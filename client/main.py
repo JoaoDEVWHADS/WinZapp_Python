@@ -40,11 +40,11 @@ class MainWindow(wx.Frame):
         self.init_UI()
 
     def init_UI(self):
-        self.main_panel = wx.Panel(self)
         self    .SetSize((400, 300))
+        self.main_panel = wx.Panel(self)
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.content_panel = wx.Panel(self.main_panel)
-        self.conversations_panel = ConversationsPanel(self, self.content_panel)
+        self.content_panel.conversations_panel = ConversationsPanel(self, self.content_panel)
         self.create_accelerator_table()
 
     def create_accelerator_table(self):
@@ -58,8 +58,11 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_alt_1, id=self.ID_ALT_1)
 
     def on_alt_1(self, event):
-        self.conversations_panel.Show()
-        self.conversations_panel.conversations_list.SetFocus()
+        panels = self.content_panel.GetChildren()
+        for panel in panels:
+            panel.Hide()
+        self.content_panel.conversations_panel.Show()
+        self.content_panel.conversations_panel.conversations_list.SetFocus()
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
