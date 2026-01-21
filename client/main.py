@@ -42,9 +42,9 @@ class MainWindow(wx.Frame):
     def init_UI(self):
         self    .SetSize((400, 300))
         self.main_panel = wx.Panel(self)
-        self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.content_panel = wx.Panel(self.main_panel)
         self.content_panel.conversations_panel = ConversationsPanel(self, self.content_panel)
+        self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.create_accelerator_table()
 
     def create_accelerator_table(self):
@@ -102,6 +102,7 @@ class MainWindow(wx.Frame):
     def start_sync(self):
         self.create_basic_files()
         self.generate_secret_key()
+        self.key = self.retrieve_secret_key()
         #Get connection settings
         self.authentication_server = self.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
         self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
@@ -163,10 +164,23 @@ class MainWindow(wx.Frame):
         self.chat_names = []
         for chat in self.chats:
             self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
+            self.sync_messages(chat)
         self.add_chats_to_ui()
         self.conversations_panel.conversations_list.Focus(0)
         self.conversations_panel.conversations_list.Select(0)
         self.conversations_panel.conversations_list.SetFocus()
+
+    def sync_messages(self, chat):
+        url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
+
+        payload = { "where": { "key": { "remoteJid": chat.get("remoteJid", "")} } }
+        headers = {
+            "apikey": self.token,
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(url, json=payload, headers=headers, verify=False)
+        print(response.text)
 
     def add_chats_to_ui(self):
         for index, chat in enumerate(self.chats):

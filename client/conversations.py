@@ -17,7 +17,7 @@ class ConversationsPanel(wx.Panel):
         self.conversations_label = wx.StaticText(self, label=self.main_window.i18n.t("conversations"), pos=(10,10))
         self.conversations_list = wx.ListCtrl(self, size=(380, 200), pos=(10, 40), style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.conversations_list.InsertColumn(0, self.main_window.i18n.t("conversations"), width=200)
-        self.conversations_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, SELF.on_conversation_selected)
+        self.conversations_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_conversation_selected)
         self.conversation_panel = wx.Panel(self)
         self.conversation_panel.Hide() #hidden by default
 
