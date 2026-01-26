@@ -129,15 +129,10 @@ class ConversationsPanel(wx.Panel):
         messages_container = self.conversation.get('messages', {}) if self.conversation else {}
         messages = []
         if isinstance(messages_container, dict):
-            # primary case: wrapper contains 'messages' -> {'records': [...]}
+            # Wrapper contains 'messages' -> {'records': [...]}
             inner = messages_container.get('messages')
             if isinstance(inner, dict) and isinstance(inner.get('records'), list):
                 messages = inner.get('records', [])
-            # alternate: records at top level of the container
-            elif isinstance(messages_container.get('records'), list):
-                messages = messages_container.get('records', [])
-        elif isinstance(messages_container, list):
-            messages = messages_container
         # sort by timestamp if possible
         try:
             messages_sorted = sorted(messages, key=lambda m: self._extract_timestamp(m) or 0)
@@ -152,12 +147,18 @@ class ConversationsPanel(wx.Panel):
             body = ""
             message_obj = msg.get('message') or {}
             if isinstance(message_obj, dict):
-                body = message_obj.get('conversation') or message_obj.get('text') or ''
+                body = message_obj.get('conversation') or ''
             # sender info
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
             else:
-                sender_label = msg.get("pushName", "")
+                #Check if there's a contact with the same remoteJid
+                remote_jid = msg.get('key', {}).get('remoteJid', '')
+                contact = self.main_window.contacts.get(remote_jid)
+                if contact and contact.get("type", "") == 'contact':
+                    sender_label = contact.get('pushName') or format_number(remote_jid)
+                else:
+                    sender_label = msg.get("pushName", "")
             status = self._map_status(msg)
             body = (body or '').replace('\n', ' ')
             pieces = [f"{sender_label}: {body}" ]

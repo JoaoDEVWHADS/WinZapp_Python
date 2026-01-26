@@ -129,6 +129,7 @@ class MainWindow(wx.Frame):
 
         #Get Local Chats
         self.chats = self.get_chats()
+        self.contacts = self.get_contacts()
         if not self.offline_mode:
             self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
             self.sync_thread.start()
@@ -139,6 +140,10 @@ class MainWindow(wx.Frame):
     def start_sync(self):
         self.connected_sound.play()
         self.chats = self.get_remote_chats()
+        self.contacts = self.get_remote_contacts()
+        #Test
+        for contact in self.contacts.values():
+            print(contact)
         self.synchronizing_sound.play()
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
         self.sync_remote_chats()
@@ -154,7 +159,7 @@ class MainWindow(wx.Frame):
         messages_file = os.path.join(data_dir, "messages.dat")
         if not os.path.isfile(messages_file):
             with open(messages_file, "wb") as f:
-                f.write(encrypt_json({"chats": {}}, self.key))
+                f.write(encrypt_json({"chats": {}, "contacts": {}}, self.key))
 
     def get_chats(self):
         messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
@@ -194,11 +199,53 @@ class MainWindow(wx.Frame):
     def save_chats(self, chats):
         #Save back to file
         messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
-        encrypted_data = encrypt_json({"chats": chats}, self.key)
+        try:
+            with open(messages_file, "rb") as f:
+                encrypted_data = f.read()
+                if encrypted_data:
+                    data = decrypt_json(encrypted_data, self.key)
+                else:
+                    data = {}
+        except:
+            data = {}
+        data["chats"] = chats
+        encrypted_data = encrypt_json(data, self.key)
+        with open(messages_file, "wb") as f:
+            f.write(encrypted_data)
+
+    def save_contacts(self, contacts):
+        #Save back to file
+        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        try:
+            with open(messages_file, "rb") as f:
+                encrypted_data = f.read()
+                if encrypted_data:
+                    data = decrypt_json(encrypted_data, self.key)
+                else:
+                    data = {}
+        except:
+            data = {}
+        data["contacts"] = contacts
+        encrypted_data = encrypt_json(data, self.key)
         with open(messages_file, "wb") as f:
             f.write(encrypted_data)
 
     def get_contacts(self):
+        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        try:
+            with open(messages_file, "rb") as f:
+                encrypted_data = f.read()
+                if encrypted_data:
+                    decrypted_data = decrypt_json(encrypted_data, self.key)
+                    return decrypted_data.get("contacts", {})
+                else:
+                    return {}
+        except Exception as e:
+            self.error_sound.play()
+            wx.MessageBox(f"{self.i18n.t('contact_load_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            return {}
+
+    def get_remote_contacts(self):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findContacts/{self.token}"
         headers = {
             "apikey": self.token,
@@ -207,7 +254,13 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, headers=headers, verify=False)
             response_data = response.json()
-            return response_data
+            contacts = {}
+            for contact in response_data:
+                if contact.get("type", "") == "contact":
+                    contacts[contact.get("remoteJid", "")] = contact
+            self.save_contacts(contacts)
+            self.contact_ids = [contact.get("remoteJid", "") for contact in response_data]
+            return contacts
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
