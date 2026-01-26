@@ -59,7 +59,7 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_CTRL, ord('R'), self.ID_CTRL_R),
             (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESC),
         ])
-        self.SetAcceleratorTable(accel_tbl)
+        self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message, id=self.ID_CTRL_R)
         self.Bind(wx.EVT_MENU, self.close_conversation, id=self.ID_ESC)
 
@@ -97,7 +97,6 @@ class ConversationsPanel(wx.Panel):
     def _map_status(self, msg):
         # Map common ack/status fields to localized strings
         i18n = self.main_window.i18n
-        # Prefer explicit MessageUpdate entries from API when present.
         # If MessageUpdate is empty or missing, do not show any status.
         updates = msg.get('MessageUpdate')
         if isinstance(updates, list) and len(updates) > 0:
@@ -109,11 +108,11 @@ class ConversationsPanel(wx.Panel):
                     statuses.append(str(st).upper())
             # Check for READ
             for s in statuses:
-                if 'READ' in s or 'LIDA' in s:
+                if 'READ' in s:
                     return i18n.t('status_read')
             # Check for delivery acknowledgements
             for s in statuses:
-                if 'DELIVERY' in s or 'DELIVERED' in s or 'DELIVERY_ACK' in s:
+                if 'DELIVERED' in s or 'DELIVERY_ACK' in s:
                     return i18n.t('status_delivered')
             # Check for sent/ack
             for s in statuses:
@@ -137,12 +136,6 @@ class ConversationsPanel(wx.Panel):
             # alternate: records at top level of the container
             elif isinstance(messages_container.get('records'), list):
                 messages = messages_container.get('records', [])
-            else:
-                # fallback: try find the first list value inside the dict
-                for v in messages_container.values():
-                    if isinstance(v, list):
-                        messages = v
-                        break
         elif isinstance(messages_container, list):
             messages = messages_container
         # sort by timestamp if possible
@@ -164,10 +157,9 @@ class ConversationsPanel(wx.Panel):
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
             else:
-                sender_label = msg.get("pushName") or format_number(msg.get("key", {}).get("remoteJid")) or ""
+                sender_label = msg.get("pushName", "")
             status = self._map_status(msg)
             body = (body or '').replace('\n', ' ')
-            # Build single-column line: "Remetente: Mensagem HH:MM, Status"
             pieces = [f"{sender_label}: {body}" ]
             if time_str:
                 pieces.append(time_str)
@@ -178,4 +170,4 @@ class ConversationsPanel(wx.Panel):
                 else:
                     pieces[-1] = pieces[-1] + f", {status}"
             line = " ".join(pieces)
-            self.messages_list.InsertItem(self.messages_list.GetItemCount(), line)
+            self.messages_list.Append((line,))
