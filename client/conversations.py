@@ -7,6 +7,7 @@ import requests
 from traceback import format_exc
 from sound_system import SoundSystem
 from datetime import datetime
+from utils import format_number
 
 class ConversationsPanel(wx.Panel):
     def __init__(self, main_window, parent):
@@ -163,7 +164,7 @@ class ConversationsPanel(wx.Panel):
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
             else:
-                sender_label = self.conversation_name or (msg.get('pushName') or '')
+                sender_label = msg.get("pushName") or format_number(msg.get("key", {}).get("remoteJid")) or ""
             status = self._map_status(msg)
             body = (body or '').replace('\n', ' ')
             # Build single-column line: "Remetente: Mensagem HH:MM, Status"
