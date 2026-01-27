@@ -5,6 +5,7 @@ client/data/secret.key
 client/data/token.tk
 client/data/media
 client/data/voice_messages
+client/logs
 server/.env
 
 # Byte-compiled / optimized / DLL files
