@@ -39,7 +39,9 @@
     "synchronization_started": "Sincronizando conversas...",
     "synchronizing": "Sincronizando",
     "sync_complete": "Conversas sincronizadas.",
-    "offline_mode_enabled": "Modo offline ativado. Algumas funcionalidades podem estar indisponíveis.",
     "offline_mode": "Modo Offline",
+    "offline_mode_enabled": "Modo offline ativado. Algumas funções podem estar indisponíveis.",
+    "connection_restored": "Conexão com a internet restabelecida.",
+    "connection_lost": "Conexão com a internet perdida.",
     "close_conversation": "&Fechar conversa"
 }

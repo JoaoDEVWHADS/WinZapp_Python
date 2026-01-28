@@ -138,7 +138,9 @@ class MainWindow(wx.Frame):
             self.sync_thread.start()
         else:
             self.offline_mode_sound.play()
-            self.output(self.i18n.t("offline_mode"))
+            self.output(self.i18n.t("offline_mode_enabled"))
+        self.monitor_thread = threading.Thread(target=self.monitor_internet_connection)
+        self.monitor_thread.start()
 
     def start_sync(self):
         self.connected_sound.play()
@@ -322,6 +324,32 @@ class MainWindow(wx.Frame):
             {f"{chat.get('unreadCount') or 0} {self.i18n.t('unread_messages') if int(chat.get('unreadCount')) > 1 else self.i18n.t('unread_message')} " if int(chat.get('unreadCount')) > 0 else ""}\
             "
             self.conversations_panel.conversations_list.Append((string,))
+
+    def monitor_internet_connection(self):
+        while True:
+            is_connected = check_internet_connection()
+            if is_connected and self.offline_mode:
+                #Went online
+                self.offline_mode = False
+                wx.CallAfter(self.on_connection_restored)
+            elif not is_connected and not self.offline_mode:
+                #Went offline
+                self.offline_mode = True
+                wx.CallAfter(self.on_connection_lost)
+            threading.Event().wait(5)  # Check every 5 seconds
+
+    def on_connection_restored(self):
+        self.output(self.i18n.t("connection_restored"), interrupt=True)
+        self.SetTitle(f"{self.i18n.t('app_name')}")
+        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+        self.sync_thread.start()
+        self.connect.connect_websocket(self.token)
+
+    def on_connection_lost(self):
+        self.output(self.i18n.t("connection_lost"), interrupt=True)
+        self.offline_mode_sound.play()
+        self.output(self.i18n.t("offline_mode_enabled"))
+        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('offline_mode')}")
 
     def generate_secret_key(self):
         key_file = os.path.join(os.getcwd(), "data", "secret.key")
