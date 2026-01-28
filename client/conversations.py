@@ -39,7 +39,10 @@ class ConversationsPanel(wx.Panel):
 
         self.message_label = wx.StaticText(self.conversation_panel, label=self.main_window.i18n.t("type_message"), pos=(10,200))
         self.message_field = wx.TextCtrl(self.conversation_panel, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP, size=(300, 60), pos=(10, 225))
-        self.record_voice_message_btn = wx.Button(self.conversation_panel, label=self.main_window.i18n.t("record_voice_message"), size=(150, 40), pos=(320, 225))
+        self.message_field.Bind(wx.EVT_TEXT, self.on_change_message_field)
+        self.send_message_btn = wx.Button(self.conversation_panel, label=self.main_window.i18n.t("send_message"), size=(150, 40), pos=(320, 175))
+        self.send_message_btn.Hide() #hidden by default
+        self.record_voice_message_btn = wx.Button(self.conversation_panel, label=self.main_window.i18n.t("record_voice_message"), size=(150, 40), pos=(320, 175))
         self.record_voice_message_btn.SetAccessible(AccessibleRecordVoiceMessage("Ctrl+R"))
         self.record_voice_message_btn.Bind(wx.EVT_BUTTON, self.on_record_voice_message)
 
@@ -53,9 +56,15 @@ class ConversationsPanel(wx.Panel):
             return
         self.message_label.SetLabel(f"{self.main_window.i18n.t('type_message')} {self.conversation_name}")
         self.conversation_panel.Show()
+        self.preselect_messages()
         self.message_field.SetFocus()
         # Populate messages list from local store
         self.populate_messages()
+
+
+    def preselect_messages(self):
+        self.messages_list.Focus(0)
+        self.messages_list.Select(0)
 
     def create_accelerator_table(self):
         #Set IDs
@@ -95,9 +104,19 @@ class ConversationsPanel(wx.Panel):
                 self.conversations_list.Append((name,))
                 self.chats_list.append(chat)
                 self.chat_names.append(name)
+        self.main_window.preselect_conversations()
 
     def on_ctrl_f(self, event):
         self.search_field.SetFocus()
+
+    def on_change_message_field(self, event):
+        msg = self.message_field.GetValue()
+        if msg.strip():
+            self.send_message_btn.Show()
+            self.record_voice_message_btn.Hide()
+        else:
+            self.send_message_btn.Hide()
+            self.record_voice_message_btn.Show()
 
     def on_record_voice_message(self, event):
         pass

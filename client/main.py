@@ -283,6 +283,7 @@ class MainWindow(wx.Frame):
         #Save copy of chats and chat_names
         self.conversations_panel.chats_list = list(self.chats.values())
         self.conversations_panel.chat_names = list(self.chat_names)
+        self.preselect_conversations()
 
     def preselect_conversations(self):
         #Checks if window is still open
