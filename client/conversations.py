@@ -58,6 +58,9 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Show()
         self.preselect_messages()
         self.message_field.SetFocus()
+        #Clear the conversation search field if it has text
+        if self.search_field.GetValue().strip():
+            self.search_field.Clear()
         # Populate messages list from local store
         self.populate_messages()
 
