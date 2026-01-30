@@ -92,6 +92,9 @@ class MainWindow(wx.Frame):
             panel.Hide()
         self.conversations_panel.Show()
         self.conversations_panel.conversations_list.SetFocus()
+        #Check if list has selection
+        if self.conversations_panel.conversations_list.GetFocusedItem() != -1 and self.conversations_panel.conversations_list.GetItemCount() > 0:#Output the current focused conversation
+            self.output(self.conversations_panel.conversations_list.GetItemText(self.conversations_panel.conversations_list.GetFocusedItem()))
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
@@ -370,6 +373,9 @@ class MainWindow(wx.Frame):
         except Exception as e:
             #Ignore audios that couldn't be saved for now
             pass
+
+    def mark_conversation_as_read(self, remote_jid):
+        pass
 
     def add_chats_to_ui(self):
         self.conversations_panel.conversations_list.DeleteAllItems()

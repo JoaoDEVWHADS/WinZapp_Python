@@ -59,6 +59,9 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Show()
         self.preselect_messages()
         self.message_field.SetFocus()
+        #Mark conversation as read in background
+        self.mark_as_read_thread = threading.Thread(target=self.main_window.mark_conversation_as_read, args=(self.conversation.get("remoteJid", ""),), daemon=True)
+        self.mark_as_read_thread.start()
         #Clear the conversation search field if it has text
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
