@@ -309,12 +309,9 @@ class ConversationsPanel(wx.Panel):
             body = (body or '').replace('\n', ' ')
             pieces = [f"{sender_label}: {body}" ]
             if time_str:
-                pieces.append(time_str)
+                pieces.append(f", {time_str}")
             if status:
                 # append status after comma
-                if len(pieces) > 1:
-                    pieces[-1] = pieces[-1] + f", {status}"
-                else:
-                    pieces[-1] = pieces[-1] + f", {status}"
+                pieces[-1] = pieces[-1] + f", {status}"
             line = " ".join(pieces)
             self.messages_list.Append((line,))

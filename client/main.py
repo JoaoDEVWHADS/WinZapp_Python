@@ -2,12 +2,13 @@ import os
 import sys
 import threading
 import requests
+import base64
 import socketio
 from accessible_output2 import outputs
 from websocket_client import WebSocketClient
 from sound_system import SoundSystem, Sound
 from i18n import I18n
-from utils import encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
+from utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
 import wx
 from connect import Connect
 from navigation import NavigationPanel
@@ -313,12 +314,62 @@ class MainWindow(wx.Frame):
         response = requests.post(url, json=payload, headers=headers, verify=False)
         response_data = response.json()
         chat["messages"] = response_data
+        for message in chat["messages"].get("messages", {}).get("records", []):
+            self.sync_if_media(message)
         if chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
             self.save_data(self.chats, self.contacts)
             #Checks if window is still open
             if self.IsShown():
                 wx.CallAfter(self.set_chats)
+
+    def sync_if_media(self, msg):
+        #Check message type
+        message_type = msg.get("messageType", "")
+        if message_type == "audioMessage":
+            try:
+                self.handle_audio_message(msg)
+            except Exception as e:
+                #Ignore and download later if necessary
+                pass
+        return
+
+    def handle_audio_message(self, msg):
+        #First, check if the audio is already downloaded
+        voice_messages_dir = os.path.join(os.getcwd(), "data", "voice_messages")
+        audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
+        if os.path.isfile(audio_file_path):
+            return
+
+        base64_audio = self.get_base64_from_media(msg)
+        audio_content = base64.b64decode(base64_audio)
+        self.save_audio_locally(msg, audio_content)
+
+    def get_base64_from_media(self, media):
+        url = f"https://{self.evolution_server}:{self.evolution_port}/chat/getBase64FromMediaMessage/{self.token}"
+        payload = {
+            "message": {"key": {"id": media.get("key", {}).get("id", "")}},
+            "convertToMp4": False
+        }
+        headers = {
+            "apikey": self.token,
+            "Content-Type": "application/json"  
+        }
+        response = requests.post(url, json=payload, headers=headers, verify=False)
+        if response.status_code == 201:
+            return response.json().get("base64", "")
+        return ""
+
+    def save_audio_locally(self, msg, audio_content):
+        voice_messages_dir = os.path.join(os.getcwd(), "data", "voice_messages")
+        audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
+        try:
+            with open(audio_file_path, "wb") as audio_file:
+                encrypted_audio = encrypt(audio_content, self.key)
+                audio_file.write(encrypted_audio)
+        except Exception as e:
+            #Ignore audios that couldn't be saved for now
+            pass
 
     def add_chats_to_ui(self):
         self.conversations_panel.conversations_list.DeleteAllItems()
