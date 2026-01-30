@@ -44,6 +44,7 @@ class MainWindow(wx.Frame):
         self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
         self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "127.0.0.1")
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
+        self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "wss://127.0.0.1")
 
         #Check Internet Connection
         self.offline_mode = not check_internet_connection()
@@ -94,7 +95,7 @@ class MainWindow(wx.Frame):
         self.conversations_panel.conversations_list.SetFocus()
         #Check if list has selection
         if self.conversations_panel.conversations_list.GetFocusedItem() != -1 and self.conversations_panel.conversations_list.GetItemCount() > 0:#Output the current focused conversation
-            self.output(self.conversations_panel.conversations_list.GetItemText(self.conversations_panel.conversations_list.GetFocusedItem()))
+            self.output(self.conversations_panel.conversations_list.GetItemText(self.conversations_panel.conversations_list.GetFocusedItem()), interrupt=True)
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
@@ -213,7 +214,7 @@ class MainWindow(wx.Frame):
             return []
 
     def get_remote_chats(self):
-        url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findChats/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/findChats/{self.token}"
         headers = {
             "apikey": self.token,
             "Content-Type": "application/json"
@@ -264,7 +265,7 @@ class MainWindow(wx.Frame):
             return {}
 
     def get_remote_contacts(self):
-        url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findContacts/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/findContacts/{self.token}"
         headers = {
             "apikey": self.token,
             "Content-Type": "application/json"
@@ -306,7 +307,7 @@ class MainWindow(wx.Frame):
             self.sync_chat_messages(chat)
 
     def sync_chat_messages(self, chat):
-        url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
 
         payload = { "where": { "key": { "remoteJid": chat.get("remoteJid", "")} } }
         headers = {
@@ -349,7 +350,7 @@ class MainWindow(wx.Frame):
         self.save_audio_locally(msg, audio_content)
 
     def get_base64_from_media(self, media):
-        url = f"https://{self.evolution_server}:{self.evolution_port}/chat/getBase64FromMediaMessage/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/getBase64FromMediaMessage/{self.token}"
         payload = {
             "message": {"key": {"id": media.get("key", {}).get("id", "")}},
             "convertToMp4": False

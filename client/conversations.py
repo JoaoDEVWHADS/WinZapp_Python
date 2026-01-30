@@ -1,6 +1,7 @@
 import os
 import sys
 import wx
+import threading
 from accessible import AccessibleSearchConversations, AccessibleRecordVoiceMessage
 import json
 import requests
@@ -35,7 +36,7 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Hide() #hidden by default
         # Messages list: single-column (name of the list is the header)
         self.messages_label = wx.StaticText(self.conversation_panel, label=self.main_window.i18n.t("messages"), pos=(10,10))
-        self.messages_list = wx.ListCtrl(self.conversation_panel, size=(360, 150), pos=(10, 35), style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        self.messages_list = wx.ListCtrl(self.conversation_panel, size=(360, 150), pos=(10, 35), style=wx.LC_REPORT)
         self.messages_list.InsertColumn(0, self.main_window.i18n.t("messages"), width=360)
 
         self.message_label = wx.StaticText(self.conversation_panel, label=self.main_window.i18n.t("type_message"), pos=(10,200))
@@ -292,6 +293,9 @@ class ConversationsPanel(wx.Panel):
             messages_sorted = messages
 
         for msg in messages_sorted:
+            #If reaction message, ignore
+            if msg.get("messageType", "") == "reactionMessage":
+                continue
             # According to API sample: record has `messageTimestamp`, `message.conversation`, `pushName`, `key.fromMe`, `MessageUpdate`
             ts = self._extract_timestamp(msg)
             time_str = self._format_date(ts) if ts else ""

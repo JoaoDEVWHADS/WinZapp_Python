@@ -36,7 +36,7 @@ class Connect:
 
         #Tries to create the instance
         try:
-            url = f"https://{self.main_window.authentication_server}:{self.main_window.authentication_port}/create_instance/"
+            url = f"{self.main_window.authentication_server}:{self.main_window.authentication_port}/create_instance/"
             self.phone_number = self.phone_field.GetValue()
             #Check if the user has already tried to connect with this number
             if self.main_window.settings.get("privateinfo", {}).get("WA_phone_number", "") == self.phone_number:
@@ -59,7 +59,7 @@ class Connect:
                 response_data = response.json()
 
             #Connect instance
-            url = f"https://{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/connect/{self.main_window.token}/"
+            url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/connect/{self.main_window.token}/"
             querystring = {"number": self.phone_number}
             headers = {
                 "apikey": self.main_window.token,
@@ -95,7 +95,7 @@ class Connect:
 
     def connect_websocket(self, instance_name):
         self.instance_name = instance_name
-        self.main_window.ws.sio.connect(f"wss://{self.main_window.evolution_server}:{self.main_window.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.main_window.token}, namespaces=[f"/{self.main_window.token}"])
+        self.main_window.ws.sio.connect(f"{self.main_window.evolution_ws_server}:{self.main_window.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.main_window.token}, namespaces=[f"/{self.main_window.token}"])
 
     def on_cancel_pairing(self, event):
         self.pairing_dial.Destroy()
