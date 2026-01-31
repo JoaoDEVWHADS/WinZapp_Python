@@ -1,4 +1,5 @@
 import os
+from pyexpat.errors import messages
 import sys
 import threading
 import requests
@@ -18,8 +19,10 @@ from traceback import format_exc, format_exception
 import pyperclip
 
 class MainWindow(wx.Frame):
-    def __init__(self, title):
-        super().__init__(None, title=title)
+    def __init__(self):
+        super().__init__(None)
+        self.app_name = "WinZapp"
+        self.SetTitle(self.app_name)
 
         #Initialize screen reader/sapi output
         self.speak_output = outputs.auto.Auto()
@@ -49,6 +52,7 @@ class MainWindow(wx.Frame):
         #Set basic variables
         self.chats = {}
         self.chat_names = []
+        self.contacts = {}
 
         #Check Internet Connection
         self.offline_mode = not check_internet_connection()
@@ -77,8 +81,6 @@ class MainWindow(wx.Frame):
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.create_accelerator_table()
         self.Show()
-        for chat in self.chats.values():
-            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
         #Set offline chats for the first time
         self.set_chats()
         app.MainLoop()
@@ -137,7 +139,7 @@ class MainWindow(wx.Frame):
                 self.token = token_file.read().strip()
         except Exception as e:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
 
     def prepare_sync(self):
@@ -147,6 +149,7 @@ class MainWindow(wx.Frame):
 
         #Get Local Chats
         self.chats = self.get_chats()
+        self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
         if not self.offline_mode:
             self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
@@ -159,7 +162,7 @@ class MainWindow(wx.Frame):
 
     def start_sync(self):
         self.connected_sound.play()
-        self.chats = self.get_remote_chats()
+        self.chats = self.get_remote_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
         self.synchronizing_sound.play()
@@ -167,6 +170,7 @@ class MainWindow(wx.Frame):
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
         self.sync_remote_chats()
         self.sync_complete_sound.play()
+        wx.CallAfter(self.set_chats)
         self.SetTitle(f"{self.i18n.t('app_name')}")
         self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(self.preselect_conversations)
@@ -219,7 +223,7 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
             return []
 
-    def get_remote_chats(self):
+    def get_remote_chats(self, chats):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findChats/{self.token}"
         headers = {
             "apikey": self.token,
@@ -228,10 +232,12 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, headers=headers, verify=False)
             response_data = response.json()
-            chats = {}
             for chat in response_data:
-                chat["messages"] = {}
-                chats[chat.get("remoteJid", "")] = chat
+                #If chat is not present
+                if not chat.get("remoteJid", "") in chats:
+                    if not "messages" in chat:
+                        chat["messages"] = {"messages": {"records": []}}
+                    chats[chat.get("remoteJid", "")] = chat
             self.save_data(chats, self.contacts)
             return chats
         except Exception as e:
@@ -285,16 +291,18 @@ class MainWindow(wx.Frame):
                 if contact.get("type", "") == "contact":
                     contacts[contact.get("remoteJid", "")] = contact
             self.save_data(self.chats, contacts)
-            self.contact_ids = [contact.get("remoteJid", "") for contact in response_data]
             return contacts
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
 
     def set_chats(self):
+        self.chat_names.clear()
+        for chat in self.chats.values():
+            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
         #Save copy of chats and chat_names
         self.conversations_panel.chats_list = list(self.chats.values())
-        self.conversations_panel.chat_names = list(self.chat_names)
+        self.conversations_panel.chat_names = self.chat_names
         #Checks if window is still open
         if self.IsShown():
             self.add_chats_to_ui()
@@ -323,10 +331,6 @@ class MainWindow(wx.Frame):
     def sync_remote_chats(self):
         for chat in self.chats.values():
             self.sync_chat_messages(chat)
-        #Update chat names after getting new messages
-            self.chat_names.clear()
-            for chat in self.chats.values():
-                self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
 
     def sync_chat_messages(self, chat):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
@@ -339,16 +343,16 @@ class MainWindow(wx.Frame):
 
         response = requests.post(url, json=payload, headers=headers, verify=False)
         response_data = response.json()
-        chat["messages"] = response_data
-        for message in chat["messages"].get("messages", {}).get("records", []):
-            self.sync_if_media(message)
+        #Check if messages are present
+        if response_data.get("messages", {}).get("records", []):
+            chat["messages"] = response_data
+            for message in chat["messages"].get("messages", {}).get("records", []):
+                self.sync_if_media(message)
 
-        if chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
+        if chat.get("messages", {}) and chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
-            #Checks if window is still open
-            if self.IsShown():
-                wx.CallAfter(self.set_chats)
-                self.save_data(self.chats, self.contacts)
+            wx.CallAfter(self.set_chats)
+        self.save_data(self.chats, self.contacts)
 
     def sync_if_media(self, msg):
         #Check message type
@@ -460,7 +464,7 @@ class MainWindow(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Error message
-        message_text = wx.StaticText(panel, label=self.i18n.t("unexpected_error_message"))
+        message_text = wx.StaticText(panel, label=self.i18n.t("unexpected_error_message".format(app_name=self.app_name)))
         sizer.Add(message_text, 0, wx.ALL, 10)
 
         #Error details label
@@ -502,4 +506,4 @@ class MainWindow(wx.Frame):
 
 if __name__ == "__main__":
     app = wx.App()
-    frame = MainWindow(title="WinZapp")
+    frame = MainWindow()

@@ -229,7 +229,7 @@ class ConversationsPanel(wx.Panel):
         message_obj = msg.get('message') or {}
         
         if not isinstance(message_obj, dict):
-            return self.main_window.i18n.t('unsupported_message')
+            return self.main_window.i18n.t('unsupported_message'.format(app_name=self.main_window.app_name))
         
         i18n = self.main_window.i18n
         
@@ -247,7 +247,7 @@ class ConversationsPanel(wx.Panel):
             return message_obj.get('conversation', '')
         else:
             # Unsupported message type
-            return i18n.t('unsupported_message')
+            return i18n.t('unsupported_message').format(app_name=self.main_window.app_name)
 
     def _map_status(self, msg):
         # Map common ack/status fields to localized strings

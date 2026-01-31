@@ -21,7 +21,7 @@ class Connect:
         return os.path.isfile(user_token_path)
 
     def show_connection_dial(self):
-        self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_winzapp"), size=(300, 150))
+        self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_phone").format(app_name=self.main_window.app_name), size=(300, 150))
         self.phone_number_label = wx.StaticText(self.connection_dial, label=self.i18n.t("enter_phone"))
         self.phone_field = wx.TextCtrl(self.connection_dial, style=wx.TE_CENTER | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP)
         self.continue_btn = wx.Button(self.connection_dial, label=self.i18n.t("continue"))
@@ -76,7 +76,7 @@ class Connect:
 
         except Exception as e:
             self.main_window.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t("connection_failed")} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t("connection_failed").format(app_name=self.main_window.app_name)} {format_exc()}", self.i18n.t("connection_error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
 
     def generate_random_token(self):
         return os.urandom(16).hex()
