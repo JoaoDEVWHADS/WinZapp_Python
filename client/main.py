@@ -161,8 +161,12 @@ class MainWindow(wx.Frame):
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
         if not self.offline_mode:
-            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-            self.sync_thread.start()
+            self.connected_sound.play()
+            if self.settings.get("status", {}).get("messages_set_completed"):
+                self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+                self.sync_thread.start()
+            else:
+                self.wait_messages_set()
         else:
             self.offline_mode_sound.play()
             self.output(self.i18n.t("offline_mode_enabled"))
@@ -170,7 +174,6 @@ class MainWindow(wx.Frame):
         self.monitor_thread.start()
 
     def start_sync(self):
-        self.connected_sound.play()
         self.chats = self.get_remote_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
@@ -182,6 +185,9 @@ class MainWindow(wx.Frame):
         self.SetTitle(f"{self.i18n.t('app_name')}")
         self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(self.preselect_conversations)
+
+    def wait_messages_set(self):
+        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('preparing_to_sync')}")
 
     def create_basic_files(self):
         data_dir = os.path.join(os.getcwd(), "data")
@@ -443,6 +449,7 @@ class MainWindow(wx.Frame):
     def on_connection_restored(self):
         self.output(self.i18n.t("connection_restored"), interrupt=True)
         self.SetTitle(f"{self.i18n.t('app_name')}")
+        self.connected_sound.play()
         self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
         self.sync_thread.start()
         self.connect_websocket()

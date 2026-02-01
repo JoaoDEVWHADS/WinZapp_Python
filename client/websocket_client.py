@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import socketio
 import wx
 import json
@@ -25,6 +26,7 @@ class WebSocketClient:
         self.sio.on("disconnect", self.on_disconnect)
         self.sio.on("connection.update", self.on_connection_update, namespace=f"/{self.instance_name}")
         self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
+        self.sio.on("messages.set", self.on_messages_set, namespace=f"/{self.instance_name}")
 
     def on_connect(self):
         print("WebSocket connected.")
@@ -65,3 +67,11 @@ class WebSocketClient:
         self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
         self.connect.pairing_code_field.SetValue(info.get("data", {}).get("qrcode", {}).get("pairingCode", ""))
 
+    def on_messages_set(self, info):
+        #Only consider if messages_set for the first time is false
+        if self.main_window.settings["status"].get("messages_set_completed", False):
+            return
+        self.main_window.settings["status"]["messages_set_completed"] = True
+        self.main_window.save_settings()
+        self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
+        self.main_window.sync_thread.start()

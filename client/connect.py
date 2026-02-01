@@ -17,9 +17,10 @@ class Connect:
         self.i18n.get_language()
 
     def check_connection_status(self):
-        #Check if both WA_phone_number and WA_token are available in settings
+        #Check if token file exists and both WA_phone_number and WA_token are available in settings
+        token_path = os.path.join(os.getcwd(), "data", "token.tk")
         private_info = self.main_window.settings.get("privateinfo", {})
-        if private_info.get("WA_phone_number") and private_info.get("WA_token"):
+        if os.path.exists(token_path) and private_info.get("WA_phone_number") and private_info.get("WA_token"):
             return True
         return False
 
@@ -41,6 +42,8 @@ class Connect:
         try:
             url = f"{self.main_window.authentication_server}:{self.main_window.authentication_port}/create_instance/"
             self.phone_number = self.phone_field.GetValue()
+            #Ensure messages_set_completed is set to False
+            self.main_window.settings["status"]["messages_set_completed"] = False
             #Check if the user has already tried to connect with this number
             if self.main_window.settings.get("privateinfo", {}).get("WA_phone_number", "") == self.phone_number:
                 #Assume token available
@@ -52,7 +55,6 @@ class Connect:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
-                self.main_window.save_settings()
                 #Create new instance
                 data = {
                     "name": self.main_window.token,
@@ -62,6 +64,8 @@ class Connect:
                 response = requests.post(url, json=data, verify=False)
                 response_data = response.json()
 
+            #Save settings
+            self.main_window.save_settings()
             #Set websocket client
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
             #Connect instance

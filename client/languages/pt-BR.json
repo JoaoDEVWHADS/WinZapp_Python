@@ -37,6 +37,7 @@
     "settings_save_failed": "Ocorreu um erro ao salvar as configurações:",
     "data_save_failed": "Ocorreu um erro ao salvar o arquivo de mensagens:",
     "synchronization_started": "Sincronizando conversas...",
+    "preparing_to_sync": "Preparando-se para sincronizar...",
     "synchronizing": "Sincronizando",
     "sync_complete": "Conversas sincronizadas.",
     "offline_mode": "Modo Offline",
