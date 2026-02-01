@@ -68,7 +68,7 @@ class MainWindow(wx.Frame):
             self.ws.sio.disconnect()
         self.retrieve_token()
         #Initialize and connect websocket
-        self.ws = WebSocketClient(self.main_window, self, self.main_window.token)
+        self.ws = WebSocketClient(self, self.connect, self.main_window.token)
         self.connect_websocket()
 
         self.prepare_sync()
