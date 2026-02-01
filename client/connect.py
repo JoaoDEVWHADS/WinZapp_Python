@@ -52,7 +52,7 @@ class Connect:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
-                self.save_settings()
+                self.main_window.save_settings()
                 #Create new instance
                 data = {
                     "name": self.main_window.token,
