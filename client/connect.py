@@ -5,6 +5,7 @@ import socketio
 import wx
 import requests
 from i18n import I18n
+from websocket_client import WebSocketClient
 from traceback import format_exc
 import json
 
@@ -58,6 +59,8 @@ class Connect:
                 response = requests.post(url, json=data, verify=False)
                 response_data = response.json()
 
+            #Set websocket client
+            self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
             #Connect instance
             url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/connect/{self.main_window.token}/"
             querystring = {"number": self.phone_number}
@@ -71,7 +74,7 @@ class Connect:
             print(response_data)
 
             #Connect WebSocket
-            self.connect_websocket(self.main_window.token)
+            self.main_window.connect_websocket()
             self.show_pairing_dial(response_data.get("pairingCode"))
 
         except Exception as e:
@@ -93,9 +96,6 @@ class Connect:
         self.main_window.waiting_pairing_sound.play()
         self.pairing_dial.ShowModal()
 
-    def connect_websocket(self, instance_name):
-        self.instance_name = instance_name
-        self.main_window.ws.sio.connect(f"{self.main_window.evolution_ws_server}:{self.main_window.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.main_window.token}, namespaces=[f"/{self.main_window.token}"])
 
     def on_cancel_pairing(self, event):
         self.pairing_dial.Destroy()

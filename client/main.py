@@ -7,9 +7,9 @@ import requests
 import base64
 import socketio
 from accessible_output2 import outputs
-from websocket_client import WebSocketClient
 from sound_system import SoundSystem, Sound
 from i18n import I18n
+from websocket_client import WebSocketClient
 from utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
 import wx
 from connect import Connect
@@ -43,6 +43,8 @@ class MainWindow(wx.Frame):
         #bind exception global handler for unexpected errors
         sys.excepthook = self.exception_handler
 
+        self.ws = None
+
         #Get connection settings
         self.authentication_server = self.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
         self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
@@ -59,16 +61,20 @@ class MainWindow(wx.Frame):
         self.offline_mode = not check_internet_connection()
         #Play startup sound
         self.startup_sound.play()
-        self.ws = WebSocketClient(self, self.connect)
 
         #Check for what window should be shown
         if not self.connect.check_connection_status():
             self.connect.show_connection_dial()
+            self.ws.sio.disconnect()
         self.retrieve_token()
+        #Initialize and connect websocket
+        self.ws = WebSocketClient(self.main_window, self, self.main_window.token)
+        self.connect_websocket()
+
         self.prepare_sync()
         #Connect WebSocket if not Offline
         if not self.offline_mode:
-            self.connect.connect_websocket(self.token)
+            self.connect.connect_websocket()
         self.init_UI()
 
 
@@ -85,6 +91,9 @@ class MainWindow(wx.Frame):
         #Set offline chats for the first time
         self.set_chats()
         app.MainLoop()
+
+    def connect_websocket(self):
+        self.ws.sio.connect(f"{self.evolution_ws_server}:{self.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.token}, namespaces=[f"/{self.token}"])
 
     def create_accelerator_table(self):
         #Set IDs
@@ -437,7 +446,7 @@ class MainWindow(wx.Frame):
         self.SetTitle(f"{self.i18n.t('app_name')}")
         self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
         self.sync_thread.start()
-        self.connect.connect_websocket(self.token)
+        self.connect_websocket()
 
     def on_connection_lost(self):
         self.output(self.i18n.t("connection_lost"), interrupt=True)

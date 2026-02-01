@@ -7,10 +7,10 @@ from i18n import I18n
 from traceback import format_exc
 
 class WebSocketClient:
-    def __init__(self, main_window, connect):
+    def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
         self.connect = connect
-        self.instance_name = ""
+        self.instance_name = instance_name
         #Initialize i18n
         self.i18n = I18n(self.main_window)
         self.i18n.get_language()
@@ -20,10 +20,11 @@ class WebSocketClient:
             reconnection=True, reconnection_attempts=5,
             logger=True
         )
-        self.sio.on("connect", self.on_connect, namespace=f"/{self.instance_name}")
-        self.sio.on("disconnect", self.on_disconnect, namespace=f"/{self.instance_name}")
-        self.sio.on("connection.update", self.on_connection_update, namespace=f"/{self.instance_name}")
-        self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
+        #Bind events
+        self.sio.on("connect", self.on_connect)
+        self.sio.on("disconnect", self.on_disconnect)
+        self.sio.on("connection.update", self.on_connection_update)
+        self.sio.on("qrcode.updated", self.on_qrcode_update)
 
     def on_connect(self):
         print("WebSocket connected.")
