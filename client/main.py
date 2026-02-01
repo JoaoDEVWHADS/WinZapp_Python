@@ -132,7 +132,6 @@ class MainWindow(wx.Frame):
         self.connected_sound = Sound(self.sound_system, "connected.ogg")
         self.synchronizing_sound = Sound(self.sound_system, "synchronizing.ogg")
         self.sync_complete_sound = Sound(self.sound_system, "sync_complete.ogg")
-        wx.CallAfter(self.set_chats)
         self.offline_mode_sound = Sound(self.sound_system, "offline_mode.ogg")
 
     def retrieve_token(self):
@@ -333,7 +332,7 @@ class MainWindow(wx.Frame):
             self.sync_chat_messages(chat.copy())
 
     def sync_chat_messages(self, chat):
-        url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}/page/2"
 
         payload = { "where": { "key": { "remoteJid": chat.get("remoteJid", "")} } }
         headers = {
@@ -464,13 +463,13 @@ class MainWindow(wx.Frame):
         self.error_sound.play()
         
         # Create error dialog
-        dialog = wx.Dialog(None, title=self.i18n.t("error"), size=(600, 400), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        dialog = wx.Dialog(None, title=self.i18n.t("error").format(app_name=self.app_name), size=(600, 400), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Error message
-        message_text = wx.StaticText(panel, label=self.i18n.t("unexpected_error_message".format(app_name=self.app_name)))
+        message_text = wx.StaticText(panel, label=self.i18n.t("unexpected_error_message").format(app_name=self.app_name))
         sizer.Add(message_text, 0, wx.ALL, 10)
 
         #Error details label
