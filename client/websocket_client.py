@@ -72,12 +72,13 @@ class WebSocketClient:
         # Check if this is QR-CODE mode (base64) or pairing code mode
         qr_data = info.get("data", {}).get("qrcode", {})
         
-        if qr_data.get("base64"):
+        # Use connection_mode to determine which mode we're in
+        if self.connect.connection_mode == "qrcode" and qr_data.get("base64"):
             # QR-CODE mode: update the image
             self.main_window.pairing_code_updated_sound.play()
             self.main_window.speak_output.output(self.i18n.t("qrcode_image_updated"))
             self.connect.display_qrcode_image(qr_data.get("base64"))
-        elif qr_data.get("pairingCode"):
+        elif self.connect.connection_mode == "phone" and qr_data.get("pairingCode"):
             # Pairing code mode: update the text field
             self.main_window.pairing_code_updated_sound.play()
             self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))

@@ -17,7 +17,7 @@ class Connect:
         #initialize i18n
         self.i18n = I18n(self.main_window)
         self.i18n.get_language()
-        self.connection_mode = "qrcode"  # Default mode: qrcode or phone
+        self.connection_mode = "phone"  # Default mode: qrcode or phone
 
     def check_connection_status(self):
         #Check if token file exists and WA_token is  available in settings
@@ -80,6 +80,9 @@ class Connect:
         self.connection_dial.ShowModal()
     
     def on_switch_to_phone(self, event):
+        # Set connection mode to phone
+        self.connection_mode = "phone"
+        
         # Disconnect WebSocket when switching to phone mode
         if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
             self.main_window.ws.sio.disconnect()
@@ -91,6 +94,9 @@ class Connect:
 
     
     def on_switch_to_qrcode(self, event):
+        # Set connection mode to qrcode
+        self.connection_mode = "qrcode"
+        
         self.phone_panel.Hide()
         self.qrcode_panel.Show()
         self.connection_dial.Layout()
