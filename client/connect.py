@@ -80,6 +80,10 @@ class Connect:
         self.connection_dial.ShowModal()
     
     def on_switch_to_phone(self, event):
+        # Disconnect WebSocket when switching to phone mode
+        if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
+            self.main_window.ws.sio.disconnect()
+        
         self.qrcode_panel.Hide()
         self.phone_panel.Show()
         self.connection_dial.Layout()
@@ -90,8 +94,14 @@ class Connect:
         self.phone_panel.Hide()
         self.qrcode_panel.Show()
         self.connection_dial.Layout()
+        
         if not hasattr(self, 'qrcode_connection_started'):
+            # First time: start full QR-CODE connection
             self.start_qrcode_connection()
+        else:
+            # Already tried QR-CODE before: just reconnect WebSocket
+            self.reconnect_websocket()
+        
         self.main_window.qrcode_loaded_sound.play()
         self.main_window.output(self.i18n.t("qrcode_instructions"))
     
@@ -172,6 +182,14 @@ class Connect:
             
         except Exception as e:
             print(f"Error displaying QR-CODE: {format_exc()}")
+
+    def reconnect_websocket(self):
+        """Reconnects WebSocket for QR-CODE mode (instance already created)"""
+        try:
+            self.main_window.connect_websocket()
+        except Exception as e:
+            self.main_window.error_sound.play()
+            wx.MessageBox(f"{self.i18n.t('websocket_init_failed')} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
     def on_continue(self, event):
 
