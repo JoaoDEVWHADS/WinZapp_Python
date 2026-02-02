@@ -135,6 +135,7 @@ class MainWindow(wx.Frame):
     def load_sounds(self):
         self.startup_sound = Sound(self.sound_system, "startup.ogg")
         self.error_sound = Sound(self.sound_system, "error.ogg")
+        self.qrcode_loaded_sound = Sound(self.sound_system, "qrcode_loaded.ogg")
         self.waiting_pairing_sound = Sound(self.sound_system, "waiting_pairing.ogg")
         self.pairing_code_updated_sound = Sound(self.sound_system, "pairing_code_updated.ogg")
         self.connected_sound = Sound(self.sound_system, "connected.ogg")

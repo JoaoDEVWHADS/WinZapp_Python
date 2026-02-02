@@ -42,7 +42,9 @@ class WebSocketClient:
             self.on_pairing_complete()
         elif connection_state == "close":
             self.main_window.error_sound.play()
-            wx.MessageBox(self.i18n.t("instance_state_changed"), self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self.connect.pairing_dial)
+            # Show error in the appropriate dialog
+            parent_dialog = self.connect.pairing_dial if hasattr(self.connect, 'pairing_dial') else self.connect.connection_dial
+            wx.MessageBox(self.i18n.t("instance_state_changed"), self.i18n.t("error"), wx.OK | wx.ICON_ERROR, parent_dialog)
 
     def on_pairing_complete(self):
         #Saves the new user token in the data  directory
@@ -53,7 +55,11 @@ class WebSocketClient:
             wx.MessageBox(f"{self.i18n.t('token_save_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
             sys.exit()
 
-        self.connect.pairing_dial.Destroy()
+        # Close pairing dialog if it exists (phone mode)
+        if hasattr(self.connect, 'pairing_dial'):
+            self.connect.pairing_dial.Destroy()
+        
+        # Close connection dialog
         self.connect.connection_dial.Destroy()
 
     def save_token(self, token):
@@ -63,9 +69,19 @@ class WebSocketClient:
 
     def on_qrcode_update(self, info):
         print(info)
-        self.main_window.pairing_code_updated_sound.play()
-        self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
-        self.connect.pairing_code_field.SetValue(info.get("data", {}).get("qrcode", {}).get("pairingCode", ""))
+        # Check if this is QR-CODE mode (base64) or pairing code mode
+        qr_data = info.get("data", {}).get("qrcode", {})
+        
+        if qr_data.get("base64"):
+            # QR-CODE mode: update the image
+            self.main_window.pairing_code_updated_sound.play()
+            self.main_window.speak_output.output(self.i18n.t("qrcode_image_updated"))
+            self.connect.display_qrcode_image(qr_data.get("base64"))
+        elif qr_data.get("pairingCode"):
+            # Pairing code mode: update the text field
+            self.main_window.pairing_code_updated_sound.play()
+            self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
+            self.connect.pairing_code_field.SetValue(qr_data.get("pairingCode", ""))
 
     def on_messages_set(self, info):
         #Only consider if messages_set for the first time is false
