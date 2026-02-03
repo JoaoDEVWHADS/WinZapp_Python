@@ -224,6 +224,7 @@ class Connect:
                 }
                 response = requests.post(url, json=data, verify=False)
                 response_data = response.json()
+                print(response_data)
 
             #Save settings
             self.main_window.save_settings()

@@ -21,7 +21,7 @@ USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"
 SSL_CERTFILE = os.getenv("SSL_CERTFILE")
 SSL_KEYFILE = os.getenv("SSL_KEYFILE")
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "10"))
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 EVOLUTION_SSL_VERIFY = os.getenv("EVOLUTION_SSL_VERIFY", "true").lower() == "true"
 
@@ -78,7 +78,7 @@ class Instance(BaseModel):
     @field_validator('number')
     @classmethod
     def validate_number(cls, v):
-        if not v or not re.match(r'^\+?[1-9]\d{10,14}$', v):
+        if not v or not re.match(r'\d+', v):
             raise ValueError('Invalid phone number format')
         return v
 
