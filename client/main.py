@@ -349,19 +349,49 @@ class MainWindow(wx.Frame):
     def sync_chat_messages(self, chat):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
 
-        payload = { "where": { "key": { "remoteJid": chat.get("remoteJid", "")} } }
         headers = {
             "apikey": self.token,
             "Content-Type": "application/json"
         }
 
-        response = requests.post(url, json=payload, headers=headers, verify=False)
-        response_data = response.json()
-        #Check if messages are present
-        if response_data.get("messages", {}).get("records", []):
-            chat["messages"] = response_data
-            for message in chat["messages"].get("messages", {}).get("records", []):
-                self.sync_if_media(message)
+        all_messages = []
+        current_page = 1
+        total_pages = 1
+
+        # Loop through all pages
+        while current_page <= total_pages:
+            payload = { 
+                "where": { "key": { "remoteJid": chat.get("remoteJid", "")} },
+                "page": current_page
+            }
+
+            response = requests.post(url, json=payload, headers=headers, verify=False)
+            response_data = response.json()
+            
+            # Update total_pages based on response
+            if response_data.get("messages", {}):
+                total_pages = response_data.get("messages", {}).get("pages", 1)
+                records = response_data.get("messages", {}).get("records", [])
+                
+                # Add messages from current page
+                all_messages.extend(records)
+                
+                # Sync media messages
+                for message in records:
+                    self.sync_if_media(message)
+            
+            current_page += 1
+
+        # After fetching all pages, update chat messages
+        if all_messages:
+            if "messages" not in chat:
+                chat["messages"] = {}
+            chat["messages"]["messages"] = {
+                "total": len(all_messages),
+                "pages": total_pages,
+                "currentPage": total_pages,
+                "records": all_messages
+            }
 
         if chat.get("messages", {}) and chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
