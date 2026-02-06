@@ -110,7 +110,7 @@ def add_instance(name, number, token):
         "integration": "WHATSAPP-BAILEYS",
         "number": number,
         "token": token,
-        "syncFullHistory": True
+        "syncFullHistory": False
     }
     headers = {
         "apikey": APIKEY,

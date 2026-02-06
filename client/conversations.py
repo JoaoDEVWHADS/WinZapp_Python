@@ -58,7 +58,7 @@ class ConversationsPanel(wx.Panel):
 
     def navigate_to_conversation(self, conversation):
         self.conversation = conversation
-        self.conversation_name = self.main_window.find_name_through_messages(conversation) or conversation.get("pushName", "") or format_number(conversation.get("remoteJid", ""))
+        self.conversation_name = self.main_window.find_name_through_messages(conversation) or conversation.get("pushName", "") or self.main_window.find_jid_through_messages(conversation) or format_number(conversation.get("remoteJid", ""))
         self.message_label.SetLabel(f"{self.main_window.i18n.t('type_message')} {self.conversation_name}")
         self.conversation_panel.Show()
         self.preselect_messages()
@@ -307,7 +307,7 @@ class ConversationsPanel(wx.Panel):
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
             else:
-                sender_label = msg.get("pushName", "") if not msg.get("pushName", "").isdigit() else format_number(msg.get("key", {}).get("remoteJid", ""))
+                sender_label = msg.get("pushName", "") if not msg.get("pushName", "").isdigit() else format_number(msg.get("key", {}).get("", "") if msg.get("key", {}).get("addressingMode", "") == "lid" else msg.get("key", {}).get("remoteJid", ""))
             status = self._map_status(msg)
             body = (body or '').replace('\n', ' ')
             pieces = [f"{sender_label}: {body}" ]

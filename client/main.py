@@ -314,7 +314,7 @@ class MainWindow(wx.Frame):
     def set_chats(self):
         self.chat_names.clear()
         for chat in self.chats.values():
-            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
+            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or self.find_jid_through_messages(chat) or format_number(chat.get("remoteJid", "")))
         #Save copy of chats and chat_names
         self.conversations_panel.chats_list = list(self.chats.values())
         self.conversations_panel.chat_names = self.chat_names
@@ -334,6 +334,17 @@ class MainWindow(wx.Frame):
             if not message.get("key", {}).get("fromMe"):
                 #Return the message push name
                 return message.get("pushName", "")
+        return None
+
+    def find_jid_through_messages(self, chat):
+        for message in chat["messages"].get("messages", {}).get("records", []):
+            print(message.get("key", {}))
+            #Find a message that is not from you
+            if not message.get("key", {}).get("fromMe"):
+                #If addressingMode is lid, return remoteJidAlt, if not return remoteJid
+                if message.get("key", {}).get("addressingMode", "") == "lid":
+                    return format_number(message.get("key", {}).get("remoteJidAlt", ""))
+                return format_number(message.get("key", {}).get("remoteJid", ""))
         return None
 
     def preselect_conversations(self):
