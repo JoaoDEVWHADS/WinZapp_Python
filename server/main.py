@@ -10,7 +10,7 @@ from traceback import format_exc
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 load_dotenv(os.path.join(os.getcwd(), '.env'))
 HOST = os.getenv("HOST")
 PORT = os.getenv("PORT")
@@ -65,31 +65,6 @@ class Instance(BaseModel):
     name: str
     number: str
     token: str
-
-    @field_validator('name')
-    @classmethod
-    def validate_name(cls, v):
-        if not v or len(v) < 3 or len(v) > 50:
-            raise ValueError('Name must be between 3 and 50 characters')
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
-            raise ValueError('Name can only contain alphanumeric characters, underscores, and hyphens')
-        return v
-
-    @field_validator('number')
-    @classmethod
-    def validate_number(cls, v):
-        if not v or not re.match(r'\d+', v):
-            raise ValueError('Invalid phone number format')
-        return v
-
-    @field_validator('token')
-    @classmethod
-    def validate_token(cls, v):
-        if not v or len(v) < 20 or len(v) > 100:
-            raise ValueError('Token must be between 20 and 100 characters')
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
-            raise ValueError('Token contains invalid characters')
-        return v
 
 @app.post("/create_instance/")
 def create_instance(instance: Instance):

@@ -135,6 +135,7 @@ class Connect:
                 "token": self.main_window.token
             }
             response = requests.post(url, json=data, verify=False)
+            print(response)
             
             # Save settings
             self.main_window.save_settings()
