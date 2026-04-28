@@ -65,5 +65,10 @@
     "error_details": "Detalhes do erro:",
     "copy_error_text": "&Copiar texto do erro para a área de transferência",
     "close": "&Fechar",
-    "error_copied": "Texto do erro copiado."
+    "error_copied": "Texto do erro copiado.",
+    "downloading": "baixando...",
+    "decimal_separator": ",",
+    "audio_progress_label": "Progresso do áudio",
+    "of": "de",
+    "downloading_media": "baixando mídias"
 }

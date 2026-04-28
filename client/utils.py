@@ -27,6 +27,10 @@ def decrypt(encrypted_data, key):
     decrypted_data = fernet.decrypt(encrypted_data)
     return decrypted_data.decode()
 
+def decrypt_bytes(encrypted_data, key):
+    fernet = Fernet(key)
+    return fernet.decrypt(encrypted_data)
+
 def encrypt_json(data, key):
     fernet = Fernet(key)
     json_data = json.dumps(data).encode()

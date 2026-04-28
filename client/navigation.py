@@ -12,23 +12,26 @@ class NavigationPanel(wx.Panel):
         self.main_window = main_window
         self.parent = parent
 
-        self.SetSize((100, 300))
-        self.SetBackgroundColour(wx.Colour(240, 240, 240))
-
         self.init_UI()
 
     def init_UI(self):
-        self.nav_label = wx.StaticText(self, label=self.main_window.i18n.t("main_nav"), pos=(10, 10))
-        self.nav_list = wx.ListCtrl(self, size=(80, 250), pos=(10, 30), style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self.nav_label = wx.StaticText(self, label=self.main_window.i18n.t("main_nav"))
+        sizer.Add(self.nav_label, 0, wx.LEFT | wx.TOP, 5)
+
+        self.nav_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.nav_list.InsertColumn(0, self.main_window.i18n.t("main_nav"), width=80)
-        self.nav_list.Append((f"{self.main_window.i18n.t("conversations")} alt+1",))
+        self.nav_list.Append((f"{self.main_window.i18n.t('conversations')} alt+1",))
         self.nav_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_nav_item_selected)
         self.nav_list.Focus(0)
         self.nav_list.Select(0)
+        sizer.Add(self.nav_list, 1, wx.EXPAND | wx.ALL, 5)
+
+        self.SetSizer(sizer)
 
     def on_nav_item_selected(self, event):
         index = event.GetIndex()
-        #Get all childs for the content panel, then hide them and show the selected one
         panels = self.main_window.content_panel.GetChildren()
         for i, panel in enumerate(panels):
             if i == index:

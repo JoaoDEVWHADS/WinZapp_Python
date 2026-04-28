@@ -80,11 +80,29 @@ class MainWindow(wx.Frame):
     def init_UI(self):
         if self.offline_mode:
             self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('offline_mode')}")
-        self    .SetSize((400, 300))
+        self.SetMinSize((400, 300))
         self.main_panel = wx.Panel(self)
+
+        self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.content_panel = wx.Panel(self.main_panel)
         self.conversations_panel = ConversationsPanel(self, self.content_panel)
-        self.navigation_panel = NavigationPanel(self, self.main_panel)
+
+        # Content panel: conversations_panel fills it entirely
+        content_sizer = wx.BoxSizer(wx.VERTICAL)
+        content_sizer.Add(self.conversations_panel, 1, wx.EXPAND)
+        self.content_panel.SetSizer(content_sizer)
+
+        # Main panel: nav sidebar on left, content on right
+        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        main_sizer.Add(self.navigation_panel, 0, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(self.content_panel, 1, wx.EXPAND | wx.ALL, 5)
+        self.main_panel.SetSizer(main_sizer)
+
+        # Frame sizer
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(self.main_panel, 1, wx.EXPAND)
+        self.SetSizer(frame_sizer)
+
         self.create_accelerator_table()
         self.Show()
         #Set offline chats for the first time
@@ -181,7 +199,11 @@ class MainWindow(wx.Frame):
         self.synchronizing_sound.play()
         self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
+        # Phase 1: sync all messages (no media download)
         self.sync_remote_chats()
+        # Phase 2: download media for all chats
+        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('downloading_media')}")
+        self.sync_media_for_all_chats()
         self.sync_complete_sound.play()
         self.SetTitle(f"{self.i18n.t('app_name')}")
         self.output(self.i18n.t("sync_complete"))
@@ -357,6 +379,18 @@ class MainWindow(wx.Frame):
         for chat in self.chats.values():
             self.sync_chat_messages(chat.copy())
 
+    def sync_media_for_all_chats(self):
+        for chat in self.chats.values():
+            self.sync_chat_media(chat)
+
+    def sync_chat_media(self, chat):
+        records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        for message in records:
+            try:
+                self.sync_if_media(message)
+            except Exception:
+                pass
+
     def sync_chat_messages(self, chat):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
 
@@ -371,26 +405,20 @@ class MainWindow(wx.Frame):
 
         # Loop through all pages
         while current_page <= total_pages:
-            payload = { 
+            payload = {
                 "where": { "key": { "remoteJid": chat.get("remoteJid", "")} },
                 "page": current_page
             }
 
             response = requests.post(url, json=payload, headers=headers, verify=False)
             response_data = response.json()
-            
+
             # Update total_pages based on response
             if response_data.get("messages", {}):
                 total_pages = response_data.get("messages", {}).get("pages", 1)
                 records = response_data.get("messages", {}).get("records", [])
-                
-                # Add messages from current page
                 all_messages.extend(records)
-                
-                # Sync media messages
-                for message in records:
-                    self.sync_if_media(message)
-            
+
             current_page += 1
 
         # After fetching all pages, update chat messages
@@ -439,7 +467,7 @@ class MainWindow(wx.Frame):
         }
         headers = {
             "apikey": self.token,
-            "Content-Type": "application/json"  
+            "Content-Type": "application/json"
         }
         response = requests.post(url, json=payload, headers=headers, verify=False)
         if response.status_code == 201:
@@ -518,13 +546,13 @@ class MainWindow(wx.Frame):
 
         #Play error sound
         self.error_sound.play()
-        
+
         # Create error dialog
         dialog = wx.Dialog(None, title=self.i18n.t("error").format(app_name=self.app_name), size=(600, 400), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-        
+
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        
+
         # Error message
         message_text = wx.StaticText(panel, label=self.i18n.t("unexpected_error_message").format(app_name=self.app_name))
         sizer.Add(message_text, 0, wx.ALL, 10)
@@ -532,31 +560,31 @@ class MainWindow(wx.Frame):
         #Error details label
         details_label = wx.StaticText(panel, label=self.i18n.t("error_details"))
         sizer.Add(details_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Error details text control (read-only, multiline)
         error_ctrl = wx.TextCtrl(panel, value=error_text, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
         sizer.Add(error_ctrl, 1, wx.ALL | wx.EXPAND, 10)
-        
+
         # Buttons
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         # Copy button
         copy_btn = wx.Button(panel, label=self.i18n.t("copy_error_text"))
         copy_btn.Bind(wx.EVT_BUTTON, lambda evt: self.on_copy_error(error_text))
         button_sizer.Add(copy_btn, 0, wx.ALL, 5)
-        
+
         # Close button
         close_btn = wx.Button(panel, id=wx.ID_CANCEL, label=self.i18n.t("close"))
         button_sizer.Add(close_btn, 0, wx.ALL, 5)
-        
+
         sizer.Add(button_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
-        
+
         panel.SetSizer(sizer)
-        
+
         # Show dialog
         dialog.ShowModal()
         dialog.Destroy()
-    
+
     def on_copy_error(self, error_text):
         """Copy error text to clipboard."""
         try:
