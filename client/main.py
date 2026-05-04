@@ -1,7 +1,7 @@
 import os
-from pyexpat.errors import messages
 import sys
 import time
+import shutil
 import threading
 import requests
 import base64
@@ -11,6 +11,7 @@ from sound_system import SoundSystem, Sound
 from i18n import I18n
 from websocket_client import WebSocketClient
 from utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
+from app_paths import resource_path, data_path
 import wx
 from connect import Connect
 from navigation import NavigationPanel
@@ -29,7 +30,7 @@ class MainWindow(wx.Frame):
         self.speak_output = outputs.auto.Auto()
 
         #Initialize sound system
-        self.sound_system = SoundSystem(self, sound_dir=os.path.join(os.getcwd(), "sounds"))
+        self.sound_system = SoundSystem(self, sound_dir=resource_path("sounds"))
         self.sound_system.start()
         self.load_sounds()
         self.settings = {}
@@ -136,19 +137,36 @@ class MainWindow(wx.Frame):
         self.speak_output.output(text, interrupt=interrupt)
 
     def load_settings(self):
+        settings_file = data_path("settings.json")
+        # Bootstrap from default on first run
+        if not os.path.isfile(settings_file):
+            default_file = resource_path("data", "settings_default.json")
+            if os.path.isfile(default_file):
+                os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+                shutil.copy2(default_file, settings_file)
         try:
-            self.settings = json.load(open(os.path.join(os.getcwd(), "data", "settings.json"), "r"))
-        except Exception as e:
-            self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t["settings_load_failed"]} {format_exc()}", self.i18n.t["error"], wx.OK | wx.ICON_ERROR)
+            with open(settings_file, "r") as f:
+                self.settings = json.load(f)
+        except Exception:
+            # i18n may not be initialized yet at startup — use plain fallback message
+            if hasattr(self, 'i18n'):
+                msg = self.i18n.t('settings_load_failed')
+                title = self.i18n.t("error").format(app_name=self.app_name)
+            else:
+                msg = "Failed to load settings."
+                title = f"{self.app_name} - Error"
+            if hasattr(self, 'error_sound'):
+                self.error_sound.play()
+            wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
             sys.exit()
 
     def save_settings(self):
         try:
-            json.dump(self.settings, open(os.path.join(os.getcwd(), "data", "settings.json"), "w"), indent=4)
-        except Exception as e:
+            with open(data_path("settings.json"), "w") as f:
+                json.dump(self.settings, f, indent=4)
+        except Exception:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t["settings_save_failed"]} {format_exc()}", self.i18n.t["error"], wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
 
     def load_sounds(self):
         self.startup_sound = Sound(self.sound_system, "startup.ogg")
@@ -163,7 +181,7 @@ class MainWindow(wx.Frame):
 
     def retrieve_token(self):
         try:
-            with open(os.path.join(os.getcwd(), "data", "token.tk"), "r") as token_file:
+            with open(data_path("token.tk"), "r") as token_file:
                 self.token = token_file.read().strip()
         except Exception as e:
             self.error_sound.play()
@@ -213,28 +231,22 @@ class MainWindow(wx.Frame):
         self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('preparing_to_sync')}")
 
     def create_basic_files(self):
-        data_dir = os.path.join(os.getcwd(), "data")
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+        data_dir = data_path("")
+        os.makedirs(data_dir, exist_ok=True)
 
         #Create empty messages.dat if not exists
-        messages_file = os.path.join(data_dir, "messages.dat")
+        messages_file = data_path("messages.dat")
         if not os.path.isfile(messages_file):
             with open(messages_file, "wb") as f:
                 f.write(encrypt_json({"chats": {}, "contacts": {}}, self.key))
 
         #Create media/voice message directories
-        media_dir = os.path.join(data_dir, "media")
-        voice_messages_dir = os.path.join(data_dir, "voice_messages")
-        if not os.path.exists(media_dir):
-            os.makedirs(media_dir)
-        if not os.path.exists(voice_messages_dir):
-            os.makedirs(voice_messages_dir)
+        os.makedirs(data_path("media"), exist_ok=True)
+        os.makedirs(data_path("voice_messages"), exist_ok=True)
 
         #Create stderr/stdout log files
-        log_dir = os.path.join(data_dir, "log")
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        log_dir = data_path("log")
+        os.makedirs(log_dir, exist_ok=True)
         stderr_log = os.path.join(log_dir, "stderr.log")
         stdout_log = os.path.join(log_dir, "stdout.log")
         if not os.path.isfile(stderr_log):
@@ -246,7 +258,7 @@ class MainWindow(wx.Frame):
         sys.stdout = open(stdout_log, "a")
 
     def get_chats(self):
-        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        messages_file = data_path("messages.dat")
         try:
             with open(messages_file, "rb") as f:
                 encrypted_data = f.read()
@@ -290,7 +302,7 @@ class MainWindow(wx.Frame):
 
     def save_data(self, chats, contacts):
         #Save back to file
-        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        messages_file = data_path("messages.dat")
         try:
             encrypted_data = encrypt_json({"chats": chats, "contacts": contacts}, self.key)
             with open(messages_file, "wb") as f:
@@ -300,7 +312,7 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('data_save_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
 
     def get_contacts(self):
-        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        messages_file = data_path("messages.dat")
         try:
             with open(messages_file, "rb") as f:
                 encrypted_data = f.read()
@@ -450,7 +462,7 @@ class MainWindow(wx.Frame):
 
     def handle_audio_message(self, msg):
         #First, check if the audio is already downloaded
-        voice_messages_dir = os.path.join(os.getcwd(), "data", "voice_messages")
+        voice_messages_dir = data_path("voice_messages")
         audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
         if os.path.isfile(audio_file_path):
             return
@@ -475,7 +487,7 @@ class MainWindow(wx.Frame):
         return ""
 
     def save_audio_locally(self, msg, audio_content):
-        voice_messages_dir = os.path.join(os.getcwd(), "data", "voice_messages")
+        voice_messages_dir = data_path("voice_messages")
         audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
         try:
             with open(audio_file_path, "wb") as audio_file:
@@ -531,13 +543,12 @@ class MainWindow(wx.Frame):
         self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('offline_mode')}")
 
     def generate_secret_key(self):
-        key_file = os.path.join(os.getcwd(), "data", "secret.key")
+        key_file = data_path("secret.key")
         if not os.path.isfile(key_file):
             generate_and_save_key(key_file)
 
     def retrieve_secret_key(self):
-        key_file = os.path.join(os.getcwd(), "data", "secret.key")
-        return retrieve_key(key_file)
+        return retrieve_key(data_path("secret.key"))
 
     def exception_handler(self, exc_type, exc_value, exc_traceback):
         """Global exception handler for unexpected errors."""

@@ -3,13 +3,21 @@ WinZapp build script.
 
 Steps:
   1. Check required tools (nuitka, gcc, windres)
-  2. Compile client with Nuitka → build/WinZapp.dist/
-  3. Copy sound_lib and accessible_output2 DLLs into build/WinZapp.dist/
-  4. Compile uninstaller → build/uninstall.exe
-  5. Create payload ZIP (ZIP_STORED) from build/WinZapp.dist/ + uninstall.exe
-  6. Compile installer stub → build/installer_stub.exe
-  7. Append payload ZIP to stub → dist/WinZappInstaller.exe
-  8. Create portable dist/WinZapp.zip (ZIP_DEFLATED, WinZapp/ prefix)
+  2. Compile client with Nuitka --mode=onefile -> build/WinZapp.exe
+       (sounds, languages, lib are external; only Python + wx etc. go inside)
+  3. Assemble staging dir: WinZapp.exe + lib/ + sounds/ + languages/ + data/
+  4. Compile uninstaller -> build/uninstall.exe
+  5. Create payload ZIP (ZIP_STORED) from staging/ + uninstall.exe
+  6. Compile installer stub -> build/installer_stub.exe
+  7. Append payload ZIP to stub -> dist/WinZappInstaller.exe
+  8. Create portable dist/WinZapp.zip (WinZapp/ prefix, ZIP_DEFLATED)
+
+Visible structure after install / extraction:
+  WinZapp.exe
+  lib/          <- BASS DLLs + screen-reader DLLs (found by sound_lib / ao2)
+  sounds/       <- OGG audio files
+  languages/    <- JSON translation files
+  data/         <- settings_default.json (bootstrap); settings.json created on first run
 
 Usage:
   venv\\Scripts\\python.exe build.py
@@ -20,9 +28,8 @@ import sys
 import shutil
 import subprocess
 import zipfile
-import glob
 
-# ── Paths ────────────────────────────────────────────────────────────────
+# -- Paths -------------------------------------------------------------------
 
 ROOT_DIR      = os.path.dirname(os.path.abspath(__file__))
 CLIENT_DIR    = os.path.join(ROOT_DIR, "client")
@@ -36,35 +43,50 @@ PYTHON_CMD  = os.path.join(VENV_DIR, "Scripts", "python.exe")
 GCC_CMD     = "gcc"
 WINDRES_CMD = "windres"
 
-NUITKA_OUTPUT_DIR = os.path.join(BUILD_DIR, "WinZapp.dist")
-PAYLOAD_ZIP       = os.path.join(BUILD_DIR, "payload.zip")
-INSTALLER_STUB    = os.path.join(BUILD_DIR, "installer_stub.exe")
-INSTALLER_RES     = os.path.join(BUILD_DIR, "installer_res.o")
-UNINSTALLER_RES   = os.path.join(BUILD_DIR, "uninstaller_res.o")
-UNINSTALLER_EXE   = os.path.join(BUILD_DIR, "uninstall.exe")
-INSTALLER_OUT     = os.path.join(DIST_DIR,  "WinZappInstaller.exe")
-PORTABLE_ZIP      = os.path.join(DIST_DIR,  "WinZapp.zip")
+# Nuitka onefile output: a single build/WinZapp.exe
+NUITKA_EXE      = os.path.join(BUILD_DIR, "WinZapp.exe")
 
-# DLL source directories (inside venv site-packages)
+# Staging dir: assembled tree that mirrors the installed layout
+STAGING_DIR     = os.path.join(BUILD_DIR, "staging")
+
+PAYLOAD_ZIP     = os.path.join(BUILD_DIR, "payload.zip")
+INSTALLER_STUB  = os.path.join(BUILD_DIR, "installer_stub.exe")
+INSTALLER_RES   = os.path.join(BUILD_DIR, "installer_res.o")
+UNINSTALLER_RES = os.path.join(BUILD_DIR, "uninstaller_res.o")
+UNINSTALLER_EXE = os.path.join(BUILD_DIR, "uninstall.exe")
+INSTALLER_OUT   = os.path.join(DIST_DIR,  "WinZappInstaller.exe")
+PORTABLE_ZIP    = os.path.join(DIST_DIR,  "WinZapp.zip")
+
+SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
+
 SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
-SOUND_LIB_DLLS = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
-AO2_DLLS       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
+# BASS DLLs (sound_lib) and screen-reader DLLs (accessible_output2) that go in lib/
+SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
+AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# -- Helpers -----------------------------------------------------------------
 
 def step(msg):
-    print(f"\n{'─'*60}")
+    print(f"\n{'-'*60}")
     print(f"  {msg}")
-    print('─'*60)
+    print('-'*60)
 
 def run(cmd, cwd=None):
-    print(f"  $ {' '.join(cmd)}")
+    print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed with exit code {result.returncode}.")
         sys.exit(result.returncode)
 
-# ── Step 1: Check tools ───────────────────────────────────────────────────
+def walk_dir(root):
+    """Yield (absolute_path, relative_path) for every file under root."""
+    for dirpath, _dirs, files in os.walk(root):
+        for fname in files:
+            abs_path = os.path.join(dirpath, fname)
+            rel_path = os.path.relpath(abs_path, root).replace("\\", "/")
+            yield abs_path, rel_path
+
+# -- Step 1: Check tools -----------------------------------------------------
 
 def check_tools():
     step("1/8  Checking required tools")
@@ -87,78 +109,114 @@ def check_tools():
 
     print("  All tools found.")
 
-# ── Step 2: Nuitka compile ─────────────────────────────────────────────────
+# -- Step 2: Nuitka onefile compile ------------------------------------------
 
 def nuitka_compile():
-    step("2/8  Compiling client with Nuitka")
+    step("2/8  Compiling client with Nuitka (--mode=onefile)")
 
-    # Clean previous output
-    if os.path.exists(NUITKA_OUTPUT_DIR):
-        shutil.rmtree(NUITKA_OUTPUT_DIR)
     os.makedirs(BUILD_DIR, exist_ok=True)
+
+    # Remove previous onefile output if present
+    if os.path.isfile(NUITKA_EXE):
+        os.remove(NUITKA_EXE)
 
     cmd = [
         NUITKA_CMD,
-        "--standalone",
-        "--onedir",
+        "--mode=onefile",
         "--windows-console-mode=disable",
         "--output-dir=" + BUILD_DIR,
         "--output-filename=WinZapp",
+        # Extract to a persistent cache location (faster re-launches)
+        "--onefile-tempdir-spec={CACHE_DIR}/WinZapp",
+        # Packages to include inside the exe
         "--include-package=sound_lib",
         "--include-package=accessible_output2",
+        "--include-package=platform_utils",
+        "--include-package=libloader",
         "--include-package=wx",
         "--include-package=cryptography",
         "--include-package=requests",
         "--include-package=socketio",
         "--include-package=engineio",
-        "--include-package=accessible_output2",
-        "--include-data-dir=" + os.path.join(CLIENT_DIR, "sounds") + "=sounds",
-        "--include-data-dir=" + os.path.join(CLIENT_DIR, "languages") + "=languages",
+        "--include-package=pyperclip",
+        # Exclude BASS DLLs from the exe - they live in the external lib/ folder
+        "--noinclude-dlls=bass*.dll",
+        "--noinclude-dlls=tags.dll",
+        # Entry point
         os.path.join(CLIENT_DIR, "main.py"),
     ]
     run(cmd, cwd=CLIENT_DIR)
 
-# ── Step 3: Copy DLLs ─────────────────────────────────────────────────────
-
-def copy_dlls():
-    step("3/8  Copying DLLs into build/WinZapp.dist/")
-    dest = NUITKA_OUTPUT_DIR
-
-    if not os.path.isdir(dest):
-        print(f"[ERROR] Nuitka output directory not found: {dest}")
+    if not os.path.isfile(NUITKA_EXE):
+        print(f"[ERROR] Nuitka did not produce {NUITKA_EXE}")
         sys.exit(1)
 
-    copied = 0
-    for src_dir, pattern in [
-        (SOUND_LIB_DLLS, "*.dll"),
-        (AO2_DLLS,       "*.dll"),
-    ]:
-        if not os.path.isdir(src_dir):
-            print(f"  [WARN] DLL source directory not found: {src_dir}")
-            continue
-        for dll in glob.glob(os.path.join(src_dir, pattern)):
-            dst = os.path.join(dest, os.path.basename(dll))
-            shutil.copy2(dll, dst)
-            print(f"  copied {os.path.basename(dll)}")
-            copied += 1
+    size_mb = os.path.getsize(NUITKA_EXE) / (1024 * 1024)
+    print(f"  -> {NUITKA_EXE}  ({size_mb:.1f} MB)")
 
-    print(f"  {copied} DLL(s) copied.")
+# -- Step 3: Assemble staging dir --------------------------------------------
 
-# ── Step 4: Compile uninstaller ────────────────────────────────────────────
+def assemble_staging():
+    step("3/8  Assembling staging distribution")
+
+    # Clean and recreate
+    if os.path.isdir(STAGING_DIR):
+        shutil.rmtree(STAGING_DIR)
+    os.makedirs(STAGING_DIR)
+
+    # WinZapp.exe (the onefile)
+    shutil.copy2(NUITKA_EXE, os.path.join(STAGING_DIR, "WinZapp.exe"))
+
+    # lib/ - BASS DLLs from sound_lib
+    lib_dir = os.path.join(STAGING_DIR, "lib")
+    os.makedirs(lib_dir)
+    dll_count = 0
+    if os.path.isdir(SOUND_LIB_X64):
+        for fname in os.listdir(SOUND_LIB_X64):
+            if fname.lower().endswith(".dll"):
+                shutil.copy2(os.path.join(SOUND_LIB_X64, fname),
+                             os.path.join(lib_dir, fname))
+                dll_count += 1
+    # accessible_output2 DLLs (NVDA, SAPI, etc.) - copy if present
+    if os.path.isdir(AO2_LIB):
+        for fname in os.listdir(AO2_LIB):
+            if fname.lower().endswith(".dll"):
+                shutil.copy2(os.path.join(AO2_LIB, fname),
+                             os.path.join(lib_dir, fname))
+                dll_count += 1
+    print(f"  -> lib/  ({dll_count} DLLs)")
+
+    # sounds/ - OGG files from client
+    sounds_src = os.path.join(CLIENT_DIR, "sounds")
+    shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))
+    sounds_count = len(os.listdir(sounds_src))
+    print(f"  -> sounds/  ({sounds_count} files)")
+
+    # languages/ - JSON files from client
+    langs_src = os.path.join(CLIENT_DIR, "languages")
+    shutil.copytree(langs_src, os.path.join(STAGING_DIR, "languages"))
+    langs_count = len(os.listdir(langs_src))
+    print(f"  -> languages/  ({langs_count} files)")
+
+    # data/settings_default.json
+    data_dir = os.path.join(STAGING_DIR, "data")
+    os.makedirs(data_dir)
+    shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
+    print(f"  -> data/settings_default.json")
+
+# -- Step 4: Compile uninstaller ---------------------------------------------
 
 def compile_uninstaller():
     step("4/8  Compiling uninstaller")
-    os.makedirs(BUILD_DIR, exist_ok=True)
 
-    # Compile resource file
     run([
         WINDRES_CMD,
         os.path.join(INSTALLER_DIR, "uninstaller.rc"),
         "-o", UNINSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
+        "--preprocessor-arg=-I/c/msys64/ucrt64/include",
     ])
 
-    # Compile and link
     run([
         GCC_CMD,
         os.path.join(INSTALLER_DIR, "uninstaller.c"),
@@ -168,49 +226,39 @@ def compile_uninstaller():
         "-I", INSTALLER_DIR,
         "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32",
     ])
-    print(f"  → {UNINSTALLER_EXE}")
+    print(f"  -> {UNINSTALLER_EXE}")
 
-# ── Step 5: Create payload ZIP ─────────────────────────────────────────────
+# -- Step 5: Create payload ZIP ----------------------------------------------
 
 def create_payload_zip():
     step("5/8  Creating payload ZIP (ZIP_STORED)")
 
-    if not os.path.isdir(NUITKA_OUTPUT_DIR):
-        print(f"[ERROR] Nuitka output not found: {NUITKA_OUTPUT_DIR}")
-        sys.exit(1)
-
+    count = 0
     with zipfile.ZipFile(PAYLOAD_ZIP, "w", compression=zipfile.ZIP_STORED) as zf:
-        # Add all files from WinZapp.dist/ under "app/" prefix
-        for dirpath, dirnames, filenames in os.walk(NUITKA_OUTPUT_DIR):
-            for fname in filenames:
-                full_path = os.path.join(dirpath, fname)
-                rel_path = os.path.relpath(full_path, NUITKA_OUTPUT_DIR)
-                arc_name = "app\\" + rel_path
-                zf.write(full_path, arc_name)
-
-        # Add uninstaller
-        if os.path.isfile(UNINSTALLER_EXE):
-            zf.write(UNINSTALLER_EXE, "uninstall.exe")
-        else:
-            print("  [WARN] uninstall.exe not found, skipping.")
+        # All staging files at the ZIP root (preserving sub-folders)
+        for abs_path, rel_path in walk_dir(STAGING_DIR):
+            zf.write(abs_path, rel_path)
+            count += 1
+        # Uninstaller at root
+        zf.write(UNINSTALLER_EXE, "uninstall.exe")
+        count += 1
 
     size_mb = os.path.getsize(PAYLOAD_ZIP) / (1024 * 1024)
-    print(f"  → {PAYLOAD_ZIP}  ({size_mb:.1f} MB)")
+    print(f"  -> {PAYLOAD_ZIP}  ({size_mb:.1f} MB, {count} entries)")
 
-# ── Step 6: Compile installer stub ────────────────────────────────────────
+# -- Step 6: Compile installer stub ------------------------------------------
 
 def compile_installer_stub():
     step("6/8  Compiling installer stub")
 
-    # Compile resource file
     run([
         WINDRES_CMD,
         os.path.join(INSTALLER_DIR, "installer.rc"),
         "-o", INSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
+        "--preprocessor-arg=-I/c/msys64/ucrt64/include",
     ])
 
-    # Compile and link
     run([
         GCC_CMD,
         os.path.join(INSTALLER_DIR, "installer.c"),
@@ -218,11 +266,11 @@ def compile_installer_stub():
         "-o", INSTALLER_STUB,
         "-mwindows",
         "-I", INSTALLER_DIR,
-        "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32",
+        "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32", "-luuid",
     ])
-    print(f"  → {INSTALLER_STUB}")
+    print(f"  -> {INSTALLER_STUB}")
 
-# ── Step 7: Append ZIP to stub ─────────────────────────────────────────────
+# -- Step 7: Append ZIP to stub ----------------------------------------------
 
 def append_zip_to_stub():
     step("7/8  Appending payload to installer stub")
@@ -235,27 +283,25 @@ def append_zip_to_stub():
             shutil.copyfileobj(payload, out)
 
     size_mb = os.path.getsize(INSTALLER_OUT) / (1024 * 1024)
-    print(f"  → {INSTALLER_OUT}  ({size_mb:.1f} MB)")
+    print(f"  -> {INSTALLER_OUT}  ({size_mb:.1f} MB)")
 
-# ── Step 8: Create portable ZIP ───────────────────────────────────────────
+# -- Step 8: Create portable ZIP ---------------------------------------------
 
 def create_portable_zip():
     step("8/8  Creating portable WinZapp.zip")
     os.makedirs(DIST_DIR, exist_ok=True)
 
+    count = 0
     with zipfile.ZipFile(PORTABLE_ZIP, "w", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=6) as zf:
-        for dirpath, dirnames, filenames in os.walk(NUITKA_OUTPUT_DIR):
-            for fname in filenames:
-                full_path = os.path.join(dirpath, fname)
-                rel_path = os.path.relpath(full_path, NUITKA_OUTPUT_DIR)
-                arc_name = os.path.join("WinZapp", rel_path)
-                zf.write(full_path, arc_name)
+        for abs_path, rel_path in walk_dir(STAGING_DIR):
+            zf.write(abs_path, "WinZapp/" + rel_path)
+            count += 1
 
     size_mb = os.path.getsize(PORTABLE_ZIP) / (1024 * 1024)
-    print(f"  → {PORTABLE_ZIP}  ({size_mb:.1f} MB)")
+    print(f"  -> {PORTABLE_ZIP}  ({size_mb:.1f} MB, {count} entries)")
 
-# ── Main ──────────────────────────────────────────────────────────────────
+# -- Main --------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("\nWinZapp Build Script")
@@ -263,7 +309,7 @@ if __name__ == "__main__":
 
     check_tools()
     nuitka_compile()
-    copy_dlls()
+    assemble_staging()
     compile_uninstaller()
     create_payload_zip()
     compile_installer_stub()
@@ -272,6 +318,6 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 60)
     print("  Build complete!")
-    print(f"  Installer : {INSTALLER_OUT}")
-    print(f"  Portable  : {PORTABLE_ZIP}")
+    print(f"  Installer  : {INSTALLER_OUT}")
+    print(f"  Portable   : {PORTABLE_ZIP}")
     print("=" * 60 + "\n")

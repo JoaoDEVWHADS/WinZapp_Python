@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <objbase.h>
@@ -9,11 +10,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "resource.h"
-
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "shlwapi.lib")
 
 /* ── ZIP structures (no compression — ZIP_STORED only) ───────────────── */
 
@@ -72,7 +68,7 @@ typedef struct {
 
 #define WM_INSTALL_PROGRESS  (WM_USER + 1)   /* wParam=done, lParam=total */
 #define WM_INSTALL_DONE      (WM_USER + 2)
-#define WM_INSTALL_ERROR     (WM_USER + 3)   /* lParam=error string (heap) */
+#define WM_INSTALL_ERROR     (WM_USER + 3)   /* lParam=wchar_t* (heap, caller frees) */
 
 /* ── Globals ──────────────────────────────────────────────────────────── */
 
@@ -92,17 +88,16 @@ static BOOL read_at(HANDLE hf, uint64_t offset, void *buf, DWORD len)
     LARGE_INTEGER li;
     li.QuadPart = (LONGLONG)offset;
     if (!SetFilePointerEx(hf, li, NULL, FILE_BEGIN)) return FALSE;
-    DWORD read = 0;
-    return ReadFile(hf, buf, len, &read, NULL) && read == len;
+    DWORD did = 0;
+    return ReadFile(hf, buf, len, &did, NULL) && did == len;
 }
 
-static BOOL find_zip_start(HANDLE hf, uint64_t *out_zip_start)
+static BOOL find_zip_start(HANDLE hf, ZipEOCD *out_eocd, uint64_t *out_zip_start)
 {
     LARGE_INTEGER fs_li;
     if (!GetFileSizeEx(hf, &fs_li)) return FALSE;
     uint64_t fsize = (uint64_t)fs_li.QuadPart;
 
-    /* Scan backwards through last 64 KB + EOCD size for the EOCD signature */
     uint64_t scan_size = 65536 + sizeof(ZipEOCD) + 65535;
     if (scan_size > fsize) scan_size = fsize;
     uint64_t scan_start = fsize - scan_size;
@@ -110,51 +105,21 @@ static BOOL find_zip_start(HANDLE hf, uint64_t *out_zip_start)
     uint8_t *buf = (uint8_t *)malloc((size_t)scan_size);
     if (!buf) return FALSE;
 
-    BOOL ok = read_at(hf, scan_start, buf, (DWORD)scan_size);
-    if (!ok) { free(buf); return FALSE; }
+    if (!read_at(hf, scan_start, buf, (DWORD)scan_size)) { free(buf); return FALSE; }
 
-    /* Walk backwards looking for EOCD sig */
     for (int64_t i = (int64_t)(scan_size - sizeof(ZipEOCD)); i >= 0; i--) {
         uint32_t sig;
         memcpy(&sig, buf + i, 4);
         if (sig == ZIP_EOCD_SIG) {
-            ZipEOCD eocd;
-            memcpy(&eocd, buf + i, sizeof(ZipEOCD));
-            /* zip_start = absolute position of EOCD - cd_size - cd_off */
+            memcpy(out_eocd, buf + i, sizeof(ZipEOCD));
             uint64_t eocd_abs = scan_start + (uint64_t)i;
-            *out_zip_start = eocd_abs - eocd.cd_size - eocd.cd_off;
+            *out_zip_start = eocd_abs - out_eocd->cd_size - out_eocd->cd_off;
             free(buf);
             return TRUE;
         }
     }
     free(buf);
     return FALSE;
-}
-
-/* Count entries in central directory */
-static int count_zip_entries(HANDLE hf, uint64_t zip_start)
-{
-    /* Re-find EOCD to get count */
-    LARGE_INTEGER fs_li;
-    if (!GetFileSizeEx(hf, &fs_li)) return 0;
-    uint64_t fsize = (uint64_t)fs_li.QuadPart;
-    uint64_t scan_size = 65536 + sizeof(ZipEOCD) + 65535;
-    if (scan_size > fsize) scan_size = fsize;
-    uint64_t scan_start = fsize - scan_size;
-    uint8_t *buf = (uint8_t *)malloc((size_t)scan_size);
-    if (!buf) return 0;
-    if (!read_at(hf, scan_start, buf, (DWORD)scan_size)) { free(buf); return 0; }
-    int count = 0;
-    for (int64_t i = (int64_t)(scan_size - sizeof(ZipEOCD)); i >= 0; i--) {
-        uint32_t sig; memcpy(&sig, buf + i, 4);
-        if (sig == ZIP_EOCD_SIG) {
-            ZipEOCD eocd; memcpy(&eocd, buf + i, sizeof(ZipEOCD));
-            count = eocd.cd_entries_total;
-            break;
-        }
-    }
-    free(buf);
-    return count;
 }
 
 /* Create all intermediate directories for a file path */
@@ -186,39 +151,22 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
                             NULL, OPEN_EXISTING, 0, NULL);
     if (hf == INVALID_HANDLE_VALUE) return FALSE;
 
-    uint64_t zip_start = 0;
-    if (!find_zip_start(hf, &zip_start)) { CloseHandle(hf); return FALSE; }
-
-    /* Find EOCD to get cd_off and total entries */
-    LARGE_INTEGER fs_li; GetFileSizeEx(hf, &fs_li);
-    uint64_t fsize = (uint64_t)fs_li.QuadPart;
-    uint64_t scan_size = 65536 + sizeof(ZipEOCD) + 65535;
-    if (scan_size > fsize) scan_size = fsize;
-    uint64_t scan_start = fsize - scan_size;
-    uint8_t *scan_buf = (uint8_t *)malloc((size_t)scan_size);
-    if (!scan_buf) { CloseHandle(hf); return FALSE; }
-    read_at(hf, scan_start, scan_buf, (DWORD)scan_size);
     ZipEOCD eocd = {0};
-    for (int64_t i = (int64_t)(scan_size - sizeof(ZipEOCD)); i >= 0; i--) {
-        uint32_t sig; memcpy(&sig, scan_buf + i, 4);
-        if (sig == ZIP_EOCD_SIG) { memcpy(&eocd, scan_buf + i, sizeof(ZipEOCD)); break; }
-    }
-    free(scan_buf);
+    uint64_t zip_start = 0;
+    if (!find_zip_start(hf, &eocd, &zip_start)) { CloseHandle(hf); return FALSE; }
 
     int total = eocd.cd_entries_total;
     uint64_t cd_pos = zip_start + eocd.cd_off;
 
-    /* Allocate file list */
     wchar_t **files = (wchar_t **)malloc(total * sizeof(wchar_t *));
     int file_count = 0;
 
-    /* Walk central directory */
     for (int i = 0; i < total && !g_cancelled; i++) {
         ZipCentral cd = {0};
         if (!read_at(hf, cd_pos, &cd, sizeof(ZipCentral))) break;
         if (cd.sig != ZIP_CD_SIG) break;
 
-        /* Read filename */
+        /* Read filename (UTF-8 in ZIP) */
         char fname_utf8[512] = {0};
         int name_len = cd.fname_len < 511 ? cd.fname_len : 511;
         read_at(hf, cd_pos + sizeof(ZipCentral), fname_utf8, name_len);
@@ -226,81 +174,72 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
 
         cd_pos += sizeof(ZipCentral) + cd.fname_len + cd.extra_len + cd.comment_len;
 
-        /* Skip directories */
-        if (fname_utf8[name_len - 1] == '/' || fname_utf8[name_len - 1] == '\\')
+        /* Skip directory entries */
+        if (name_len > 0 &&
+            (fname_utf8[name_len - 1] == '/' || fname_utf8[name_len - 1] == '\\'))
             continue;
 
-        /* Build destination path */
+        /* Convert filename to wide and normalise separators */
         wchar_t fname_w[512];
         MultiByteToWideChar(CP_UTF8, 0, fname_utf8, -1, fname_w, 512);
-
-        /* Replace forward slashes with backslashes */
-        for (wchar_t *p = fname_w; *p; p++)
-            if (*p == L'/') *p = L'\\';
+        for (wchar_t *pw = fname_w; *pw; pw++)
+            if (*pw == L'/') *pw = L'\\';
 
         wchar_t dest_path[MAX_PATH];
         swprintf(dest_path, MAX_PATH, L"%s\\%s", dest_dir, fname_w);
 
-        /* Ensure parent directories exist */
         ensure_dirs(dest_path);
 
-        /* Seek to local file header */
+        /* Read local file header to find data offset */
         ZipLocal local = {0};
         uint64_t local_off = zip_start + cd.local_off;
         if (!read_at(hf, local_off, &local, sizeof(ZipLocal))) continue;
         if (local.sig != ZIP_LOCAL_SIG) continue;
 
-        uint64_t data_off = local_off + sizeof(ZipLocal) + local.fname_len + local.extra_len;
+        uint64_t data_off = local_off + sizeof(ZipLocal)
+                          + local.fname_len + local.extra_len;
 
-        /* Create output file */
+        /* Extract file */
         HANDLE hout = CreateFileW(dest_path, GENERIC_WRITE, 0, NULL,
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hout == INVALID_HANDLE_VALUE) continue;
 
-        /* Copy raw bytes in 64 KB chunks */
         uint32_t remaining = cd.comp_size;
-        uint8_t chunk[65536];
+        uint8_t  chunk[65536];
         uint64_t read_pos = data_off;
-        BOOL write_ok = TRUE;
-        while (remaining > 0 && write_ok) {
+        while (remaining > 0) {
             DWORD to_read = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
             DWORD did_read = 0;
             LARGE_INTEGER li; li.QuadPart = (LONGLONG)read_pos;
             SetFilePointerEx(hf, li, NULL, FILE_BEGIN);
             if (!ReadFile(hf, chunk, to_read, &did_read, NULL) || did_read == 0) break;
             DWORD written = 0;
-            if (!WriteFile(hout, chunk, did_read, &written, NULL) || written != did_read)
-                write_ok = FALSE;
-            read_pos += did_read;
+            WriteFile(hout, chunk, did_read, &written, NULL);
+            read_pos  += did_read;
             remaining -= did_read;
         }
         CloseHandle(hout);
 
-        /* Store in file list */
-        if (files) {
-            files[file_count] = (wchar_t *)malloc((wcslen(dest_path) + 1) * sizeof(wchar_t));
-            if (files[file_count]) {
-                wcscpy(files[file_count], dest_path);
-                file_count++;
-            }
+        /* Add to file list */
+        files[file_count] = (wchar_t *)malloc((wcslen(dest_path) + 1) * sizeof(wchar_t));
+        if (files[file_count]) {
+            wcscpy(files[file_count], dest_path);
+            file_count++;
         }
 
-        /* Report progress */
+        /* Update progress bar and status label */
         SendMessage(hDlg, WM_INSTALL_PROGRESS, (WPARAM)(i + 1), (LPARAM)total);
-
-        /* Update status label with filename (just the base name) */
         wchar_t *base = wcsrchr(fname_w, L'\\');
-        base = base ? base + 1 : fname_w;
-        SetDlgItemTextW(hDlg, IDC_STATUS, base);
+        SetDlgItemTextW(hDlg, IDC_STATUS, base ? base + 1 : fname_w);
     }
 
     CloseHandle(hf);
-    *out_files = files;
-    *out_count = file_count;
+    *out_files  = files;
+    *out_count  = file_count;
     return !g_cancelled;
 }
 
-/* ── Shortcut helpers ─────────────────────────────────────────────────── */
+/* ── Shortcut creation ────────────────────────────────────────────────── */
 
 static void create_shortcut(const wchar_t *target, const wchar_t *link_path,
                             const wchar_t *working_dir)
@@ -315,8 +254,7 @@ static void create_shortcut(const wchar_t *target, const wchar_t *link_path,
     IShellLinkW_SetWorkingDirectory(psl, working_dir);
 
     IPersistFile *ppf = NULL;
-    hr = IShellLinkW_QueryInterface(psl, &IID_IPersistFile, (void **)&ppf);
-    if (SUCCEEDED(hr)) {
+    if (SUCCEEDED(IShellLinkW_QueryInterface(psl, &IID_IPersistFile, (void **)&ppf))) {
         IPersistFile_Save(ppf, link_path, TRUE);
         IPersistFile_Release(ppf);
     }
@@ -324,7 +262,7 @@ static void create_shortcut(const wchar_t *target, const wchar_t *link_path,
     CoUninitialize();
 }
 
-/* ── Registry helpers ─────────────────────────────────────────────────── */
+/* ── Registry ─────────────────────────────────────────────────────────── */
 
 static void register_uninstall(const wchar_t *install_dir,
                                 const wchar_t *uninstall_exe)
@@ -348,26 +286,35 @@ static void register_uninstall(const wchar_t *install_dir,
                    (BYTE *)L"1.0.0", sizeof(L"1.0.0"));
     RegSetValueExW(hkey, L"Publisher", 0, REG_SZ,
                    (BYTE *)L"WinZapp", sizeof(L"WinZapp"));
-    DWORD no_modify = 1;
-    RegSetValueExW(hkey, L"NoModify", 0, REG_DWORD,
-                   (BYTE *)&no_modify, sizeof(DWORD));
-    RegSetValueExW(hkey, L"NoRepair", 0, REG_DWORD,
-                   (BYTE *)&no_modify, sizeof(DWORD));
+    DWORD one = 1;
+    RegSetValueExW(hkey, L"NoModify", 0, REG_DWORD, (BYTE *)&one, sizeof(DWORD));
+    RegSetValueExW(hkey, L"NoRepair", 0, REG_DWORD, (BYTE *)&one, sizeof(DWORD));
     RegCloseKey(hkey);
 }
 
-/* ── Write installed files list ───────────────────────────────────────── */
+/* ── Write installed-files manifest (UTF-16LE) ────────────────────────── */
 
 static void write_file_list(const wchar_t *install_dir,
                              wchar_t **files, int count)
 {
     wchar_t list_path[MAX_PATH];
     swprintf(list_path, MAX_PATH, L"%s\\installed_files.dat", install_dir);
-    FILE *f = _wfopen(list_path, L"w, ccs=UTF-8");
-    if (!f) return;
-    for (int i = 0; i < count; i++)
-        fwprintf(f, L"%s\n", files[i]);
-    fclose(f);
+
+    HANDLE hf = CreateFileW(list_path, GENERIC_WRITE, 0, NULL,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return;
+
+    /* UTF-16LE BOM */
+    WORD bom = 0xFEFF;
+    DWORD written;
+    WriteFile(hf, &bom, sizeof(bom), &written, NULL);
+
+    for (int i = 0; i < count; i++) {
+        WriteFile(hf, files[i],
+                  (DWORD)(wcslen(files[i]) * sizeof(wchar_t)), &written, NULL);
+        WriteFile(hf, L"\r\n", 4, &written, NULL);   /* 4 bytes = \r\n in UTF-16LE */
+    }
+    CloseHandle(hf);
 }
 
 /* ── Install thread ───────────────────────────────────────────────────── */
@@ -376,11 +323,10 @@ static DWORD WINAPI install_thread(LPVOID param)
 {
     InstallParams *p = (InstallParams *)param;
 
-    /* Create destination directory */
     SHCreateDirectoryExW(NULL, p->install_dir, NULL);
 
-    wchar_t **files = NULL;
-    int file_count = 0;
+    wchar_t **files    = NULL;
+    int       file_count = 0;
     BOOL ok = extract_all(g_hDlg, p->install_dir, &files, &file_count);
 
     if (!ok || g_cancelled) {
@@ -389,41 +335,34 @@ static DWORD WINAPI install_thread(LPVOID param)
             free(files);
         }
         free(p);
-        if (!g_cancelled) {
-            wchar_t *err = _wcsdup(L"Extração falhou.");
-            SendMessage(g_hDlg, WM_INSTALL_ERROR, 0, (LPARAM)err);
-        }
+        if (!g_cancelled)
+            SendMessage(g_hDlg, WM_INSTALL_ERROR, 0,
+                        (LPARAM)_wcsdup(L"Extração falhou."));
         return 0;
     }
 
-    /* Shortcuts */
+    /* WinZapp.exe is at install_dir root (single onefile exe) */
     wchar_t exe_path[MAX_PATH];
-    swprintf(exe_path, MAX_PATH, L"%s\\app\\WinZapp.exe", p->install_dir);
+    swprintf(exe_path, MAX_PATH, L"%s\\WinZapp.exe", p->install_dir);
 
     if (p->desktop_sc) {
-        wchar_t desktop[MAX_PATH];
+        wchar_t desktop[MAX_PATH], link[MAX_PATH];
         SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, desktop);
-        wchar_t link[MAX_PATH];
         swprintf(link, MAX_PATH, L"%s\\WinZapp.lnk", desktop);
         create_shortcut(exe_path, link, p->install_dir);
     }
 
     if (p->startmenu_sc) {
-        wchar_t programs[MAX_PATH];
+        wchar_t programs[MAX_PATH], link[MAX_PATH];
         SHGetFolderPathW(NULL, CSIDL_COMMON_PROGRAMS, NULL, 0, programs);
-        wchar_t link[MAX_PATH];
         swprintf(link, MAX_PATH, L"%s\\WinZapp.lnk", programs);
         create_shortcut(exe_path, link, p->install_dir);
     }
 
-    /* Uninstaller path */
     wchar_t uninstall_exe[MAX_PATH];
     swprintf(uninstall_exe, MAX_PATH, L"%s\\uninstall.exe", p->install_dir);
 
-    /* Registry */
     register_uninstall(p->install_dir, uninstall_exe);
-
-    /* File list */
     write_file_list(p->install_dir, files, file_count);
 
     for (int i = 0; i < file_count; i++) free(files[i]);
@@ -442,7 +381,6 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_INITDIALOG: {
         g_hDlg = hDlg;
 
-        /* Default install path: %LOCALAPPDATA%\WinZapp */
         wchar_t local_app[MAX_PATH];
         if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local_app))) {
             wchar_t def_path[MAX_PATH];
@@ -450,11 +388,9 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
             SetDlgItemTextW(hDlg, IDC_INSTALL_PATH, def_path);
         }
 
-        /* Check both shortcut checkboxes by default */
         CheckDlgButton(hDlg, IDC_DESKTOP_SC,   BST_CHECKED);
         CheckDlgButton(hDlg, IDC_STARTMENU_SC, BST_CHECKED);
 
-        /* Initialise progress bar range; we'll set max when we know entry count */
         SendDlgItemMessage(hDlg, IDC_PROGRESS, PBM_SETRANGE32, 0, 100);
         return TRUE;
     }
@@ -485,13 +421,13 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             }
 
-            /* Disable install/cancel buttons while installing */
             EnableWindow(GetDlgItem(hDlg, IDC_INSTALL), FALSE);
             EnableWindow(GetDlgItem(hDlg, IDC_CANCEL),  FALSE);
             EnableWindow(GetDlgItem(hDlg, IDC_BROWSE),  FALSE);
 
             InstallParams *params = (InstallParams *)malloc(sizeof(InstallParams));
             wcsncpy(params->install_dir, install_dir, MAX_PATH - 1);
+            params->install_dir[MAX_PATH - 1] = L'\0';
             params->desktop_sc   = IsDlgButtonChecked(hDlg, IDC_DESKTOP_SC)   == BST_CHECKED;
             params->startmenu_sc = IsDlgButtonChecked(hDlg, IDC_STARTMENU_SC) == BST_CHECKED;
 
@@ -512,7 +448,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
         int total = (int)lParam;
         if (total > 0) {
             SendDlgItemMessage(hDlg, IDC_PROGRESS, PBM_SETRANGE32, 0, total);
-            SendDlgItemMessage(hDlg, IDC_PROGRESS, PBM_SETPOS, done, 0);
+            SendDlgItemMessage(hDlg, IDC_PROGRESS, PBM_SETPOS,     done, 0);
         }
         return TRUE;
     }
@@ -525,10 +461,11 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_INSTALL_ERROR: {
         wchar_t *err = (wchar_t *)lParam;
-        wchar_t msg_buf[512];
-        swprintf(msg_buf, 512, L"Ocorreu um erro durante a instalação:\n%s", err ? err : L"");
+        wchar_t buf[512];
+        swprintf(buf, 512, L"Ocorreu um erro durante a instalação:\n%s",
+                 err ? err : L"");
         free(err);
-        MessageBoxW(hDlg, msg_buf, L"Erro de instalação", MB_OK | MB_ICONERROR);
+        MessageBoxW(hDlg, buf, L"Erro de instalação", MB_OK | MB_ICONERROR);
         EndDialog(hDlg, IDABORT);
         return TRUE;
     }

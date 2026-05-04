@@ -5,6 +5,7 @@ import socketio
 import wx
 import json
 from i18n import I18n
+from app_paths import data_path
 from traceback import format_exc
 
 class WebSocketClient:
@@ -63,7 +64,7 @@ class WebSocketClient:
         self.connect.connection_dial.Destroy()
 
     def save_token(self, token):
-        with open(os.path.join(os.getcwd(), "data", "token.tk"), "w") as token_file:
+        with open(data_path("token.tk"), "w") as token_file:
             token_file.write(token)
 
 

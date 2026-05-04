@@ -6,6 +6,7 @@ import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from accessible import AccessibleSearchConversations, AccessibleRecordVoiceMessage, AccessibleAudioSlider
 from utils import format_number, decrypt_bytes
+from app_paths import data_path
 from datetime import datetime
 
 
@@ -241,7 +242,7 @@ class ConversationsPanel(wx.Panel):
 
         # Different audio: stop current and load new one
         self._stop_audio()
-        audio_path = os.path.join(os.getcwd(), "data", "voice_messages", f"{msg_id}.msv")
+        audio_path = data_path("voice_messages", f"{msg_id}.msv")
         if os.path.isfile(audio_path):
             self._play_audio(msg_id, duration_seconds)
         else:
@@ -254,7 +255,7 @@ class ConversationsPanel(wx.Panel):
             t.start()
 
     def _play_audio(self, msg_id, duration_seconds):
-        audio_path = os.path.join(os.getcwd(), "data", "voice_messages", f"{msg_id}.msv")
+        audio_path = data_path("voice_messages", f"{msg_id}.msv")
         if not os.path.isfile(audio_path):
             return
         try:

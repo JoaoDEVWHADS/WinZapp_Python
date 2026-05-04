@@ -1,6 +1,5 @@
-import os
-import sys
 import json
+from app_paths import resource_path
 
 class I18n:
     def __init__(self, main_window):
@@ -15,8 +14,8 @@ class I18n:
     def t(self, key):
         #Translates a given key based on the current language
         try:
-            with open(os.path.join(os.getcwd(), "languages", f"{self.language}.json"), "r", encoding="utf-8") as f:
+            with open(resource_path("languages", f"{self.language}.json"), "r", encoding="utf-8") as f:
                 translations = json.load(f)
             return translations.get(key, key)
-        except Exception as e:
+        except Exception:
             return key

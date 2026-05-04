@@ -6,6 +6,7 @@ import wx
 import requests
 from i18n import I18n
 from websocket_client import WebSocketClient
+from app_paths import data_path
 from traceback import format_exc
 import json
 import base64
@@ -21,7 +22,7 @@ class Connect:
 
     def check_connection_status(self):
         #Check if token file exists and WA_token is  available in settings
-        token_path = os.path.join(os.getcwd(), "data", "token.tk")
+        token_path = data_path("token.tk")
         private_info = self.main_window.settings.get("privateinfo", {})
         if os.path.exists(token_path) and private_info.get("WA_token"):
             return True

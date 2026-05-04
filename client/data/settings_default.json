@@ -1,21 +1,16 @@
 {
+    "connection": {
+        "authentication_server": "127.0.0.1",
+        "authentication_port": 8081,
+        "evolution_server": "http://127.0.0.1",
+        "evolution_port": 8080,
+        "evolution_ws_server": "ws://127.0.0.1"
+    },
     "general": {
         "language": "pt-BR",
         "sounds_enabled": true
     },
-    "connection": {
-        "authentication_server": "https://127.0.0.1",
-        "authentication_port": 8081,
-        "evolution_server": "https://127.0.0.1",
-        "evolution_port": 8080,
-        "evolution_ws_server": "wss://127.0.0.1"
-    },
     "status": {
-        "terms_alert_displayed": false,
         "messages_set_completed": false
-    },
-    "privateinfo": {
-        "WA_phone_number": "",
-        "WA_token": ""
     }
 }

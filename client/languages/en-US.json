@@ -21,6 +21,7 @@
     "search_conversations": "Search conversations",
     "chat_retrieval_failed": "Failed to retrieve the conversation list from the server.",
     "chat_load_failed": "Could not load your local message file. Restart the program and try again.",
+    "contact_load_failed": "Could not load the local contact list.",
     "contact_retrieval_failed": "Failed to retrieve the contact list.",
     "unread_message": "unread message",
     "unread_messages": "unread messages",

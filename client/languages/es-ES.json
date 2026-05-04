@@ -21,6 +21,7 @@
     "search_conversations": "Buscar en conversaciones",
     "chat_retrieval_failed": "Error al obtener la lista de conversaciones del servidor.",
     "chat_load_failed": "No se pudo cargar el archivo local de mensajes. Reinicia el programa e inténtalo de nuevo.",
+    "contact_load_failed": "No se pudo cargar la lista de contactos local.",
     "contact_retrieval_failed": "Error al obtener la lista de contactos.",
     "unread_message": "mensaje no leído",
     "unread_messages": "mensajes no leídos",
