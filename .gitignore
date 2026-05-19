@@ -11,22 +11,22 @@ client/data/voice_messages/
 client/logs/
 
 # Bundled Node.js runtime (binary distribution, ~50 MB)
-/node/
+/client/node/
 
 # Evolution API directory.
 # The entire directory is excluded because it contains the cloned upstream
 # repo (~hundreds of MB) plus runtime state (pgdata, instances, store, logs).
 # EXCEPTIONS: start.js and .env are WinZapp-specific config files that belong
 # in version control.
-/api/*
-!/api/start.js
-!/api/.env
+/client/api/*
+!/client/api/start.js
+!/client/api/.env
 
 # Evolution API runtime state (redundant with /api/* but explicit for clarity)
-/api/pgdata/
-/api/instances/
-/api/store/
-/api/evolution.log
+/client/api/pgdata/
+/client/api/instances/
+/client/api/store/
+/client/api/evolution.log
 
 # Build intermediates and distribution artefacts
 /build/
