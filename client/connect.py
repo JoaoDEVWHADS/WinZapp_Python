@@ -41,11 +41,17 @@ class Connect:
         )
         return {"apikey": apikey, "Content-Type": "application/json"}
 
-    def _create_instance(self, token, phone_number=None):
+    def _create_instance(self, token):
         """
-        Create (or silently re-use) a WhatsApp instance in the local
-        Evolution API.  Errors are swallowed because the instance may
-        already exist from a previous session.
+        Create a WhatsApp instance in the local Evolution API.
+
+        If the instance already exists (HTTP 409) that is fine — we simply
+        reuse it.  Any other non-2xx response is raised as a RuntimeError so
+        the caller can surface a meaningful error to the user.
+
+        Note: the phone number for pairing-code flows does NOT belong in the
+        create payload; it is passed later to /instance/connect as a query
+        parameter.
         """
         url = (
             f"{self.main_window.evolution_server}"
@@ -53,20 +59,33 @@ class Connect:
         )
         payload = {
             "instanceName": token,
-            "token": token,
-            "integration": "WHATSAPP-BAILEYS",
+            "token":        token,
+            "integration":  "WHATSAPP-BAILEYS",
+            "qrcode":       False,
             "syncFullHistory": False,
         }
-        if phone_number:
-            payload["number"] = phone_number
+        response = requests.post(
+            url, json=payload,
+            headers=self._evolution_headers(use_global_key=True),
+            timeout=15,
+        )
+        if response.status_code in (200, 201):
+            return  # Created successfully
+        if response.status_code == 409:
+            return  # Already exists — reuse it
+        # Any other status is a real failure
         try:
-            requests.post(url, json=payload, headers=self._evolution_headers(use_global_key=True))
+            detail = response.json()
         except Exception:
-            pass  # Instance likely already exists; safe to ignore
+            detail = response.text
+        raise RuntimeError(
+            f"HTTP {response.status_code}: {detail}"
+        )
 
     def _setup_websocket_for_instance(self, token):
         """
         Enable and configure Socket.IO event delivery for this instance.
+        Uses the instance's own token as the API key (not the global key).
         Called once after creating an instance.
         """
         url = (
@@ -75,9 +94,13 @@ class Connect:
         )
         payload = {"enabled": True, "events": _WEBSOCKET_EVENTS}
         try:
-            requests.post(url, json=payload, headers=self._evolution_headers(use_global_key=True))
+            requests.post(
+                url, json=payload,
+                headers=self._evolution_headers(),  # instance token, not global
+                timeout=10,
+            )
         except Exception:
-            pass
+            pass  # Non-critical — the app can still function without this
 
     # ── Connection status ──────────────────────────────────────────────────
 
@@ -192,7 +215,7 @@ class Connect:
             else:
                 self.main_window.token = self.main_window.settings.get("privateinfo", {}).get("WA_token")
 
-            # Step 1 – Create Evolution instance (call Evolution directly)
+            # Step 1 – Create Evolution instance
             self._create_instance(self.main_window.token)
 
             # Step 2 – Configure WebSocket events for this instance
@@ -279,8 +302,8 @@ class Connect:
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
-            # Step 1 – Create Evolution instance (call Evolution directly)
-            self._create_instance(self.main_window.token, phone_number=self.phone_number)
+            # Step 1 – Create Evolution instance
+            self._create_instance(self.main_window.token)
 
             # Step 2 – Configure WebSocket events for this instance
             self._setup_websocket_for_instance(self.main_window.token)

@@ -95,5 +95,15 @@
     "autostart_ask_message": "Deseja permitir que o WinZapp seja iniciado automaticamente em segundo plano ao entrar no Windows?",
     "autostart_success_title": "Sucesso",
     "autostart_success_message": "O WinZapp agora será iniciado em segundo plano com o Windows.",
-    "autostart_error_message": "Não foi possível adicionar a entrada de inicialização automática. Erro:"
+    "autostart_error_message": "Não foi possível adicionar a entrada de inicialização automática. Erro:",
+    "document": "documento",
+    "photo": "foto",
+    "photo_no_caption": "foto (sem legenda)",
+    "sticker": "figurinha",
+    "video": "vídeo",
+    "options": "opções",
+    "open": "Abrir",
+    "open_image": "Abrir imagem",
+    "save_as": "Salvar como...",
+    "downloading_progress": "baixando, {pct}% concluído"
 }

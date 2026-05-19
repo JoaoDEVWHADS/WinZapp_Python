@@ -382,13 +382,17 @@ class MainWindow(wx.Frame):
             with open(settings_file, "r") as f:
                 self.settings = json.load(f)
         except Exception:
-            # i18n may not be initialized yet at startup — use plain fallback message
             if hasattr(self, 'i18n'):
-                msg = self.i18n.t('settings_load_failed')
+                msg   = self.i18n.t('settings_load_failed')
                 title = self.i18n.t("error").format(app_name=self.app_name)
             else:
-                msg = "Failed to load settings."
-                title = f"{self.app_name} - Error"
+                # i18n not yet initialised — load pt-BR directly as default
+                from i18n import _load_translations
+                _pt   = _load_translations("pt-BR")
+                msg   = _pt.get("settings_load_failed",
+                                "Erro ao carregar o arquivo de configuração:")
+                title = _pt.get("error", "{app_name} Erro").format(
+                    app_name=self.app_name)
             if hasattr(self, 'error_sound'):
                 self.error_sound.play()
             wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
@@ -767,15 +771,48 @@ class MainWindow(wx.Frame):
             self.save_data(self.chats, self.contacts)
 
     def sync_if_media(self, msg):
-        #Check message type
+        """Download media for a single message during the background sync phase."""
         message_type = msg.get("messageType", "")
-        if message_type == "audioMessage":
-            try:
+        _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
+        try:
+            if message_type == "audioMessage":
                 self.handle_audio_message(msg)
-            except Exception as e:
-                #Ignore and download later if necessary
-                pass
-        return
+            elif message_type in _MEDIA_TYPES:
+                msg_id = msg.get("key", {}).get("id", "")
+                conv = self.conversations_panel
+                def _prog(p, mid=msg_id):
+                    wx.CallAfter(conv.update_message_download_progress, mid, p)
+                self.handle_media_message(msg, progress_callback=_prog)
+                wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
+        except Exception:
+            pass
+
+    def handle_media_message(self, msg, progress_callback=None):
+        """Download and encrypt a document/image/sticker/video to data/media/."""
+        msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id:
+            return
+        media_path = data_path("media", f"{msg_id}.wzmedia")
+        if os.path.isfile(media_path):
+            return
+        b64 = self.get_base64_from_media(msg, progress_callback=progress_callback)
+        if not b64:
+            return
+        content = base64.b64decode(b64)
+        encrypted = encrypt(content, self.key)
+        with open(media_path, "wb") as f:
+            f.write(encrypted)
+
+    def send_text_message(self, remote_jid, text):
+        """Send a plain-text message via the Evolution API (used for button replies)."""
+        url = f"{self.evolution_server}:{self.evolution_port}/message/sendText/{self.token}"
+        payload = {"number": remote_jid, "text": text}
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            return response.status_code in (200, 201)
+        except Exception:
+            return False
 
     def handle_audio_message(self, msg):
         #First, check if the audio is already downloaded
@@ -788,20 +825,44 @@ class MainWindow(wx.Frame):
         audio_content = base64.b64decode(base64_audio)
         self.save_audio_locally(msg, audio_content)
 
-    def get_base64_from_media(self, media):
+    def get_base64_from_media(self, media, progress_callback=None):
+        """
+        Fetch encrypted media from Evolution API and return its base64 string.
+
+        When *progress_callback* is provided the request is streamed and the
+        callback is called with a float in [0, 1] as each chunk arrives.
+        """
         url = f"{self.evolution_server}:{self.evolution_port}/chat/getBase64FromMediaMessage/{self.token}"
         payload = {
             "message": {"key": {"id": media.get("key", {}).get("id", "")}},
-            "convertToMp4": False
+            "convertToMp4": False,
         }
-        headers = {
-            "apikey": self.token,
-            "Content-Type": "application/json"
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code == 201:
-            return response.json().get("base64", "")
-        return ""
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+
+        if progress_callback is None:
+            response = requests.post(url, json=payload, headers=headers)
+            if response.status_code == 201:
+                return response.json().get("base64", "")
+            return ""
+
+        # Streaming mode so we can report per-chunk progress
+        try:
+            response = requests.post(url, json=payload, headers=headers, stream=True)
+            if response.status_code not in (200, 201):
+                return ""
+            total = int(response.headers.get("content-length", 0))
+            downloaded = 0
+            chunks: list = []
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        progress_callback(downloaded / total)
+            body = b"".join(chunks).decode("utf-8", errors="replace")
+            return json.loads(body).get("base64", "")
+        except Exception:
+            return ""
 
     def save_audio_locally(self, msg, audio_content):
         voice_messages_dir = data_path("voice_messages")

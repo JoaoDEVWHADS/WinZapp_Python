@@ -95,7 +95,17 @@
     "autostart_ask_message": "Would you like WinZapp to start automatically in the background when you log in to Windows?",
     "autostart_success_title": "Success",
     "autostart_success_message": "WinZapp will now start in the background with Windows.",
-    "autostart_error_message": "Could not add the startup entry. Error:"
+    "autostart_error_message": "Could not add the startup entry. Error:",
+    "document": "document",
+    "photo": "photo",
+    "photo_no_caption": "photo (no caption)",
+    "sticker": "sticker",
+    "video": "video",
+    "options": "options",
+    "open": "Open",
+    "open_image": "Open image",
+    "save_as": "Save as...",
+    "downloading_progress": "downloading, {pct}% done"
 }
 
 

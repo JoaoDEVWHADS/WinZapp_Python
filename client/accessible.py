@@ -21,6 +21,13 @@ class AccessibleRecordVoiceMessage(wx.Accessible):
         return (wx.ACC_OK, self.shortcut)
 
 
+class AccessibleSaveAs(wx.Accessible):
+    """Reports Ctrl+Shift+S as the keyboard shortcut for the Save-As button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+S")
+
+
 class AccessibleAudioSlider(wx.Accessible):
     def __init__(self, conversations_panel):
         super().__init__()

@@ -57,7 +57,7 @@ class SettingsDialog(wx.Dialog):
             wx.StaticText(self._conn_page, label=i18n.t("evolution_port_label")),
             0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
         )
-        self._port_field = wx.TextCtrl(self._conn_page)
+        self._port_field = wx.TextCtrl(self._conn_page, style=wx.TE_DONTWRAP)
         conn_sizer.Add(self._port_field, 0, wx.EXPAND | wx.ALL, 8)
         self._conn_page.SetSizer(conn_sizer)
         self._notebook.AddPage(self._conn_page, i18n.t("tab_connection"))
