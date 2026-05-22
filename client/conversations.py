@@ -79,6 +79,18 @@ class ConversationsPanel(wx.Panel):
         # msg_id -> float 0.0-1.0  (absent = not tracked / already complete)
         self._download_progress: dict = {}
 
+        # ── Unread separator ────────────────────────────────────────────────
+        # Index in _sorted_messages of the unread-separator sentinel, or -1
+        self._unread_sep_idx: int = -1
+
+        # ── Reaction tracking ───────────────────────────────────────────────
+        # Maps original_msg_id → {emoji: count}
+        self._reaction_map: dict = {}
+
+        # ── Reply / quoted message state ────────────────────────────────────
+        # When not None, the next sent message will be a quoted reply
+        self._quoted_message: dict | None = None
+
         self.init_UI()
         self.create_accelerator_table()
         self.create_accel_conversation()
@@ -223,6 +235,13 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._cancel_edit_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._cancel_edit_btn.Hide()
 
+        self._remove_quote_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("remove_quote")
+        )
+        self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
+        conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._remove_quote_btn.Hide()
+
         self.send_message_btn = wx.Button(
             self.conversation_panel, label=i18n.t("send_message")
         )
@@ -317,54 +336,58 @@ class ConversationsPanel(wx.Panel):
 
     def create_accel_conversation(self):
         # ── Navigation / recording ──────────────────────────────────────────
-        self.ID_CTRL_R          = wx.NewIdRef()  # record voice
-        self.ID_ESC             = wx.NewIdRef()  # close conversation
-        self.CTRL_W             = wx.NewIdRef()  # close conversation
-        self.ID_CTRL_SHIFT_D    = wx.NewIdRef()  # conversation data / discard
-        self.ID_CTRL_SHIFT_P    = wx.NewIdRef()  # pause / resume recording
+        self.ID_CTRL_R          = wx.NewIdRef()  # record voice            (Ctrl+R)
+        self.ID_ESC             = wx.NewIdRef()  # close conversation      (Esc)
+        self.CTRL_W             = wx.NewIdRef()  # close conversation      (Ctrl+W)
+        self.ID_CTRL_SHIFT_D    = wx.NewIdRef()  # conv data / discard     (Ctrl+Shift+D)
         # ── Attachment / media ───────────────────────────────────────────────
-        self.ID_CTRL_SHIFT_J    = wx.NewIdRef()  # add attachment  (Ctrl+Shift+J)
-        self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # save as / download (Ctrl+Shift+B)
+        self.ID_CTRL_SHIFT_J    = wx.NewIdRef()  # add attachment          (Ctrl+Shift+J)
+        self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+B)
         # ── Message-level ────────────────────────────────────────────────────
-        self.ID_ALT_R           = wx.NewIdRef()  # reply            (Alt+R)
-        self.ID_ALT_D           = wx.NewIdRef()  # message data     (Alt+D)
-        self.ID_CTRL_SHIFT_E    = wx.NewIdRef()  # forward          (Ctrl+Shift+E)
-        self.ID_CTRL_SHIFT_A    = wx.NewIdRef()  # delete message   (Ctrl+Shift+A)
+        self.ID_ALT_R           = wx.NewIdRef()  # reply                   (Alt+R)
+        self.ID_ALT_SHIFT_D     = wx.NewIdRef()  # message data            (Alt+Shift+D)
+        self.ID_CTRL_SHIFT_E    = wx.NewIdRef()  # forward                 (Ctrl+Shift+E)
+        self.ID_CTRL_SHIFT_P    = wx.NewIdRef()  # pause/resume OR delete  (Ctrl+Shift+P)
+        self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
+        self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         # ── Conversation-level ───────────────────────────────────────────────
-        self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # mute / unmute    (Ctrl+Shift+S)
-        self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # mark as read     (Ctrl+Shift+M)
+        self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # mute / unmute           (Ctrl+Shift+S)
+        self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # mark as read            (Ctrl+Shift+M)
 
         CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
+        AS = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,    ord("R"),        self.ID_CTRL_R),
             (wx.ACCEL_NORMAL,  wx.WXK_ESCAPE,   self.ID_ESC),
             (wx.ACCEL_CTRL,    ord("W"),         self.CTRL_W),
             (CS,               ord("D"),         self.ID_CTRL_SHIFT_D),
-            (CS,               ord("P"),         self.ID_CTRL_SHIFT_P),
             (CS,               ord("J"),         self.ID_CTRL_SHIFT_J),
             (CS,               ord("B"),         self.ID_CTRL_SHIFT_B),
             (wx.ACCEL_ALT,     ord("R"),         self.ID_ALT_R),
-            (wx.ACCEL_ALT,     ord("D"),         self.ID_ALT_D),
+            (AS,               ord("D"),         self.ID_ALT_SHIFT_D),
             (CS,               ord("E"),         self.ID_CTRL_SHIFT_E),
-            (CS,               ord("A"),         self.ID_CTRL_SHIFT_A),
+            (CS,               ord("P"),         self.ID_CTRL_SHIFT_P),
+            (wx.ACCEL_CTRL,    ord("C"),         self.ID_CTRL_C),
+            (wx.ACCEL_ALT,     ord("C"),         self.ID_ALT_C),
             (CS,               ord("S"),         self.ID_CTRL_SHIFT_S),
             (CS,               ord("M"),         self.ID_CTRL_SHIFT_M),
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self.on_record_voice_message,  id=self.ID_CTRL_R)
-        self.Bind(wx.EVT_MENU, self.close_conversation,       id=self.ID_ESC)
-        self.Bind(wx.EVT_MENU, self.close_conversation,       id=self.CTRL_W)
-        # Ctrl+Shift+D: discard recording when active, else show conversation data
-        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,         id=self.ID_CTRL_SHIFT_D)
-        self.Bind(wx.EVT_MENU, self._toggle_pause_recording,  id=self.ID_CTRL_SHIFT_P)
-        self.Bind(wx.EVT_MENU, self.on_add_attachment,        id=self.ID_CTRL_SHIFT_J)
-        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_s,         id=self.ID_CTRL_SHIFT_B)   # save as
-        self.Bind(wx.EVT_MENU, self._on_accel_reply,          id=self.ID_ALT_R)
-        self.Bind(wx.EVT_MENU, self._on_accel_message_data,   id=self.ID_ALT_D)
-        self.Bind(wx.EVT_MENU, self._on_accel_forward,        id=self.ID_CTRL_SHIFT_E)
-        self.Bind(wx.EVT_MENU, self._on_accel_delete_message, id=self.ID_CTRL_SHIFT_A)
-        self.Bind(wx.EVT_MENU, self._on_accel_mute,           id=self.ID_CTRL_SHIFT_S)
-        self.Bind(wx.EVT_MENU, self._on_accel_mark_read,      id=self.ID_CTRL_SHIFT_M)
+        self.Bind(wx.EVT_MENU, self.on_record_voice_message,   id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.ID_ESC)
+        self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.CTRL_W)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,          id=self.ID_CTRL_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self.on_add_attachment,         id=self.ID_CTRL_SHIFT_J)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_s,          id=self.ID_CTRL_SHIFT_B)   # save as
+        self.Bind(wx.EVT_MENU, self._on_accel_reply,           id=self.ID_ALT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_message_data,    id=self.ID_ALT_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self._on_accel_forward,         id=self.ID_CTRL_SHIFT_E)
+        # Ctrl+Shift+P: pause/resume when recording, delete message otherwise
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p,          id=self.ID_CTRL_SHIFT_P)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_message,    id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup, id=self.ID_ALT_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_mute,            id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_accel_mark_read,       id=self.ID_CTRL_SHIFT_M)
 
     # ── Conversations list events ───────────────────────────────────────────
 
@@ -380,6 +403,9 @@ class ConversationsPanel(wx.Panel):
         self._hide_audio_controls()
         self._hide_all_media_controls()
         self._hide_attachment_panel()
+        self._unread_sep_idx = -1  # reset separator for new conversation
+        self._quoted_message = None
+        self._reaction_map   = {}
         self.conversation = conversation
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
@@ -401,6 +427,8 @@ class ConversationsPanel(wx.Panel):
         self.message_label.SetLabel(
             f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
         )
+        if hasattr(self, "_remove_quote_btn"):
+            self._remove_quote_btn.Hide()
         self.conversation_panel.Show()
         self.Layout()
         self.preselect_messages()
@@ -495,6 +523,8 @@ class ConversationsPanel(wx.Panel):
 
         self.send_message_btn.SetLabel(i18n.t("send_message"))
         self._cancel_edit_btn.SetLabel(i18n.t("cancel_edit"))
+        if hasattr(self, "_remove_quote_btn"):
+            self._remove_quote_btn.SetLabel(i18n.t("remove_quote"))
         self.record_voice_message_btn.SetLabel(i18n.t("record_voice_message"))
         self._add_attachment_btn.SetLabel(i18n.t("add_attachment"))
         self._add_more_btn.SetLabel(i18n.t("add_more_files"))
@@ -587,8 +617,9 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetValue("")
 
         # Enqueue for background sending (with retry on failure).
-        pm = PendingMessage(local_id, remote_jid, text=text)
+        pm = PendingMessage(local_id, remote_jid, text=text, quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
+        self._on_cancel_reply()  # clear quoted state after send
 
     def _mark_message_sent(self, local_id: str):
         """
@@ -772,8 +803,9 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.EnsureVisible(last)
 
         # Enqueue for background upload.
-        pm = PendingMessage(local_id, remote_jid, audio_path=wav_path)
+        pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
+        self._on_cancel_reply()  # clear quoted state after send
 
         self._hide_voice_panel()
         self.message_field.SetFocus()
@@ -793,6 +825,8 @@ class ConversationsPanel(wx.Panel):
         # Clear any active edit state
         if self._editing_message_id is not None:
             self._on_cancel_edit()
+        if self._quoted_message is not None:
+            self._on_cancel_reply()
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
@@ -902,6 +936,12 @@ class ConversationsPanel(wx.Panel):
                 lambda e, j=jid: self._on_menu_leave_group(j),
                 leave_item,
             )
+            add_member_item = menu.Append(wx.ID_ANY, i18n.t("add_member"))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, j=jid: self._on_menu_add_member(j),
+                add_member_item,
+            )
 
         menu.AppendSeparator()
 
@@ -923,6 +963,8 @@ class ConversationsPanel(wx.Panel):
         self._hide_all_media_controls()
         if index < 0 or index >= len(self._sorted_messages):
             return
+        if self._is_separator(self._sorted_messages[index]):
+            return  # separator row — no action controls
         msg     = self._sorted_messages[index]
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
@@ -984,6 +1026,8 @@ class ConversationsPanel(wx.Panel):
         index = event.GetIndex()
         if index < 0 or index >= len(self._sorted_messages):
             return
+        if self._is_separator(self._sorted_messages[index]):
+            return  # separator row — no action
         msg      = self._sorted_messages[index]
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
@@ -1016,6 +1060,8 @@ class ConversationsPanel(wx.Panel):
         index = self.messages_list.GetFirstSelected()
         if index < 0 or index >= len(self._sorted_messages):
             return
+        if self._is_separator(self._sorted_messages[index]):
+            return  # no context menu for separator
         msg      = self._sorted_messages[index]
         msg_type = msg.get("messageType", "")
         msg_id   = msg.get("key", {}).get("id", "")
@@ -1023,8 +1069,27 @@ class ConversationsPanel(wx.Panel):
 
         menu = wx.Menu()
 
-        # Message info (Alt+D)
-        data_item = menu.Append(wx.ID_ANY, f"{i18n.t('message_data')}\tAlt+D")
+        # ── Most-used reactions submenu (if this conversation has reactions) ──
+        if self._reaction_map:
+            all_emojis: dict = {}
+            for msg_reactions in self._reaction_map.values():
+                for em, cnt in msg_reactions.items():
+                    all_emojis[em] = all_emojis.get(em, 0) + cnt
+            if all_emojis:
+                top_emojis = sorted(all_emojis.items(), key=lambda x: x[1], reverse=True)[:5]
+                most_used_sub = wx.Menu()
+                for em, _cnt in top_emojis:
+                    sub_item = most_used_sub.Append(wx.ID_ANY, em)
+                    self.Bind(
+                        wx.EVT_MENU,
+                        lambda e, m=msg, em=em: self._send_reaction(m, em),
+                        sub_item,
+                    )
+                menu.AppendSubMenu(most_used_sub, i18n.t("most_used_reactions"))
+                menu.AppendSeparator()
+
+        # Message info (Alt+Shift+D)
+        data_item = menu.Append(wx.ID_ANY, f"{i18n.t('message_data')}\tAlt+Shift+D")
         self.Bind(
             wx.EVT_MENU,
             lambda e, m=msg: self._on_menu_message_data(m),
@@ -1034,7 +1099,8 @@ class ConversationsPanel(wx.Panel):
         menu.AppendSeparator()
 
         # Copy text (only for text messages)
-        if msg_type in ("conversation", "extendedTextMessage"):
+        _TEXT_TYPES = ("conversation", "extendedTextMessage", "textMessage")
+        if msg_type in _TEXT_TYPES:
             copy_item = menu.Append(wx.ID_ANY, i18n.t("copy_message_text"))
             self.Bind(
                 wx.EVT_MENU,
@@ -1049,6 +1115,23 @@ class ConversationsPanel(wx.Panel):
             lambda e, m=msg: self._on_menu_reply(m),
             reply_item,
         )
+
+        # React (opens emoji picker)
+        react_item = menu.Append(wx.ID_ANY, i18n.t("react_to_message"))
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, m=msg: self._on_menu_react(m),
+            react_item,
+        )
+
+        # Show text popup (only for text messages)
+        if msg_type in _TEXT_TYPES:
+            show_text_item = menu.Append(wx.ID_ANY, f"{i18n.t('show_msg_text')}\tAlt+C")
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._show_message_text_popup(m),
+                show_text_item,
+            )
 
         # Forward (Ctrl+Shift+E)
         fwd_item = menu.Append(wx.ID_ANY, f"{i18n.t('forward_message')}\tCtrl+Shift+E")
@@ -1092,8 +1175,8 @@ class ConversationsPanel(wx.Panel):
 
         menu.AppendSeparator()
 
-        # Delete message (with scope dialog — Ctrl+Shift+A)
-        del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_message')}\tCtrl+Shift+A")
+        # Delete message (with scope dialog — Ctrl+Shift+P)
+        del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_message')}\tCtrl+Shift+P")
         self.Bind(
             wx.EVT_MENU,
             lambda e, i=index: self._on_menu_delete_message(i),
@@ -1669,18 +1752,42 @@ class ConversationsPanel(wx.Panel):
             return format_number(key.get("remoteJidAlt", ""))
         return format_number(key.get("remoteJid", ""))
 
+    def _is_separator(self, msg: dict) -> bool:
+        """Return True if msg is the unread-messages separator sentinel."""
+        return isinstance(msg, dict) and msg.get("_type") == "unread_separator"
+
+    def _render_separator(self, count: int) -> str:
+        i18n = self.main_window.i18n
+        if count == 1:
+            return i18n.t("unread_sep_singular")
+        return i18n.t("unread_sep_plural").format(count=count)
+
     def _render_message_line(self, msg) -> str:
         """Produce the full display string for a single message row."""
+        # Unread separator sentinel
+        if self._is_separator(msg):
+            return self._render_separator(msg.get("count", 1))
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
         body     = (self._get_message_content(msg) or "").replace("\n", " ")
         sender   = self._sender_label(msg)
         status   = self._map_status(msg)
-        pieces   = [f"{sender}: {body}"]
+        pieces = [f"{sender}: {body}"]
         if time_str:
             pieces.append(f", {time_str}")
         if status:
             pieces[-1] += f", {status}"
+
+        # Append reactions if any
+        msg_id    = msg.get("key", {}).get("id", "")
+        reactions = self._reaction_map.get(msg_id, {})
+        if reactions:
+            i18n_r    = self.main_window.i18n
+            r_parts   = []
+            for emoji, count in reactions.items():
+                r_parts.append(f"{emoji}, {count} {i18n_r.t('total_label')}")
+            pieces.append(f". {i18n_r.t('reactions_label')} {', '.join(r_parts)}.")
+
         return " ".join(pieces)
 
     # ── Download progress ───────────────────────────────────────────────────
@@ -1696,7 +1803,7 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 break
 
-    # ── Ctrl+Shift+D dispatch ────────────────────────────────────────────────
+    # ── Ctrl+Shift+D / Ctrl+Shift+P dispatch ────────────────────────────────
 
     def _on_ctrl_shift_d(self, event):
         """Discard voice recording if active; otherwise show conversation data."""
@@ -1704,6 +1811,13 @@ class ConversationsPanel(wx.Panel):
             self._discard_voice_message(event)
         elif self.conversation is not None:
             self._show_conversation_data()
+
+    def _on_ctrl_shift_p(self, event):
+        """Pause/resume recording when active; delete focused message otherwise."""
+        if self._is_recording:
+            self._toggle_pause_recording(event)
+        else:
+            self._on_accel_delete_message(event)
 
     # ── Conversation / group data ────────────────────────────────────────────
 
@@ -1874,6 +1988,13 @@ class ConversationsPanel(wx.Panel):
             daemon=True,
         ).start()
 
+    def _on_menu_add_member(self, group_jid: str):
+        """Open the add-member dialog for a group."""
+        from ui.dialogs.add_member_dialog import AddMemberDialog
+        dlg = AddMemberDialog(self.main_window, group_jid)
+        dlg.ShowModal()
+        dlg.Destroy()
+
     # ── Message context menu handlers ────────────────────────────────────────
 
     def _on_menu_message_data(self, msg: dict):
@@ -1918,21 +2039,34 @@ class ConversationsPanel(wx.Panel):
         text = ""
         if msg_type == "conversation":
             text = msg_obj.get("conversation", "")
-        elif msg_type == "extendedTextMessage":
+        elif msg_type in ("extendedTextMessage", "textMessage"):
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
         if text:
             try:
                 pyperclip.copy(text)
+                self.main_window.output(self.main_window.i18n.t("msg_copied"))
             except Exception:
-                pass
+                self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+        else:
+            self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
 
     def _on_menu_reply(self, msg: dict):
-        """Pre-fill the message field with a quoted excerpt of the message."""
-        content = self._get_message_content(msg) or ""
-        quote   = content[:80] + ("…" if len(content) > 80 else "")
-        sender  = self._sender_label(msg)
-        self.message_field.SetValue(f"> {sender}: {quote}\n")
-        self.message_field.SetInsertionPointEnd()
+        """Enter reply mode: change field label, store quoted message, focus field."""
+        self._quoted_message = msg
+        i18n      = self.main_window.i18n
+        sender    = self._sender_label(msg)
+        jid       = self.conversation.get("remoteJid", "") if self.conversation else ""
+        is_group  = jid.endswith("@g.us")
+
+        if is_group and not msg.get("key", {}).get("fromMe", False):
+            group_name = self.conversation_name
+            label = i18n.t("reply_to_group").format(name=sender, group=group_name)
+        else:
+            label = i18n.t("reply_to").format(name=sender)
+
+        self.message_label.SetLabel(label)
+        self._remove_quote_btn.Show()
+        self.conversation_panel.Layout()
         self.message_field.SetFocus()
 
     def _on_menu_forward(self, msg: dict):
@@ -1946,6 +2080,8 @@ class ConversationsPanel(wx.Panel):
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
         if index < 0 or index >= len(self._sorted_messages):
+            return
+        if self._is_separator(self._sorted_messages[index]):
             return
         msg    = self._sorted_messages[index]
         msg_id = msg.get("key", {}).get("id", "")
@@ -2039,6 +2175,21 @@ class ConversationsPanel(wx.Panel):
         self._cancel_edit_btn.Hide()
         self.conversation_panel.Layout()
 
+    def _on_cancel_reply(self, event=None):
+        """Leave reply mode without sending."""
+        self._quoted_message = None
+        i18n     = self.main_window.i18n
+        jid      = self.conversation.get("remoteJid", "") if self.conversation else ""
+        is_group = jid.endswith("@g.us")
+        label = (
+            i18n.t("type_message_group") if is_group else i18n.t("type_message")
+        )
+        if self.conversation_name:
+            label = f"{label} {self.conversation_name}"
+        self.message_label.SetLabel(label)
+        self._remove_quote_btn.Hide()
+        self.conversation_panel.Layout()
+
     # ── Accelerator shims ─────────────────────────────────────────────────────
 
     def _on_accel_message_data(self, event):
@@ -2080,6 +2231,162 @@ class ConversationsPanel(wx.Panel):
         jid = self.conversation.get("remoteJid", "")
         if jid:
             self.main_window.mark_conversation_as_read(jid)
+
+    def _on_accel_copy_message(self, event):
+        """Ctrl+C: copy focused message text to clipboard."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._on_menu_copy_message(msg)
+
+    def _on_accel_show_text_popup(self, event):
+        """Alt+C: show focused message text in a popup dialog."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._show_message_text_popup(msg)
+
+    def _show_message_text_popup(self, msg: dict):
+        """Open a read-only dialog showing the full message text (100-char lines)."""
+        msg_type = msg.get("messageType", "")
+        msg_obj  = msg.get("message") or {}
+        text = ""
+        if msg_type in ("conversation", "textMessage"):
+            text = msg_obj.get("conversation", "")
+        elif msg_type == "extendedTextMessage":
+            text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        if not text:
+            return
+
+        i18n = self.main_window.i18n
+        # Split into 100-char lines
+        lines = []
+        while len(text) > 100:
+            lines.append(text[:100])
+            text = text[100:]
+        if text:
+            lines.append(text)
+        full_text = "\n".join(lines)
+
+        dlg = wx.Dialog(
+            self.main_window,
+            title=i18n.t("msg_text_title"),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            size=(480, 320),
+        )
+        panel = wx.Panel(dlg)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        text_ctrl = wx.TextCtrl(
+            panel, value=full_text,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+        )
+        sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+        close_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("close"))
+        sizer.Add(close_btn, 0, wx.ALIGN_RIGHT | wx.RIGHT | wx.BOTTOM, 8)
+        panel.SetSizer(sizer)
+        dlg_sizer = wx.BoxSizer(wx.VERTICAL)
+        dlg_sizer.Add(panel, 1, wx.EXPAND)
+        dlg.SetSizer(dlg_sizer)
+        # ESC also closes (wx.ID_CANCEL handles this automatically)
+        dlg.Bind(wx.EVT_BUTTON, lambda e: dlg.EndModal(wx.ID_CANCEL), close_btn)
+        text_ctrl.SetFocus()
+        dlg.CentreOnParent()
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def _on_menu_react(self, msg: dict):
+        """Open the emoji picker dialog to react to a message."""
+        i18n = self.main_window.i18n
+        EMOJIS = [
+            ("❤️", "❤️"),
+            ("👍", "👍"),
+            ("👎", "👎"),
+            ("😂", "😂"),
+            ("😮", "😮"),
+            ("😢", "😢"),
+            ("🙏", "🙏"),
+            ("🔥", "🔥"),
+            ("🎉", "🎉"),
+            ("💯", "💯"),
+            ("😎", "😎"),
+            ("🥰", "🥰"),
+        ]
+
+        dlg = wx.Dialog(
+            self.main_window,
+            title=i18n.t("react_dialog_title"),
+            style=wx.DEFAULT_DIALOG_STYLE,
+            size=(300, 380),
+        )
+        panel = wx.Panel(dlg)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        hint_label = wx.StaticText(panel, label=i18n.t("react_dialog_hint"))
+        sizer.Add(hint_label, 0, wx.ALL, 8)
+
+        emoji_list = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        emoji_list.InsertColumn(0, i18n.t("react_dialog_title"), width=240)
+        for emoji, display in EMOJIS:
+            emoji_list.Append((display,))
+        sizer.Add(emoji_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
+        sizer.Add(cancel_btn, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+
+        panel.SetSizer(sizer)
+        dlg_sizer = wx.BoxSizer(wx.VERTICAL)
+        dlg_sizer.Add(panel, 1, wx.EXPAND)
+        dlg.SetSizer(dlg_sizer)
+
+        selected_emoji = [None]
+
+        def _on_emoji_activated(event):
+            idx = event.GetIndex()
+            if 0 <= idx < len(EMOJIS):
+                selected_emoji[0] = EMOJIS[idx][0]
+                dlg.EndModal(wx.ID_OK)
+
+        def _on_emoji_selected(event):
+            # Single click: just move selection, don't send yet
+            pass
+
+        emoji_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, _on_emoji_activated)
+        cancel_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.EndModal(wx.ID_CANCEL))
+        dlg.Bind(wx.EVT_CHAR_HOOK, lambda e: dlg.EndModal(wx.ID_CANCEL) if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip())
+
+        emoji_list.SetFocus()
+        dlg.CentreOnParent()
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result == wx.ID_OK and selected_emoji[0]:
+            emoji = selected_emoji[0]
+            msg_key = msg.get("key", {})
+            threading.Thread(
+                target=self._do_send_reaction,
+                args=(msg_key, emoji),
+                daemon=True,
+            ).start()
+
+    def _send_reaction(self, msg: dict, emoji: str):
+        """Send reaction directly (called from most-used submenu)."""
+        msg_key = msg.get("key", {})
+        threading.Thread(
+            target=self._do_send_reaction,
+            args=(msg_key, emoji),
+            daemon=True,
+        ).start()
+
+    def _do_send_reaction(self, msg_key: dict, emoji: str):
+        """Background: send reaction via Evolution API."""
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        self.main_window.send_reaction(jid, msg_key, emoji)
 
     # ── Attachment handling ──────────────────────────────────────────────────
 
@@ -2204,8 +2511,10 @@ class ConversationsPanel(wx.Panel):
         last = self.messages_list.GetItemCount() - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
-        pm = PendingMessage(local_id, remote_jid, contact_info=contact)
+        pm = PendingMessage(local_id, remote_jid, contact_info=contact,
+                            quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
+        self._on_cancel_reply()  # clear quoted state after send
 
     def _show_attachment_panel(self):
         count = len(self._staged_attachments)
@@ -2254,6 +2563,9 @@ class ConversationsPanel(wx.Panel):
             "audio":    "audioMessage",
             "document": "documentMessage",
         }
+        # Capture quoted state before looping (cleared after all enqueued)
+        quoted = self._quoted_message
+
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
@@ -2283,9 +2595,11 @@ class ConversationsPanel(wx.Panel):
             pm = PendingMessage(
                 local_id, remote_jid,
                 media_path=path, media_type=media_type, caption=caption,
+                quoted=quoted,
             )
             self.main_window.message_queue.enqueue(pm)
 
+        self._on_cancel_reply()  # clear quoted state after send
         self._hide_attachment_panel()
         self.message_field.SetFocus()
 
@@ -2326,17 +2640,56 @@ class ConversationsPanel(wx.Panel):
             return
         if self.conversation.get("remoteJid", "") != remote_jid:
             return
-        # Reactions do not appear as standalone rows
-        if msg.get("messageType", "") == "reactionMessage":
-            return
+        # ── Reaction messages: update reaction_map and re-render original ────
+        if msg.get("messageType") == "reactionMessage":
+            reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+            emoji    = reaction.get("text", "")
+            orig_id  = (reaction.get("key") or {}).get("id", "")
+            if orig_id:
+                if orig_id not in self._reaction_map:
+                    self._reaction_map[orig_id] = {}
+                if emoji:
+                    self._reaction_map[orig_id][emoji] = (
+                        self._reaction_map[orig_id].get(emoji, 0) + 1
+                    )
+                elif orig_id in self._reaction_map:
+                    # empty emoji = remove reaction (just rebuild, can't easily track sender)
+                    pass
+                # Re-render the original message in the list
+                for i, m in enumerate(self._sorted_messages):
+                    if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
+                        self.messages_list.SetItemText(i, self._render_message_line(m))
+                        break
+            return  # Don't add reaction as a separate row
         # Avoid duplicates
         msg_id = msg.get("key", {}).get("id", "")
         if msg_id:
             for existing in self._sorted_messages:
+                if self._is_separator(existing):
+                    continue
                 if existing.get("key", {}).get("id", "") == msg_id:
                     return
+
+        # Manage unread separator
+        if self._unread_sep_idx == -1:
+            # First new message in this session — insert separator before it
+            sep_pos = len(self._sorted_messages)
+            sep = {"_type": "unread_separator", "count": 1}
+            self._sorted_messages.insert(sep_pos, sep)
+            self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+            self._unread_sep_idx = sep_pos
+        else:
+            # Separator already present — increment its count
+            sep = self._sorted_messages[self._unread_sep_idx]
+            sep["count"] = sep.get("count", 0) + 1
+            self.messages_list.SetItemText(
+                self._unread_sep_idx, self._render_separator(sep["count"])
+            )
+
+        # Append the real message (focus must NOT move)
         self._sorted_messages.append(msg)
         self.messages_list.Append((self._render_message_line(msg),))
+        # Scroll to the new message but keep keyboard focus where it is
         last = self.messages_list.GetItemCount() - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
@@ -2361,6 +2714,8 @@ class ConversationsPanel(wx.Panel):
 
     def populate_messages(self):
         self.messages_list.DeleteAllItems()
+        self._unread_sep_idx = -1
+        self._reaction_map = {}
         messages_container = (
             self.conversation.get("messages", {}) if self.conversation else {}
         )
@@ -2376,14 +2731,43 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             messages_sorted = messages
 
+        # Build reaction map from all reaction messages
+        for m in messages_sorted:
+            if isinstance(m, dict) and m.get("messageType") == "reactionMessage":
+                reaction = (m.get("message") or {}).get("reactionMessage") or {}
+                emoji    = reaction.get("text", "")
+                orig_id  = (reaction.get("key") or {}).get("id", "")
+                if orig_id:
+                    if orig_id not in self._reaction_map:
+                        self._reaction_map[orig_id] = {}
+                    if emoji:
+                        self._reaction_map[orig_id][emoji] = (
+                            self._reaction_map[orig_id].get(emoji, 0) + 1
+                        )
+
         # Exclude reaction messages — they must not affect index mapping
         displayable = [
             m for m in messages_sorted if m.get("messageType", "") != "reactionMessage"
         ]
+
+        # Insert unread separator before the first unread message
+        unread_count = int((self.conversation or {}).get("unreadCount") or 0)
+        if unread_count > 0 and len(displayable) >= unread_count:
+            sep_pos = len(displayable) - unread_count
+            sep = {"_type": "unread_separator", "count": unread_count}
+            displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
+            self._unread_sep_idx = sep_pos
+
         self._sorted_messages = displayable
 
         for msg in displayable:
             self.messages_list.Append((self._render_message_line(msg),))
+
+        # Focus the separator when opening a conversation with unreads
+        if self._unread_sep_idx >= 0:
+            self.messages_list.Focus(self._unread_sep_idx)
+            self.messages_list.Select(self._unread_sep_idx)
+            self.messages_list.EnsureVisible(self._unread_sep_idx)
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────

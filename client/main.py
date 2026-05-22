@@ -150,6 +150,9 @@ class MainWindow(wx.Frame):
 
         self.create_accelerator_table()
 
+        # ── Status tracking (shown in title and tray tooltip) ─────────────────
+        self._tray_status = ""
+
         # ── Menu bar ──────────────────────────────────────────────────────────
         self._update_checker = None
         self._build_menubar()
@@ -199,6 +202,17 @@ class MainWindow(wx.Frame):
         mb.GetMenu(0).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
             self.i18n.t("menu_force_update")
         )
+
+    def _set_status(self, status: str):
+        """Update window title and tray tooltip to reflect current status."""
+        self._tray_status = status
+        app_name = self.i18n.t("app_name")
+        if status:
+            self.SetTitle(f"{app_name} - {status}")
+        else:
+            self.SetTitle(app_name)
+        if getattr(self, "tray_icon", None) is not None:
+            self.tray_icon.update_tooltip()
 
     def _on_force_update(self, event):
         if self._update_checker is None:
@@ -346,14 +360,52 @@ class MainWindow(wx.Frame):
             return
         if not self.settings.get("general", {}).get("notifications_enabled", True):
             return
-        if not self.settings.get("general", {}).get("show_tray_icon", True):
-            return
 
         from core.notification_manager import (
-            format_notification_title, format_notification_body
+            format_notification_title, format_notification_body,
+            format_foreground_sender,
         )
-        title = format_notification_title(msg, self, self.i18n)
+
         body  = format_notification_body(msg, self.i18n)
+
+        # Check if the WinZapp window is currently active/focused
+        window_active = self.IsShown() and not self.IsIconized() and self.IsActive()
+
+        if window_active:
+            # Determine if the incoming message is for the currently-open conversation
+            cp = getattr(self, "conversations_panel", None)
+            current_jid = (
+                cp.conversation.get("remoteJid", "")
+                if cp is not None and cp.conversation is not None
+                else ""
+            )
+            is_current_conv = (current_jid == remote_jid)
+
+            if is_current_conv:
+                # Scenario 1: message in the ACTIVE conversation
+                # Play current-conversation sound, speak "Sender: body" via AO2
+                self.message_current_sound.play()
+                sender = format_foreground_sender(msg, self, self.i18n)
+                self.output(f"{sender}: {body}")
+                # Mark the active conversation as read immediately
+                threading.Thread(
+                    target=self.mark_conversation_as_read,
+                    args=(remote_jid,),
+                    daemon=True,
+                ).start()
+            else:
+                # Scenario 2: message in a DIFFERENT conversation (window active)
+                # Play foreground sound, speak "Nova mensagem de X: body" via AO2
+                self.message_foreground_sound.play()
+                title = format_notification_title(msg, self, self.i18n)
+                spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+                self.output(spoken)
+            return  # never send system toast when window is active
+
+        # Window is not focused → send system toast notification
+        if not self.settings.get("general", {}).get("show_tray_icon", True):
+            return
+        title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
             self.notification_manager.send(title, body, remote_jid)
 
@@ -683,6 +735,9 @@ class MainWindow(wx.Frame):
         self.voicemsg_send_sound            = Sound(self.sound_system, "voicemsg_send.ogg")
         # Background notification sound
         self.message_background_sound       = Sound(self.sound_system, "message_background.ogg")
+        # Foreground notification sounds
+        self.message_current_sound          = Sound(self.sound_system, "message_current.ogg")
+        self.message_foreground_sound       = Sound(self.sound_system, "message_foreground.ogg")
 
     def retrieve_token(self):
         try:
@@ -727,17 +782,17 @@ class MainWindow(wx.Frame):
         self.contacts = self.get_remote_contacts()
         if not self.background_mode:
             self.synchronizing_sound.play()
-            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
+            wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
             self.output(self.i18n.t("synchronization_started"), interrupt=True)
         # Phase 1: sync all messages (no media download)
         self.sync_remote_chats()
         # Phase 2: download media for all chats
         if not self.background_mode:
-            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('downloading_media')}")
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
         self.sync_media_for_all_chats()
         if not self.background_mode:
             self.sync_complete_sound.play()
-            self.SetTitle(f"{self.i18n.t('app_name')}")
+            wx.CallAfter(self._set_status, "")
             self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(self.preselect_conversations)
 
@@ -1101,10 +1156,12 @@ class MainWindow(wx.Frame):
         with open(media_path, "wb") as f:
             f.write(encrypted)
 
-    def send_text_message(self, remote_jid, text):
+    def send_text_message(self, remote_jid, text, quoted=None):
         """Send a plain-text message via the Evolution API."""
         url = f"{self.evolution_server}:{self.evolution_port}/message/sendText/{self.token}"
         payload = {"number": remote_jid, "text": text}
+        if quoted:
+            payload["quoted"] = quoted
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -1112,7 +1169,7 @@ class MainWindow(wx.Frame):
         except Exception:
             return False
 
-    def send_audio_message(self, remote_jid: str, wav_path: str) -> bool:
+    def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
         """
         Base64-encode a WAV file and send it as an audio media message via the
         Evolution API.  Returns True on HTTP 200/201, False on any failure.
@@ -1133,9 +1190,25 @@ class MainWindow(wx.Frame):
             "mimetype":  "audio/wav",
             "fileName":  "voice_message.wav",
         }
+        if quoted:
+            payload["quoted"] = quoted
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
+            return response.status_code in (200, 201)
+        except Exception:
+            return False
+
+    def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
+        """Send a reaction to a message via the Evolution API."""
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/message/sendReaction/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        payload = {"key": msg_key, "reaction": emoji}
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
             return response.status_code in (200, 201)
         except Exception:
             return False
@@ -1390,13 +1463,37 @@ class MainWindow(wx.Frame):
             requests.delete(url, json={"groupJid": jid}, headers=headers, timeout=10)
         except Exception:
             pass
-        self.delete_chat_local(jid)
+        # Archive instead of delete so the message history is preserved locally.
+        self.archive_chat(jid)
+
+    def add_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """
+        Add one or more participants to a group.
+        Returns (True, "") on success, (False, error_message) on failure.
+        """
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/group/updateParticipant/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        payload = {
+            "groupJid":    group_jid,
+            "action":      "add",
+            "participants": participant_jids,
+        }
+        try:
+            r = requests.put(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
 
     # ── Media / contact attachments ───────────────────────────────────────────
 
     def send_media_attachment(
         self, remote_jid: str, file_path: str,
-        media_type: str, caption: str = ""
+        media_type: str, caption: str = "", quoted: dict = None
     ) -> bool:
         """
         Base64-encode a file and send it as a media message.
@@ -1422,6 +1519,8 @@ class MainWindow(wx.Frame):
             "fileName":  filename,
             "caption":   caption,
         }
+        if quoted:
+            payload["quoted"] = quoted
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -1429,7 +1528,8 @@ class MainWindow(wx.Frame):
         except Exception:
             return False
 
-    def send_contact_attachment(self, remote_jid: str, contact_info: dict) -> bool:
+    def send_contact_attachment(self, remote_jid: str, contact_info: dict,
+                                quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
         name = (
             contact_info.get("name") or contact_info.get("pushName")
@@ -1446,6 +1546,8 @@ class MainWindow(wx.Frame):
             "number":  remote_jid,
             "contact": [{"fullName": name, "wuid": phone_raw, "phoneNumber": phone_fmt}],
         }
+        if quoted:
+            payload["quoted"] = quoted
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -1488,6 +1590,149 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
+    def _last_msg_preview(self, chat: dict) -> str:
+        """
+        Build a compact last-message description for the conversations list.
+        Returns "" if no messages are found.
+        Format: "[você: ]{content} {timestamp}"
+        """
+        records = (
+            chat.get("messages", {})
+                .get("messages", {})
+                .get("records", [])
+        )
+        if not records:
+            return ""
+
+        # Find the most recent message (max by timestamp)
+        try:
+            last = max(
+                (m for m in records if isinstance(m, dict)),
+                key=lambda m: int(m.get("messageTimestamp", 0) or 0),
+                default=None,
+            )
+        except Exception:
+            return ""
+        if last is None:
+            return ""
+
+        from_me  = last.get("key", {}).get("fromMe", False)
+        msg_type = last.get("messageType", "conversation")
+        msg_obj  = last.get("message") or {}
+        i18n     = self.i18n
+
+        # If latest message is a reaction, show it inline instead of skipping
+        if msg_type == "reactionMessage":
+            reaction = msg_obj.get("reactionMessage") or {}
+            emoji = reaction.get("text", "")
+            orig_id = (reaction.get("key") or {}).get("id", "")
+            orig_text = ""
+            for m in records:
+                if isinstance(m, dict) and m.get("key", {}).get("id") == orig_id:
+                    orig_type = m.get("messageType", "")
+                    orig_obj  = m.get("message") or {}
+                    if orig_type in ("conversation", "textMessage"):
+                        orig_text = (orig_obj.get("conversation") or "")[:40]
+                    elif orig_type == "extendedTextMessage":
+                        orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")[:40]
+                    break
+            ts = last.get("messageTimestamp")
+            time_str = ""
+            if ts:
+                try:
+                    from datetime import datetime as _dt
+                    dt    = _dt.fromtimestamp(int(ts))
+                    today = _dt.now().date()
+                    if dt.date() == today:
+                        time_str = dt.strftime("%H:%M")
+                    else:
+                        time_str = dt.strftime("%d/%m/%Y %H:%M")
+                except Exception:
+                    pass
+            if from_me:
+                label = i18n.t("reaction_preview_you").format(emoji=emoji)
+            else:
+                p_key = last.get("key", {})
+                sender_name = (
+                    last.get("pushName")
+                    or format_number(p_key.get("participant", "") or p_key.get("remoteJid", ""))
+                )
+                label = i18n.t("reaction_preview_them").format(name=sender_name, emoji=emoji)
+            parts = [label]
+            if orig_text:
+                parts.append(orig_text)
+            if time_str:
+                parts.append(time_str)
+            return " ".join(parts)
+
+        # Build compact content
+        def _dur(secs):
+            try:
+                s = int(secs or 0)
+            except Exception:
+                return "0:00"
+            h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+            return f"{h}:{m:02d}:{sec:02d}" if h > 0 else f"{m}:{sec:02d}"
+
+        if msg_type in ("conversation", "textMessage"):
+            content = (
+                msg_obj.get("conversation")
+                or (msg_obj.get("extendedTextMessage") or {}).get("text")
+                or last.get("messageBody")
+                or ""
+            )
+            if len(content) > 60:
+                content = content[:57] + "..."
+        elif msg_type == "extendedTextMessage":
+            content = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+            if len(content) > 60:
+                content = content[:57] + "..."
+        elif msg_type == "audioMessage":
+            dur     = _dur((msg_obj.get("audioMessage") or {}).get("seconds"))
+            content = f"{i18n.t('message_type_audio')} {dur}"
+        elif msg_type == "videoMessage":
+            video = msg_obj.get("videoMessage") or {}
+            dur   = _dur(video.get("seconds"))
+            content = f"{i18n.t('video')} {dur}"
+        elif msg_type == "imageMessage":
+            img     = msg_obj.get("imageMessage") or {}
+            caption = (img.get("caption") or "").strip()
+            content = i18n.t("photo") + (f" {caption[:40]}" if caption else "")
+        elif msg_type == "documentMessage":
+            content = i18n.t("document")
+        elif msg_type == "stickerMessage":
+            content = i18n.t("sticker")
+        elif msg_type == "contactMessage":
+            contact = msg_obj.get("contactMessage") or {}
+            content = i18n.t("contact_message").format(
+                name=contact.get("displayName") or ""
+            )
+        elif msg_type == "locationMessage":
+            content = i18n.t("notif_location")
+        else:
+            content = i18n.t("notif_unsupported")
+
+        # Build time string
+        ts = last.get("messageTimestamp")
+        time_str = ""
+        if ts:
+            try:
+                from datetime import datetime as _dt
+                dt    = _dt.fromtimestamp(int(ts))
+                today = _dt.now().date()
+                if dt.date() == today:
+                    time_str = dt.strftime("%H:%M")
+                else:
+                    time_str = dt.strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                pass
+
+        you_prefix = (i18n.t("conv_preview_you") + " ") if from_me else ""
+        parts = [f"{you_prefix}{content}"]
+        if time_str:
+            parts.append(time_str)
+        return " ".join(parts)
+
     def add_chats_to_ui(self):
         search = self.conversations_panel.search_field.GetValue().strip().lower()
         self.conversations_panel.conversations_list.DeleteAllItems()
@@ -1503,7 +1748,11 @@ class MainWindow(wx.Frame):
                 )
             else:
                 unread_str = ""
-            self.conversations_panel.conversations_list.Append((f"{name}{unread_str}",))
+            preview = self._last_msg_preview(chat)
+            item_text = name + unread_str
+            if preview:
+                item_text += f" {preview}"
+            self.conversations_panel.conversations_list.Append((item_text,))
 
         # Also refresh the archived panel if present
         if hasattr(self, "archived_conversations_panel"):
@@ -1519,7 +1768,11 @@ class MainWindow(wx.Frame):
                     )
                 else:
                     unread_str = ""
-                panel.conversations_list.Append((f"{name}{unread_str}",))
+                preview = self._last_msg_preview(chat)
+                item_text = name + unread_str
+                if preview:
+                    item_text += f" {preview}"
+                panel.conversations_list.Append((item_text,))
 
     def monitor_internet_connection(self):
         while True:
