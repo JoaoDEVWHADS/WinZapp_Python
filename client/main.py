@@ -903,6 +903,8 @@ class MainWindow(wx.Frame):
         # Foreground notification sounds
         self.message_current_sound          = Sound(self.sound_system, "message_current.ogg")
         self.message_foreground_sound       = Sound(self.sound_system, "message_foreground.ogg")
+        # Message sent confirmation sound
+        self.message_sent_sound             = Sound(self.sound_system, "message_sent.ogg")
 
     def retrieve_token(self):
         try:
@@ -1630,6 +1632,35 @@ class MainWindow(wx.Frame):
             pass
         # Archive instead of delete so the message history is preserved locally.
         self.archive_chat(jid)
+
+    def create_group(self, name: str, participants: list) -> tuple:
+        """
+        Create a WhatsApp group with the given name and participant numbers.
+        participants: list of phone number strings (e.g. ["5511999999999"])
+        Returns (True, group_jid) on success, (False, error_message) on failure.
+        """
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/group/create/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        payload = {
+            "subject":      name,
+            "participants": [{"number": p} for p in participants],
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            if r.status_code in (200, 201):
+                data = r.json()
+                jid = (
+                    data.get("id")
+                    or data.get("groupJid")
+                    or data.get("remoteJid", "")
+                )
+                return True, jid
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
 
     def add_group_members(self, group_jid: str, participant_jids: list) -> tuple:
         """
