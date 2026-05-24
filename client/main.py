@@ -172,6 +172,12 @@ class MainWindow(wx.Frame):
         self._update_checker = None
         self._build_menubar()
 
+        # ── Online presence (sendPresence) ────────────────────────────────────
+        # Sends "available" while the window is focused; "unavailable" otherwise.
+        self._presence_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER,    self._on_presence_timer,   self._presence_timer)
+        self.Bind(wx.EVT_ACTIVATE, self._on_window_activate)
+
         # ── System tray icon ──────────────────────────────────────────────────
         self.tray_icon = None
         self._init_tray()
@@ -254,6 +260,62 @@ class MainWindow(wx.Frame):
 
     # ── Tray / window lifecycle ───────────────────────────────────────────────
 
+    # ── Online presence ───────────────────────────────────────────────────────
+
+    def _on_window_activate(self, event):
+        """
+        Fired by wxPython when the main window gains or loses OS focus.
+        - Gained focus  → send "available" immediately, then every 20 s
+        - Lost focus    → stop the timer, send "unavailable" once
+        """
+        if self.background_mode:
+            event.Skip()
+            return
+        token = getattr(self, "token", None)
+        if not token:
+            event.Skip()
+            return
+        if event.GetActive():
+            threading.Thread(
+                target=self._send_presence, args=("available",), daemon=True
+            ).start()
+            if not self._presence_timer.IsRunning():
+                self._presence_timer.Start(20_000)   # refresh every 20 s
+        else:
+            self._presence_timer.Stop()
+            threading.Thread(
+                target=self._send_presence, args=("unavailable",), daemon=True
+            ).start()
+        event.Skip()
+
+    def _on_presence_timer(self, event):
+        """Periodic keep-alive: resend 'available' while window is focused."""
+        token = getattr(self, "token", None)
+        if token:
+            threading.Thread(
+                target=self._send_presence, args=("available",), daemon=True
+            ).start()
+
+    def _send_presence(self, presence: str):
+        """
+        POST /instance/setPresence/{token}  (Evolution API v2)
+        Body: {"presence": "available" | "unavailable"}
+
+        Always runs on a background thread — never blocks the UI.
+        """
+        token = getattr(self, "token", None)
+        if not token:
+            return
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/instance/setPresence/{token}"
+        )
+        headers = {"apikey": token, "Content-Type": "application/json"}
+        try:
+            requests.post(url, json={"presence": presence}, headers=headers, timeout=5)
+        except Exception:
+            pass
+
     def _init_tray(self):
         """Create the system-tray icon if the setting is enabled."""
         show = self.settings.get("general", {}).get("show_tray_icon", True)
@@ -283,6 +345,9 @@ class MainWindow(wx.Frame):
 
     def real_exit(self):
         """Completely close WinZapp, removing the tray icon and stopping all threads."""
+        # Stop the presence keep-alive timer before tearing down
+        if hasattr(self, "_presence_timer") and self._presence_timer.IsRunning():
+            self._presence_timer.Stop()
         if self.tray_icon is not None:
             try:
                 self.tray_icon.RemoveIcon()

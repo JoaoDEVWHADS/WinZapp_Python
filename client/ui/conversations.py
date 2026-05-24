@@ -56,9 +56,14 @@ class ConversationsPanel(wx.Panel):
         self._is_audio_playing = False
         self._audio_stream_duration = 0
         self._audio_temp_file = None
-        self._audio_speed_index = 0
         self._audio_speed_steps = [1.0, 1.5, 2.0]
         self._audio_tempo_map = {1.0: 0, 1.5: 50, 2.0: 100}
+        # Restore the last-used speed from settings (persists across conversations/sessions)
+        _saved_speed = self.main_window.settings.get("general", {}).get("audio_default_speed", 1.0)
+        try:
+            self._audio_speed_index = self._audio_speed_steps.index(float(_saved_speed))
+        except (ValueError, TypeError):
+            self._audio_speed_index = 0
         self._audio_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_audio_timer, self._audio_timer)
 
@@ -269,7 +274,8 @@ class ConversationsPanel(wx.Panel):
 
         # ── Audio / video playback controls ────────────────────────────────
         self.audio_speed_btn = wx.Button(
-            self.conversation_panel, label=self._format_speed(1.0)
+            self.conversation_panel,
+            label=self._format_speed(self._audio_speed_steps[self._audio_speed_index]),
         )
         self.audio_speed_btn.Bind(wx.EVT_BUTTON, self.on_audio_speed_btn)
         conv_sizer.Add(self.audio_speed_btn, 0, wx.LEFT | wx.BOTTOM, 5)
@@ -1738,15 +1744,16 @@ class ConversationsPanel(wx.Panel):
                 file=self._audio_temp_file, decode=True
             )
             self._audio_tempo_ctrl = Tempo(self._audio_stream)
-            self._audio_tempo_ctrl.tempo = 0          # 1.0× default
+            # Apply the persisted speed (do NOT reset to 1× on each new audio)
+            _speed = self._audio_speed_steps[self._audio_speed_index]
+            self._audio_tempo_ctrl.tempo = self._audio_tempo_map.get(_speed, 0)
             self._audio_stream_duration = int(duration_seconds)
             self._current_audio_id = msg_id
-            self._audio_speed_index = 0
             self._audio_stream.play()
             self._is_audio_playing = True
             self._audio_timer.Start(200)
             self._show_audio_controls()
-            self.audio_speed_btn.SetLabel(self._format_speed(1.0))
+            self.audio_speed_btn.SetLabel(self._format_speed(_speed))
         except Exception:
             self._stop_audio()
 
@@ -1839,6 +1846,9 @@ class ConversationsPanel(wx.Panel):
                 self._audio_tempo_ctrl.tempo = self._audio_tempo_map[speed]
             except Exception:
                 pass
+        # Persist the new speed so it applies to all future playbacks/conversations
+        self.main_window.settings.setdefault("general", {})["audio_default_speed"] = speed
+        self.main_window.save_settings()
 
     def on_audio_slider(self, event):
         if self._audio_stream is None:

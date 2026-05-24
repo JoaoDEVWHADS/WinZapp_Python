@@ -323,7 +323,9 @@
     "api_update_now": "&Actualizar ahora",
     "api_update_exit": "&Salir",
     "api_update_continue": "&Continuar con la versión actual de la API (no recomendado)",
-    "api_update_dialog_title": "WinZapp | Actualizando Evolution API"
+    "api_update_dialog_title": "WinZapp | Actualizando Evolution API",
+    "tab_audio_playback": "Reproducción de audio",
+    "audio_speed_label": "&Velocidad de reproducción de audio predeterminada"
 }
 
 

@@ -3,7 +3,9 @@ from core.i18n import LANGUAGE_NAMES
 
 
 class SettingsDialog(wx.Dialog):
-    """Settings dialog with a General tab (language) and a Connection tab (port)."""
+    """Settings dialog with a General, Connection, and Audio playback tab."""
+
+    _AUDIO_SPEED_STEPS = [1.0, 1.5, 2.0]
 
     def __init__(self, parent):
         self.main_window = parent
@@ -19,6 +21,13 @@ class SettingsDialog(wx.Dialog):
         self.Fit()
         self.SetMinSize((360, -1))
         self.Centre()
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _format_speed(self, speed: float) -> str:
+        """Format a speed float as a locale-sensitive label (e.g. '1,5×')."""
+        sep = self.main_window.i18n.t("decimal_separator")
+        return f"{speed:.1f}".replace(".", sep) + "×"
 
     # ── UI construction ──────────────────────────────────────────────────────
 
@@ -83,6 +92,25 @@ class SettingsDialog(wx.Dialog):
         self._conn_page.SetSizer(conn_sizer)
         self._notebook.AddPage(self._conn_page, i18n.t("tab_connection"))
 
+        # ── Audio playback tab ───────────────────────────────────────────────
+        self._audio_page = wx.Panel(self._notebook)
+        audio_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._audio_speed_label = wx.StaticText(
+            self._audio_page, label=i18n.t("audio_speed_label")
+        )
+        audio_sizer.Add(self._audio_speed_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        self._audio_speed_combo = wx.ComboBox(
+            self._audio_page,
+            style=wx.CB_READONLY,
+            choices=[self._format_speed(s) for s in self._AUDIO_SPEED_STEPS],
+        )
+        audio_sizer.Add(self._audio_speed_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._audio_page.SetSizer(audio_sizer)
+        self._notebook.AddPage(self._audio_page, i18n.t("tab_audio_playback"))
+
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn = wx.Button(self, wx.ID_OK)
@@ -128,6 +156,13 @@ class SettingsDialog(wx.Dialog):
         self._updates_check.SetValue(updates)
 
         self._port_field.SetValue(str(self.main_window.evolution_port))
+
+        saved_speed = self.main_window.settings.get("general", {}).get("audio_default_speed", 1.0)
+        try:
+            speed_idx = self._AUDIO_SPEED_STEPS.index(float(saved_speed))
+        except (ValueError, TypeError):
+            speed_idx = 0
+        self._audio_speed_combo.SetSelection(speed_idx)
 
     def _validate(self) -> bool:
         """Return True if the port value is valid; show an error and return False otherwise."""
@@ -206,6 +241,23 @@ class SettingsDialog(wx.Dialog):
                     pass
                 self.main_window.tray_icon = None
 
+        # Audio playback speed
+        speed_sel = self._audio_speed_combo.GetSelection()
+        if speed_sel != wx.NOT_FOUND:
+            new_speed = self._AUDIO_SPEED_STEPS[speed_sel]
+            self.main_window.settings.setdefault("general", {})["audio_default_speed"] = new_speed
+            # Sync live playback panel so the button label and next playback use the new speed
+            cp = getattr(self.main_window, "conversations_panel", None)
+            if cp is not None:
+                try:
+                    cp._audio_speed_index = speed_sel
+                    cp.audio_speed_btn.SetLabel(cp._format_speed(new_speed))
+                    # Apply to any audio currently playing
+                    if cp._audio_tempo_ctrl is not None:
+                        cp._audio_tempo_ctrl.tempo = cp._audio_tempo_map.get(new_speed, 0)
+                except Exception:
+                    pass
+
         # Persist and propagate
         self.main_window.save_settings()
 
@@ -224,12 +276,20 @@ class SettingsDialog(wx.Dialog):
         self.SetTitle(i18n.t("settings_title"))
         self._notebook.SetPageText(0, i18n.t("tab_general"))
         self._notebook.SetPageText(1, i18n.t("tab_connection"))
+        self._notebook.SetPageText(2, i18n.t("tab_audio_playback"))
         self._sounds_check.SetLabel(i18n.t("sounds_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
         self._apply_btn.SetLabel(i18n.t("apply"))
+        self._audio_speed_label.SetLabel(i18n.t("audio_speed_label"))
+        # Regenerate speed labels — decimal separator may have changed with language
+        cur_sel = self._audio_speed_combo.GetSelection()
+        self._audio_speed_combo.Clear()
+        for s in self._AUDIO_SPEED_STEPS:
+            self._audio_speed_combo.Append(self._format_speed(s))
+        self._audio_speed_combo.SetSelection(cur_sel if cur_sel != wx.NOT_FOUND else 0)
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
