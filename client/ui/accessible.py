@@ -1,0 +1,126 @@
+import os
+import sys
+import wx
+
+
+class AccessibleSearchInConversation(wx.Accessible):
+    """Reports Ctrl+Shift+F as the keyboard shortcut for the search-in-conversation button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+F")
+
+
+class AccessibleSearchNextResult(wx.Accessible):
+    """Reports Enter as the keyboard shortcut for the next-result button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Enter")
+
+
+class AccessibleSearchPrevResult(wx.Accessible):
+    """Reports Shift+Enter as the keyboard shortcut for the previous-result button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Shift+Enter")
+
+
+class AccessibleStatusPrev(wx.Accessible):
+    """Reports Ctrl+Left as the keyboard shortcut for the previous-status button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Left")
+
+
+class AccessibleStatusNext(wx.Accessible):
+    """Reports Ctrl+Right as the keyboard shortcut for the next-status button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Right")
+
+
+class AccessibleSearchConversations(wx.Accessible):
+    def __init__(self, shortcut):
+        super().__init__()
+        self.shortcut = shortcut
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, self.shortcut)
+
+
+class AccessibleRecordVoiceMessage(wx.Accessible):
+    def __init__(self, shortcut):
+        super().__init__()
+        self.shortcut = shortcut
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, self.shortcut)
+
+
+class AccessibleSaveAs(wx.Accessible):
+    """Reports Ctrl+Shift+B as the keyboard shortcut for the Save-As button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+B")
+
+
+class AccessibleConversationDataButton(wx.Accessible):
+    """Reports Ctrl+Shift+D as the keyboard shortcut for the conversation-data button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+D")
+
+
+class AccessibleAddAttachmentButton(wx.Accessible):
+    """Reports Ctrl+Shift+J as the keyboard shortcut for the Add Attachment button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+J")
+
+
+class AccessibleDiscardVoiceMessage(wx.Accessible):
+    """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+D")
+
+
+class AccessiblePauseResumeRecording(wx.Accessible):
+    """Reports Ctrl+Shift+P as the keyboard shortcut for the Pause/Resume button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+P")
+
+
+class AccessibleSendVoiceMessage(wx.Accessible):
+    """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+R")
+
+
+class AccessibleNewConversationButton(wx.Accessible):
+    """Reports Ctrl+N as the keyboard shortcut for the New Conversation button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+N")
+
+
+class AccessibleAudioSlider(wx.Accessible):
+    def __init__(self, conversations_panel):
+        super().__init__()
+        self._panel = conversations_panel
+
+    def GetName(self, childId):
+        panel = self._panel
+        i18n = panel.main_window.i18n
+        if panel._audio_stream is not None and panel._audio_stream_duration > 0:
+            try:
+                pos = panel._audio_stream.get_position()
+                total = panel._audio_stream.get_length()
+                current_secs = int(pos / total * panel._audio_stream_duration) if total > 0 else 0
+            except Exception:
+                current_secs = 0
+            current_str = panel._format_duration(current_secs)
+            total_str = panel._format_duration(panel._audio_stream_duration)
+            return (wx.ACC_OK, f"{current_str} {i18n.t('of')} {total_str}")
+        return (wx.ACC_OK, "")
