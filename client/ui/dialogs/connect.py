@@ -52,7 +52,7 @@ class Connect:
                             if not line or line.startswith("#") or "=" not in line:
                                 continue
                             k, _, v = line.partition("=")
-                            if k.strip() == "LICENSING_USER_EMAIL":
+                            if k.strip() == "EVOLUTION_LICENSING_USER_EMAIL":
                                 val = v.strip()
                                 return val if val else default
                 except Exception:
@@ -76,6 +76,14 @@ class Connect:
         reuse it.  Any other non-2xx response is raised as a RuntimeError so
         the caller can surface a meaningful error to the user.
 
+        Special case — HTTP 503 / LICENSE_REQUIRED (Evolution API v2.4+):
+        The local Evolution API has not been activated yet.  We call
+        ``_activate_instance()`` which posts to the external auto-activation
+        endpoint and returns the api_key issued by the licensing server.  That
+        key is stored in settings (persisted across restarts) and used as the
+        ``apikey`` header for the retry.  If the retry still fails or the
+        external call raises, the exception propagates to the caller.
+
         Note: the phone number for pairing-code flows does NOT belong in the
         create payload; it is passed later to /instance/connect as a query
         parameter.
@@ -91,34 +99,69 @@ class Connect:
             "qrcode":       False,
             "syncFullHistory": False,
         }
-        response = requests.post(
-            url, json=payload,
-            headers=self._evolution_headers(use_global_key=True),
-            timeout=15,
-        )
-        if response.status_code in (200, 201):
-            # Return the instance_id so the caller can activate the license
+        headers = self._evolution_headers(use_global_key=True)
+
+        for attempt in range(2):
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+
+            if response.status_code in (200, 201):
+                try:
+                    data = response.json()
+                    instance_id = (
+                        data.get("instance", {}).get("instanceId")
+                        or data.get("instance", {}).get("id")
+                        or data.get("instanceId")
+                        or data.get("id")
+                    )
+                    return instance_id  # May be None if not present in response
+                except Exception:
+                    return None
+
+            if response.status_code == 409:
+                return None  # Already exists — reuse it
+
+            # HTTP 503 + LICENSE_REQUIRED (Evolution API v2.4+):
+            # Auto-activate via the licensing server, then retry once.
+            # _activate_instance() returns the api_key issued by the licensing
+            # server; that key must replace the default global key for all
+            # subsequent calls so the local API accepts them.
+            if response.status_code == 503 and attempt == 0:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
+                if data.get("code") == "LICENSE_REQUIRED":
+                    instance_id_from_503 = (
+                        data.get("instance_id")
+                        or data.get("instanceId")
+                        or data.get("id")
+                    )
+                    if instance_id_from_503:
+                        # May raise RuntimeError — let it propagate so the
+                        # caller shows a meaningful error to the user.
+                        new_api_key = self._activate_instance(instance_id_from_503)
+                        if new_api_key:
+                            # Persist the key: main.py reads evolution_api_key
+                            # from settings["connection"]["evolution_api_key"],
+                            # so this survives across restarts.
+                            self.main_window.evolution_api_key = new_api_key
+                            self.main_window.settings.setdefault("connection", {})[
+                                "evolution_api_key"
+                            ] = new_api_key
+                            self.main_window.save_settings()
+                            headers = {
+                                "apikey": new_api_key,
+                                "Content-Type": "application/json",
+                            }
+                        continue  # retry with updated (or same) headers
+                    # 503 LICENSE_REQUIRED but no instance_id in body — fall through
+
+            # Any other status is a real failure
             try:
-                data = response.json()
-                instance_id = (
-                    data.get("instance", {}).get("instanceId")
-                    or data.get("instance", {}).get("id")
-                    or data.get("instanceId")
-                    or data.get("id")
-                )
-                return instance_id  # May be None if not present in response
+                detail = response.json()
             except Exception:
-                return None
-        if response.status_code == 409:
-            return None  # Already exists — reuse it (skip activation)
-        # Any other status is a real failure
-        try:
-            detail = response.json()
-        except Exception:
-            detail = response.text
-        raise RuntimeError(
-            f"HTTP {response.status_code}: {detail}"
-        )
+                detail = response.text
+            raise RuntimeError(f"HTTP {response.status_code}: {detail}")
 
     def _setup_websocket_for_instance(self, token):
         """
@@ -140,14 +183,17 @@ class Connect:
         except Exception:
             pass  # Non-critical — the app can still function without this
 
-    def _activate_instance(self, instance_id: str) -> None:
+    def _activate_instance(self, instance_id: str) -> str | None:
         """
-        Register and activate a newly created instance with the Evolution
-        Foundation licensing server (required since v2.4.0).
+        Register this Evolution API installation with the licensing server
+        (required since v2.4.0) using the auto-activation endpoint.
 
-        On success the server returns the real api_key for the instance; we
-        update self.main_window.token so every subsequent call uses it.
-        Raises RuntimeError on any non-2xx response.
+        Returns the api_key that the licensing server issued, which must be
+        used as the ``apikey`` header for all subsequent local Evolution API
+        calls in this session.  The caller is responsible for persisting the
+        key to settings so future sessions skip this step.
+
+        Raises RuntimeError on any non-2xx response from the licensing server.
         """
         url = "https://license.evolutionfoundation.com.br/v1/register/auto"
         payload = {
@@ -166,19 +212,16 @@ class Connect:
                 f"Licensing activation failed — HTTP {response.status_code}: {detail}"
             )
         data = response.json()
-        # Extract the real api_key/token returned by the licensing server
-        new_token = (
+        # Extract the api_key returned by the licensing server.
+        # Evolution API uses this key as the bearer for all requests once
+        # the installation is activated.
+        return (
             data.get("api_key")
             or data.get("apikey")
             or data.get("token")
             or (data.get("hash") or {}).get("apikey")
             or (data.get("instance") or {}).get("apikey")
         )
-        if new_token and new_token != self.main_window.token:
-            self.main_window.token = new_token
-            if "privateinfo" not in self.main_window.settings:
-                self.main_window.settings["privateinfo"] = {}
-            self.main_window.settings["privateinfo"]["WA_token"] = new_token
 
     # ── Connection status ──────────────────────────────────────────────────
 
@@ -313,24 +356,28 @@ class Connect:
             self.main_window.settings["status"]["messages_set_completed"] = False
             self.main_window.save_settings()
 
-            # Generate token if not already set
-            if not self.main_window.settings.get("privateinfo", {}).get("WA_token"):
+            # Determine whether an instance already exists for this token.
+            # If WA_token is already saved the Evolution API instance was created
+            # in a previous session — skip create + websocket-setup and go
+            # straight to /instance/connect.
+            existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+            _instance_exists = bool(existing_token)
+
+            if _instance_exists:
+                self.main_window.token = existing_token
+            else:
                 self.main_window.token = self.generate_random_token()
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
-            else:
-                self.main_window.token = self.main_window.settings.get("privateinfo", {}).get("WA_token")
 
-            # Step 1 – Create Evolution instance (returns instance_id when new)
-            instance_id = self._create_instance(self.main_window.token)
+            if not _instance_exists:
+                # Step 1 – Create Evolution API instance (first time only).
+                # Handles 503/LICENSE_REQUIRED via auto-activation internally.
+                self._create_instance(self.main_window.token)
 
-            # Step 1b – Activate license (required since v2.4.0, new instances only)
-            if instance_id:
-                self._activate_instance(instance_id)
-
-            # Step 2 – Configure WebSocket events for this instance
-            self._setup_websocket_for_instance(self.main_window.token)
+                # Step 2 – Configure WebSocket events for this instance
+                self._setup_websocket_for_instance(self.main_window.token)
 
             # Save settings
             self.main_window.save_settings()
@@ -410,30 +457,30 @@ class Connect:
                 )
                 if c.isdigit()
             )
-            #Check if the user has already tried to connect with this number
-            if (
-                stored_raw == self.phone_number
-                and self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
-            ):
-                #Assume token available
-                self.main_window.token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+            # Check if the user has already paired with this number.
+            # If both the phone number and WA_token are already saved, the
+            # Evolution API instance was created in a previous session — skip
+            # create + websocket-setup and jump straight to /instance/connect.
+            existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+            _instance_exists = bool(stored_raw == self.phone_number and existing_token)
+
+            if _instance_exists:
+                self.main_window.token = existing_token
             else:
                 self.main_window.token = self.generate_random_token()
-                #Set the new token and phone number in settings
+                # Set the new token and phone number in settings
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
-            # Step 1 – Create Evolution instance (returns instance_id when new)
-            instance_id = self._create_instance(self.main_window.token)
+            if not _instance_exists:
+                # Step 1 – Create Evolution API instance (first time only).
+                # Handles 503/LICENSE_REQUIRED via auto-activation internally.
+                self._create_instance(self.main_window.token)
 
-            # Step 1b – Activate license (required since v2.4.0, new instances only)
-            if instance_id:
-                self._activate_instance(instance_id)
-
-            # Step 2 – Configure WebSocket events for this instance
-            self._setup_websocket_for_instance(self.main_window.token)
+                # Step 2 – Configure WebSocket events for this instance
+                self._setup_websocket_for_instance(self.main_window.token)
 
             # Save settings
             self.main_window.save_settings()

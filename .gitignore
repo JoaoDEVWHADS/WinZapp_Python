@@ -3,6 +3,7 @@
 # User data / secrets (generated at runtime, never committed)
 client/data/messages.dat
 client/data/settings.json
+client/data/settings_default.json
 client/data/secret.key
 client/data/token.tk
 client/data/token.tk2

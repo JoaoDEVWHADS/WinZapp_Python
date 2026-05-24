@@ -3,7 +3,7 @@
         "evolution_server": "http://127.0.0.1",
         "evolution_port": 3417,
         "evolution_ws_server": "ws://127.0.0.1",
-        "evolution_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037"
+        "evolution_api_key": "MY_LICENSED_API_KEY"
     },
     "general": {
         "language": "",
