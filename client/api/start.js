@@ -11,13 +11,14 @@
  * Environment variables that MUST be set before Evolution's own dotenv
  * call (dotenv does not override variables already present in process.env):
  *   DATABASE_CONNECTION_URI  – set here after PG starts
- *   SERVER_PORT              – set here to 3414
+ *   SERVER_PORT              – set here to 3417
  *   SERVER_URL               – set here accordingly
  */
 
 'use strict';
 
 const path = require('path');
+const fs   = require('fs');
 const { execFileSync } = require('child_process');
 
 // ── Paths ──────────────────────────────────────────────────────────────────
@@ -39,7 +40,7 @@ const DB_URI  = `postgresql://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB
 // precedence over whatever is written in api/.env.
 process.env.DATABASE_CONNECTION_URI = DB_URI;
 process.env.DATABASE_PROVIDER       = 'postgresql';
-process.env.SERVER_PORT             = '3414';
+process.env.SERVER_PORT             = '3417';
 process.env.SERVER_URL              = 'http://127.0.0.1:3414';
 process.env.SERVER_TYPE             = 'http';
 
@@ -61,8 +62,16 @@ async function main() {
     persistent:  true,   // data survives process restarts
   });
 
+  // pg.initialise() runs initdb, which fails if pgdata already exists.
+  // We detect an existing cluster by the presence of the PG_VERSION marker
+  // file that initdb always creates, and skip initialisation in that case.
+  const pgVersionFile = path.join(PG_DATA_DIR, 'PG_VERSION');
+  const pgAlreadyInit = fs.existsSync(pgVersionFile);
+
   try {
-    await pg.initialise();  // runs initdb only on first launch
+    if (!pgAlreadyInit) {
+      await pg.initialise();
+    }
     await pg.start();
   } catch (err) {
     console.error('[WinZapp] Failed to start embedded PostgreSQL:', err.message);
@@ -75,6 +84,23 @@ async function main() {
   } catch (_) { /* already exists – fine */ }
 
   // ── 2. Run Prisma migrations ──────────────────────────────────────────────
+  // First, sync the provider-specific migrations folder into the generic
+  // ./prisma/migrations path that Prisma expects.  This replicates what
+  // `npm run db:deploy:win` does (xcopy step) but using Node's fs module so
+  // it works on Windows without relying on Unix shell commands.
+  const MIGRATIONS_SRC = path.join(API_DIR, 'prisma', 'postgresql-migrations');
+  const MIGRATIONS_DST = path.join(API_DIR, 'prisma', 'migrations');
+  try {
+    if (fs.existsSync(MIGRATIONS_DST)) {
+      fs.rmSync(MIGRATIONS_DST, { recursive: true, force: true });
+    }
+    if (fs.existsSync(MIGRATIONS_SRC)) {
+      fs.cpSync(MIGRATIONS_SRC, MIGRATIONS_DST, { recursive: true });
+    }
+  } catch (err) {
+    console.warn('[WinZapp] Could not sync migrations folder:', err.message);
+  }
+
   try {
     execFileSync(
       process.execPath,
