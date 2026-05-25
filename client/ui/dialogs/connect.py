@@ -166,23 +166,37 @@ class Connect:
     def _setup_websocket_for_instance(self, token):
         """
         Enable and configure Socket.IO event delivery for this instance.
-        Uses the global api_key so this works both before and after license
-        activation (the licensed key replaces the default in evolution_api_key).
-        Called once after creating an instance.
+
+        The Evolution API expects the payload nested under a "websocket" key:
+            {"websocket": {"enabled": true, "events": [...]}}
+
+        Uses the global api_key (works before and after license activation).
+        Raises RuntimeError on any non-2xx response so the caller can surface
+        the error rather than silently proceeding to a doomed connect_websocket.
         """
         url = (
             f"{self.main_window.evolution_server}"
             f":{self.main_window.evolution_port}/websocket/set/{token}"
         )
-        payload = {"enabled": True, "events": _WEBSOCKET_EVENTS}
-        try:
-            requests.post(
-                url, json=payload,
-                headers=self._evolution_headers(use_global_key=True),
-                timeout=10,
+        payload = {
+            "websocket": {
+                "enabled": True,
+                "events": _WEBSOCKET_EVENTS,
+            }
+        }
+        response = requests.post(
+            url, json=payload,
+            headers=self._evolution_headers(use_global_key=True),
+            timeout=10,
+        )
+        if response.status_code not in (200, 201):
+            try:
+                detail = response.json()
+            except Exception:
+                detail = response.text
+            raise RuntimeError(
+                f"websocket/set failed — HTTP {response.status_code}: {detail}"
             )
-        except Exception:
-            pass  # Non-critical — the app can still function without this
 
     def _activate_instance(self, instance_id: str) -> str | None:
         """
