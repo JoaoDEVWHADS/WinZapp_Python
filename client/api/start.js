@@ -60,6 +60,10 @@ async function main() {
     password:    PG_PASS,
     port:        PG_PORT,
     persistent:  true,   // data survives process restarts
+    // Force UTF-8 on first-time cluster initialisation.
+    // Without this, initdb on Windows defaults to WIN1252 and Postgres cannot
+    // store emoji / multibyte characters (error code 22P05).
+    initdbFlags: ['--encoding=UTF8'],
   });
 
   // pg.initialise() runs initdb, which fails if pgdata already exists.
@@ -78,10 +82,77 @@ async function main() {
     process.exit(1);
   }
 
-  // Create the application database (no-op if it already exists)
-  try {
-    await pg.createDatabase(PG_DB);
-  } catch (_) { /* already exists – fine */ }
+  // ── Ensure the application database exists with UTF-8 encoding ────────────
+  //
+  // On Windows, initdb defaults to WIN1252.  The fix is to create (or
+  // recreate) the database from template0 with an explicit UTF-8 encoding.
+  // Using template0 (not template1) is required when the target encoding
+  // differs from the cluster default.
+  //
+  // If the database already exists with the wrong encoding we drop it first.
+  // This means existing WhatsApp session data is lost, but:
+  //   a) The cluster was already broken (all emoji writes failed).
+  //   b) Baileys session credentials live in the 'instances/' file tree, not
+  //      in Postgres, so WhatsApp pairing survives the database reset.
+  {
+    const adminClient = pg.getPgClient('postgres', '127.0.0.1');
+    try {
+      await adminClient.connect();
+
+      const { rows } = await adminClient.query(
+        `SELECT pg_encoding_to_char(encoding) AS enc
+           FROM pg_database
+          WHERE datname = $1`,
+        [PG_DB]
+      );
+
+      if (rows.length === 0) {
+        // Database does not yet exist — create with UTF-8.
+        console.log('[WinZapp] Criando banco de dados com encoding UTF-8...');
+        await adminClient.query(
+          `CREATE DATABASE "${PG_DB}"
+             ENCODING    'UTF8'
+             LC_COLLATE  'C'
+             LC_CTYPE    'C'
+             TEMPLATE    template0`
+        );
+        console.log('[WinZapp] Banco de dados criado com sucesso (UTF-8).');
+
+      } else if (rows[0].enc !== 'UTF8') {
+        // Wrong encoding detected — drop and recreate.
+        console.log(
+          `[WinZapp] Encoding incorreto detectado (${rows[0].enc}). ` +
+          'Recriando banco de dados com UTF-8...'
+        );
+
+        // Terminate any lingering connections to allow DROP DATABASE.
+        await adminClient.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [PG_DB]
+        );
+
+        await adminClient.query(`DROP DATABASE IF EXISTS "${PG_DB}"`);
+        await adminClient.query(
+          `CREATE DATABASE "${PG_DB}"
+             ENCODING    'UTF8'
+             LC_COLLATE  'C'
+             LC_CTYPE    'C'
+             TEMPLATE    template0`
+        );
+        console.log('[WinZapp] Banco de dados recriado com UTF-8. Re-pareamento do WhatsApp necessário.');
+
+      } else {
+        console.log('[WinZapp] Banco de dados OK (UTF-8).');
+      }
+
+    } catch (dbErr) {
+      console.error('[WinZapp] Erro ao verificar/criar banco de dados:', dbErr.message);
+    } finally {
+      await adminClient.end().catch(() => {});
+    }
+  }
 
   // ── 2. Run Prisma migrations ──────────────────────────────────────────────
   // First, sync the provider-specific migrations folder into the generic
