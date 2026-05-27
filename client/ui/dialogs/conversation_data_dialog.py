@@ -174,15 +174,12 @@ class ConversationDataDialog(wx.Dialog):
         if not self.IsShown():
             return
         lines = []
-        name   = data.get("name") or self._name
-        phone  = format_number(self._jid)
-        about  = data.get("status") or data.get("about") or ""
+        name  = data.get("name") or self._name
+        phone = format_number(self._jid)
 
         lines.append(f"{self._i18n.t('conversations')}: {name}")
         if phone:
             lines.append(f"{self._i18n.t('phone_label')}: {phone}")
-        if about:
-            lines.append(f"{self._i18n.t('about_label')}: {about}")
 
         self._info_ctrl.SetValue("\n".join(lines))
         self._info_ctrl.SetFocus()

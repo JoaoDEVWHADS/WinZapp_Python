@@ -748,11 +748,42 @@ class ConversationsPanel(wx.Panel):
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
 
+        # Register the virtual message in chat records so the conversation
+        # list preview updates immediately to show the sent message.
+        self._register_virtual_msg(virtual_msg)
+        self.main_window.set_chats()
+
+    def _register_virtual_msg(self, virtual_msg: dict):
+        """
+        Add a just-sent virtual message to the chat's records dict so that
+        _last_msg_preview() can pick it up and set_chats() shows the correct
+        preview in the conversation list.
+
+        Because virtual_msg is the *same* Python dict object that sits in
+        _sorted_messages, clearing _local_pending later (in _mark_message_sent)
+        automatically updates the records entry too.
+        """
+        remote_jid = virtual_msg.get("key", {}).get("remoteJid", "")
+        if not remote_jid:
+            return
+        chat = self.main_window.chats.get(remote_jid)
+        if chat is None:
+            return
+        records = (
+            chat.setdefault("messages", {})
+                .setdefault("messages", {})
+                .setdefault("records", [])
+        )
+        local_id = virtual_msg.get("_local_id", "")
+        if local_id and any(r.get("_local_id") == local_id for r in records):
+            return  # already registered
+        records.append(virtual_msg)
+
     def _mark_message_sent(self, local_id: str):
         """
         Called on the main thread when a queued message is successfully delivered.
-        Clears the _local_pending flag, refreshes the list item, and plays the
-        message-sent sound (only when the conversation is currently active).
+        Clears the _local_pending flag, refreshes the list item, plays the
+        message-sent sound, and refreshes the conversation list preview.
         """
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
@@ -763,6 +794,8 @@ class ConversationsPanel(wx.Panel):
                 if hasattr(self.main_window, "message_sent_sound"):
                     self.main_window.message_sent_sound.play()
                 break
+        # Refresh conversation list so the preview reflects the sent message.
+        self.main_window.set_chats()
 
     # ── Voice recording ──────────────────────────────────────────────────────
 
@@ -938,6 +971,10 @@ class ConversationsPanel(wx.Panel):
         pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+
+        # Register the virtual message so the conversation list preview updates.
+        self._register_virtual_msg(virtual_msg)
+        self.main_window.set_chats()
 
         self._hide_voice_panel()
         self.message_field.SetFocus()
@@ -1768,6 +1805,8 @@ class ConversationsPanel(wx.Panel):
     def _play_audio(self, msg_id, duration_seconds, file_path, audio_ext=".ogg"):
         if not os.path.isfile(file_path):
             return
+
+        # ── Decrypt and write to a temp file ────────────────────────────────
         try:
             with open(file_path, "rb") as fh:
                 content = decrypt_bytes(fh.read(), self.main_window.key)
@@ -1775,22 +1814,52 @@ class ConversationsPanel(wx.Panel):
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name
+        except Exception:
+            self._stop_audio()
+            return
+
+        # ── Try decoded stream + Tempo FX (enables speed control) ───────────
+        # A decoded stream (BASS_STREAM_DECODE) cannot be played directly; it
+        # must be wrapped by a BASS FX processor such as Tempo.  If the FX
+        # plugin is unavailable, fall back to a plain stream without the effect.
+        stream_ok = False
+        try:
             self._audio_stream = sl_stream.FileStream(
                 file=self._audio_temp_file, decode=True
             )
             self._audio_tempo_ctrl = Tempo(self._audio_stream)
-            # Apply the persisted speed (do NOT reset to 1× on each new audio)
             _speed = self._audio_speed_steps[self._audio_speed_index]
             self._audio_tempo_ctrl.tempo = self._audio_tempo_map.get(_speed, 0)
-            self._audio_stream_duration = int(duration_seconds)
-            self._current_audio_id = msg_id
+            stream_ok = True
+        except Exception:
+            # BASS FX not available or format not supported with decode=True;
+            # discard the broken stream and retry without decode.
+            self._audio_tempo_ctrl = None
+            self._audio_stream = None
+
+        if not stream_ok:
+            try:
+                self._audio_stream = sl_stream.FileStream(
+                    file=self._audio_temp_file
+                )
+            except Exception:
+                self._stop_audio()
+                return
+
+        # ── Start playback ───────────────────────────────────────────────────
+        self._audio_stream_duration = int(duration_seconds)
+        self._current_audio_id = msg_id
+        try:
             self._audio_stream.play()
-            self._is_audio_playing = True
-            self._audio_timer.Start(200)
-            self._show_audio_controls()
-            self.audio_speed_btn.SetLabel(self._format_speed(_speed))
         except Exception:
             self._stop_audio()
+            return
+
+        self._is_audio_playing = True
+        self._audio_timer.Start(200)
+        self._show_audio_controls()
+        _speed = self._audio_speed_steps[self._audio_speed_index]
+        self.audio_speed_btn.SetLabel(self._format_speed(_speed))
 
     def _stop_audio(self):
         if self._audio_timer.IsRunning():
@@ -3313,6 +3382,9 @@ class ConversationsPanel(wx.Panel):
         self._on_cancel_reply()  # clear quoted state after send
         self._hide_attachment_panel()
         self.message_field.SetFocus()
+
+        # Refresh conversation list preview to show the last sent attachment.
+        self.main_window.set_chats()
 
     # ── Contact message helpers ──────────────────────────────────────────────
 

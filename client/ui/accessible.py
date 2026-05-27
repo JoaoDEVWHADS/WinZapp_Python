@@ -71,10 +71,10 @@ class AccessibleConversationDataButton(wx.Accessible):
 
 
 class AccessibleAddAttachmentButton(wx.Accessible):
-    """Reports Ctrl+Shift+J as the keyboard shortcut for the Add Attachment button."""
+    """Reports Ctrl+Shift+A as the keyboard shortcut for the Add Attachment button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+J")
+        return (wx.ACC_OK, "Ctrl+Shift+A")
 
 
 class AccessibleDiscardVoiceMessage(wx.Accessible):
