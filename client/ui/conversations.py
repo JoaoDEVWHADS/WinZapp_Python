@@ -306,6 +306,7 @@ class ConversationsPanel(wx.Panel):
             style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP,
         )
         self.message_field.Bind(wx.EVT_TEXT, self.on_change_message_field)
+        self.message_field.Bind(wx.EVT_TEXT_ENTER, self.on_send_message)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
         self._cancel_edit_btn = wx.Button(
@@ -423,11 +424,12 @@ class ConversationsPanel(wx.Panel):
     def create_accel_conversation(self):
         # ── Navigation / recording ──────────────────────────────────────────
         self.ID_CTRL_R          = wx.NewIdRef()  # record voice            (Ctrl+R)
+        self.ID_ALT_2           = wx.NewIdRef()  # jump to last message    (Alt+2)
         self.ID_ESC             = wx.NewIdRef()  # close conversation      (Esc)
         self.CTRL_W             = wx.NewIdRef()  # close conversation      (Ctrl+W)
         self.ID_CTRL_SHIFT_D    = wx.NewIdRef()  # conv data / discard     (Ctrl+Shift+D)
         # ── Attachment / media ───────────────────────────────────────────────
-        self.ID_CTRL_SHIFT_J    = wx.NewIdRef()  # add attachment          (Ctrl+Shift+J)
+        self.ID_CTRL_SHIFT_A    = wx.NewIdRef()  # add attachment          (Ctrl+Shift+A)
         self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+B)
         # ── Message-level ────────────────────────────────────────────────────
         self.ID_ALT_R           = wx.NewIdRef()  # reply                   (Alt+R)
@@ -442,6 +444,9 @@ class ConversationsPanel(wx.Panel):
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
         self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
+        # ── Conv-list shortcuts ───────────────────────────────────────────────
+        self.ID_CONV_PIN        = wx.NewIdRef()  # pin / unpin chat        (Ctrl+P)
+        self.ID_CONV_ARCHIVE    = wx.NewIdRef()  # archive / unarchive     (Ctrl+Q)
         # ── Group actions ────────────────────────────────────────────────────
         self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+C)
@@ -451,10 +456,11 @@ class ConversationsPanel(wx.Panel):
         AS = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,    ord("R"),        self.ID_CTRL_R),
+            (wx.ACCEL_ALT,     ord("2"),        self.ID_ALT_2),
             (wx.ACCEL_NORMAL,  wx.WXK_ESCAPE,   self.ID_ESC),
             (wx.ACCEL_CTRL,    ord("W"),         self.CTRL_W),
             (CS,               ord("D"),         self.ID_CTRL_SHIFT_D),
-            (CS,               ord("J"),         self.ID_CTRL_SHIFT_J),
+            (CS,               ord("A"),         self.ID_CTRL_SHIFT_A),
             (CS,               ord("B"),         self.ID_CTRL_SHIFT_B),
             (wx.ACCEL_ALT,     ord("R"),         self.ID_ALT_R),
             (AS,               ord("D"),         self.ID_ALT_SHIFT_D),
@@ -472,10 +478,11 @@ class ConversationsPanel(wx.Panel):
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message,   id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_jump_last,       id=self.ID_ALT_2)
         self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.ID_ESC)
         self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.CTRL_W)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,          id=self.ID_CTRL_SHIFT_D)
-        self.Bind(wx.EVT_MENU, self.on_add_attachment,         id=self.ID_CTRL_SHIFT_J)
+        self.Bind(wx.EVT_MENU, self.on_add_attachment,         id=self.ID_CTRL_SHIFT_A)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_s,          id=self.ID_CTRL_SHIFT_B)   # save as
         self.Bind(wx.EVT_MENU, self._on_accel_reply,           id=self.ID_ALT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_message_data,    id=self.ID_ALT_SHIFT_D)
@@ -734,6 +741,7 @@ class ConversationsPanel(wx.Panel):
 
         # Clear the text field (this also hides send btn, shows record btn).
         self.message_field.SetValue("")
+        self.message_field.SetFocus()
 
         # Enqueue for background sending (with retry on failure).
         pm = PendingMessage(local_id, remote_jid, text=text, quoted=self._quoted_message)
@@ -1037,18 +1045,18 @@ class ConversationsPanel(wx.Panel):
 
         # ── Archive / Unarchive ───────────────────────────────────────────
         if mw.is_chat_archived(jid):
-            ua_item = menu.Append(wx.ID_ANY, i18n.t("unarchive_chat"))
+            ua_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_unarchive(j), ua_item)
         else:
-            arch_item = menu.Append(wx.ID_ANY, i18n.t("archive_chat"))
+            arch_item = menu.Append(wx.ID_ANY, f"{i18n.t('archive_chat')}\tCtrl+Q")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_archive(j), arch_item)
 
         # ── Pin / Unpin ───────────────────────────────────────────────────
         if mw.is_chat_pinned(jid):
-            unpin_item = menu.Append(wx.ID_ANY, i18n.t("unpin_chat"))
+            unpin_item = menu.Append(wx.ID_ANY, f"{i18n.t('unpin_chat')}\tCtrl+P")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_unpin(j), unpin_item)
         else:
-            pin_item = menu.Append(wx.ID_ANY, i18n.t("pin_chat"))
+            pin_item = menu.Append(wx.ID_ANY, f"{i18n.t('pin_chat')}\tCtrl+P")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_pin(j), pin_item)
 
         menu.AppendSeparator()
@@ -1265,7 +1273,7 @@ class ConversationsPanel(wx.Panel):
         # Copy text (only for text messages)
         _TEXT_TYPES = ("conversation", "extendedTextMessage", "textMessage")
         if msg_type in _TEXT_TYPES:
-            copy_item = menu.Append(wx.ID_ANY, i18n.t("copy_message_text"))
+            copy_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_message_text')}\tCtrl+C")
             self.Bind(
                 wx.EVT_MENU,
                 lambda e, m=msg: self._on_menu_copy_message(m),
@@ -1485,12 +1493,34 @@ class ConversationsPanel(wx.Panel):
             event.Skip()
 
     def _on_conv_list_key_down(self, event):
-        """Make Space open the focused conversation (same as Enter)."""
-        if event.GetKeyCode() == wx.WXK_SPACE:
+        """Make Space open the focused conversation (same as Enter).
+        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives."""
+        key  = event.GetKeyCode()
+        ctrl = event.ControlDown()
+
+        if key == wx.WXK_SPACE:
             idx = self.conversations_list.GetFocusedItem()
             if idx >= 0:
                 self.conversations_list.Select(idx)
                 self.on_conversation_selected_by_index(idx)
+        elif ctrl and key == ord("P"):
+            idx = self.conversations_list.GetFocusedItem()
+            if 0 <= idx < len(self.chats_list):
+                jid = self.chats_list[idx].get("remoteJid", "")
+                if jid:
+                    if self.main_window.is_chat_pinned(jid):
+                        self._on_menu_unpin(jid)
+                    else:
+                        self._on_menu_pin(jid)
+        elif ctrl and key == ord("Q"):
+            idx = self.conversations_list.GetFocusedItem()
+            if 0 <= idx < len(self.chats_list):
+                jid = self.chats_list[idx].get("remoteJid", "")
+                if jid:
+                    if self.main_window.is_chat_archived(jid):
+                        self._on_menu_unarchive(jid)
+                    else:
+                        self._on_menu_archive(jid)
         else:
             event.Skip()
 
@@ -1727,9 +1757,11 @@ class ConversationsPanel(wx.Panel):
                 else:
                     if msg is not None:
                         self.main_window.handle_media_message(msg)
-                wx.CallAfter(
-                    self._play_audio, msg_id, duration_seconds, file_path, audio_ext
-                )
+                # Only play if the file was actually downloaded (non-empty)
+                if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
+                    wx.CallAfter(
+                        self._play_audio, msg_id, duration_seconds, file_path, audio_ext
+                    )
 
             threading.Thread(target=_download_and_play, daemon=True).start()
 
@@ -2079,13 +2111,24 @@ class ConversationsPanel(wx.Panel):
     def _sender_label(self, msg) -> str:
         if msg.get("key", {}).get("fromMe"):
             return self.main_window.i18n.t("sender_you")
+        key = msg.get("key", {})
+        # Look up the contact by participant JID (groups) or remoteJid (DMs)
+        participant = key.get("participant", "")
+        jid         = key.get("remoteJid", "")
+        lookup_jid  = participant or jid
+        if lookup_jid:
+            contact = self.main_window.contacts.get(lookup_jid)
+            if contact:
+                n = (contact.get("name") or contact.get("fullName")
+                     or contact.get("verifiedName") or contact.get("pushName") or "")
+                if n and not n.isdigit():
+                    return n
         push = msg.get("pushName", "")
         if push and not push.isdigit():
             return push
-        key = msg.get("key", {})
         if key.get("addressingMode") == "lid":
             return format_number(key.get("remoteJidAlt", ""))
-        return format_number(key.get("remoteJid", ""))
+        return format_number(participant or jid)
 
     def _is_separator(self, msg: dict) -> bool:
         """Return True if msg is the unread-messages separator sentinel."""
@@ -2786,6 +2829,18 @@ class ConversationsPanel(wx.Panel):
         dlg = NewConversationDialog(self.main_window)
         dlg.ShowModal()
         dlg.Destroy()
+
+    # ── Alt+2: jump to last message ────────────────────────────────────────
+
+    def _on_accel_jump_last(self, event):
+        """Alt+2: move focus to the last message in the current conversation."""
+        count = self.messages_list.GetItemCount()
+        if count > 0:
+            last = count - 1
+            self.messages_list.Focus(last)
+            self.messages_list.Select(last, True)
+            self.messages_list.EnsureVisible(last)
+            self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
 

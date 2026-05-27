@@ -1139,6 +1139,8 @@ class MainWindow(wx.Frame):
             self.sync_complete_sound.play()
             wx.CallAfter(self._set_status, "")
             self.output(self.i18n.t("sync_complete"))
+        # Refresh the conversations list UI after sync (order/names may have changed)
+        wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
 
     def wait_messages_set(self):
@@ -1285,10 +1287,21 @@ class MainWindow(wx.Frame):
                 main_chats.append(chat)
                 main_names.append(name)
 
-        # Pinned chats float to the top of the main list
+        # Pinned chats float to the top; within each group sort by most-recent
+        # message timestamp descending (newest first), then alphabetically.
+        def _chat_last_ts(chat):
+            ts = 0
+            for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+                t = int(msg.get("messageTimestamp", 0) or 0)
+                if t > ts:
+                    ts = t
+            return ts
+
         def _sort_key(pair):
             chat, name = pair
-            return (0 if chat.get("remoteJid", "") in pinned else 1, name.lower())
+            jid = chat.get("remoteJid", "")
+            pin = 0 if jid in pinned else 1
+            return (pin, -_chat_last_ts(chat), name.lower())
 
         pairs = sorted(zip(main_chats, main_names), key=_sort_key)
         main_chats = [c for c, _ in pairs]
@@ -1403,8 +1416,11 @@ class MainWindow(wx.Frame):
     def preselect_conversations(self):
         #Checks if window is still open
         if self.IsShown():
-            self.conversations_panel.conversations_list.Focus(0)
-            self.conversations_panel.conversations_list.Select(0)
+            lst = self.conversations_panel.conversations_list
+            if lst.GetItemCount() > 0:
+                lst.Focus(0)
+                lst.Select(0)
+                lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
         for chat in self.chats.values():
@@ -1516,8 +1532,9 @@ class MainWindow(wx.Frame):
 
     def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
         """
-        Base64-encode a WAV file and send it as an audio media message via the
-        Evolution API.  Returns True on HTTP 200/201, False on any failure.
+        Base64-encode a WAV/audio file and send it as a PTT voice message via the
+        Evolution API.  Uses /message/sendWhatsAppAudio which handles OGG conversion
+        server-side.  Returns True on HTTP 200/201, False on any failure.
         """
         try:
             with open(wav_path, "rb") as fh:
@@ -1526,14 +1543,13 @@ class MainWindow(wx.Frame):
             return False
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/message/sendMedia/{self.token}"
+            f"/message/sendWhatsAppAudio/{self.token}"
         )
         payload = {
-            "number":    remote_jid,
-            "mediatype": "audio",
-            "media":     audio_b64,
-            "mimetype":  "audio/wav",
-            "fileName":  "voice_message.wav",
+            "number":   remote_jid,
+            "audio":    audio_b64,
+            "encoding": True,
+            "ptt":      True,
         }
         if quoted:
             payload["quoted"] = quoted
@@ -1599,7 +1615,7 @@ class MainWindow(wx.Frame):
 
         if progress_callback is None:
             response = requests.post(url, json=payload, headers=headers)
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 return response.json().get("base64", "")
             return ""
 

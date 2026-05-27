@@ -56,12 +56,21 @@ class WebSocketClient:
             wx.MessageBox(f"{self.i18n.t('token_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
 
-        # Close pairing dialog if it exists (phone mode)
-        if hasattr(self.connect, 'pairing_dial'):
-            self.connect.pairing_dial.Destroy()
+        # Destroy dialogs on the main thread to avoid wx thread-safety issues.
+        # Guards against the case where the app is already paired (no dialogs open).
+        def _close_dialogs():
+            if hasattr(self.connect, 'pairing_dial'):
+                try:
+                    self.connect.pairing_dial.Destroy()
+                except Exception:
+                    pass
+            if hasattr(self.connect, 'connection_dial'):
+                try:
+                    self.connect.connection_dial.Destroy()
+                except Exception:
+                    pass
 
-        # Close connection dialog
-        self.connect.connection_dial.Destroy()
+        wx.CallAfter(_close_dialogs)
 
     def save_token(self, token):
         with open(data_path("token.tk"), "w") as token_file:
