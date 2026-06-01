@@ -198,11 +198,57 @@ async function main() {
     }
   }
 
-  try {
-    await pg.start();
-  } catch (err) {
-    console.error('[WinZapp] Failed to start embedded PostgreSQL:', err.message);
-    process.exit(1);
+  // ── Fix Windows built-in Administrator permissions ─────────────────────────
+  // When running as the Windows built-in Administrator account, initdb creates
+  // the pgdata directory with an ACL that includes BUILTIN\Administrators (group
+  // access).  PostgreSQL's startup check refuses to accept a data directory that
+  // has group or world access.  We strip the group ACE after a fresh init so
+  // postgres.exe accepts the directory.  The same fix is applied on pg.start()
+  // failure (below) so it also helps when pgdata was created by a different
+  // user context in a previous run.
+  if (process.platform === 'win32' && !pgAlreadyInit) {
+    try {
+      execFileSync('icacls', [PG_DATA_DIR, '/inheritance:r'], { stdio: 'pipe' });
+    } catch (_) {}
+    try {
+      execFileSync('icacls', [PG_DATA_DIR, '/remove:g', 'BUILTIN\\Administrators'], { stdio: 'pipe' });
+      console.log('[WinZapp] Permissões do pgdata ajustadas para compatibilidade com usuário administrador interno.');
+    } catch (_) {}
+  }
+
+  // ── Start PostgreSQL ───────────────────────────────────────────────────────
+  // On Windows as built-in Administrator, pg_ctl may fail on the first attempt
+  // because postgres.exe detects broad ACLs on the data directory.  We apply
+  // the permission fix and retry once.
+  {
+    const MAX_START_ATTEMPTS = process.platform === 'win32' ? 2 : 1;
+    let startErr = null;
+    for (let startAttempt = 1; startAttempt <= MAX_START_ATTEMPTS; startAttempt++) {
+      try {
+        await pg.start();
+        startErr = null;
+        break; // success
+      } catch (err) {
+        startErr = err;
+        console.error(
+          `[WinZapp] Tentativa ${startAttempt}/${MAX_START_ATTEMPTS} de iniciar PostgreSQL falhou: ${err.message}`
+        );
+        if (startAttempt < MAX_START_ATTEMPTS && process.platform === 'win32') {
+          console.log('[WinZapp] Corrigindo permissões do pgdata e aguardando antes de tentar novamente...');
+          try {
+            execFileSync('icacls', [PG_DATA_DIR, '/inheritance:r'], { stdio: 'pipe' });
+          } catch (_) {}
+          try {
+            execFileSync('icacls', [PG_DATA_DIR, '/remove:g', 'BUILTIN\\Administrators'], { stdio: 'pipe' });
+          } catch (_) {}
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+    if (startErr) {
+      console.error('[WinZapp] Failed to start embedded PostgreSQL:', startErr.message);
+      process.exit(1);
+    }
   }
 
   // ── Ensure the application database exists with UTF-8 encoding ────────────

@@ -384,6 +384,14 @@ class MainWindow(wx.Frame):
 
     # ── Incoming real-time messages ───────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_jid(jid: str) -> str:
+        """Normalize WhatsApp JID: replace the legacy @c.us suffix with @s.whatsapp.net.
+        @g.us (groups) and @lid (linked-device IDs) are left unchanged."""
+        if jid and jid.endswith("@c.us"):
+            return jid[:-5] + "@s.whatsapp.net"
+        return jid
+
     def on_new_message(self, msg: dict):
         """
         Called on the main thread (via wx.CallAfter) when a new message
@@ -393,7 +401,7 @@ class MainWindow(wx.Frame):
         """
         key        = msg.get("key", {})
         from_me    = key.get("fromMe", False)
-        remote_jid = key.get("remoteJid", "")
+        remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
 
         if not remote_jid:
@@ -1135,6 +1143,7 @@ class MainWindow(wx.Frame):
 
         #Get Local Chats
         self.chats = self.get_chats()
+        self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
         if not self.background_mode:
@@ -1232,11 +1241,14 @@ class MainWindow(wx.Frame):
             response = requests.post(url, headers=headers)
             response_data = response.json()
             for chat in response_data:
-                #If chat is not present
-                if not chat.get("remoteJid", "") in chats:
-                    if not "messages" in chat:
+                jid = self._normalize_jid(chat.get("remoteJid", ""))
+                if not jid:
+                    continue
+                if jid not in chats:
+                    if "messages" not in chat:
                         chat["messages"] = {"messages": {"records": []}}
-                    chats[chat.get("remoteJid", "")] = chat
+                    chat["remoteJid"] = jid
+                    chats[jid] = chat
             self.save_data(chats, self.contacts)
             return chats
         except Exception as e:
@@ -1245,9 +1257,90 @@ class MainWindow(wx.Frame):
 
     def normalize_chats(self, chats):
         for key, chat in chats.items():
-            if chat["unreadCount"] is None:
+            if chat.get("unreadCount") is None:
                 chat["unreadCount"] = 0
             chats[key] = chat
+        return chats
+
+    def deduplicate_chats(self, chats: dict) -> dict:
+        """
+        Merge duplicate chat entries that refer to the same contact but use
+        different JID formats:
+
+          1. @c.us (legacy) vs @s.whatsapp.net (modern) for the same phone number.
+             Both formats identify the same conversation; we keep @s.whatsapp.net
+             and merge any messages from the @c.us entry into it.
+
+          2. @lid (Linked-Device ID) vs @s.whatsapp.net when the @lid chat's
+             messages contain a remoteJidAlt / senderPn bridge field that maps
+             back to a phone-number JID already present in the chats dict.
+             We merge the @lid messages into the @s.whatsapp.net entry and drop
+             the @lid duplicate.
+
+        New keys are normalised to @s.whatsapp.net during the merge so that
+        subsequent lookups always hit the canonical entry.
+        """
+        def _merge_records(dst_records: list, src_records: list):
+            """Append src messages that are not already in dst (dedup by msg ID)."""
+            if not src_records:
+                return
+            dst_ids = {r.get("key", {}).get("id") for r in dst_records}
+            for r in src_records:
+                if r.get("key", {}).get("id") not in dst_ids:
+                    dst_records.append(r)
+
+        # ── Pass 1: normalise @c.us → @s.whatsapp.net ────────────────────────
+        cus_jids = [j for j in list(chats.keys()) if j.endswith("@c.us")]
+        for cus_jid in cus_jids:
+            if cus_jid not in chats:
+                continue
+            normalized = self._normalize_jid(cus_jid)
+            cus_chat   = chats.pop(cus_jid)
+            cus_chat["remoteJid"] = normalized
+
+            if normalized in chats:
+                # Both exist — merge messages into the @s.whatsapp.net entry
+                dst_records = (
+                    chats[normalized]
+                    .setdefault("messages", {})
+                    .setdefault("messages", {})
+                    .setdefault("records", [])
+                )
+                src_records = (
+                    cus_chat.get("messages", {})
+                    .get("messages", {})
+                    .get("records", [])
+                )
+                _merge_records(dst_records, src_records)
+            else:
+                # Only the @c.us version existed — rename it
+                chats[normalized] = cus_chat
+
+        # ── Pass 2: merge @lid into matching @s.whatsapp.net ─────────────────
+        lid_jids = [j for j in list(chats.keys()) if j.endswith("@lid")]
+        for lid_jid in lid_jids:
+            if lid_jid not in chats:
+                continue
+            lid_chat = chats[lid_jid]
+            alt_jid  = self._find_alt_jid_from_messages(lid_chat)
+            if not alt_jid or alt_jid not in chats:
+                continue  # no matching phone-number chat found — keep @lid as-is
+
+            # Merge @lid messages into the @s.whatsapp.net entry and drop @lid
+            dst_records = (
+                chats[alt_jid]
+                .setdefault("messages", {})
+                .setdefault("messages", {})
+                .setdefault("records", [])
+            )
+            src_records = (
+                lid_chat.get("messages", {})
+                .get("messages", {})
+                .get("records", [])
+            )
+            _merge_records(dst_records, src_records)
+            del chats[lid_jid]
+
         return chats
 
     def save_data(self, chats, contacts):
@@ -1486,6 +1579,9 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
+        remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
+        chat["remoteJid"] = remote_jid
+
         all_messages = []
         current_page = 1
         total_pages = 1
@@ -1493,7 +1589,7 @@ class MainWindow(wx.Frame):
         # Loop through all pages
         while current_page <= total_pages:
             payload = {
-                "where": { "key": { "remoteJid": chat.get("remoteJid", "")} },
+                "where": { "key": { "remoteJid": remote_jid} },
                 "page": current_page
             }
 
@@ -1510,6 +1606,20 @@ class MainWindow(wx.Frame):
 
         # After fetching all pages, update chat messages
         if all_messages:
+            # Preserve any messages received via WebSocket during this sync that
+            # the API hasn't indexed yet (they arrived after the API snapshot).
+            local_chat    = self.chats.get(remote_jid, {})
+            local_records = (local_chat.get("messages", {})
+                             .get("messages", {})
+                             .get("records", []))
+            if local_records:
+                api_ids = {r.get("key", {}).get("id") for r in all_messages}
+                extra   = [r for r in local_records
+                           if r.get("key", {}).get("id") and
+                              r.get("key", {}).get("id") not in api_ids]
+                if extra:
+                    all_messages = all_messages + extra
+
             if "messages" not in chat:
                 chat["messages"] = {}
             chat["messages"]["messages"] = {
@@ -1519,8 +1629,8 @@ class MainWindow(wx.Frame):
                 "records": all_messages
             }
 
-        if chat.get("messages", {}) and chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
-            self.chats[chat.get("remoteJid", "")] = chat
+        if chat.get("messages", {}) and chat["messages"] != self.chats.get(remote_jid, {}).get("messages", {}): #update only if necessary
+            self.chats[remote_jid] = chat
             wx.CallAfter(self.set_chats)
             self.save_data(self.chats, self.contacts)
 

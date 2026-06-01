@@ -91,27 +91,39 @@ class WebSocketClient:
         """
         Handle real-time incoming messages from the Evolution API.
 
-        The event payload can arrive in two forms:
+        The event payload can arrive in several forms:
           • {"data": {"messages": [...], "type": "notify"}}   (most common)
           • {"data": [message_object, ...], "type": "notify"} (some versions)
-        We only process type=="notify" (new messages) and skip
-        type=="append" (history) or missing type (echo/status updates).
+          • {"data": {<message fields>, "type": "notify"}}    (single message in data)
+          • {"messages": [...], "type": "notify"}             (no data wrapper)
+        We only process new messages and skip type=="append" (history replay).
         """
         try:
             data = info.get("data", {})
 
-            # Normalise: data may be a dict or a list
+            # Normalise: data may be a dict, list, or the message itself
             if isinstance(data, dict):
                 event_type = data.get("type", "")
                 messages   = data.get("messages", [])
+                # Some versions embed the single message directly in "data"
+                if not messages and data.get("key"):
+                    messages = [data]
             elif isinstance(data, list):
                 # Some Evolution versions send the messages array directly
                 event_type = info.get("type", "notify")
                 messages   = data
             else:
-                return
+                event_type = ""
+                messages   = []
 
-            if event_type not in ("notify", ""):
+            # Fallback: messages may be at the root of the info dict
+            if not messages:
+                messages = info.get("messages", [])
+                if not messages and info.get("key"):
+                    messages = [info]
+
+            # Skip historical sync replays; allow "notify" and unknown types
+            if event_type == "append":
                 return
 
             if not isinstance(messages, list):
@@ -166,6 +178,11 @@ class WebSocketClient:
                 key = last_msg.get("key", {})
                 if key.get("fromMe", False):
                     continue
+                # Ensure remoteJid is present — some payloads omit it from lastMessage
+                if not key.get("remoteJid"):
+                    last_msg = dict(last_msg)
+                    last_msg["key"] = dict(key)
+                    last_msg["key"]["remoteJid"] = jid
                 wx.CallAfter(self.main_window.on_new_message, last_msg)
         except Exception as e:
             print(f"[WebSocketClient] on_contacts_update error: {e}")
