@@ -775,7 +775,7 @@ class MainWindow(wx.Frame):
 
         if self.background_mode:
             # Silent wait — no dialog, no speech.  Timeout → exit code 1.
-            deadline = time.time() + 180
+            deadline = time.time() + 120
             while time.time() < deadline:
                 if self._is_evolution_running():
                     return
