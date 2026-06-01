@@ -198,63 +198,42 @@ async function main() {
     }
   }
 
-  // ── Fix Windows built-in Administrator permissions ─────────────────────────
+  // ── Repair broken pgdata permissions (Windows) ───────────────────────────
   //
-  // IMPORTANT: This fix is ONLY for the Windows built-in Administrator account
-  // (SID ending in -500).  Regular administrator accounts must NOT be touched
-  // here — their access to pgdata comes through BUILTIN\Administrators and
-  // removing that group ACE would break their access.
+  // Previous WinZapp versions incorrectly ran `icacls /inheritance:r` and
+  // `icacls /remove:g BUILTIN\Administrators` on pgdata for ALL Windows users,
+  // stripping the Administrators group ACE and leaving the directory
+  // inaccessible even to regular administrator accounts.
   //
-  // The built-in Administrator's problem:
-  //   initdb creates pgdata with an ACL that includes BUILTIN\Administrators
-  //   (group access).  PostgreSQL's startup check refuses to accept a data
-  //   directory that has group access.  For the built-in Administrator we strip
-  //   the group ACE after a fresh init so postgres.exe accepts the directory;
-  //   the Administrator's own personal SID ACE (which initdb also sets) keeps
-  //   giving them the required access.
-  //
-  // Detection: `whoami /user /fo csv /nh` returns the current user's SID.
-  // A SID ending with -500 is always the built-in Administrator account.
-
-  /** Returns true only when running as the Windows built-in Administrator (SID -500). */
-  function isBuiltinAdministrator() {
-    if (process.platform !== 'win32') return false;
-    try {
-      const out = execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], {
-        encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-      return /-500"?\s*$/.test(out);
-    } catch (_) {
-      return false;
+  // On every startup we check whether pgdata exists but cannot be read by
+  // the current process.  If so, we repair it with `takeown` (reclaim
+  // ownership) followed by `icacls /reset /T /C` (restore inherited
+  // permissions from the parent directory).  This is idempotent and safe.
+  if (process.platform === 'win32' && fs.existsSync(PG_DATA_DIR)) {
+    let readable = false;
+    try { fs.readdirSync(PG_DATA_DIR); readable = true; } catch (_) {}
+    if (!readable) {
+      console.log('[WinZapp] pgdata inacessível — reparando permissões (takeown + icacls /reset)...');
+      try {
+        execFileSync('takeown', ['/F', PG_DATA_DIR, '/R', '/D', 'Y'], { stdio: 'pipe' });
+      } catch (_) {}
+      try {
+        execFileSync('icacls', [PG_DATA_DIR, '/reset', '/T', '/C'], { stdio: 'pipe' });
+        console.log('[WinZapp] Permissões do pgdata reparadas com sucesso.');
+      } catch (_) {
+        console.warn('[WinZapp] Reparo automático falhou. Execute manualmente como administrador:');
+        console.warn(`[WinZapp]   takeown /F "${PG_DATA_DIR}" /R /D Y`);
+        console.warn(`[WinZapp]   icacls  "${PG_DATA_DIR}" /reset /T /C`);
+      }
     }
   }
 
-  const builtinAdmin = isBuiltinAdministrator();
-
-  if (builtinAdmin && !pgAlreadyInit) {
-    // Fresh init as built-in Administrator: strip group ACE so postgres accepts
-    // the directory.  Non-fatal — we proceed even if icacls is unavailable.
-    try {
-      execFileSync('icacls', [PG_DATA_DIR, '/inheritance:r'], { stdio: 'pipe' });
-    } catch (_) {}
-    try {
-      execFileSync('icacls', [PG_DATA_DIR, '/remove:g', 'BUILTIN\\Administrators'], { stdio: 'pipe' });
-      console.log('[WinZapp] Permissões do pgdata ajustadas para compatibilidade com usuário administrador interno.');
-    } catch (_) {}
-  }
-
   // ── Start PostgreSQL ───────────────────────────────────────────────────────
-  //
-  // Two retry scenarios on Windows:
-  //
-  //   A) Built-in Administrator: postgres detects broad ACLs and refuses.
-  //      Fix: strip BUILTIN\Administrators from pgdata ACL then retry.
-  //
-  //   B) Regular admin user after a botched previous fix: the Administrators
-  //      group ACE may have been incorrectly removed, causing "Permission
-  //      denied".  Fix: restore the Administrators group ACE then retry.
+  // Retry once on failure — handles transient errors such as antivirus
+  // locking freshly-extracted binaries or a previous postgres process still
+  // releasing the port lock.
   {
-    const MAX_START_ATTEMPTS = process.platform === 'win32' ? 2 : 1;
+    const MAX_START_ATTEMPTS = 2;
     let startErr = null;
     for (let startAttempt = 1; startAttempt <= MAX_START_ATTEMPTS; startAttempt++) {
       try {
@@ -267,27 +246,8 @@ async function main() {
         console.error(
           `[WinZapp] Tentativa ${startAttempt}/${MAX_START_ATTEMPTS} de iniciar PostgreSQL falhou: ${errMsg}`
         );
-        if (startAttempt < MAX_START_ATTEMPTS && process.platform === 'win32') {
-          if (builtinAdmin) {
-            // Scenario A: strip Administrators group access (built-in admin)
-            console.log('[WinZapp] Corrigindo permissões do pgdata (administrador interno) e aguardando...');
-            try {
-              execFileSync('icacls', [PG_DATA_DIR, '/inheritance:r'], { stdio: 'pipe' });
-            } catch (_) {}
-            try {
-              execFileSync('icacls', [PG_DATA_DIR, '/remove:g', 'BUILTIN\\Administrators'], { stdio: 'pipe' });
-            } catch (_) {}
-          } else {
-            // Scenario B: restore Administrators group access (regular admin,
-            // may have been broken by a previous version of this fix)
-            console.log('[WinZapp] Restaurando permissões do pgdata e aguardando...');
-            try {
-              execFileSync('icacls', [
-                PG_DATA_DIR, '/grant', 'BUILTIN\\Administrators:(OI)(CI)F',
-              ], { stdio: 'pipe' });
-            } catch (_) {}
-          }
-          await new Promise(resolve => setTimeout(resolve, 2000));
+        if (startAttempt < MAX_START_ATTEMPTS) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
         }
       }
     }
