@@ -198,40 +198,72 @@ async function main() {
     }
   }
 
-  // ── Repair broken pgdata permissions (Windows) ───────────────────────────
+  // ── Windows built-in Administrator permission handling ───────────────────
   //
-  // Previous WinZapp versions incorrectly ran `icacls /inheritance:r` and
-  // `icacls /remove:g BUILTIN\Administrators` on pgdata for ALL Windows users,
-  // stripping the Administrators group ACE and leaving the directory
-  // inaccessible even to regular administrator accounts.
+  // RULE: any call to takeown / icacls / SetNamedSecurityInfo is ONLY allowed
+  // when the current user is the Windows built-in Administrator (SID -500).
+  // For every other account — including ordinary administrator accounts —
+  // this code is entirely skipped and the file behaves exactly as it did
+  // before any of these changes were made.
   //
-  // On every startup we check whether pgdata exists but cannot be read by
-  // the current process.  If so, we repair it with `takeown` (reclaim
-  // ownership) followed by `icacls /reset /T /C` (restore inherited
-  // permissions from the parent directory).  This is idempotent and safe.
-  if (process.platform === 'win32' && fs.existsSync(PG_DATA_DIR)) {
-    let readable = false;
-    try { fs.readdirSync(PG_DATA_DIR); readable = true; } catch (_) {}
-    if (!readable) {
-      console.log('[WinZapp] pgdata inacessível — reparando permissões (takeown + icacls /reset)...');
-      try {
-        execFileSync('takeown', ['/F', PG_DATA_DIR, '/R', '/D', 'Y'], { stdio: 'pipe' });
-      } catch (_) {}
-      try {
-        execFileSync('icacls', [PG_DATA_DIR, '/reset', '/T', '/C'], { stdio: 'pipe' });
-        console.log('[WinZapp] Permissões do pgdata reparadas com sucesso.');
-      } catch (_) {
-        console.warn('[WinZapp] Reparo automático falhou. Execute manualmente como administrador:');
-        console.warn(`[WinZapp]   takeown /F "${PG_DATA_DIR}" /R /D Y`);
-        console.warn(`[WinZapp]   icacls  "${PG_DATA_DIR}" /reset /T /C`);
-      }
+  // Detection: `whoami /user /fo csv /nh` outputs the primary user SID.
+  // The built-in Administrator always has a SID ending in -500 and that
+  // suffix is unique (no regular user account can share it).
+  let isBuiltinAdmin = false;
+  if (process.platform === 'win32') {
+    try {
+      const whoOut = execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      // whoami CSV output: "DOMAIN\User","S-1-5-21-xxx-yyy-zzz-500"
+      isBuiltinAdmin = /-500"?\s*$/.test(whoOut);
+    } catch (_) {
+      // whoami unavailable — assume not built-in admin (safe default)
     }
   }
 
+  if (isBuiltinAdmin) {
+    // ── Built-in Administrator: repair inaccessible pgdata ────────────────
+    // Previous WinZapp versions ran destructive icacls commands that could
+    // leave pgdata unreadable.  Repair here using takeown + icacls /reset.
+    // This block only runs when isBuiltinAdmin === true.
+    if (fs.existsSync(PG_DATA_DIR)) {
+      let readable = false;
+      try { fs.readdirSync(PG_DATA_DIR); readable = true; } catch (_) {}
+      if (!readable) {
+        console.log('[WinZapp] pgdata inacessível (administrador interno) — reparando...');
+        try { execFileSync('takeown', ['/F', PG_DATA_DIR, '/R', '/D', 'Y'], { stdio: 'pipe' }); } catch (_) {}
+        try { execFileSync('icacls', [PG_DATA_DIR, '/reset', '/T', '/C'], { stdio: 'pipe' }); } catch (_) {}
+      }
+    }
+
+    // ── Built-in Administrator: fix pgdata ACL after fresh initdb ─────────
+    // When initdb runs as the built-in Administrator, it may set the pgdata
+    // owner to BUILTIN\Administrators (the group), which causes PostgreSQL
+    // to refuse the data directory as having "group access".  We take
+    // explicit ownership and grant Full Control by user SID so that
+    // postgres.exe can access the directory with its inherited token.
+    if (!pgAlreadyInit) {
+      try {
+        execFileSync('takeown', ['/F', PG_DATA_DIR, '/R', '/D', 'Y'], { stdio: 'pipe' });
+        execFileSync('icacls', [PG_DATA_DIR,
+          '/grant:r', `${process.env.USERNAME || 'Administrator'}:(OI)(CI)F`,
+          '/T', '/C',
+        ], { stdio: 'pipe' });
+        console.log('[WinZapp] Permissões do pgdata configuradas para administrador interno.');
+      } catch (e) {
+        console.warn('[WinZapp] Aviso: não foi possível ajustar permissões do pgdata:', e.message);
+      }
+    }
+  }
+  // (All users who are NOT the built-in Administrator reach this point
+  //  without any file-system modification having occurred.)
+
   // ── Start PostgreSQL ───────────────────────────────────────────────────────
-  // Retry once on failure — handles transient errors such as antivirus
-  // locking freshly-extracted binaries or a previous postgres process still
-  // releasing the port lock.
+  // Retry once on transient failure (antivirus locking binaries, previous
+  // postgres process still releasing the port lock, etc.).
+  // No permission changes are made here under any circumstances.
   {
     const MAX_START_ATTEMPTS = 2;
     let startErr = null;
