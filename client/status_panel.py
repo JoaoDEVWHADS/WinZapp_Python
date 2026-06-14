@@ -376,7 +376,11 @@ class StatusPanel(wx.Panel):
                 my_statuses.append(item)
                 continue
             remote_jid  = key.get("remoteJid", "")
-            participant = key.get("participant", "")
+            # key.participant is the canonical sender field for status messages,
+            # but may be null/missing if the Baileys WAMessage had participant
+            # at the top level instead of inside the key.  Fall back to the
+            # top-level participant column that Prisma also exposes.
+            participant = (key.get("participant") or item.get("participant") or "")
             # status@broadcast is the channel; real sender is in participant
             if remote_jid == "status@broadcast" and participant:
                 jid = participant

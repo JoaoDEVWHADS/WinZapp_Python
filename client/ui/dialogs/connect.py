@@ -366,10 +366,6 @@ class Connect:
         """Initiates QR-CODE connection without user interaction."""
         self.qrcode_connection_started = True
         try:
-            # Ensure messages_set_completed is set to False
-            self.main_window.settings["status"]["messages_set_completed"] = False
-            self.main_window.save_settings()
-
             # Determine whether an instance already exists for this token.
             # If WA_token is already saved the Evolution API instance was created
             # in a previous session — skip create + websocket-setup and go
@@ -380,6 +376,9 @@ class Connect:
             if _instance_exists:
                 self.main_window.token = existing_token
             else:
+                # New pairing: reset sync flag so we wait for messages.set
+                self.main_window.settings["status"]["messages_set_completed"] = False
+                self.main_window.save_settings()
                 self.main_window.token = self.generate_random_token()
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}
@@ -461,9 +460,6 @@ class Connect:
             )
             if not self.phone_number:
                 return
-            #Ensure messages_set_completed is set to False
-            self.main_window.settings["status"]["messages_set_completed"] = False
-            self.main_window.save_settings()
             # Normalise stored number to digits-only for comparison
             stored_raw = "".join(
                 c for c in self.main_window.settings.get("privateinfo", {}).get(
@@ -477,6 +473,10 @@ class Connect:
             # create + websocket-setup and jump straight to /instance/connect.
             existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
             _instance_exists = bool(stored_raw == self.phone_number and existing_token)
+            if not _instance_exists:
+                # New pairing: reset sync flag so we wait for messages.set
+                self.main_window.settings["status"]["messages_set_completed"] = False
+                self.main_window.save_settings()
 
             if _instance_exists:
                 self.main_window.token = existing_token

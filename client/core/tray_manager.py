@@ -7,6 +7,7 @@ right-click context menu (Open / Exit).
 """
 
 import os
+import time
 import wx
 import wx.adv
 from core.i18n import I18n
@@ -27,8 +28,10 @@ class TrayIcon(wx.adv.TaskBarIcon):
         self.i18n.get_language()
 
         self._icon = self._load_icon()
+        self._last_activate = 0.0  # debounce timestamp
 
         self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self._on_activate)
+        self.Bind(wx.adv.EVT_TASKBAR_LEFT_UP,    self._on_activate)
         self.Bind(wx.EVT_MENU, self._on_open,           id=_ID_OPEN)
         self.Bind(wx.EVT_MENU, self._on_toggle_offline, id=_ID_OFFLINE)
         self.Bind(wx.EVT_MENU, self._on_exit,           id=_ID_EXIT)
@@ -163,7 +166,15 @@ class TrayIcon(wx.adv.TaskBarIcon):
     # ── Event handlers ────────────────────────────────────────────────────────
 
     def _on_activate(self, event):
-        """Double-click (or Enter/Space on keyboard) on tray icon."""
+        """Left-click, double-click, or keyboard Enter on tray icon.
+
+        Both EVT_TASKBAR_LEFT_UP and EVT_TASKBAR_LEFT_DCLICK fire on a
+        double-click, so debounce to a 400ms window to avoid restoring twice.
+        """
+        now = time.monotonic()
+        if now - self._last_activate < 0.4:
+            return
+        self._last_activate = now
         wx.CallAfter(self.main_window.restore_window)
 
     def _on_open(self, event):

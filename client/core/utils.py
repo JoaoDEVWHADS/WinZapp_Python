@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import requests
 from cryptography.fernet import Fernet
 
@@ -31,9 +32,19 @@ def decrypt_bytes(encrypted_data, key):
     fernet = Fernet(key)
     return fernet.decrypt(encrypted_data)
 
+def _sanitize_for_json(obj):
+    """Recursively convert bytes values to base64 strings so json.dumps never raises."""
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode("ascii")
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(item) for item in obj]
+    return obj
+
 def encrypt_json(data, key):
     fernet = Fernet(key)
-    json_data = json.dumps(data).encode()
+    json_data = json.dumps(_sanitize_for_json(data)).encode()
     encrypted_data = fernet.encrypt(json_data)
     return encrypted_data
 
@@ -42,6 +53,13 @@ def decrypt_json(encrypted_data, key):
     decrypted_data = fernet.decrypt(encrypted_data)
     data = json.loads(decrypted_data.decode())
     return data
+
+def is_phone_like(name: str) -> bool:
+    """Return True if name looks like a phone number rather than a display name."""
+    if not name:
+        return False
+    digit_count = sum(1 for c in name if c.isdigit())
+    return digit_count >= 7 and digit_count >= len(name) * 0.7
 
 def format_number(string_number):
     #Removes any non-digit characters

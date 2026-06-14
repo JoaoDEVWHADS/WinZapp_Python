@@ -29,7 +29,7 @@ from ui.accessible import (
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
 )
-from core.utils import format_number, decrypt_bytes
+from core.utils import format_number, decrypt_bytes, is_phone_like
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -47,6 +47,7 @@ class ConversationsPanel(wx.Panel):
         self.chat_names = []
         self.conversation = None
         self.conversation_name = ""
+        self._last_open_jid = ""
 
         # ── Audio / video player state ──────────────────────────────────────
         self._sorted_messages = []
@@ -456,7 +457,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_SHIFT_D    = wx.NewIdRef()  # conv data / discard     (Ctrl+Shift+D)
         # ── Attachment / media ───────────────────────────────────────────────
         self.ID_CTRL_SHIFT_A    = wx.NewIdRef()  # add attachment          (Ctrl+Shift+A)
-        self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+B)
+        self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # mute / unmute           (Ctrl+Shift+B)
         # ── Message-level ────────────────────────────────────────────────────
         self.ID_ALT_R           = wx.NewIdRef()  # reply                   (Alt+R)
         self.ID_ALT_SHIFT_D     = wx.NewIdRef()  # message data            (Alt+Shift+D)
@@ -465,7 +466,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         # ── Conversation-level ───────────────────────────────────────────────
-        self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # mute / unmute           (Ctrl+Shift+S)
+        self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+S)
         self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # mark as read            (Ctrl+Shift+M)
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
@@ -509,7 +510,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.CTRL_W)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,          id=self.ID_CTRL_SHIFT_D)
         self.Bind(wx.EVT_MENU, self.on_add_attachment,         id=self.ID_CTRL_SHIFT_A)
-        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_s,          id=self.ID_CTRL_SHIFT_B)   # save as
+        self.Bind(wx.EVT_MENU, self._on_action_save_as,         id=self.ID_CTRL_SHIFT_S)   # save as (Ctrl+Shift+S)
         self.Bind(wx.EVT_MENU, self._on_accel_reply,           id=self.ID_ALT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_message_data,    id=self.ID_ALT_SHIFT_D)
         self.Bind(wx.EVT_MENU, self._on_accel_forward,         id=self.ID_CTRL_SHIFT_E)
@@ -517,7 +518,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p,          id=self.ID_CTRL_SHIFT_P)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_message,    id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup, id=self.ID_ALT_C)
-        self.Bind(wx.EVT_MENU, self._on_accel_mute,            id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_accel_mute,            id=self.ID_CTRL_SHIFT_B)   # mute (Ctrl+Shift+B)
         self.Bind(wx.EVT_MENU, self._on_accel_mark_read,       id=self.ID_CTRL_SHIFT_M)
         self.Bind(wx.EVT_MENU, self._on_accel_open_search,     id=self.ID_CTRL_SHIFT_F)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,     id=self.ID_ALT_3)
@@ -553,12 +554,14 @@ class ConversationsPanel(wx.Panel):
             self._search_open_btn.Show()
             self._search_field.SetValue("")
         self.conversation = conversation
+        _conv_jid = conversation.get("remoteJid", "")
+        self._last_open_jid = _conv_jid
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
             or conversation.get("pushName", "")
             or self.main_window.find_jid_through_messages(conversation)
-            or format_number(conversation.get("remoteJid", ""))
+            or (format_number(_conv_jid) if not _conv_jid.endswith("@lid") else "")
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
@@ -841,6 +844,15 @@ class ConversationsPanel(wx.Panel):
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window.set_chats()
 
+    def _mark_message_failed(self, local_id: str):
+        """Mark a virtual pending message as permanently failed (exhausted retries)."""
+        for i, msg in enumerate(self._sorted_messages):
+            if msg.get("_local_id") == local_id:
+                msg["_local_pending"] = False
+                msg["_send_failed"]   = True
+                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                break
+
     # ── Voice recording ──────────────────────────────────────────────────────
 
     def _start_voice_recording(self):
@@ -1051,6 +1063,18 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Hide()
         self.Layout()
         self.conversations_list.SetFocus()
+        self._restore_conversation_selection()
+
+    def _restore_conversation_selection(self):
+        """Select and focus the last-opened conversation in the list."""
+        if not self._last_open_jid:
+            return
+        for i, chat in enumerate(self.chats_list):
+            if chat.get("remoteJid") == self._last_open_jid:
+                self.conversations_list.Focus(i)
+                self.conversations_list.Select(i)
+                self.conversations_list.EnsureVisible(i)
+                return
 
     # ── Conversations context menu ──────────────────────────────────────────
 
@@ -1448,7 +1472,7 @@ class ConversationsPanel(wx.Panel):
         ):
             menu.AppendSeparator()
             save_item = menu.Append(
-                wx.ID_ANY, f"{i18n.t('save_as')}\tCtrl+Shift+B"
+                wx.ID_ANY, f"{i18n.t('save_as')}\tCtrl+Shift+S"
             )
             self.Bind(wx.EVT_MENU, self._on_action_save_as, save_item)
 
@@ -2334,23 +2358,33 @@ class ConversationsPanel(wx.Panel):
     def _sender_label(self, msg) -> str:
         if msg.get("key", {}).get("fromMe"):
             return self.main_window.i18n.t("sender_you")
-        key = msg.get("key", {})
-        # Look up the contact by participant JID (groups) or remoteJid (DMs)
+        key         = msg.get("key", {})
         participant = key.get("participant", "")
         jid         = key.get("remoteJid", "")
         lookup_jid  = participant or jid
+        mw = self.main_window
         if lookup_jid:
-            contact = self.main_window.contacts.get(lookup_jid)
+            contact = mw.contacts.get(lookup_jid)
+            if not contact and lookup_jid.endswith("@lid"):
+                phone_jid = getattr(mw, "_lid_to_phone", {}).get(lookup_jid, "")
+                if phone_jid:
+                    contact = mw.contacts.get(phone_jid)
             if contact:
                 n = contact.get("pushName") or ""
-                if n and not n.isdigit():
+                if n and not is_phone_like(n):
                     return n
         push = msg.get("pushName", "")
-        if push and not push.isdigit():
+        if push and not is_phone_like(push):
             return push
-        if key.get("addressingMode") == "lid":
-            return format_number(key.get("remoteJidAlt", ""))
-        return format_number(participant or jid)
+        alt = key.get("remoteJidAlt", "")
+        if alt and alt.endswith("@s.whatsapp.net"):
+            return format_number(alt)
+        phone_jid = participant or jid
+        if phone_jid.endswith("@lid"):
+            phone_jid = getattr(mw, "_lid_to_phone", {}).get(phone_jid, "")
+        if phone_jid and not phone_jid.endswith("@lid"):
+            return format_number(phone_jid)
+        return ""
 
     def _is_separator(self, msg: dict) -> bool:
         """Return True if msg is the unread-messages separator sentinel."""
@@ -2411,10 +2445,17 @@ class ConversationsPanel(wx.Panel):
             return ""
         mw = self.main_window
         contact = mw.contacts.get(participant)
+        if not contact and participant.endswith("@lid"):
+            phone_jid = getattr(mw, "_lid_to_phone", {}).get(participant, "")
+            if phone_jid:
+                contact = mw.contacts.get(phone_jid)
         if contact:
             name = contact.get("pushName") or ""
-            if name:
+            if name and not is_phone_like(name):
                 return name
+        if participant.endswith("@lid"):
+            phone_jid = getattr(mw, "_lid_to_phone", {}).get(participant, "")
+            return format_number(phone_jid) if phone_jid else ""
         return format_number(participant) or participant
 
     def _render_message_line(self, msg) -> str:

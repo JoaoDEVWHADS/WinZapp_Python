@@ -17,6 +17,7 @@ Design decisions:
     sender inside the notification.
 """
 
+import sys
 import threading
 import uuid
 import wx
@@ -233,11 +234,22 @@ class NotificationManager:
         self._setup()
 
     def _setup(self):
+        # In dev mode (running from source) the "WinZapp" AUMID is not registered
+        # in the Windows Start Menu, so InteractableWindowsToaster fails silently.
+        # Use sys.executable as the app-id instead — Python is already registered.
+        app_id = self.APP_ID if getattr(sys, "frozen", False) else sys.executable
+        self._interactable = False
         try:
             from windows_toasts import InteractableWindowsToaster
-            self._toaster = InteractableWindowsToaster(self.APP_ID)
+            self._toaster = InteractableWindowsToaster(app_id)
+            self._interactable = True
         except Exception as e:
-            print(f"[NotificationManager] Toast system unavailable: {e}")
+            print(f"[NotificationManager] InteractableWindowsToaster unavailable: {e}")
+            try:
+                from windows_toasts import WindowsToaster
+                self._toaster = WindowsToaster(app_id)
+            except Exception as e2:
+                print(f"[NotificationManager] Toast system unavailable: {e2}")
 
     def send(self, title: str, body: str, remote_jid: str):
         """Send a toast notification (non-blocking)."""
@@ -264,19 +276,25 @@ class NotificationManager:
                 toast.text_fields = [title, body]
                 toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
-                toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
-
                 jid_snapshot = remote_jid
 
-                def on_activated(event):
-                    inputs     = getattr(event, "inputs", {}) or {}
-                    reply_text = (inputs.get("reply_box") or "").strip()
-                    if reply_text:
-                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
-                    else:
+                if self._interactable:
+                    toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
+
+                    def on_activated(event):
+                        inputs     = getattr(event, "inputs", {}) or {}
+                        reply_text = (inputs.get("reply_box") or "").strip()
+                        if reply_text:
+                            wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
+                        else:
+                            wx.CallAfter(self._do_open, jid_snapshot)
+
+                    toast.on_activated = on_activated
+                else:
+                    def on_activated(event):
                         wx.CallAfter(self._do_open, jid_snapshot)
 
-                toast.on_activated = on_activated
+                    toast.on_activated = on_activated
                 self._toaster.show_toast(toast)
 
             # Play custom OGG sound after releasing the lock

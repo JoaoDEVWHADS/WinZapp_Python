@@ -57,10 +57,10 @@ class AccessibleRecordVoiceMessage(wx.Accessible):
 
 
 class AccessibleSaveAs(wx.Accessible):
-    """Reports Ctrl+Shift+B as the keyboard shortcut for the Save-As button."""
+    """Reports Ctrl+Shift+S as the keyboard shortcut for the Save-As button."""
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Shift+B")
+        return (wx.ACC_OK, "Ctrl+Shift+S")
 
 
 class AccessibleConversationDataButton(wx.Accessible):

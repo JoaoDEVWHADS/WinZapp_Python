@@ -14,7 +14,6 @@ class WebSocketClient:
 
         self.sio = socketio.Client(
             reconnection=True, reconnection_attempts=5,
-            logger=True
         )
         #Bind events
         self.sio.on("connect", self.on_connect)
@@ -36,12 +35,28 @@ class WebSocketClient:
         #Checks the new connection state
         connection_state = info.get("data", {}).get("state", "")
         if connection_state == "open":
+            # Mark WhatsApp as connected so the MessageQueue resumes sending.
+            self.main_window._wa_connected = True
+            if hasattr(self.main_window, "message_queue"):
+                self.main_window.message_queue.flush()
             self.on_pairing_complete()
         elif connection_state == "close":
-            self.main_window.error_sound.play()
-            # Show error in the appropriate dialog
-            parent_dialog = self.connect.pairing_dial if hasattr(self.connect, 'pairing_dial') else self.connect.connection_dial
-            wx.MessageBox(self.i18n.t("instance_state_changed"), self.i18n.t("error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR, parent_dialog)
+            # Must run on the main thread — wx.MessageBox from a Socket.IO
+            # I/O thread triggers COM cross-thread errors and can freeze the app.
+            def _show_error():
+                self.main_window.error_sound.play()
+                parent_dialog = (
+                    self.connect.pairing_dial
+                    if hasattr(self.connect, 'pairing_dial')
+                    else self.connect.connection_dial
+                )
+                wx.MessageBox(
+                    self.i18n.t("instance_state_changed"),
+                    self.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    parent_dialog,
+                )
+            wx.CallAfter(_show_error)
 
     def on_pairing_complete(self):
         # Destroy dialogs on the main thread to avoid wx thread-safety issues.

@@ -40,12 +40,14 @@ class PendingMessage:
         self.caption      = caption or "" # optional caption for media
         self.contact_info = contact_info  # dict for contact attachment
         self.quoted       = quoted        # quoted/replied-to message dict
+        self.fail_count   = 0            # consecutive send failures
 
 
 class MessageQueue:
     """Thread-safe outgoing-message queue with automatic retry."""
 
     _RETRY_INTERVAL = 3   # seconds between retry cycles
+    _MAX_RETRIES    = 20  # give up after this many consecutive failures per message
 
     def __init__(self, main_window):
         self.main_window = main_window
@@ -87,8 +89,10 @@ class MessageQueue:
             if self._stop.is_set():
                 break
 
-            # While offline: skip this cycle, wait for the next event/timeout.
+            # While offline or WhatsApp disconnected: skip this cycle.
             if self.main_window.offline_mode:
+                continue
+            if not getattr(self.main_window, "_wa_connected", True):
                 continue
 
             with self._lock:
@@ -98,6 +102,8 @@ class MessageQueue:
                 if self._stop.is_set():
                     break
                 if self.main_window.offline_mode:
+                    break
+                if not getattr(self.main_window, "_wa_connected", True):
                     break
                 try:
                     if msg.audio_path:
@@ -118,6 +124,7 @@ class MessageQueue:
                             msg.jid, msg.text, quoted=msg.quoted
                         )
                     if ok:
+                        msg.fail_count = 0
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
                         # Notify the UI on the main thread.
@@ -126,5 +133,25 @@ class MessageQueue:
                             msg.local_id,
                             msg.audio_path,
                         )
-                except Exception:
-                    pass  # Keep in queue; will be retried next cycle.
+                    else:
+                        msg.fail_count += 1
+                        print(f"[MessageQueue] send failed for {msg.local_id} (attempt {msg.fail_count}/{self._MAX_RETRIES})")
+                        if msg.fail_count >= self._MAX_RETRIES:
+                            print(f"[MessageQueue] giving up on {msg.local_id} after {self._MAX_RETRIES} attempts")
+                            with self._lock:
+                                self._pending.pop(msg.local_id, None)
+                            wx.CallAfter(
+                                self.main_window._on_message_failed,
+                                msg.local_id,
+                            )
+                except Exception as exc:
+                    msg.fail_count += 1
+                    print(f"[MessageQueue] exception for {msg.local_id} (attempt {msg.fail_count}/{self._MAX_RETRIES}): {exc}")
+                    if msg.fail_count >= self._MAX_RETRIES:
+                        print(f"[MessageQueue] giving up on {msg.local_id} after {self._MAX_RETRIES} attempts")
+                        with self._lock:
+                            self._pending.pop(msg.local_id, None)
+                        wx.CallAfter(
+                            self.main_window._on_message_failed,
+                            msg.local_id,
+                        )
