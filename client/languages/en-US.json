@@ -194,7 +194,7 @@
     "notif_in_group": "{participant} in {group}",
     "notif_location": "Location",
     "notif_reaction": "Reacted with {emoji}",
-    "notif_unsupported": "New message",
+    "notif_unsupported": "Incompatible message",
     "update_available_title": "Update available",
     "update_available_msg": "A new version of WinZapp is available (v{new_version}). Would you like to download and install it now?",
     "update_yes": "&Yes",

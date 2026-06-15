@@ -2381,25 +2381,55 @@ class ConversationsPanel(wx.Panel):
         jid         = key.get("remoteJid", "")
         lookup_jid  = participant or jid
         mw = self.main_window
+        lid_to_phone = getattr(mw, "_lid_to_phone", {})
+
+        def _contact_name(lj: str) -> str:
+            """Return saved contact name for lj, trying @lid ↔ phone both ways,
+            then the chat's own 'name' field as a fallback."""
+            candidates = [lj]
+            if lj.endswith("@lid"):
+                phone = lid_to_phone.get(lj, "")
+                if phone:
+                    candidates.append(phone)
+            elif lj.endswith("@s.whatsapp.net"):
+                for lid, ph in lid_to_phone.items():
+                    if ph == lj:
+                        candidates.append(lid)
+                        break
+
+            for cjid in candidates:
+                c = mw.contacts.get(cjid)
+                if c:
+                    n = c.get("pushName") or ""
+                    n = n.strip()
+                    if n and not n.isdigit() and not is_phone_like(n):
+                        return n
+                # Also check the direct-chat object's 'name' field — Baileys
+                # stores the address-book name there during chats.upsert, which
+                # may be more up-to-date than a stale pushName in the contacts dict.
+                chat_obj = mw.chats.get(cjid)
+                if chat_obj:
+                    cn = (chat_obj.get("name") or "").strip()
+                    if cn and not cn.isdigit() and not is_phone_like(cn):
+                        return cn
+            return ""
+
         if lookup_jid:
-            contact = mw.contacts.get(lookup_jid)
-            if not contact and lookup_jid.endswith("@lid"):
-                phone_jid = getattr(mw, "_lid_to_phone", {}).get(lookup_jid, "")
-                if phone_jid:
-                    contact = mw.contacts.get(phone_jid)
-            if contact:
-                n = contact.get("pushName") or ""
-                if n and not is_phone_like(n):
-                    return n
+            n = _contact_name(lookup_jid)
+            if n:
+                return n
+
         push = msg.get("pushName", "")
         if push and not is_phone_like(push):
             return push
+
+        # Last resort: format the phone number
         alt = key.get("remoteJidAlt", "")
         if alt and alt.endswith("@s.whatsapp.net"):
             return format_number(alt)
         phone_jid = participant or jid
         if phone_jid.endswith("@lid"):
-            phone_jid = getattr(mw, "_lid_to_phone", {}).get(phone_jid, "")
+            phone_jid = lid_to_phone.get(phone_jid, "")
         if phone_jid and not phone_jid.endswith("@lid"):
             return format_number(phone_jid)
         return ""
@@ -2792,16 +2822,42 @@ class ConversationsPanel(wx.Panel):
     def _get_participant_name(self, participant_jid: str, msg: dict | None = None) -> str:
         """Return a display name for a group participant."""
         mw = self.main_window
-        contact = mw.contacts.get(participant_jid)
-        if contact:
-            name = contact.get("pushName") or ""
-            if name:
-                return name
+        lid_to_phone = getattr(mw, "_lid_to_phone", {})
+
+        # Try direct lookup, then @lid↔phone cross-lookup, then chat's name field
+        candidates = [participant_jid]
+        if participant_jid.endswith("@lid"):
+            phone = lid_to_phone.get(participant_jid, "")
+            if phone:
+                candidates.append(phone)
+        elif participant_jid.endswith("@s.whatsapp.net"):
+            for lid, ph in lid_to_phone.items():
+                if ph == participant_jid:
+                    candidates.append(lid)
+                    break
+
+        for cjid in candidates:
+            contact = mw.contacts.get(cjid)
+            if contact:
+                name = (contact.get("pushName") or "").strip()
+                if name and not name.isdigit() and not is_phone_like(name):
+                    return name
+            # Check the direct-chat's 'name' field (address-book name from Baileys)
+            chat_obj = mw.chats.get(cjid)
+            if chat_obj:
+                cn = (chat_obj.get("name") or "").strip()
+                if cn and not cn.isdigit() and not is_phone_like(cn):
+                    return cn
         if msg is not None:
             push = msg.get("pushName", "")
-            if push and not push.isdigit():
+            if push and not is_phone_like(push):
                 return push
-        return format_number(participant_jid) or participant_jid
+        if not participant_jid.endswith("@lid"):
+            return format_number(participant_jid) or participant_jid
+        phone = lid_to_phone.get(participant_jid, "")
+        if phone:
+            return format_number(phone)
+        return participant_jid
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""

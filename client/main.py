@@ -451,6 +451,21 @@ class MainWindow(wx.Frame):
         if remote_jid.endswith("@broadcast"):
             return
 
+        # ── Resolve canonical JID, merging @lid duplicates ───────────────────
+        # Evolution API v2 swaps key.remoteJid/@remoteJidAlt so the delivered
+        # message always has remoteJid=phone and remoteJidAlt=@lid.  If we
+        # already have a chat stored under the @lid key (e.g. from the initial
+        # chats sync), rename it to the phone JID so both old and new messages
+        # end up in one entry.
+        alt_jid = key.get("remoteJidAlt", "")
+        if (remote_jid.endswith("@s.whatsapp.net")
+                and alt_jid.endswith("@lid")
+                and alt_jid in self.chats
+                and remote_jid not in self.chats):
+            lid_chat = self.chats.pop(alt_jid)
+            lid_chat["remoteJid"] = remote_jid
+            self.chats[remote_jid] = lid_chat
+
         # ── Ensure the chat record exists ─────────────────────────────────────
         if remote_jid not in self.chats:
             self.chats[remote_jid] = {
@@ -1564,35 +1579,50 @@ class MainWindow(wx.Frame):
         """
         Build self._lid_to_phone: a dict mapping @lid JIDs to @s.whatsapp.net
         JIDs by scanning remoteJidAlt fields across all loaded chat messages.
-        Covers both 1:1 chats (remoteJid) and group participants (participant).
+
+        Evolution API v2 normalises the key before emitting the WebSocket event:
+          OLD format: remoteJid=@lid,          remoteJidAlt=@s.whatsapp.net
+          NEW format: remoteJid=@s.whatsapp.net, remoteJidAlt=@lid  (after swap)
+        Both formats are handled here so the cache is populated regardless of
+        which version of the API produced the stored messages.
         """
         cache = {}
         for chat in self.chats.values():
             for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
-                key = msg.get("key", {})
-                alt = key.get("remoteJidAlt", "")
-                if not alt or not alt.endswith("@s.whatsapp.net"):
-                    continue
+                key    = msg.get("key", {})
                 remote = key.get("remoteJid", "")
-                if remote.endswith("@lid"):
-                    cache[remote] = alt
-                participant = key.get("participant", "")
-                if participant.endswith("@lid"):
-                    cache[participant] = alt
+                alt    = key.get("remoteJidAlt", "")
+
+                if alt and alt.endswith("@s.whatsapp.net"):
+                    # OLD format: remoteJid=@lid, remoteJidAlt=phone
+                    if remote.endswith("@lid"):
+                        cache[remote] = alt
+                    participant = key.get("participant", "")
+                    if participant.endswith("@lid"):
+                        cache[participant] = alt
+
+                elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                    # NEW format (post-swap): remoteJid=phone, remoteJidAlt=lid
+                    cache[alt] = remote
+
         self._lid_to_phone = cache
 
     def _find_alt_jid_from_messages(self, chat):
         """
         Find the @s.whatsapp.net phone-number JID for a chat by scanning all
-        message keys for the remoteJidAlt bridge field that Evolution API v2
-        sets on @lid-addressed chats (e.g. "5511987654321@s.whatsapp.net").
-        Scans all messages regardless of direction or addressingMode.
-        Returns the alt JID string, or None if not found.
+        message keys.  Handles both Evolution API v2 key formats:
+          OLD: remoteJid=@lid,   remoteJidAlt=@s.whatsapp.net → return alt
+          NEW: remoteJid=phone, remoteJidAlt=@lid             → return remoteJid
+        Returns the phone JID string, or None if not found.
         """
         for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
-            alt = msg.get("key", {}).get("remoteJidAlt", "")
+            key    = msg.get("key", {})
+            remote = key.get("remoteJid", "")
+            alt    = key.get("remoteJidAlt", "")
             if alt and alt.endswith("@s.whatsapp.net"):
                 return alt
+            if remote and remote.endswith("@s.whatsapp.net") and alt and alt.endswith("@lid"):
+                return remote
         return None
 
     def _resolve_contact_name(self, chat):
@@ -1619,12 +1649,15 @@ class MainWindow(wx.Frame):
             # Evolution API v2 stores the contact name in Contact.pushName
             # (derived from Baileys contact.name ?? contact.verifiedName).
             # When neither field is set, Evolution API falls back to
-            # contact.id.split('@')[0] — which for system/business JIDs like
-            # "0@s.whatsapp.net" produces "0".  Reject purely-numeric strings.
+            # contact.id.split('@')[0] — a bare phone number.  Reject both
+            # purely-numeric strings ("5511999") and phone-like strings ("+55…").
             name = c.get("pushName")
-            if not name or not isinstance(name, str) or name.strip().isdigit():
+            if not name or not isinstance(name, str):
                 return None
-            return name.strip() or None
+            name = name.strip()
+            if not name or name.isdigit() or is_phone_like(name):
+                return None
+            return name
 
         # 1. Direct lookup by chat's own remoteJid
         contact = self.contacts.get(remoteJid)
@@ -1652,6 +1685,17 @@ class MainWindow(wx.Frame):
                 n = _name_from_contact(contact)
                 if n:
                     return n
+
+        # 4. Fall back to the chat's own 'name' field, which Baileys populates
+        #    from the address-book when the contact is saved.  This is a
+        #    reliable source when the contacts dict has a stale pushName (e.g.
+        #    the contact was first seen as a group member and stored with just
+        #    a phone number before being added to the address book).
+        chat_name = chat.get("name", "")
+        if chat_name and isinstance(chat_name, str):
+            chat_name = chat_name.strip()
+            if chat_name and not chat_name.isdigit() and not is_phone_like(chat_name):
+                return chat_name
 
         return None
 
@@ -1689,7 +1733,12 @@ class MainWindow(wx.Frame):
 
     def sync_remote_chats(self):
         for chat in self.chats.values():
-            self.sync_chat_messages(chat.copy())
+            try:
+                self.sync_chat_messages(chat.copy())
+            except Exception:
+                # Log but continue — one failed chat must not abort the others
+                jid = chat.get("remoteJid", "?")
+                print(f"[sync_remote_chats] failed to sync {jid}, continuing")
 
     def sync_media_for_all_chats(self):
         for chat in self.chats.values():
@@ -1718,15 +1767,25 @@ class MainWindow(wx.Frame):
         current_page = 1
         total_pages = 1
 
-        # Loop through all pages
+        # Loop through all pages; a single failed page is skipped so the rest
+        # of the pages (and the rest of the chats) are still processed.
+        consecutive_failures = 0
         while current_page <= total_pages:
             payload = {
                 "where": { "key": { "remoteJid": remote_jid} },
                 "page": current_page
             }
 
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            response_data = response.json()
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
+                response_data = response.json()
+                consecutive_failures = 0
+            except Exception:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    break  # give up on this chat after 3 consecutive failures
+                current_page += 1
+                continue
 
             # Update total_pages based on response
             if response_data.get("messages", {}):
@@ -1814,14 +1873,24 @@ class MainWindow(wx.Frame):
 
     @staticmethod
     def _clean_quoted(quoted: dict) -> dict:
-        """Return a copy of *quoted* with all local-only (``_``-prefixed) keys
-        removed so that the Evolution API does not receive internal state fields
-        such as ``_local_pending`` or ``_local_id``.
-        Only the fields expected by the API (``key``, ``message``, …) are kept.
+        """Return a minimal quoted dict with only the fields the Evolution API DTO
+        expects: ``key`` (with id, remoteJid, fromMe) and ``message``.
+        Extra Evolution-specific fields (instanceId, source, messageType, …) are
+        stripped so they don't confuse the API schema validator or Baileys.
         """
-        if not quoted:
-            return quoted
-        return {k: v for k, v in quoted.items() if not k.startswith("_")}
+        if not quoted or not isinstance(quoted, dict):
+            return None
+        key_raw = quoted.get("key")
+        message  = quoted.get("message")
+        if not key_raw or not isinstance(key_raw, dict):
+            return None
+        clean_key = {k: v for k, v in key_raw.items() if not k.startswith("_")}
+        if not clean_key.get("id"):
+            return None
+        result = {"key": clean_key}
+        if message and isinstance(message, dict):
+            result["message"] = message
+        return result
 
     def _check_wa_connection_closed(self, response):
         """If the Evolution API returned a 'Connection Closed' error, mark the
@@ -1841,26 +1910,23 @@ class MainWindow(wx.Frame):
         url = f"{self.evolution_server}:{self.evolution_port}/message/sendText/{self.token}"
         payload = {"number": remote_jid, "text": text}
         if quoted:
-            payload["quoted"] = self._clean_quoted(quoted)
+            _cq = self._clean_quoted(quoted)
+            if _cq:
+                payload["quoted"] = _cq
         headers = {"apikey": self.token, "Content-Type": "application/json"}
+        if "quoted" in payload:
+            print(f"[send_text_message] sending quoted reply to {remote_jid}, quoted key.id={payload['quoted'].get('key', {}).get('id')}")
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
                 print(f"[send_text_message] HTTP {response.status_code}: {response.text[:500]}")
                 self._check_wa_connection_closed(response)
                 return False
-            # Evolution API may return HTTP 200 with an error body (e.g. when the
-            # quoted field is malformed).  Treat responses without a "key" as failure
-            # so the queue retries.
+            self._wa_connected = True
             try:
                 body = response.json()
                 if isinstance(body, dict) and "key" not in body:
                     print(f"[send_text_message] no 'key' in response body: {body}")
-                    return False
-            except Exception:
-                pass
-            self._wa_connected = True
-            try:
                 return body.get("key", {}).get("id") or True
             except Exception:
                 return True
@@ -1890,7 +1956,9 @@ class MainWindow(wx.Frame):
             "ptt":      True,
         }
         if quoted:
-            payload["quoted"] = self._clean_quoted(quoted)
+            _cq = self._clean_quoted(quoted)
+            if _cq:
+                payload["quoted"] = _cq
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
@@ -2292,7 +2360,9 @@ class MainWindow(wx.Frame):
             "caption":   caption,
         }
         if quoted:
-            payload["quoted"] = self._clean_quoted(quoted)
+            _cq = self._clean_quoted(quoted)
+            if _cq:
+                payload["quoted"] = _cq
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -2321,7 +2391,9 @@ class MainWindow(wx.Frame):
             "contact": [{"fullName": name, "wuid": phone_raw, "phoneNumber": phone_fmt}],
         }
         if quoted:
-            payload["quoted"] = self._clean_quoted(quoted)
+            _cq = self._clean_quoted(quoted)
+            if _cq:
+                payload["quoted"] = _cq
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -2630,12 +2702,14 @@ class MainWindow(wx.Frame):
             panel.conversations_list.Select(target_idx)
             panel.conversations_list.EnsureVisible(target_idx)
         elif panel.conversation is not None:
-            # A conversation is already open: DeleteAllItems() above may have
-            # cleared keyboard focus from wx's perspective.  Re-anchor it to
-            # the message field so focus doesn't drift to another application.
+            # A conversation is already open.  Only re-anchor focus to the
+            # message field if the app has completely lost focus (FindFocus()
+            # returns None).  If the user is reading messages or has any other
+            # control focused within the app, leave focus exactly where it is.
             focus_ctrl = getattr(panel, "message_field", None)
             if focus_ctrl and focus_ctrl.IsShownOnScreen():
-                wx.CallAfter(focus_ctrl.SetFocus)
+                if wx.Window.FindFocus() is None:
+                    wx.CallAfter(focus_ctrl.SetFocus)
 
         # Also refresh the archived panel if present
         if hasattr(self, "archived_conversations_panel"):

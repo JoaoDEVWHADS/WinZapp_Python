@@ -147,6 +147,26 @@ def format_notification_body(msg: dict, i18n) -> str:
     return i18n.t("notif_unsupported")
 
 
+def _resolve_participant_name(p_jid: str, push_name: str, main_window) -> str:
+    """
+    Return the best display name for a group participant.
+    Priority: saved contact/chat name → WhatsApp pushName → phone number.
+    """
+    from core.utils import format_number, is_phone_like
+    if p_jid:
+        # Use _resolve_contact_name with the participant's own chat object so
+        # step 4 (chat.name) is also available.
+        p_chat = main_window.chats.get(p_jid) or {"remoteJid": p_jid}
+        saved = main_window._resolve_contact_name(p_chat)
+        if saved:
+            return saved
+    if push_name and not is_phone_like(push_name):
+        return push_name
+    if p_jid and not p_jid.endswith("@lid"):
+        return format_number(p_jid)
+    return p_jid or ""
+
+
 def format_foreground_sender(msg: dict, main_window, i18n) -> str:
     """
     Sender label for foreground (scenario 1 — active conversation).
@@ -159,15 +179,8 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
     push_name  = msg.get("pushName", "")
 
     if remote_jid.endswith("@g.us"):
-        participant_name = push_name
-        if not participant_name:
-            p_jid = key.get("participant", "")
-            if p_jid:
-                c = main_window.contacts.get(p_jid, {})
-                participant_name = (
-                    c.get("pushName") or format_number(p_jid)
-                )
-        return participant_name or remote_jid.split("@")[0]
+        p_jid = key.get("participant", "")
+        return _resolve_participant_name(p_jid, push_name, main_window) or remote_jid.split("@")[0]
 
     chat = main_window.chats.get(remote_jid, {})
     return (
@@ -198,15 +211,9 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
             or chat.get("pushName", "")
             or remote_jid.split("@")[0]
         )
-        # Resolve participant name from pushName or participant JID
-        participant_name = push_name
-        if not participant_name:
-            p_jid = key.get("participant", "")
-            if p_jid:
-                c = main_window.contacts.get(p_jid, {})
-                participant_name = (
-                    c.get("pushName") or format_number(p_jid)
-                )
+        # Resolve participant name — saved name takes priority over pushName
+        p_jid = key.get("participant", "")
+        participant_name = _resolve_participant_name(p_jid, push_name, main_window)
         if not participant_name:
             participant_name = remote_jid.split("@")[0]
 
@@ -257,24 +264,35 @@ class NotificationManager:
             self._dispatch(title, body, remote_jid)
 
     def _setup_toaster(self):
-        # Use the registered AUMID ("WinZapp") in compiled builds so that the
-        # Start-Menu shortcut's AppUserModelID matches and Windows shows the
-        # correct app name.  In dev mode (running from source) the AUMID is not
-        # registered, so fall back to sys.executable which Python has registered.
-        # _is_frozen() handles both PyInstaller (sys.frozen) and Nuitka
-        # (__compiled__ module global).
-        app_id = self.APP_ID if _is_frozen() else sys.executable
-        try:
-            from windows_toasts import InteractableWindowsToaster
-            self._toaster      = InteractableWindowsToaster(app_id)
-            self._interactable = True
-        except Exception as e:
-            print(f"[NotificationManager] InteractableWindowsToaster unavailable: {e}")
+        # Build a prioritised list of AUMID candidates to try.
+        # Installed build: registered AUMID "WinZapp" first, exe path as fallback.
+        # Dev build / portable: exe path (always available, recognised by Windows).
+        # _is_frozen() handles both PyInstaller (sys.frozen) and Nuitka (__compiled__).
+        if _is_frozen():
+            candidates = [self.APP_ID, sys.executable]
+        else:
+            candidates = [sys.executable]
+
+        for app_id in candidates:
+            # Try interactable first (supports inline reply text box).
+            try:
+                from windows_toasts import InteractableWindowsToaster
+                self._toaster      = InteractableWindowsToaster(app_id)
+                self._interactable = True
+                print(f"[NotificationManager] interactable toaster ready (app_id={app_id!r})")
+                return
+            except Exception as e:
+                print(f"[NotificationManager] InteractableWindowsToaster({app_id!r}) failed: {e}")
+            # Fall back to basic toaster (no inline reply).
             try:
                 from windows_toasts import WindowsToaster
                 self._toaster = WindowsToaster(app_id)
-            except Exception as e2:
-                print(f"[NotificationManager] Toast system unavailable: {e2}")
+                print(f"[NotificationManager] basic toaster ready (app_id={app_id!r})")
+                return
+            except Exception as e:
+                print(f"[NotificationManager] WindowsToaster({app_id!r}) failed: {e}")
+
+        print("[NotificationManager] toast system unavailable — all candidates failed")
 
     def _dispatch(self, title: str, body: str, remote_jid: str):
         if not self._toaster:
