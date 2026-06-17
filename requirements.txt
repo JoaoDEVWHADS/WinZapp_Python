@@ -46,3 +46,6 @@ nuitka==4.0.8
 sounddevice==0.5.5
 soundfile==0.13.1
 numpy==2.4.6
+windows-toasts
+winrt-runtime
+zstandard
