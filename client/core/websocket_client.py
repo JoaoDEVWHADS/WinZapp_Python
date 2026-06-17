@@ -15,6 +15,7 @@ class WebSocketClient:
 
         self.sio = socketio.Client(
             reconnection=True, reconnection_attempts=5,
+            logger=True, engineio_logger=True,
         )
         #Bind events
         self.sio.on("connect", self.on_connect)

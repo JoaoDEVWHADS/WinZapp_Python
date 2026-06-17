@@ -312,6 +312,9 @@ class MediaExpiredError(Exception):
 class MainWindow(wx.Frame):
     def __init__(self):
         import logging
+        # Re-verify and update all imported library loggers to DEBUG
+        for logger_name in list(logging.Logger.manager.loggerDict.keys()):
+            logging.getLogger(logger_name).setLevel(logging.DEBUG)
         logging.info("MainWindow: Initializing MainWindow...")
         super().__init__(None)
         self.app_name = "WinZapp"
@@ -3714,10 +3717,19 @@ def setup_logging():
             format="%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s",
             encoding="utf-8",
         )
+        # Force all existing library loggers to DEBUG
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.DEBUG)
+        logging.getLogger("requests").setLevel(logging.DEBUG)
+        logging.getLogger("socketio").setLevel(logging.DEBUG)
+        logging.getLogger("engineio").setLevel(logging.DEBUG)
+        for logger_name in list(logging.Logger.manager.loggerDict.keys()):
+            logging.getLogger(logger_name).setLevel(logging.DEBUG)
+
         logging.info("WinZapp client starting up...")
         
-        # Redirect stdout and stderr globally
-        sys.stdout = LoggerWriter(sys.stdout, logging.INFO)
+        # Redirect stdout and stderr globally to logger
+        sys.stdout = LoggerWriter(sys.stdout, logging.DEBUG)
         sys.stderr = LoggerWriter(sys.stderr, logging.ERROR)
     except Exception as e:
         sys.stderr.write(f"Failed to setup logging: {e}\n")
