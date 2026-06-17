@@ -311,6 +311,8 @@ class MediaExpiredError(Exception):
 
 class MainWindow(wx.Frame):
     def __init__(self):
+        import logging
+        logging.info("MainWindow: Initializing MainWindow...")
         super().__init__(None)
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
@@ -318,30 +320,37 @@ class MainWindow(wx.Frame):
         # Detect no-UI background mode (started via --background flag by Windows
         # autostart).  When True: no dialogs, no sounds, no visible window.
         self.background_mode = "--background" in sys.argv
+        logging.info("MainWindow: background_mode=%s", self.background_mode)
 
         #Initialize screen reader/sapi output
+        logging.info("MainWindow: Initializing screen reader output...")
         self.speak_output = outputs.auto.Auto()
 
         #Initialize sound system
+        logging.info("MainWindow: Initializing sound system...")
         self.sound_system = SoundSystem(self, sound_dir=resource_path("sounds"))
         self.sound_system.start()
         self.load_sounds()
         self.settings = {}
+        logging.info("MainWindow: Loading settings...")
         self.load_settings()
 
         # ── Language selection on first launch ─────────────────────────────────
         # Show before everything else so the user can pick their language
         # before any module installation or connection dialogs appear.
         if not self.background_mode:
+            logging.info("MainWindow: Ensuring language selected...")
             self._ensure_language_selected()
 
         #Initialize helper classes
+        logging.info("MainWindow: Initializing Connect/I18n helpers...")
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
 
         # Terms of service – show once before anything else happens
         if not self.background_mode:
+            logging.info("MainWindow: Checking terms acceptance...")
             self._check_terms_acceptance()
 
         #bind exception global handler for unexpected errors
@@ -354,6 +363,8 @@ class MainWindow(wx.Frame):
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 3414)
         self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
         self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
+        logging.info("MainWindow: Evolution config - server=%s, port=%s, apikey=%s", 
+                     self.evolution_server, self.evolution_port, self.evolution_api_key)
 
         #Set basic variables
         self.chats = {}
@@ -361,13 +372,16 @@ class MainWindow(wx.Frame):
         self.contacts = {}
 
         # Check and install API modules if needed (first run only)
+        logging.info("MainWindow: Checking/installing API modules...")
         self.ensure_api_modules_installed()
 
         # Check that the installed Evolution API meets the minimum required version
+        logging.info("MainWindow: Checking Evolution API version...")
         self.ensure_evolution_version()
 
         #Start local Evolution API (if bundled)
         self.evolution_process = None
+        logging.info("MainWindow: Ensuring Evolution process is running...")
         self.ensure_evolution_running()
 
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
@@ -398,21 +412,30 @@ class MainWindow(wx.Frame):
 
         #Check for what window should be shown (skipped in background mode)
         if not self.background_mode:
+            logging.info("MainWindow: Checking WhatsApp connection status...")
             if not self.connect.check_connection_status():
+                logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
                 self.connect.show_connection_dial()
-                self.ws.sio.disconnect()
+                if self.ws:
+                    self.ws.sio.disconnect()
                 self._just_paired = True
+        
+        logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
         #Initialize websocket
+        logging.info("MainWindow: Initializing WebSocketClient...")
         self.ws = WebSocketClient(self, self.connect, self.token)
 
+        logging.info("MainWindow: Preparing sync...")
         self.prepare_sync()
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
         try:
+            logging.info("MainWindow: Connecting WebSocket...")
             self.connect_websocket()
         except Exception:
+            logging.exception("MainWindow: Exception during websocket connection")
             self.error_sound.play()
             wx.MessageBox(
                 self.i18n.t("websocket_failed_reconnect"),
@@ -421,6 +444,8 @@ class MainWindow(wx.Frame):
             )
             self.connect.show_connection_dial()
             self._just_paired = True
+        
+        logging.info("MainWindow: Initializing User Interface...")
         self.init_UI()
 
 
@@ -3685,7 +3710,7 @@ def setup_logging():
         log_file = log_path("log.log")
         logging.basicConfig(
             filename=log_file,
-            level=logging.INFO,
+            level=logging.DEBUG,
             format="%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s",
             encoding="utf-8",
         )
