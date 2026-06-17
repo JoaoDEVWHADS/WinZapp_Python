@@ -40,6 +40,12 @@ const DB_URI  = `postgresql://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB
 // precedence over whatever is written in api/.env.
 process.env.DATABASE_CONNECTION_URI = DB_URI;
 process.env.DATABASE_PROVIDER       = 'postgresql';
+process.env.DATABASE_SAVE_DATA_INSTANCE     = 'true';
+process.env.DATABASE_SAVE_DATA_NEW_MESSAGE  = 'true';
+process.env.DATABASE_SAVE_DATA_CONTACTS     = 'true';
+process.env.DATABASE_SAVE_DATA_CHATS        = 'true';
+process.env.DATABASE_SAVE_DATA_HISTORIC     = 'true';
+process.env.DATABASE_SAVE_DATA_LABELS       = 'true';
 process.env.SERVER_PORT             = '3417';
 process.env.SERVER_URL              = 'http://127.0.0.1:3414';
 process.env.SERVER_TYPE             = 'http';

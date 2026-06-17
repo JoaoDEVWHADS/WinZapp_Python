@@ -137,6 +137,13 @@ jobs:
           # Sempre gera o Prisma client e compila
           &$nodeExe $npmCli run db:generate
           &$nodeExe $npmCli run build
+          
+          # Aplicar patches
+          cd ../..
+          python baileys_apply_patch_quoted_context.py
+          python baileys_apply_patch_pairing_time.py
+          python baileys_apply_patch_mark_read.py
+          python baileys_apply_patch_auth_state.py
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
