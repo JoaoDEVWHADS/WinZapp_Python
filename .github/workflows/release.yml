@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Versão da Release (Ex: 0.11.0.2)"
-        required: true
+        description: "Versão da Release (Deixe em branco para usar a data/hora atual)"
+        required: false
         type: string
 
 jobs:
@@ -20,10 +20,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Atualizar versão no version.py
+      - name: Definir Versão da Release
         shell: pwsh
         run: |
           $ver = "${{ inputs.version }}"
+          if ([string]::IsNullOrEmpty($ver)) {
+              $ver = Get-Date -Format "yyyy.MM.dd.HHmm"
+          }
+          echo "RELEASE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "[INFO] Versão definida para: $ver"
+
+      - name: Atualizar versão no version.py
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_VERSION }}"
           $filePath = "client/version.py"
           $content = "__version__ = `"$ver`""
           $content | Out-File -FilePath $filePath -Encoding utf8 -NoNewline
@@ -32,7 +42,7 @@ jobs:
       - name: Configurar Git, Commit e Tag
         shell: pwsh
         run: |
-          $ver = "${{ inputs.version }}"
+          $ver = "${{ env.RELEASE_VERSION }}"
           git config --local user.name "github-actions"
           git config --local user.email "github-actions@github.com"
           git add client/version.py
@@ -134,8 +144,8 @@ jobs:
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
-          name: Versão ${{ inputs.version }}
+          tag_name: v${{ env.RELEASE_VERSION }}
+          name: Versão ${{ env.RELEASE_VERSION }}
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip

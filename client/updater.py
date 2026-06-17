@@ -31,19 +31,30 @@ from version import __version__
 
 _PRE_ORDER = {"dev": 0, "alpha": 1, "beta": 2, "": 3}
 
-_VER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)(dev|alpha|beta)?$", re.IGNORECASE)
-
 
 def parse_version(v: str):
-    """Parse "1.2.3.4suffix" -> ((1,2,3,4), suffix) or None on failure."""
+    """Parse version string -> (nums_tuple, suffix) or None on failure."""
     if not v:
         return None
-    m = _VER_RE.match(v.strip())
-    if not m:
+    v = v.strip()
+    
+    # Extract dev/alpha/beta suffix
+    suffix = ""
+    m_suf = re.search(r'(dev|alpha|beta)', v, re.IGNORECASE)
+    if m_suf:
+        suffix = m_suf.group(1).lower()
+        v = re.sub(r'(dev|alpha|beta)', '', v, flags=re.IGNORECASE)
+        
+    # Extract all digits
+    parts = [int(x) for x in re.findall(r'\d+', v)]
+    if not parts:
         return None
-    nums   = tuple(int(m.group(i)) for i in range(1, 5))
-    suffix = (m.group(5) or "").lower()
-    return (nums, suffix)
+        
+    # Pad to length 4 for standard comparison
+    while len(parts) < 4:
+        parts.append(0)
+        
+    return (tuple(parts[:4]), suffix)
 
 
 def is_newer(remote: str, local: str) -> bool:
