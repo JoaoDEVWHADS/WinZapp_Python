@@ -60,6 +60,19 @@ def main():
     else:
         print(f"[INFO] Cloning Evolution API …")
         import shutil
+        temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
+        node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
+        has_node_modules = os.path.isdir(node_modules_path)
+        if has_node_modules:
+            try:
+                if os.path.exists(temp_node_modules):
+                    shutil.rmtree(temp_node_modules)
+                shutil.move(node_modules_path, temp_node_modules)
+                print("[INFO] Temporarily moved node_modules to preserve cache.")
+            except Exception as e:
+                print(f"[WARNING] Failed to move node_modules: {e}")
+                has_node_modules = False
+
         if os.path.isdir(CLIENT_API_DIR):
             try:
                 shutil.rmtree(CLIENT_API_DIR)
@@ -67,6 +80,13 @@ def main():
                 print(f"[WARNING] Failed to remove client/api: {e}")
         os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
         _run(["git", "clone", EVOLUTION_REPO, CLIENT_API_DIR])
+
+        if has_node_modules:
+            try:
+                shutil.move(temp_node_modules, os.path.join(CLIENT_API_DIR, "node_modules"))
+                print("[INFO] Restored node_modules cache successfully.")
+            except Exception as e:
+                print(f"[WARNING] Failed to restore node_modules: {e}")
 
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
