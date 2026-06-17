@@ -382,5 +382,8 @@
     "conv_filter_all": "Tudo",
     "conv_filter_unread": "Não lidas",
     "conv_filter_groups": "Grupos",
-    "conv_filter_individual": "Individuais"
+    "conv_filter_individual": "Individuais",
+    "unknown_contact": "Contato sem nome",
+    "unknown_group": "Grupo sem nome",
+    "unnamed_participant": "Participante sem nome"
 }

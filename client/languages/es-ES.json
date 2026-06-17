@@ -372,9 +372,6 @@
     "ui_voice_record_focus_discard": "Botón descartar",
     "invalid_messages_page_size": "El número de mensajes por página debe ser un entero positivo.",
     "forward_search_label": "&Buscar",
-    "menu_file": "&Archivo",
-    "menu_mark_all_read": "Marcar todas las conversaciones como leídas",
-    "menu_shortcuts": "Atajos de teclado",
     "global_hotkey_label": "Atajo global para abrir WinZapp",
     "global_hotkey_hint": "Presiona un atajo (Delete o Retroceso para eliminar)",
     "hotkey_first_run_title": "WinZapp | Atajo global",
@@ -385,5 +382,8 @@
     "conv_filter_all": "Todo",
     "conv_filter_unread": "Sin leer",
     "conv_filter_groups": "Grupos",
-    "conv_filter_individual": "Individuales"
+    "conv_filter_individual": "Individuales",
+    "unknown_contact": "Contacto sin nombre",
+    "unknown_group": "Grupo sin nombre",
+    "unnamed_participant": "Participante sin nombre"
 }
