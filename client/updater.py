@@ -21,6 +21,7 @@ import ctypes
 import subprocess
 import requests
 import wx
+import logging
 
 from app_paths import _outer_exe_dir, _is_frozen
 from config import GITHUB_RELEASE_URL, UPDATE_ZIP_URL
@@ -112,6 +113,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
 
     with open(bat_path, "w", encoding="utf-8") as f:
         f.write(bat)
+    logging.info("Auto-updater: Wrote batch installer script to %s", bat_path)
 
     needs_admin = _needs_admin()
     if needs_admin:
@@ -182,6 +184,7 @@ class UpdateProgressDialog(wx.Dialog):
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="winzapp_upd_")
             os.close(zip_fd)
 
+            logging.info("Auto-updater: Downloading ZIP from %s to %s", UPDATE_ZIP_URL, zip_path)
             resp = requests.get(UPDATE_ZIP_URL, stream=True, timeout=60)
             resp.raise_for_status()
 
@@ -190,6 +193,7 @@ class UpdateProgressDialog(wx.Dialog):
             with open(zip_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
                     if self._cancelled:
+                        logging.info("Auto-updater: Download cancelled by user.")
                         return
                     f.write(chunk)
                     downloaded += len(chunk)
@@ -198,15 +202,20 @@ class UpdateProgressDialog(wx.Dialog):
                         wx.CallAfter(self._gauge.SetValue, pct)
 
             if self._cancelled:
+                logging.info("Auto-updater: Download cancelled by user.")
                 return
+
+            logging.info("Auto-updater: Download completed successfully.")
 
             # ── Extract ───────────────────────────────────────────────────────
             extract_dir = tempfile.mkdtemp(prefix="winzapp_ext_")
+            logging.info("Auto-updater: Extracting update to %s", extract_dir)
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(extract_dir)
             os.remove(zip_path)
 
             if self._cancelled:
+                logging.info("Auto-updater: Extraction cancelled by user.")
                 return
 
             # ── Install ───────────────────────────────────────────────────────
@@ -217,7 +226,7 @@ class UpdateProgressDialog(wx.Dialog):
             wx.CallAfter(self._gauge.SetValue, 100)
 
             if not _is_frozen():
-                # Dev mode: just pretend it worked
+                logging.info("Auto-updater: Dev mode detected. Skipping real installation.")
                 time.sleep(1)
                 self._install_ok = True
                 wx.CallAfter(self.EndModal, wx.ID_OK)
@@ -227,11 +236,13 @@ class UpdateProgressDialog(wx.Dialog):
             exe_name    = os.path.basename(sys.argv[0]) if sys.argv else "WinZapp.exe"
             pid         = os.getpid()
 
+            logging.info("Auto-updater: Launching batch installer from %s (PID %d)", install_dir, pid)
             _run_batch_installer(extract_dir, install_dir, exe_name, pid)
             self._install_ok = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
 
         except Exception as exc:
+            logging.exception("Auto-updater: Exception during update installation")
             self._error_msg = str(exc)
             wx.CallAfter(self.EndModal, wx.ID_ABORT)
 
@@ -320,19 +331,28 @@ class UpdateChecker:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _check_once(self):
+        logging.info("Auto-updater: Starting update check...")
         try:
             headers = {"User-Agent": "WinZapp-Updater"}
+            logging.info("Auto-updater: Querying GITHUB_RELEASE_URL: %s", GITHUB_RELEASE_URL)
             resp = requests.get(GITHUB_RELEASE_URL, headers=headers, timeout=15)
             resp.raise_for_status()
             data           = resp.json()
             remote_version = data.get("tag_name", "").lstrip("vV")
-        except Exception:
+            logging.info("Auto-updater: Latest remote version from GitHub is v%s", remote_version)
+        except Exception as e:
+            logging.exception("Auto-updater: Exception checking for updates")
+            if self._force:
+                self._force = False
+                wx.CallAfter(self._show_error_message, str(e))
             self._schedule_retry()
             return
 
         local_version = __version__
+        logging.info("Auto-updater: Local version is v%s", local_version)
 
         if not is_newer(remote_version, local_version):
+            logging.info("Auto-updater: WinZapp is already up-to-date.")
             if self._force:
                 self._force = False
                 wx.CallAfter(self._show_no_update)
@@ -340,8 +360,18 @@ class UpdateChecker:
                 self._schedule_retry()
             return
 
+        logging.info("Auto-updater: Newer version v%s is available!", remote_version)
         self._force = False
         wx.CallAfter(self._show_update_dialog, remote_version)
+
+    def _show_error_message(self, err_msg: str):
+        i18n = self._mw.i18n
+        wx.MessageBox(
+            i18n.t("update_error_msg").format(error=err_msg),
+            i18n.t("update_error_title"),
+            wx.OK | wx.ICON_ERROR,
+            self._mw,
+        )
 
     def _show_no_update(self):
         i18n = self._mw.i18n

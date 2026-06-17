@@ -3591,6 +3591,11 @@ class MainWindow(wx.Frame):
         """Global exception handler for unexpected errors."""
         # Format the full traceback
         error_text = ''.join(format_exception(exc_type, exc_value, exc_traceback))
+        try:
+            import logging
+            logging.error("Unhandled global exception:\n%s", error_text)
+        except Exception:
+            pass
 
         #Play error sound
         self.error_sound.play()
@@ -3654,14 +3659,35 @@ def _write_crash_log(tb: str) -> str:
     return crash_path
 
 
-if __name__ == "__main__":
+def setup_logging():
+    import logging
+    from app_paths import log_path
     try:
+        os.makedirs(log_path(), exist_ok=True)
+        log_file = log_path("log.log")
+        logging.basicConfig(
+            filename=log_file,
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s",
+            encoding="utf-8",
+        )
+        logging.info("WinZapp client starting up...")
+    except Exception as e:
+        sys.stderr.write(f"Failed to setup logging: {e}\n")
+
+
+if __name__ == "__main__":
+    setup_logging()
+    try:
+        import logging
+        logging.info("Checking instance lock...")
         from autostart import acquire_single_instance_mutex, activate_existing_window
 
         background = "--background" in sys.argv
         first_instance = acquire_single_instance_mutex()
 
         if not first_instance:
+            logging.info("Another instance is already running.")
             if not background:
                 # A normal launch while WinZapp is already running in the background:
                 # bring the existing window to the foreground and exit.
@@ -3669,10 +3695,16 @@ if __name__ == "__main__":
             # If --background and already running: nothing to do — exit silently.
             sys.exit(0)
 
+        logging.info("Creating wx.App...")
         app = wx.App()
         frame = MainWindow()
     except Exception:
         tb = format_exc()
+        try:
+            import logging
+            logging.error("Critical initialization error:\n%s", tb)
+        except Exception:
+            pass
         crash_path = _write_crash_log(tb)
         # Try to show a native Windows error box (works even without wx).
         try:

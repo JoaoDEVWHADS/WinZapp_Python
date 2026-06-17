@@ -52,3 +52,10 @@ def data_path(*parts: str) -> str:
     if _is_frozen():
         return os.path.join(_outer_exe_dir(), "data", *parts)
     return os.path.join(os.getcwd(), "data", *parts)
+
+
+def log_path(*parts: str) -> str:
+    """Absolute path inside the writable logs directory."""
+    if _is_frozen():
+        return os.path.join(_outer_exe_dir(), "logs", *parts)
+    return os.path.join(os.getcwd(), "logs", *parts)
