@@ -1,12 +1,12 @@
 """
-WinZapp build script.
+WinZapp build script — PyInstaller variant.
 
 Steps:
-  1. Check required tools (nuitka, gcc, windres) and pre-built api/ + client/node/
-  2. Compile client with Nuitka --mode=onefile -> build/WinZapp.exe
-       (sounds, languages, lib are external; only Python + wx etc. go inside)
-  3. Assemble staging dir:
-       WinZapp.exe + lib/ + sounds/ + languages/ + data/ + .env + node/ + api/
+  1. Check required tools (pyinstaller, gcc, windres) and pre-built api/ + client/node/
+  2. Compile client with PyInstaller --onedir -> build/pyinstaller_out/WinZapp/
+       All Python deps go into _internal/; only WinZapp.exe stays at the root.
+  3. Assemble staging dir (same layout as Nuitka build):
+       WinZapp.exe + _internal/ + lib/ + sounds/ + languages/ + data/ + .env + node/ + api/
   4. Compile uninstaller -> build/uninstall.exe
   5. Create payload ZIP (ZIP_STORED) from staging/ + uninstall.exe
   6. Compile installer stub -> build/installer_stub.exe
@@ -15,6 +15,7 @@ Steps:
 
 Visible structure after install / extraction:
   WinZapp.exe
+  _internal/    <- PyInstaller runtime (Python interpreter + all bundled packages)
   lib/          <- BASS DLLs + screen-reader DLLs (found by sound_lib / ao2)
   sounds/       <- OGG audio files
   languages/    <- JSON translation files
@@ -23,6 +24,9 @@ Visible structure after install / extraction:
   api/          <- Evolution API (dist/ + node_modules/ + prisma/ + start.js + .env)
 
 Before running this script you must prepare:
+
+  venv/  - activate the venv and install pyinstaller:
+             venv\\Scripts\\pip install pyinstaller
 
   client/node/  - download the Windows x64 portable Node.js zip from
                   https://nodejs.org/dist/ (node-vXX.X.X-win-x64.zip)
@@ -38,30 +42,9 @@ Before running this script you must prepare:
                 Verify: client/api/dist/main.js must exist.
 
 Usage:
-  venv\\Scripts\\python.exe build.py           # release build (no console)
-  venv\\Scripts\\python.exe build.py --debug   # debug build  (console window visible)
-
-Debug build:
-  Use --debug when users report the program does not start and you need to see
-  what error is printed.  The resulting WinZapp.exe opens a console window and
-  prints Python tracebacks before crashing.  Do NOT ship the debug build to end
-  users — use it locally on the affected machine (or ask the user to send the
-  crash.log that the release build writes next to WinZapp.exe).
-
-Windows 10 notes:
-  - The Visual C++ 2015-2022 Redistributable must be installed on the target
-    machine (vcruntime140.dll / msvcp140.dll).  Most machines have it already;
-    if not, install "vc_redist.x64.exe" from Microsoft.
-  - Some older Nuitka releases provided a wx plugin for wxPython applications.
-    Newer Nuitka versions may not have that plugin; this script only enables it
-    when the installed Nuitka actually lists it.
-  - Usernames with accented characters (very common in Brazil) used to cause
-    Nuitka's onefile bootstrap to fail silently on paths like
-    %LOCALAPPDATA%\\WinZapp_runtime.  This build now uses %TEMP% instead, which
-    avoids the issue at the cost of re-extracting on every launch.
+  venv\\Scripts\\python.exe build_pyinstaller.py
 """
 
-import argparse
 import os
 import sys
 import shutil
@@ -78,25 +61,24 @@ DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets (developer prepares these once)
-NODE_DIR      = os.path.join(CLIENT_DIR, "node")        # portable Node.js (lives inside client/)
-API_DIR       = os.path.join(CLIENT_DIR, "api")         # Evolution API (set up via setup_api.py)
+NODE_DIR      = os.path.join(CLIENT_DIR, "node")
+API_DIR       = os.path.join(CLIENT_DIR, "api")
 
-NUITKA_CMD  = os.path.join(VENV_DIR, "Scripts", "nuitka.cmd")
-PYTHON_CMD  = os.path.join(VENV_DIR, "Scripts", "python.exe")
-GCC_CMD     = "gcc"
-WINDRES_CMD = "windres"
+PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
+PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
+GCC_CMD         = "gcc"
+WINDRES_CMD     = "windres"
 
-# Set via --debug on the command line.  Debug builds open a console window and
-# show Python tracebacks; release builds suppress the console entirely.
-DEBUG_BUILD = False
-
-# Nuitka onefile output: a single build/WinZapp.exe
-NUITKA_EXE      = os.path.join(BUILD_DIR, "WinZapp.exe")
+# PyInstaller output: build/pyinstaller_out/WinZapp/
+PYINST_OUTDIR   = os.path.join(BUILD_DIR, "pyinstaller_out")
+PYINST_APP_DIR  = os.path.join(PYINST_OUTDIR, "WinZapp")
+PYINST_EXE      = os.path.join(PYINST_APP_DIR, "WinZapp.exe")
+PYINST_INTERNAL = os.path.join(PYINST_APP_DIR, "_internal")
 
 # Staging dir: assembled tree that mirrors the installed layout
-STAGING_DIR     = os.path.join(BUILD_DIR, "staging")
+STAGING_DIR     = os.path.join(BUILD_DIR, "staging_pyinstaller")
 
-PAYLOAD_ZIP     = os.path.join(BUILD_DIR, "payload.zip")
+PAYLOAD_ZIP     = os.path.join(BUILD_DIR, "payload_pyinstaller.zip")
 INSTALLER_STUB  = os.path.join(BUILD_DIR, "installer_stub.exe")
 INSTALLER_RES   = os.path.join(BUILD_DIR, "installer_res.o")
 UNINSTALLER_RES = os.path.join(BUILD_DIR, "uninstaller_res.o")
@@ -107,13 +89,12 @@ PORTABLE_ZIP    = os.path.join(DIST_DIR,  "WinZapp.zip")
 SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
 
 SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
-# BASS DLLs (sound_lib) and screen-reader DLLs (accessible_output2) that go in lib/
+# BASS DLLs (sound_lib) and screen-reader DLLs (accessible_output2)
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
 # Directories inside api/ that must NOT be copied into the distribution
-# (they are runtime data created on first launch)
-API_EXCLUDE_DIRS = {"pgdata", "instances", "store", ".git", "__pycache__", "node_modules"}
+API_EXCLUDE_DIRS  = {"pgdata", "instances", "store", ".git", "__pycache__", "node_modules"}
 API_EXCLUDE_FILES = {".gitignore", "README-SETUP.md"}
 
 # -- Helpers -----------------------------------------------------------------
@@ -130,43 +111,18 @@ def run(cmd, cwd=None):
         print(f"\n[ERROR] Command failed with exit code {result.returncode}.")
         sys.exit(result.returncode)
 
-def nuitka_has_plugin(plugin_name):
-    """Return True when the configured Nuitka exposes *plugin_name*."""
-    try:
-        result = subprocess.run(
-            [NUITKA_CMD, "--plugin-list"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return False
-    if result.returncode != 0:
-        return False
-    for line in result.stdout.splitlines():
-        if line.strip().split(maxsplit=1)[:1] == [plugin_name]:
-            return True
-    return False
-
 def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None):
-    """Yield (absolute_path, relative_path) for every file under root.
-
-    exclude_top_dirs  - set of directory names (relative to root) to skip.
-    exclude_top_files - set of file names (relative to root) to skip.
-    """
+    """Yield (absolute_path, relative_path) for every file under root."""
     exclude_top_dirs  = exclude_top_dirs  or set()
     exclude_top_files = exclude_top_files or set()
     for dirpath, dirs, files in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
-        # Skip excluded top-level directories
         top = rel_dir.split(os.sep)[0] if rel_dir != "." else ""
         if top in exclude_top_dirs:
             dirs.clear()
             continue
-        # Prune excluded dirs in-place so os.walk doesn't descend into them
         dirs[:] = [d for d in dirs if not (rel_dir == "." and d in exclude_top_dirs)]
         for fname in files:
-            # Skip excluded top-level files
             if rel_dir == "." and fname in exclude_top_files:
                 continue
             abs_path = os.path.join(dirpath, fname)
@@ -179,8 +135,11 @@ def check_tools():
     step("1/8  Checking required tools and pre-built assets")
     missing = []
 
-    if not os.path.isfile(NUITKA_CMD):
-        missing.append(f"nuitka  (expected at {NUITKA_CMD})")
+    if not os.path.isfile(PYINSTALLER_CMD):
+        missing.append(
+            f"pyinstaller  (expected at {PYINSTALLER_CMD})\n"
+            f"    Install with: venv\\Scripts\\pip install pyinstaller"
+        )
     if not os.path.isfile(PYTHON_CMD):
         missing.append(f"python  (expected at {PYTHON_CMD})")
 
@@ -202,20 +161,12 @@ def check_tools():
         missing.append(
             "client/api/dist/main.js  -- Evolution API not built.\n"
             "    1. Run:  venv\\Scripts\\python.exe setup_api.py\n"
-            "       (set EVOLUTION_TAG_VERSION in .env to pin a specific release tag)\n"
             "    2. Then inside client/api/ run:\n"
             "         npm install embedded-postgres --save\n"
             "         npm install\n"
             "         npm run db:generate\n"
             "         npm run build"
         )
-
-    # Prisma client must be generated before building (npm run db:generate in client/api/)
-    prisma_client = os.path.join(API_DIR, "node_modules", ".prisma", "client", "index.js")
-    if not os.path.isfile(prisma_client) and os.path.isfile(api_main):
-        # dist exists but generated client is missing – warn, don't fail
-        print("  [WARN] api/node_modules/.prisma/client not found.")
-        print("         If the API crashes at runtime, run 'npm run db:generate' in api/.")
 
     if missing:
         print("\n[ERROR] Missing required tools or pre-built assets:")
@@ -225,71 +176,74 @@ def check_tools():
 
     print("  All tools and assets found.")
 
-# -- Step 2: Nuitka onefile compile ------------------------------------------
+# -- Step 2: PyInstaller onedir compile --------------------------------------
 
-def nuitka_compile():
-    step("2/8  Compiling client with Nuitka (--mode=onefile)")
+def pyinstaller_compile():
+    step("2/8  Compiling client with PyInstaller (--onedir)")
 
     os.makedirs(BUILD_DIR, exist_ok=True)
+    os.makedirs(PYINST_OUTDIR, exist_ok=True)
 
-    # Remove previous onefile output if present
-    if os.path.isfile(NUITKA_EXE):
-        os.remove(NUITKA_EXE)
+    # Clean previous PyInstaller output for this app
+    if os.path.isdir(PYINST_APP_DIR):
+        shutil.rmtree(PYINST_APP_DIR)
 
-    # Console mode: force-open for debug builds so errors are visible;
-    # disable for release so no black window flashes at startup.
-    console_mode = "force" if DEBUG_BUILD else "disable"
+    # Work dir for PyInstaller intermediates (spec, pyc cache)
+    work_dir = os.path.join(BUILD_DIR, "pyinstaller_work")
+
+    # Packages to collect in full (Python + data files + binaries).
+    # The DLLs from sound_lib/accessible_output2 will end up in _internal/ and
+    # also be copied to lib/ during staging — both paths are valid at runtime.
+    collect_all = [
+        "sound_lib",
+        "accessible_output2",
+        "platform_utils",
+        "libloader",
+        "wx",
+        "cryptography",
+        "requests",
+        "socketio",
+        "engineio",
+        "pyperclip",
+        "packaging",
+        "windows_toasts",
+        "winrt",
+        "sounddevice",
+        "soundfile",
+    ]
 
     cmd = [
-        NUITKA_CMD,
-        "--mode=onefile",
-        f"--windows-console-mode={console_mode}",
-        "--output-dir=" + BUILD_DIR,
-        "--output-filename=WinZapp",
-        # Extract to %TEMP%\WinZapp_runtime.
-        # Reason: {CACHE_DIR} maps to %LOCALAPPDATA%, which can contain
-        # accented characters when the Windows username has them (very common
-        # for Brazilian users: João, André, etc.).  Nuitka's onefile bootstrap
-        # fails silently on such paths in versions older than ~1.7.  %TEMP% is
-        # still user-relative but is typically shorter and less likely to be
-        # problematic.  Tradeoff: files are re-extracted on every run instead
-        # of being cached across runs.
-        "--onefile-tempdir-spec={TEMP}/WinZapp_runtime",
-        # Packages to include inside the exe
-        "--include-package=sound_lib",
-        "--include-package=accessible_output2",
-        "--include-package=platform_utils",
-        "--include-package=libloader",
-        "--include-package=wx",
-        "--include-package=cryptography",
-        "--include-package=requests",
-        "--include-package=socketio",
-        "--include-package=engineio",
-        "--include-package=pyperclip",
-        "--include-package=packaging",
-        "--include-package=windows_toasts",
-        # winrt packages — windows_toasts depends on these WinRT bindings.
-        # Nuitka misses them because the imports live inside try/except blocks
-        # in a background thread method, bypassing static analysis.
-        "--include-package=winrt",
-        # Exclude BASS DLLs from the exe - they live in the external lib/ folder
-        "--noinclude-dlls=bass*.dll",
-        "--noinclude-dlls=tags.dll",
-        # Entry point
-        os.path.join(CLIENT_DIR, "main.py"),
+        PYINSTALLER_CMD,
+        "--onedir",
+        "--windowed",                       # no console window
+        "--name", "WinZapp",
+        "--distpath", PYINST_OUTDIR,        # output to build/pyinstaller_out/
+        "--workpath", work_dir,
+        "--noconfirm",                      # overwrite without asking
     ]
-    if nuitka_has_plugin("wx"):
-        cmd.insert(-1, "--enable-plugin=wx")
-    else:
-        print("  [INFO] Nuitka wx plugin not available; building without --enable-plugin=wx.")
+
+    for pkg in collect_all:
+        cmd += ["--collect-all", pkg]
+
+    # numpy / soundfile might need special handling
+    cmd += ["--collect-all", "numpy"]
+
+    # Tell PyInstaller where to find local packages (core/, ui/, app_paths, etc.)
+    cmd += ["--paths", CLIENT_DIR]
+
+    cmd.append(os.path.join(CLIENT_DIR, "main.py"))
+
     run(cmd, cwd=CLIENT_DIR)
 
-    if not os.path.isfile(NUITKA_EXE):
-        print(f"[ERROR] Nuitka did not produce {NUITKA_EXE}")
+    if not os.path.isfile(PYINST_EXE):
+        print(f"[ERROR] PyInstaller did not produce {PYINST_EXE}")
         sys.exit(1)
 
-    size_mb = os.path.getsize(NUITKA_EXE) / (1024 * 1024)
-    print(f"  -> {NUITKA_EXE}  ({size_mb:.1f} MB)")
+    size_mb = os.path.getsize(PYINST_EXE) / (1024 * 1024)
+    print(f"  -> {PYINST_EXE}  ({size_mb:.1f} MB)")
+    if os.path.isdir(PYINST_INTERNAL):
+        count = sum(1 for _, _, fs in os.walk(PYINST_INTERNAL) for _ in fs)
+        print(f"  -> {PYINST_INTERNAL}  ({count} files)")
 
 # -- Step 3: Assemble staging dir --------------------------------------------
 
@@ -301,11 +255,21 @@ def assemble_staging():
         shutil.rmtree(STAGING_DIR)
     os.makedirs(STAGING_DIR)
 
-    # WinZapp.exe (the onefile)
-    shutil.copy2(NUITKA_EXE, os.path.join(STAGING_DIR, "WinZapp.exe"))
+    # WinZapp.exe (the PyInstaller exe)
+    shutil.copy2(PYINST_EXE, os.path.join(STAGING_DIR, "WinZapp.exe"))
+    print(f"  -> WinZapp.exe")
+
+    # _internal/ — the full PyInstaller runtime folder
+    if os.path.isdir(PYINST_INTERNAL):
+        dst_internal = os.path.join(STAGING_DIR, "_internal")
+        shutil.copytree(PYINST_INTERNAL, dst_internal)
+        count = sum(1 for _, _, fs in os.walk(dst_internal) for _ in fs)
+        print(f"  -> _internal/  ({count} files)")
+    else:
+        print("  [WARN] _internal/ directory not found in PyInstaller output")
 
     # lib/ - BASS DLLs from sound_lib + screen-reader DLLs from accessible_output2
-    lib_dir = os.path.join(STAGING_DIR, "lib")
+    lib_dir   = os.path.join(STAGING_DIR, "lib")
     os.makedirs(lib_dir)
     dll_count = 0
     if os.path.isdir(SOUND_LIB_X64):
@@ -340,22 +304,22 @@ def assemble_staging():
     shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
     print(f"  -> data/settings_default.json")
 
-    # .env - WinZapp runtime configuration (EVOLUTION_API_MINIMUM_VERSION, update URLs, etc.)
+    # .env - WinZapp runtime configuration
     client_env = os.path.join(CLIENT_DIR, ".env")
     if os.path.isfile(client_env):
         shutil.copy2(client_env, os.path.join(STAGING_DIR, ".env"))
         print(f"  -> .env")
     else:
-        print(f"  [WARN] client/.env not found — skipping (version check will be disabled at runtime)")
+        print(f"  [WARN] client/.env not found — skipping")
 
     # node/ - portable Node.js runtime
-    node_dst = os.path.join(STAGING_DIR, "node")
+    node_dst   = os.path.join(STAGING_DIR, "node")
     shutil.copytree(NODE_DIR, node_dst)
     node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
     print(f"  -> node/  ({node_count} files)")
 
     # api/ - pre-built Evolution API (exclude runtime data directories)
-    api_dst = os.path.join(STAGING_DIR, "api")
+    api_dst   = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0
     for abs_path, rel_path in walk_dir(API_DIR,
@@ -374,7 +338,7 @@ def compile_uninstaller():
 
     run([
         WINDRES_CMD,
-        "--codepage", "65001",          # source .rc is UTF-8
+        "--codepage", "65001",
         os.path.join(INSTALLER_DIR, "uninstaller.rc"),
         "-o", UNINSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
@@ -383,8 +347,8 @@ def compile_uninstaller():
 
     run([
         GCC_CMD,
-        "-finput-charset=UTF-8",        # source .c is UTF-8
-        "-fwide-exec-charset=UTF-16LE", # wchar_t → UTF-16 LE (Windows native)
+        "-finput-charset=UTF-8",
+        "-fwide-exec-charset=UTF-16LE",
         os.path.join(INSTALLER_DIR, "uninstaller.c"),
         UNINSTALLER_RES,
         "-o", UNINSTALLER_EXE,
@@ -401,11 +365,9 @@ def create_payload_zip():
 
     count = 0
     with zipfile.ZipFile(PAYLOAD_ZIP, "w", compression=zipfile.ZIP_STORED) as zf:
-        # All staging files at the ZIP root (preserving sub-folders)
         for abs_path, rel_path in walk_dir(STAGING_DIR):
             zf.write(abs_path, rel_path)
             count += 1
-        # Uninstaller at root
         zf.write(UNINSTALLER_EXE, "uninstall.exe")
         count += 1
 
@@ -419,7 +381,7 @@ def compile_installer_stub():
 
     run([
         WINDRES_CMD,
-        "--codepage", "65001",          # source .rc is UTF-8
+        "--codepage", "65001",
         os.path.join(INSTALLER_DIR, "installer.rc"),
         "-o", INSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
@@ -428,8 +390,8 @@ def compile_installer_stub():
 
     run([
         GCC_CMD,
-        "-finput-charset=UTF-8",        # source .c is UTF-8
-        "-fwide-exec-charset=UTF-16LE", # wchar_t → UTF-16 LE (Windows native)
+        "-finput-charset=UTF-8",
+        "-fwide-exec-charset=UTF-16LE",
         os.path.join(INSTALLER_DIR, "installer.c"),
         INSTALLER_RES,
         "-o", INSTALLER_STUB,
@@ -473,24 +435,11 @@ def create_portable_zip():
 # -- Main --------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--debug", action="store_true",
-                        help="Build with --windows-console-mode=force so startup "
-                             "errors are visible (do not ship to end users)")
-    args = parser.parse_args()
-
-    if args.debug:
-        DEBUG_BUILD = True
-        print("\n*** DEBUG BUILD — console window will be visible ***")
-    else:
-        DEBUG_BUILD = False
-
-    print("\nWinZapp Build Script")
+    print("\nWinZapp Build Script — PyInstaller")
     print("=" * 60)
 
     check_tools()
-    nuitka_compile()
+    pyinstaller_compile()
     assemble_staging()
     compile_uninstaller()
     create_payload_zip()
@@ -502,6 +451,4 @@ if __name__ == "__main__":
     print("  Build complete!")
     print(f"  Installer  : {INSTALLER_OUT}")
     print(f"  Portable   : {PORTABLE_ZIP}")
-    if DEBUG_BUILD:
-        print("  NOTE: this is a DEBUG build — do not distribute to end users.")
     print("=" * 60 + "\n")

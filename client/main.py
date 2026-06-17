@@ -160,6 +160,20 @@ def _vk_mod_to_str(vk: int, mod: int) -> str:
     return "+".join(parts)
 
 
+def _get_short_path_name(long_path: str) -> str:
+    """Return Windows short (8.3) path to avoid PostgreSQL initdb failures
+    when the install path contains accented characters (e.g. 'Área de Trabalho')."""
+    try:
+        buf_size = ctypes.windll.kernel32.GetShortPathNameW(long_path, None, 0)
+        if buf_size:
+            buf = ctypes.create_unicode_buffer(buf_size)
+            if ctypes.windll.kernel32.GetShortPathNameW(long_path, buf, buf_size):
+                return buf.value
+    except Exception:
+        pass
+    return long_path
+
+
 def _spawn_delevated(cmd: list, cwd: str, log_fh, main_window) -> bool:
     """
     Launch *cmd* as a restricted (non-admin) process using the Windows Safer API.
@@ -1158,7 +1172,9 @@ class MainWindow(wx.Frame):
             self._evolution_log_path = resource_path("api", "evolution.log")
             log_fh = open(self._evolution_log_path, "w",
                           encoding="utf-8", errors="replace")
-            cwd                    = resource_path("api")
+            # Use the short (8.3) path so PostgreSQL's initdb doesn't choke on
+            # accented characters in the install path (e.g. "Área de Trabalho").
+            cwd = _get_short_path_name(resource_path("api"))
             self.evolution_process = None
 
             spawned = False
