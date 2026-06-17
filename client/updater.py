@@ -126,26 +126,23 @@ def _needs_admin() -> bool:
 def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int):
     """
     Write a batch script that:
-      1. Waits for PID to exit.
-      2. Copies all extracted files to install_dir.
-      3. Restarts exe_name.
-    Then launches it (elevated if the dir needs admin).
+      1. Forcefully terminates the WinZapp client process and its children.
+      2. Finds and terminates any leftover Evolution API (port 3417) and PostgreSQL (port 5433) processes to release file locks.
+      3. Copies all extracted files to install_dir.
+      4. Restarts the client executable.
+    Then launches it (elevated if the directory needs admin).
     """
     bat_fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="winzapp_upd_")
     os.close(bat_fd)
 
     exe_path = os.path.join(install_dir, exe_name)
-    src      = os.path.join(extracted_dir, "*")
 
     bat = (
         "@echo off\n"
-        ":WAIT\n"
-        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
-        "if not errorlevel 1 (\n"
-        "    timeout /t 1 /nobreak >NUL\n"
-        "    goto WAIT\n"
-        ")\n"
-        "timeout /t 1 /nobreak >NUL\n"
+        f"taskkill /F /PID {pid} >NUL 2>&1\n"
+        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :3417 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "timeout /t 2 /nobreak >NUL\n"
         f'xcopy /E /Y /I "{extracted_dir}\\*" "{install_dir}\\"\n'
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
