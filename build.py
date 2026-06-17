@@ -273,6 +273,8 @@ def nuitka_compile():
         # Nuitka misses them because the imports live inside try/except blocks
         # in a background thread method, bypassing static analysis.
         "--include-package=winrt",
+        # Include screen-reader DLLs for accessible_output2 inside the package runtime
+        f"--include-data-dir={AO2_LIB}=accessible_output2/lib",
         # Exclude BASS DLLs from the exe - they live in the external lib/ folder
         "--noinclude-dlls=bass*.dll",
         "--noinclude-dlls=tags.dll",
