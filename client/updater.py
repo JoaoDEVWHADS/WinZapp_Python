@@ -23,7 +23,7 @@ import requests
 import wx
 
 from app_paths import _outer_exe_dir, _is_frozen
-from config import UPDATE_VERSION_URL, UPDATE_CHANGELOG_URL, UPDATE_ZIP_URL
+from config import GITHUB_RELEASE_URL, UPDATE_ZIP_URL
 from version import __version__
 
 
@@ -57,55 +57,6 @@ def is_newer(remote: str, local: str) -> bool:
     r_key = (r_nums, _PRE_ORDER.get(r_suf, 0))
     l_key = (l_nums, _PRE_ORDER.get(l_suf, 0))
     return r_key > l_key
-
-
-# ── Changelog parser ──────────────────────────────────────────────────────────
-
-_HDR_RE = re.compile(r"^V(\d+\.\d+\.\d+\.(?:\d+)(?:dev|alpha|beta)?)\s*$", re.IGNORECASE)
-
-
-def get_changelog_for_update(changelog_text: str, current: str, new: str) -> str:
-    """
-    Extract changelog entries for all versions > current and <= new.
-    Returns empty string if no relevant entries found.
-    """
-    c_parsed = parse_version(current)
-    n_parsed = parse_version(new)
-    if c_parsed is None or n_parsed is None:
-        return ""
-
-    c_key = (c_parsed[0], _PRE_ORDER.get(c_parsed[1], 0))
-    n_key = (n_parsed[0], _PRE_ORDER.get(n_parsed[1], 0))
-
-    # Split into sections by "V1.2.3.4" header lines
-    sections = []
-    cur_ver   = None
-    cur_lines = []
-    for line in changelog_text.splitlines():
-        m = _HDR_RE.match(line.strip())
-        if m:
-            if cur_ver is not None:
-                sections.append((cur_ver, cur_lines))
-            cur_ver   = m.group(1)
-            cur_lines = []
-        else:
-            if cur_ver is not None:
-                cur_lines.append(line)
-    if cur_ver is not None:
-        sections.append((cur_ver, cur_lines))
-
-    result_parts = []
-    for ver_str, lines in sections:
-        parsed = parse_version(ver_str)
-        if parsed is None:
-            continue
-        key = (parsed[0], _PRE_ORDER.get(parsed[1], 0))
-        if c_key < key <= n_key:
-            body = "\n".join(lines).strip()
-            if body:
-                result_parts.append(f"V{ver_str}\n{body}")
-
-    return "\n\n".join(result_parts)
 
 
 # ── Install helpers ───────────────────────────────────────────────────────────
@@ -406,10 +357,12 @@ class UpdateChecker:
 
     def _check_once(self):
         try:
-            resp = requests.get(UPDATE_VERSION_URL, timeout=15)
+            headers = {"User-Agent": "WinZapp-Updater"}
+            resp = requests.get(GITHUB_RELEASE_URL, headers=headers, timeout=15)
             resp.raise_for_status()
             data           = resp.json()
-            remote_version = data.get("version", "")
+            remote_version = data.get("tag_name", "").lstrip("vV")
+            changelog      = data.get("body", "")
         except Exception:
             self._schedule_retry()
             return
@@ -425,18 +378,6 @@ class UpdateChecker:
             return
 
         self._force = False
-
-        # Fetch changelog (optional)
-        changelog = ""
-        try:
-            resp2 = requests.get(UPDATE_CHANGELOG_URL, timeout=15)
-            resp2.raise_for_status()
-            changelog = get_changelog_for_update(
-                resp2.text, local_version, remote_version
-            )
-        except Exception:
-            pass
-
         wx.CallAfter(self._show_update_dialog, remote_version, changelog)
 
     def _show_no_update(self):
