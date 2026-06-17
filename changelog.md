@@ -15,6 +15,9 @@ All notable changes to this fork of WinZapp are documented in this file.
 ## Client Logging System
 * **Persistent Logs:** Added a client logging module writing to `logs/log.log` to track runtime traces, request errors, and detailed updater exception tracebacks for troubleshooting.
 
+## CI/CD & Automation
+* **Workflow Concurrency Control:** Added concurrency settings in GitHub Actions to automatically cancel any in-progress runs when a new push is received, preventing duplicate builds and race conditions.
+
 ---
 
 # V2026.06.17.2208

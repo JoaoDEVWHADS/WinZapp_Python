@@ -25,6 +25,7 @@ Since the original fork, a deep restructuring has been performed in the followin
   * The entire build process is executed (configuring MSYS2 for GCC/windres, downloading portable Node.js, compiling Evolution API, and running PyInstaller).
   * A GitHub Release is created and the ready-to-run executable binaries are published.
 * **Advanced Caches:** Structured caching was implemented for the MSYS2 compiler, `pip` packages (Python), Node.js binaries, and Evolution API `node_modules`, drastically reducing cloud build times.
+* **Concurrency Control:** Configured workflow concurrency to automatically cancel any in-progress runs when a new commit is pushed, preventing duplicate builds and resource conflicts.
 
 ### 2. Auto-Updater Redesign (Zero Conflicts)
 * **Direct GitHub Integration:** The dependency on static JSON and TXT files in the repository was removed. The updater now queries the GitHub Releases API directly, fetching the latest version and changelogs natively from the platform.
