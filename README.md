@@ -54,7 +54,7 @@ Since the original fork, a deep restructuring has been performed in the followin
 ### Steps to Run Locally:
 ```powershell
 # 1. Clone the repository
-git clone git@github.com:JoaoDEVWHADS/WinZapp_Python.git
+git clone https://github.com/JoaoDEVWHADS/WinZapp_Python.git
 cd WinZapp_Python
 
 # 2. Create and activate the virtual environment
