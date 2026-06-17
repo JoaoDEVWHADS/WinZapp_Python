@@ -11,8 +11,7 @@ jobs:
   build:
     runs-on: windows-latest
 
-    env:
-      NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
+
 
     steps:
       - name: Checkout Código-Fonte
@@ -102,16 +101,7 @@ jobs:
           &$nodeExe $npmCli run db:generate
           &$nodeExe $npmCli run build
 
-      - name: Cache Nuitka Build
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.NUITKA_CACHE_DIR }}
-          key: nuitka-cache-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-${{ github.sha }}
-          restore-keys: |
-            nuitka-cache-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-
-            nuitka-cache-${{ runner.os }}-
-
-      - name: Compilar WinZapp com Nuitka e Gerar Instalador
+      - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
           python build.py

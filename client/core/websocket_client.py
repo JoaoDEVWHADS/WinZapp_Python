@@ -113,11 +113,15 @@ class WebSocketClient:
             self.connect.pairing_code_field.SetValue(qr_data.get("pairingCode", ""))
 
     def on_messages_set(self, info):
-        #Only consider if messages_set for the first time is false
-        if self.main_window.settings["status"].get("messages_set_completed", False):
-            return
-        self.main_window.settings["status"]["messages_set_completed"] = True
+        self.main_window.settings.setdefault("status", {})["messages_set_completed"] = True
         self.main_window.save_settings()
+        # Always trigger a sync when messages.set arrives so conversations that
+        # came in while the app was offline are picked up even on returning
+        # sessions (where the flag was already True).  Guard against a concurrent
+        # sync that is still running from prepare_sync().
+        existing = getattr(self.main_window, "sync_thread", None)
+        if existing and existing.is_alive():
+            return
         self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
         self.main_window.sync_thread.start()
 

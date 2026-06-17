@@ -2658,6 +2658,22 @@ class ConversationsPanel(wx.Panel):
             if n:
                 return n
 
+        # For private chats the contact resolution above may have missed the
+        # name when the message JID and chat storage key differ (e.g. @lid vs
+        # @s.whatsapp.net).  Use the same resolution chain as the chat list so
+        # the sender name stays consistent with what is shown there.
+        if not participant:
+            conv = self.conversation
+            if conv and not conv.get("remoteJid", "").endswith("@g.us"):
+                n = (
+                    mw._resolve_contact_name(conv)
+                    or mw.find_name_through_messages(conv)
+                    or conv.get("name", "")
+                    or conv.get("pushName", "")
+                )
+                if n:
+                    return n
+
         push = msg.get("pushName", "")
         if push and not is_phone_like(push):
             return push

@@ -407,8 +407,13 @@ class Connect:
             response_data = response.json()
 
             if response_data.get("base64"):
-                # Connect WebSocket
-                self.main_window.connect_websocket()
+                try:
+                    self.main_window.connect_websocket()
+                except Exception:
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(self.i18n.t("websocket_failed_reconnect"), self.i18n.t("connection_error"), wx.OK | wx.ICON_WARNING)
+                    self.show_connection_dial()
+                    return
                 # Display QR-CODE image
                 self.display_qrcode_image(response_data.get("base64"))
             else:
@@ -510,8 +515,13 @@ class Connect:
             response_data = response.json()
 
             if response_data.get("pairingCode"):
-                #Connect WebSocket
-                self.main_window.connect_websocket()
+                try:
+                    self.main_window.connect_websocket()
+                except Exception:
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(self.i18n.t("websocket_failed_reconnect"), self.i18n.t("connection_error"), wx.OK | wx.ICON_WARNING)
+                    self.show_connection_dial()
+                    return
                 self.show_pairing_dial(response_data.get("pairingCode"))
             else:
                 wx.MessageBox(self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
