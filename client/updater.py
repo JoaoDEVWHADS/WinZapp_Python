@@ -114,40 +114,6 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         )
 
 
-# ── WhatsNewDialog ────────────────────────────────────────────────────────────
-
-class WhatsNewDialog(wx.Dialog):
-    """Shows the changelog entries between the current and new version."""
-
-    def __init__(self, parent, changelog: str):
-        i18n = parent.main_window.i18n if hasattr(parent, "main_window") else parent.i18n
-        super().__init__(
-            parent,
-            title=i18n.t("whats_new_title"),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
-        )
-        self._build(parent, changelog, i18n)
-        self.SetMinSize((400, 300))
-        self.SetSize((520, 400))
-        self.Centre()
-
-    def _build(self, parent, changelog, i18n):
-        sizer = wx.BoxSizer(wx.VERTICAL)
-
-        text_ctrl = wx.TextCtrl(
-            self,
-            value=changelog,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
-        )
-        sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)
-
-        close_btn = wx.Button(self, wx.ID_CLOSE, label=i18n.t("whats_new_close"))
-        sizer.Add(close_btn, 0, wx.ALIGN_CENTER | wx.BOTTOM, 8)
-        close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
-
-        self.SetSizer(sizer)
-
-
 # ── UpdateProgressDialog ──────────────────────────────────────────────────────
 
 class UpdateProgressDialog(wx.Dialog):
@@ -264,10 +230,10 @@ class UpdateProgressDialog(wx.Dialog):
 class UpdateDialog(wx.Dialog):
     """
     Prompts the user to install an available update.
-    Buttons: Sim | Nao | Quais as novidades? (hidden when no changelog)
+    Buttons: Sim | Nao
     """
 
-    def __init__(self, parent, new_version: str, changelog: str):
+    def __init__(self, parent, new_version: str):
         self._main_window = parent
         i18n = parent.i18n
         super().__init__(
@@ -276,7 +242,6 @@ class UpdateDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE,
         )
         self._new_version = new_version
-        self._changelog   = changelog
         self._build(i18n)
         self.Fit()
         self.SetMinSize((360, -1))
@@ -297,13 +262,6 @@ class UpdateDialog(wx.Dialog):
         btn_sizer.Add(self._yes_btn, 0, wx.RIGHT, 4)
         btn_sizer.Add(self._no_btn,  0, wx.RIGHT, 4)
 
-        if self._changelog:
-            self._news_btn = wx.Button(self, wx.ID_MORE, label=i18n.t("whats_new_btn"))
-            btn_sizer.Add(self._news_btn, 0)
-            self._news_btn.Bind(wx.EVT_BUTTON, self._on_whats_new)
-        else:
-            self._news_btn = None
-
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         self.SetSizer(sizer)
 
@@ -316,11 +274,6 @@ class UpdateDialog(wx.Dialog):
 
     def _on_no(self, event):
         self.EndModal(wx.ID_NO)
-
-    def _on_whats_new(self, event):
-        dlg = WhatsNewDialog(self, self._changelog)
-        dlg.ShowModal()
-        dlg.Destroy()
 
 
 # ── UpdateChecker ─────────────────────────────────────────────────────────────
@@ -362,7 +315,6 @@ class UpdateChecker:
             resp.raise_for_status()
             data           = resp.json()
             remote_version = data.get("tag_name", "").lstrip("vV")
-            changelog      = data.get("body", "")
         except Exception:
             self._schedule_retry()
             return
@@ -378,7 +330,7 @@ class UpdateChecker:
             return
 
         self._force = False
-        wx.CallAfter(self._show_update_dialog, remote_version, changelog)
+        wx.CallAfter(self._show_update_dialog, remote_version)
 
     def _show_no_update(self):
         i18n = self._mw.i18n
@@ -389,8 +341,8 @@ class UpdateChecker:
             self._mw,
         )
 
-    def _show_update_dialog(self, remote_version: str, changelog: str):
-        dlg    = UpdateDialog(self._mw, remote_version, changelog)
+    def _show_update_dialog(self, remote_version: str):
+        dlg    = UpdateDialog(self._mw, remote_version)
         result = dlg.ShowModal()
         dlg.Destroy()
 
