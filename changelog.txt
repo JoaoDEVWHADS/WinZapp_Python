@@ -1,10 +1,22 @@
+Histórico de Alterações (Fork WinZapp)
+
+V2026.06.17.2208
+- Remoção completa da tela de novidades (WhatsNewDialog) e do botão de changelog na interface do atualizador.
+- Implementação de Action CI/CD completa para compilar e publicar releases automaticamente a cada push na branch main.
+- Adicionado suporte a versionamento automático por data/hora UTC para evitar loop infinito de atualizações.
+- Configuração de caches estruturados no GitHub Actions para acelerar o build (Pip, Node, node_modules e MSYS2).
+
+V0.11.0.1
+- Reformulação do sistema de atualizações para se integrar diretamente com a API de Releases do GitHub (sem necessidade de version.json e changelog.txt adicionais).
+- Correção do bug de "Acesso Negado" no atualizador: inserção de rotinas no script .bat para identificar e encerrar processos que estiverem escutando nas portas 3417 (Evolution API) e 5433 (PostgreSQL) liberando as travas dos arquivos.
+- Resolução definitiva do erro HTTP 401 (Unauthorized): alteração na inicialização da API local (start.js) para preservar a variável AUTHENTICATION_API_KEY passada pelo ambiente.
+- Migração completa do sistema de compilação de Nuitka para PyInstaller (build.py).
+- Correção no empacotamento de arquivos binários e DLLs nativas de áudio (BASS) e leitor de tela (accessible-output2) que causavam crashes.
+- Otimização do instalador em C (installer.c) para realizar a extração e registro de desinstalação corretos no Windows.
+- Correção em setup_api.py para preservar temporariamente o diretório node_modules e manter o cache do NPM intacto durante o clone.
+
 V0.10.0.0
-- Correção de contatos em branco com JID @lid.
-- Ajuste na formatação de JIDs de grupos.
-- Correção de AttributeError (connection_dial) ao desconectar do WebSocket:
-  Traceback (most recent call last):
-    File "C:\Users\JOO~1\AppData\Local\Temp\WINZAP~1\wx\core.py", line 3425, in <lambda>
-    File "C:\Users\JOO~1\AppData\Local\Temp\WINZAP~1\core\websocket_client.py", line 64, in _show_error
-  AttributeError: 'Connect' object has no attribute 'connection_dial'. Did you mean: 'connection_mode'?
-- Otimização do pipeline de compilação.
-- Integração do sistema de atualizações com o repositório GitHub de JoaoDEVWHADS.
+- Correção do AttributeError na tela de conexão (connection_dial) ao desconectar repentinamente do WebSocket.
+- Correção de contatos em branco com JID de dispositivos vinculados (@lid).
+- Ajuste na formatação de JIDs de grupos para evitar que sejam tratados como números normais.
+- Redirecionamento e configuração das URLs do atualizador para apontarem para o repositório JoaoDEVWHADS/WinZapp_Python.
