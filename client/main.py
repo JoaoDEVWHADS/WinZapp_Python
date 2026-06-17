@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import time
 import shutil
@@ -1998,8 +1998,13 @@ class MainWindow(wx.Frame):
                 or chat.get("name", "")
                 or chat.get("pushName", "")
                 or self.find_jid_through_messages(chat)
-                or (format_number(jid) if not jid.endswith("@lid") else "")
+                or (format_number(jid) if not jid.endswith("@lid") and not jid.endswith("@g.us") else "")
             )
+            if not name or not name.strip():
+                if jid.endswith("@g.us"):
+                    name = self.i18n.t("unknown_group")
+                else:
+                    name = self.i18n.t("unknown_contact")
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
             if jid in archived:
@@ -2230,7 +2235,7 @@ class MainWindow(wx.Frame):
                 if alt and alt.endswith("@s.whatsapp.net"):
                     return format_number(alt)
                 jid = key.get("remoteJid", "")
-                if jid and not jid.endswith("@lid"):
+                if jid and not jid.endswith("@lid") and not jid.endswith("@g.us"):
                     return format_number(jid)
         return None
 
@@ -3243,7 +3248,9 @@ class MainWindow(wx.Frame):
                 return name
         if jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
-            return format_number(phone_jid) if phone_jid else ""
+            return format_number(phone_jid) if phone_jid else self.i18n.t("unnamed_participant")
+        if jid.endswith("@g.us"):
+            return self.i18n.t("unknown_group")
         return format_number(jid)
 
     def _last_msg_preview(self, chat: dict) -> str:

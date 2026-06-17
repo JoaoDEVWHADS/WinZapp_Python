@@ -382,5 +382,8 @@
     "conv_filter_all": "All",
     "conv_filter_unread": "Unread",
     "conv_filter_groups": "Groups",
-    "conv_filter_individual": "Individual"
+    "conv_filter_individual": "Individual",
+    "unknown_contact": "Unnamed contact",
+    "unknown_group": "Unnamed group",
+    "unnamed_participant": "Unnamed participant"
 }
