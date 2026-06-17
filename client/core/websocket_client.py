@@ -58,11 +58,17 @@ class WebSocketClient:
             # I/O thread triggers COM cross-thread errors and can freeze the app.
             def _show_error():
                 self.main_window.error_sound.play()
-                parent_dialog = (
-                    self.connect.pairing_dial
-                    if hasattr(self.connect, 'pairing_dial')
-                    else self.connect.connection_dial
-                )
+                parent_dialog = None
+                for name in ('pairing_dial', 'connection_dial'):
+                    dial = getattr(self.connect, name, None)
+                    if dial:
+                        try:
+                            if not wx.IsDestroyed(dial):
+                                parent_dialog = dial
+                                break
+                        except Exception:
+                            pass
+
                 wx.MessageBox(
                     self.i18n.t("instance_state_changed"),
                     self.i18n.t("error").format(app_name=self.main_window.app_name),
