@@ -18,6 +18,18 @@ jobs:
       - name: Checkout Código-Fonte
         uses: actions/checkout@v4
 
+      - name: Configurar Arquivos .env
+        shell: pwsh
+        run: |
+          $envContent = @"
+          EVOLUTION_TAG_VERSION=2.4.0-rc2
+          EVOLUTION_API_MINIMUM_VERSION=2.4.0-rc2
+          LICENSING_USER_EMAIL=gabrielhaberkamp@gmail.com
+          "@
+          $envContent | Out-File -FilePath ".env" -Encoding utf8
+          $envContent | Out-File -FilePath "client/.env" -Encoding utf8
+          Write-Output "[INFO] Arquivos .env criados para o build."
+
       - name: Configurar Python 3.13
         uses: actions/setup-python@v5
         with:
