@@ -40,7 +40,8 @@ Since the original fork, a deep restructuring has been performed in the followin
 ### 4. Critical App Bug Fixes
 * **Resolution of 401 (Unauthorized) Failures:** The local API boot script ([start.js](file:///client/api/start.js)) and the Python client were adjusted to synchronize and preserve the `AUTHENTICATION_API_KEY` environment variable (using registered license keys without overwriting the local token).
 * **Connection Initialization Crash Fix:** A crash occurring during connection setup (`TypeError: Cannot read properties of undefined (reading 'state')`) was resolved by implementing a defensive patch for the Baileys auth state and enabling PostgreSQL local database persistence by default.
-* **Persistent Client Logging:** A persistent client-side logging system was added to store runtime traces and diagnostics under `logs/log.log`, facilitating troubleshooting of connection and auto-updater failures.
+* **Evolution API WebSocket Activation:** Configured automatic activation of the Socket.IO WebSocket server in the local Evolution API (`WEBSOCKET_ENABLED=true` in `start.js`), preventing `404 Not Found` connection failures during application boot.
+* **Persistent & Highly Detailed Client Logging:** A persistent client-side logging system was added to store all runtime traces under `logs/log.log` at the `DEBUG` level. This includes global stdout redirection, HTTP/HTTPS connection traces, and full Socket.IO packet/payload data (including connection heartbeats) to facilitate debugging.
 * **Compatibility with Linked Devices (LID):** Empty contact names and chats caused by JIDs linked to secondary devices (`@lid`) were fixed.
 * **Dialog Stabilization:** An `AttributeError` in the client when attempting to reconnect or when destroying graphical elements during sudden disconnections was fixed.
 * **Group Filtering:** WhatsApp group JIDs are no longer incorrectly formatted as standard phone numbers.

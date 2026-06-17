@@ -2,6 +2,16 @@
 
 All notable changes to this fork of WinZapp are documented in this file.
 
+# V2026.06.17.2340
+
+## WebSocket & API Connection
+* **Evolution API WebSocket Activation:** Configured `WEBSOCKET_ENABLED=true` and `WEBSOCKET_GLOBAL_EVENTS=true` in the local launcher (`start.js`) to ensure the Socket.IO server initializes correctly, resolving `404 Not Found` connection failures during client startup.
+
+## Maximum Verbosity Logging ("logs no talo")
+* **Deep Level Logging (DEBUG):** Upgraded the entire Python client log level to `DEBUG` and redirected all standard output (`sys.stdout`) to `logging.DEBUG` to capture every print.
+* **Network & WebSocket Tracing:** Explicitly forced all HTTP (`requests`, `urllib3`) and Socket.IO/Engine.IO loggers to `DEBUG` level.
+* **Full Socket.IO Packet Logging:** Enabled `logger=True` and `engineio_logger=True` on the Socket.IO client constructor to record all incoming/outgoing websocket packets, events, payload contents, and keep-alive heartbeats.
+
 # V2026.06.17.2228
 
 ## Critical App Bug Fixes
