@@ -273,8 +273,6 @@ def nuitka_compile():
         # Nuitka misses them because the imports live inside try/except blocks
         # in a background thread method, bypassing static analysis.
         "--include-package=winrt",
-        # Include screen-reader DLLs for accessible_output2 inside the package runtime
-        f"--include-data-dir={AO2_LIB}=accessible_output2/lib",
         # Exclude BASS DLLs from the exe - they live in the external lib/ folder
         "--noinclude-dlls=bass*.dll",
         "--noinclude-dlls=tags.dll",
@@ -285,6 +283,16 @@ def nuitka_compile():
         cmd.insert(-1, "--enable-plugin=wx")
     else:
         print("  [INFO] Nuitka wx plugin not available; building without --enable-plugin=wx.")
+
+    # Include screen-reader DLLs for accessible_output2 inside the package runtime
+    # We must use --include-data-files for individual DLLs because --include-data-dir filters out .dll files.
+    if os.path.isdir(AO2_LIB):
+        for fname in os.listdir(AO2_LIB):
+            if fname.lower().endswith(".dll"):
+                src = os.path.join(AO2_LIB, fname)
+                dest = f"accessible_output2/lib/{fname}"
+                cmd.insert(-1, f"--include-data-files={src}={dest}")
+
     run(cmd, cwd=CLIENT_DIR)
 
     if not os.path.isfile(NUITKA_EXE):
