@@ -3659,6 +3659,24 @@ def _write_crash_log(tb: str) -> str:
     return crash_path
 
 
+class LoggerWriter:
+    def __init__(self, original_stream, level):
+        self.original_stream = original_stream
+        self.level = level
+
+    def write(self, message):
+        if self.original_stream:
+            self.original_stream.write(message)
+        msg = message.rstrip()
+        if msg:
+            import logging
+            logging.log(self.level, msg)
+
+    def flush(self):
+        if self.original_stream:
+            self.original_stream.flush()
+
+
 def setup_logging():
     import logging
     from app_paths import log_path
@@ -3672,6 +3690,10 @@ def setup_logging():
             encoding="utf-8",
         )
         logging.info("WinZapp client starting up...")
+        
+        # Redirect stdout and stderr globally
+        sys.stdout = LoggerWriter(sys.stdout, logging.INFO)
+        sys.stderr = LoggerWriter(sys.stderr, logging.ERROR)
     except Exception as e:
         sys.stderr.write(f"Failed to setup logging: {e}\n")
 
