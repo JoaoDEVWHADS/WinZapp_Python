@@ -49,6 +49,8 @@ process.env.DATABASE_SAVE_DATA_LABELS       = 'true';
 process.env.SERVER_PORT             = '3417';
 process.env.SERVER_URL              = 'http://127.0.0.1:3414';
 process.env.SERVER_TYPE             = 'http';
+process.env.WEBSOCKET_ENABLED       = 'true';
+process.env.WEBSOCKET_GLOBAL_EVENTS = 'true';
 process.env.AUTHENTICATION_API_KEY  = process.env.AUTHENTICATION_API_KEY || 'wz-local-api-key';
 
 async function main() {
