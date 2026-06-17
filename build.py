@@ -243,7 +243,7 @@ def nuitka_compile():
     cmd = [
         NUITKA_CMD,
         "--mode=onefile",
-        "--accept-downloads",
+        "--assume-yes-for-downloads",
         f"--windows-console-mode={console_mode}",
         "--output-dir=" + BUILD_DIR,
         "--output-filename=WinZapp",
