@@ -43,6 +43,7 @@ process.env.DATABASE_PROVIDER       = 'postgresql';
 process.env.SERVER_PORT             = '3417';
 process.env.SERVER_URL              = 'http://127.0.0.1:3414';
 process.env.SERVER_TYPE             = 'http';
+process.env.AUTHENTICATION_API_KEY  = 'wz-local-api-key';
 
 async function main() {
   // ── 1. Start embedded PostgreSQL ─────────────────────────────────────────
