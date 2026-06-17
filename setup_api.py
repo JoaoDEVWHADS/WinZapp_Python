@@ -52,12 +52,19 @@ def main():
     env = _load_env()
     tag = env.get("EVOLUTION_TAG_VERSION", "").strip()
 
-    already_cloned = os.path.isdir(CLIENT_API_DIR) and os.listdir(CLIENT_API_DIR)
+    git_dir = os.path.join(CLIENT_API_DIR, ".git")
+    already_cloned = os.path.isdir(git_dir)
 
     if already_cloned:
         print(f"[INFO] client/api/ already exists — skipping clone.")
     else:
         print(f"[INFO] Cloning Evolution API …")
+        import shutil
+        if os.path.isdir(CLIENT_API_DIR):
+            try:
+                shutil.rmtree(CLIENT_API_DIR)
+            except Exception as e:
+                print(f"[WARNING] Failed to remove client/api: {e}")
         os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
         _run(["git", "clone", EVOLUTION_REPO, CLIENT_API_DIR])
 
