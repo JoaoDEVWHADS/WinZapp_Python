@@ -20,12 +20,26 @@ BASE = Path(__file__).parent / "client" / "api"
 # ---------------------------------------------------------------------------
 # TypeScript source patch
 # ---------------------------------------------------------------------------
-TS_ORIGINAL = b"""    let phoneJid = jid;
+TS_ORIGINAL = b"""    if (!onWhatsapp.exists) {
+      throw new BadRequestException(onWhatsapp);
+    }
 
     try {
-      if (number) {"""
+      if (number) {
+        const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        const picture = await this.profilePicture(info?.jid);
+        const status = await this.getStatus(info?.jid);
+        const business = await this.fetchBusinessProfile(info?.jid);
 
-TS_PATCHED = b"""    let phoneJid = jid;
+        return {
+          wuid: info?.jid || jid,
+          name: info?.name,"""
+
+TS_PATCHED = b"""    if (!onWhatsapp.exists) {
+      throw new BadRequestException(onWhatsapp);
+    }
+
+    let phoneJid = jid;
     if (jid.endsWith('@lid')) {
       try {
         const mapped = await this.client.signalRepository.lidMapping.getPNForLID(jid);
@@ -38,7 +52,16 @@ TS_PATCHED = b"""    let phoneJid = jid;
     }
 
     try {
-      if (number) {"""
+      if (number) {
+        const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        const picture = await this.profilePicture(info?.jid);
+        const status = await this.getStatus(info?.jid);
+        const business = await this.fetchBusinessProfile(info?.jid);
+
+        return {
+          jid: phoneJid,
+          wuid: info?.jid || jid,
+          name: info?.name,"""
 
 # ---------------------------------------------------------------------------
 # Compiled main.js patch
