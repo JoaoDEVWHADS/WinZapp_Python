@@ -338,6 +338,12 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Loading settings...")
         self.load_settings()
 
+        # ── Auto-updater ──────────────────────────────────────────────────────
+        # Schedule the update checker on the event loop early so it runs even
+        # if language selection, terms acceptance, or pairing dialogs are shown (modal).
+        if not self.background_mode:
+            wx.CallLater(2000, self._start_update_checker)
+
         # ── Language selection on first launch ─────────────────────────────────
         # Show before everything else so the user can pick their language
         # before any module installation or connection dialogs appear.
@@ -532,9 +538,7 @@ class MainWindow(wx.Frame):
         if not self.background_mode and self._just_paired:
             wx.CallAfter(self._check_quick_tip)
 
-        # ── Auto-updater ──────────────────────────────────────────────────────
-        if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
+        # Auto-updater already scheduled early in constructor
 
         app.MainLoop()
 
