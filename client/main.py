@@ -1900,10 +1900,18 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
 
     def normalize_chats(self, chats):
+        settings_changed = False
+        archived = self.settings.setdefault("archived_chats", [])
         for key, chat in chats.items():
             if chat.get("unreadCount") is None:
                 chat["unreadCount"] = 0
+            if chat.get("archived") is True or chat.get("archive") is True:
+                if key not in archived:
+                    archived.append(key)
+                    settings_changed = True
             chats[key] = chat
+        if settings_changed:
+            self.save_settings()
         return chats
 
     def deduplicate_chats(self, chats: dict) -> dict:
