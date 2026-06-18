@@ -1302,6 +1302,7 @@ class MainWindow(wx.Frame):
             # Guarantee that the child Node process inherits the correct API key
             # regardless of whether the local start.js or .env has been preserved.
             os.environ["AUTHENTICATION_API_KEY"] = self.evolution_api_key
+            os.environ["WPP_LID_MODE"] = "false"
 
             spawned = False
             if _is_elevated():
