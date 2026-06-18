@@ -146,6 +146,9 @@ jobs:
           python baileys_apply_patch_auth_state.py
           python baileys_apply_patch_lid_resolution.py
           
+          # Remove backup files from source tree to prevent esbuild compilation failures
+          Get-ChildItem -Path "client/api/src" -Filter "*_backup*" -Recurse | Remove-Item -Force
+          
           # Sempre gera o Prisma client e compila
           cd client/api
           &$nodeExe $npmCli run db:generate
