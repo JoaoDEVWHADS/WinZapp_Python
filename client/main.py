@@ -1846,6 +1846,41 @@ class MainWindow(wx.Frame):
         self.save_settings()
         self.wait_messages_set()
 
+    def check_wa_connection_http(self):
+        """Query the Evolution API via HTTP to check if the instance is already connected to WhatsApp.
+        This resolves a race condition where the 'connection.update' WebSocket event
+        with state='open' is emitted before the client WebSocket successfully connects.
+        """
+        url = f"{self.evolution_server}:{self.evolution_port}/instance/connectionState/{self.token}"
+        headers = {
+            "apikey": self.token,
+            "Content-Type": "application/json"
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code in (200, 201):
+                data = response.json()
+                inst_data = data.get("instance", {})
+                state = ""
+                if isinstance(inst_data, dict):
+                    state = inst_data.get("state") or inst_data.get("connectionState") or ""
+                if not state:
+                    state = data.get("state") or data.get("connectionState") or ""
+                
+                logging.info("[check_wa_connection_http] Instance connection state: %s", state)
+                if state == "open":
+                    self._wa_connected = True
+                    wuid = ""
+                    if isinstance(inst_data, dict):
+                        wuid = inst_data.get("wuid") or inst_data.get("jid") or ""
+                    if not wuid:
+                        wuid = data.get("wuid") or data.get("jid") or ""
+                    if wuid:
+                        self.my_jid = wuid
+                        logging.info("[check_wa_connection_http] Extracted my_jid from connectionState: %s", wuid)
+        except Exception as e:
+            logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
+
     def start_sync(self):
         # Block until init_UI() completes.  This prevents wx.CallAfter calls
         # below from referencing panels that don't exist yet (which happens when
@@ -1854,6 +1889,7 @@ class MainWindow(wx.Frame):
             return  # UI never initialized; bail out silently
 
         logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
+        self.check_wa_connection_http()
         waited = 0
         while waited < 30:
             if getattr(self, "_wa_connected", False):
