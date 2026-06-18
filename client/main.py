@@ -1884,6 +1884,9 @@ class MainWindow(wx.Frame):
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
 
+        # Start periodic background contacts sync (every 5 minutes)
+        self.start_periodic_contacts_sync()
+
     def wait_messages_set(self):
         if not self.background_mode:
             self._set_status(self.i18n.t("preparing_to_sync"))
@@ -2167,13 +2170,13 @@ class MainWindow(wx.Frame):
             return {}
 
     def get_remote_contacts(self):
-        url = f"{self.evolution_server}:{self.evolution_port}/contact/findContacts/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/findContacts/{self.token}"
         headers = {
             "apikey": self.token,
             "Content-Type": "application/json"
         }
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.post(url, json={}, headers=headers)
             if response.status_code not in (200, 201):
                 print(f"[get_remote_contacts] API error {response.status_code}: {response.text}")
                 response_data = []
@@ -2189,12 +2192,31 @@ class MainWindow(wx.Frame):
                     if jid not in self.contacts:
                         self.contacts[jid] = contact
                     else:
-                        self.contacts[jid].update(contact)
+                        for k, v in contact.items():
+                            if v is not None and v != "":
+                                self.contacts[jid][k] = v
             self.save_data(self.chats, self.contacts)
             return self.contacts
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
+
+    def start_periodic_contacts_sync(self):
+        if hasattr(self, "_contacts_sync_thread_started") and self._contacts_sync_thread_started:
+            return
+        self._contacts_sync_thread_started = True
+
+        def _loop():
+            while True:
+                time.sleep(300)
+                try:
+                    if getattr(self, "_wa_connected", False):
+                        self.get_remote_contacts()
+                        wx.CallAfter(self._schedule_set_chats)
+                except Exception as e:
+                    print(f"[periodic_contacts_sync] error: {e}")
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def _is_self_jid(self, jid: str) -> bool:
         """Return True if jid refers to the user's own WhatsApp account.
