@@ -437,14 +437,20 @@ class MainWindow(wx.Frame):
         try:
             logging.info("MainWindow: Connecting WebSocket...")
             self.connect_websocket()
-        except Exception:
+        except Exception as e:
             logging.exception("MainWindow: Exception during websocket connection")
             self.error_sound.play()
-            wx.MessageBox(
-                self.i18n.t("websocket_failed_reconnect"),
-                self.i18n.t("connection_error"),
-                wx.OK | wx.ICON_WARNING,
-            )
+            error_str = str(e)
+            # If the instance does not exist on the server (e.g. database recreated/wiped),
+            # it returns "Invalid namespace". We should fallback to the connection dialog silently.
+            if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                logging.info("WebSocket namespace is invalid (instance does not exist). Showing connection dialog silently.")
+            else:
+                wx.MessageBox(
+                    self.i18n.t("websocket_failed_reconnect"),
+                    self.i18n.t("connection_error"),
+                    wx.OK | wx.ICON_WARNING,
+                )
             self.connect.show_connection_dial()
             self._just_paired = True
         
