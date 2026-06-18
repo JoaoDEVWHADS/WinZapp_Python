@@ -1959,6 +1959,12 @@ class MainWindow(wx.Frame):
             response_data = response.json()
             if not isinstance(response_data, list):
                 response_data = []
+            # Diagnostic log to inspect chat keys
+            lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
+            if lid_chats:
+                logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
+                logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
+
             for chat in response_data:
                 if not isinstance(chat, dict):
                     continue
