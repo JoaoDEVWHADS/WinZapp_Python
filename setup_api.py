@@ -117,7 +117,7 @@ def main():
 
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "checkout", tag], cwd=CLIENT_API_DIR)
+        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
         
         # Re-restore after checkout just in case git checkout overwrites package.json
         if start_js_content is not None:
