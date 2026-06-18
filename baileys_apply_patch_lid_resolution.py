@@ -58,11 +58,14 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
         const picture = await this.profilePicture(info?.jid);
         const status = await this.getStatus(info?.jid);
         const business = await this.fetchBusinessProfile(info?.jid);
+        const contact = await this.prismaRepository.contact.findFirst({
+          where: { remoteJid: jid, instanceId: this.instanceId }
+        });
 
         return {
           jid: phoneJid,
           wuid: info?.jid || jid,
-          name: info?.name,"""
+          name: contact?.pushName || info?.name || null,"""
 
 # ---------------------------------------------------------------------------
 # Regex for Compiled main.js / main.mjs

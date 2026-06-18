@@ -3676,6 +3676,14 @@ class MainWindow(wx.Frame):
                     canonical_jid = res.get("jid") or res.get("id") or ""
                     if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                         self.register_jid_mapping(lid_jid, canonical_jid)
+                    
+                    # Store name directly under @lid in local contacts dictionary if mapping fails
+                    name = res.get("name")
+                    if name and name != "Contato sem nome" and not is_phone_like(name):
+                        if lid_jid not in self.contacts:
+                            self.contacts[lid_jid] = {}
+                        self.contacts[lid_jid]["name"] = name
+                        self.contacts[lid_jid]["pushName"] = name
                 else:
                     logging.error(f"[LID Resolution] fetchProfile API error {response.status_code} for {lid_jid}: {response.text}")
             except Exception as e:
