@@ -2,6 +2,7 @@ import threading
 import time
 import socketio
 import wx
+import requests
 from core.i18n import I18n
 
 class WebSocketClient:
@@ -54,22 +55,85 @@ class WebSocketClient:
                 self.main_window.message_queue.flush()
             self.on_pairing_complete()
         elif connection_state == "close":
-            # Must run on the main thread — wx.MessageBox from a Socket.IO
-            # I/O thread triggers COM cross-thread errors and can freeze the app.
-            def _show_error():
-                self.main_window.error_sound.play()
-                parent_dialog = (
-                    self.connect.pairing_dial
-                    if hasattr(self.connect, 'pairing_dial')
-                    else self.connect.connection_dial
-                )
-                wx.MessageBox(
-                    self.i18n.t("instance_state_changed"),
-                    self.i18n.t("error").format(app_name=self.main_window.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                    parent_dialog,
-                )
-            wx.CallAfter(_show_error)
+            # Detect permanent WhatsApp logout (Baileys DisconnectReason.loggedOut = 401).
+            # Evolution API may surface this in different fields depending on the version.
+            status_code  = (
+                data.get("statusCode")
+                or data.get("status")
+                or (data.get("lastDisconnect") or {}).get("statusCode")
+            )
+            is_logout = (
+                data.get("loggedOut", False)
+                or status_code == 401
+            )
+            if is_logout:
+                # Permanent logout: clear credentials and redirect to pairing.
+                wx.CallAfter(self._handle_logout)
+            else:
+                # Temporary disconnection (network glitch, API restart, etc.)
+                # Must run on the main thread — wx.MessageBox from a Socket.IO
+                # I/O thread triggers COM cross-thread errors and can freeze the app.
+                def _show_error():
+                    self.main_window.error_sound.play()
+                    parent_dialog = (
+                        self.connect.pairing_dial
+                        if hasattr(self.connect, 'pairing_dial')
+                        else getattr(self.connect, 'connection_dial', None)
+                    )
+                    wx.MessageBox(
+                        self.i18n.t("instance_state_changed"),
+                        self.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                        parent_dialog,
+                    )
+                wx.CallAfter(_show_error)
+
+    def _handle_logout(self):
+        """Handle a permanent WhatsApp logout (device removed from account).
+
+        Runs on the wx main thread (via wx.CallAfter).  Shows an informative
+        dialog, wipes the now-invalid credentials from settings, disconnects
+        the socket, and opens the connection dialog so the user can re-pair.
+        """
+        mw = self.main_window
+        mw._wa_connected = False
+        mw.error_sound.play()
+
+        wx.MessageBox(
+            self.i18n.t("device_logged_out"),
+            self.i18n.t("error").format(app_name=mw.app_name),
+            wx.OK | wx.ICON_ERROR,
+        )
+
+        # Wipe the invalidated credentials so next startup goes to pairing.
+        pi = mw.settings.setdefault("privateinfo", {})
+        old_token = pi.pop("WA_token", "")
+        pi.pop("WA_phone_number", None)
+        mw.settings.setdefault("status", {})["messages_set_completed"] = False
+        mw.token = ""
+        mw.save_settings()
+
+        # Best-effort: delete the orphaned instance from the local Evolution API.
+        if old_token:
+            def _delete():
+                try:
+                    requests.delete(
+                        f"{mw.evolution_server}:{mw.evolution_port}/instance/delete/{old_token}",
+                        headers={"apikey": mw.evolution_api_key},
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+            threading.Thread(target=_delete, daemon=True).start()
+
+        # Disconnect the socket (may already be disconnecting).
+        try:
+            self.sio.disconnect()
+        except Exception:
+            pass
+
+        # Redirect to pairing dialog.
+        self.connect.show_connection_dial()
 
     def on_pairing_complete(self):
         # Destroy dialogs on the main thread to avoid wx thread-safety issues.
@@ -109,12 +173,15 @@ class WebSocketClient:
     def on_messages_set(self, info):
         self.main_window.settings.setdefault("status", {})["messages_set_completed"] = True
         self.main_window.save_settings()
-        # Always trigger a sync when messages.set arrives so conversations that
-        # came in while the app was offline are picked up even on returning
-        # sessions (where the flag was already True).  Guard against a concurrent
-        # sync that is still running from prepare_sync().
+        # Guard 1: don't start a second sync while one is already running.
         existing = getattr(self.main_window, "sync_thread", None)
         if existing and existing.is_alive():
+            return
+        # Guard 2: don't restart sync after it already completed this session.
+        # Evolution API sends messages.set in multiple batches during initial
+        # WhatsApp sync; without this guard the second batch would trigger a
+        # full re-sync immediately after the first one finished.
+        if getattr(self.main_window, "_sync_completed", False):
             return
         self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
         self.main_window.sync_thread.start()
@@ -255,11 +322,35 @@ class WebSocketClient:
             for contact in data:
                 if not isinstance(contact, dict):
                     continue
-                jid = contact.get("remoteJid", "")
+                # Normalise @c.us → @s.whatsapp.net so the lookup matches the
+                # contacts dict, which always stores entries under the modern
+                # @s.whatsapp.net format.
+                jid = self.main_window._normalize_jid(contact.get("remoteJid", ""))
                 if not jid:
                     continue
                 existing = self.main_window.contacts.get(jid)
+                # Bridge @lid JIDs to their canonical phone JID before giving up.
+                if existing is None and jid.endswith("@lid"):
+                    phone_jid = getattr(self.main_window, "_lid_to_phone", {}).get(jid, "")
+                    if phone_jid:
+                        existing = self.main_window.contacts.get(phone_jid)
+                        if existing is not None:
+                            jid = phone_jid
                 if existing is None:
+                    # Contact was absent from self.contacts (filtered out by
+                    # get_remote_contacts because it had no pushName in the DB
+                    # at sync time). If this event carries a name, create the
+                    # entry now so future lookups can find it.
+                    push = contact.get("pushName", "")
+                    if push:
+                        self.main_window.contacts[jid] = {
+                            "remoteJid": jid,
+                            "pushName": push,
+                            "profilePicUrl": contact.get("profilePicUrl") or "",
+                            "type": "contact",
+                            "isSaved": True,
+                        }
+                        updated = True
                     continue
                 if contact.get("pushName"):
                     existing["pushName"] = contact["pushName"]

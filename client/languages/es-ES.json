@@ -321,6 +321,9 @@
     "quoted_message_label": "mensaje citado",
     "typing_indicator": "escribiendo...",
     "typing_text": "{name} está escribiendo...",
+    "recording_indicator": "grabando audio...",
+    "recording_text": "{name} está grabando audio...",
+    "group_presence_indicator": "{name}: {action}",
     "reply_private": "Responder en privado",
     "converse_with": "Chatear con {name}",
     "goto_quoted": "Ir al mensaje citado",
@@ -385,5 +388,6 @@
     "conv_filter_all": "Todo",
     "conv_filter_unread": "Sin leer",
     "conv_filter_groups": "Grupos",
-    "conv_filter_individual": "Individuales"
+    "conv_filter_individual": "Individuales",
+    "device_logged_out": "Tu dispositivo ha sido desconectado de la cuenta de WhatsApp. Por favor, conéctate de nuevo."
 }

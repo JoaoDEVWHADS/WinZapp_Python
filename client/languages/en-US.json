@@ -321,6 +321,9 @@
     "quoted_message_label": "quoted message",
     "typing_indicator": "typing...",
     "typing_text": "{name} is typing...",
+    "recording_indicator": "recording audio...",
+    "recording_text": "{name} is recording audio...",
+    "group_presence_indicator": "{name}: {action}",
     "reply_private": "Reply privately",
     "converse_with": "Chat with {name}",
     "goto_quoted": "Go to quoted message",
@@ -382,5 +385,6 @@
     "conv_filter_all": "All",
     "conv_filter_unread": "Unread",
     "conv_filter_groups": "Groups",
-    "conv_filter_individual": "Individual"
+    "conv_filter_individual": "Individual",
+    "device_logged_out": "Your device has been disconnected from the WhatsApp account. Please connect again."
 }

@@ -359,6 +359,10 @@ class MainWindow(wx.Frame):
         self.chats = {}
         self.chat_names = []
         self.contacts = {}
+        # Set by init_UI() when all wx widgets are ready.  start_sync() waits
+        # on this before making any wx.CallAfter calls so it never touches
+        # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
+        self._ui_ready_event = threading.Event()
 
         # Check and install API modules if needed (first run only)
         self.ensure_api_modules_installed()
@@ -493,6 +497,9 @@ class MainWindow(wx.Frame):
             self.Show()
         #Set offline chats for the first time
         self.set_chats()
+        # All widgets exist and the initial chat list is painted — unblock any
+        # sync thread that was waiting for the UI to be ready.
+        self._ui_ready_event.set()
 
         # ── Quick tip after first pairing ─────────────────────────────────────
         if not self.background_mode and self._just_paired:
@@ -806,6 +813,38 @@ class MainWindow(wx.Frame):
             return jid[:-5] + "@s.whatsapp.net"
         return jid
 
+    def _merge_lid_into_phone(self, lid_jid: str, phone_jid: str):
+        """Merge a @lid chat entry into the canonical phone (@s.whatsapp.net) entry.
+
+        If only @lid exists, renames it.
+        If both exist, copies @lid messages into phone_jid (dedup by ID), then
+        removes the @lid entry.
+        """
+        if lid_jid not in self.chats:
+            return
+        if phone_jid in self.chats:
+            dst_records = (
+                self.chats[phone_jid]
+                .setdefault("messages", {})
+                .setdefault("messages", {})
+                .setdefault("records", [])
+            )
+            src_records = (
+                self.chats[lid_jid]
+                .get("messages", {})
+                .get("messages", {})
+                .get("records", [])
+            )
+            dst_ids = {r.get("key", {}).get("id") for r in dst_records}
+            for r in src_records:
+                if r.get("key", {}).get("id") not in dst_ids:
+                    dst_records.append(r)
+        else:
+            lid_chat = self.chats.pop(lid_jid)
+            lid_chat["remoteJid"] = phone_jid
+            self.chats[phone_jid] = lid_chat
+        self.chats.pop(lid_jid, None)
+
     def on_new_message(self, msg: dict):
         """
         Called on the main thread (via wx.CallAfter) when a new message
@@ -834,19 +873,29 @@ class MainWindow(wx.Frame):
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
-        # Evolution API v2 swaps key.remoteJid/@remoteJidAlt so the delivered
-        # message always has remoteJid=phone and remoteJidAlt=@lid.  If we
-        # already have a chat stored under the @lid key (e.g. from the initial
-        # chats sync), rename it to the phone JID so both old and new messages
-        # end up in one entry.
-        alt_jid = key.get("remoteJidAlt", "")
-        if (remote_jid.endswith("@s.whatsapp.net")
-                and alt_jid.endswith("@lid")
-                and alt_jid in self.chats
-                and remote_jid not in self.chats):
-            lid_chat = self.chats.pop(alt_jid)
-            lid_chat["remoteJid"] = remote_jid
-            self.chats[remote_jid] = lid_chat
+        # Handles both API key formats and all combinations of which entries exist:
+        #   OLD format: remoteJid=@lid,  remoteJidAlt=@s.whatsapp.net
+        #   NEW format: remoteJid=phone, remoteJidAlt=@lid
+        #   Cache-only: no remoteJidAlt, but @lid known from prior messages
+        alt_jid = self._normalize_jid(key.get("remoteJidAlt", ""))
+
+        if remote_jid.endswith("@lid"):
+            # OLD format — redirect to canonical phone JID
+            phone_jid = (
+                alt_jid if alt_jid.endswith("@s.whatsapp.net")
+                else getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+            )
+            if phone_jid:
+                self._merge_lid_into_phone(remote_jid, phone_jid)
+                remote_jid = phone_jid
+        elif alt_jid.endswith("@lid"):
+            # NEW format — merge the @lid side into the phone chat
+            self._merge_lid_into_phone(alt_jid, remote_jid)
+        elif remote_jid.endswith("@s.whatsapp.net"):
+            # No remoteJidAlt — consult cache for any @lid counterpart
+            lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+            if lid_jid:
+                self._merge_lid_into_phone(lid_jid, remote_jid)
 
         # ── Ensure the chat record exists ─────────────────────────────────────
         if remote_jid not in self.chats:
@@ -916,6 +965,8 @@ class MainWindow(wx.Frame):
             return
         if self.is_chat_muted(remote_jid):
             return
+        if self.is_chat_archived(remote_jid):
+            return
         if not self.settings.get("general", {}).get("notifications_enabled", True):
             return
 
@@ -968,7 +1019,29 @@ class MainWindow(wx.Frame):
             self.notification_manager.send(title, body, remote_jid)
 
     def connect_websocket(self):
-        self.ws.sio.connect(f"{self.evolution_ws_server}:{self.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.token}, namespaces=[f"/{self.token}"])
+        """Connect to the Evolution API WebSocket namespace.
+
+        Retries up to 3 times with a 2-second delay to handle the brief window
+        after instance creation where the namespace isn't registered yet on the
+        socket.io server (race condition that causes 'namespace failed' errors).
+        """
+        last_exc = None
+        for attempt in range(3):
+            try:
+                if self.ws.sio.connected:
+                    self.ws.sio.disconnect()
+                self.ws.sio.connect(
+                    f"{self.evolution_ws_server}:{self.evolution_port}/",
+                    socketio_path="socket.io",
+                    headers={"apikey": self.token},
+                    namespaces=[f"/{self.token}"],
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(2)
+        raise last_exc
 
     # ── First-run module installation ──────────────────────────────────────
 
@@ -1673,17 +1746,31 @@ class MainWindow(wx.Frame):
 
         #Get Local Chats
         self.chats = self.get_chats()
+        # Build cache first so deduplicate_chats() can use it as a fallback
+        # for @lid chats whose messages carry no remoteJidAlt bridge field.
+        self._build_lid_to_phone_cache()
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
         self.connected_sound.play()
-        if self.settings.get("status", {}).get("messages_set_completed"):
-            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-            self.sync_thread.start()
-        else:
-            self.wait_messages_set()
+        # Reset per-session sync guard so on_messages_set() can start a fresh
+        # sync.  Without this, _sync_completed stays True from the previous
+        # session and messages.set never triggers start_sync() again.
+        self._sync_completed = False
+        # Reset so the 60-s fallback and on_messages_set() can fire.
+        # The flag persisted as True across restarts, blocking re-sync on
+        # reconnection when the Evolution API doesn't re-send messages.set.
+        self.settings.setdefault("status", {})["messages_set_completed"] = False
+        self.save_settings()
+        self.wait_messages_set()
 
     def start_sync(self):
+        # Block until init_UI() completes.  This prevents wx.CallAfter calls
+        # below from referencing panels that don't exist yet (which happens when
+        # the websocket failed and ShowModal() is still blocking init_UI()).
+        if not self._ui_ready_event.wait(timeout=120):
+            return  # UI never initialized; bail out silently
+
         # After first pairing the API may need a few seconds to populate chats.
         # Retry only when starting cold (no local cache); if we already have
         # local chats just refresh once and move on — the API is ready.
@@ -1705,7 +1792,15 @@ class MainWindow(wx.Frame):
                 wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
             time.sleep(_CHAT_DELAY)
         self.chats = self.normalize_chats(self.chats)
-        self.contacts = self.get_remote_contacts()
+
+        # Quick initial contacts fetch — may be incomplete on first QR pairing
+        # because WhatsApp delivers contacts to the Evolution API concurrently
+        # with messages.  We'll do a second, definitive fetch after messages are
+        # synced (by then the API has received all contacts from WhatsApp).
+        _initial_contacts = self.get_remote_contacts()
+        if _initial_contacts:
+            self.contacts = _initial_contacts
+
         self.synchronizing_sound.play()
         if not self.background_mode:
             wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
@@ -1719,6 +1814,14 @@ class MainWindow(wx.Frame):
         # returned both JID formats before messages were fetched) can now be
         # fully resolved and merged.
         self.chats = self.deduplicate_chats(self.chats)
+
+        # Re-fetch contacts now that sync_remote_chats() has finished.  The
+        # message sync takes long enough that by this point the Evolution API
+        # has received all contacts from WhatsApp — solving the first-pairing
+        # issue where names were missing because the initial fetch was too early.
+        _fresh_contacts = self.get_remote_contacts()
+        if _fresh_contacts:
+            self.contacts = _fresh_contacts
 
         # Conversations are fully sorted as soon as messages are synced.
         # Sort, display, play sync-complete sound, and announce to the user
@@ -1739,19 +1842,50 @@ class MainWindow(wx.Frame):
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
 
+        # Mark sync as done for this session so late-arriving messages.set
+        # events (Evolution API sends them in batches) don't restart the full
+        # sync process after it already completed successfully.
+        self._sync_completed = True
+
     def wait_messages_set(self):
         if not self.background_mode:
             self._set_status(self.i18n.t("preparing_to_sync"))
-        # Safety net: if the messages.set WebSocket event never arrives (e.g. the
-        # API already finished syncing before our socket connected), start sync
-        # anyway after 60 seconds so the user is never left with an empty list.
+        # Fallback: if messages.set never arrives (the API was already fully synced
+        # before our WebSocket connected so Baileys won't re-fire the event), poll
+        # the API every 5 s for up to 60 s and start sync as soon as it responds.
+        # This means a ready API triggers sync in ≤5 s instead of always waiting 60 s.
         def _fallback():
-            time.sleep(60)
-            if not self.settings.get("status", {}).get("messages_set_completed"):
-                self.settings.setdefault("status", {})["messages_set_completed"] = True
-                self.save_settings()
-                self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-                self.sync_thread.start()
+            for _ in range(12):   # 12 × 5 s = 60 s maximum
+                time.sleep(5)
+                # messages.set WebSocket event already triggered sync — nothing to do
+                if self.settings.get("status", {}).get("messages_set_completed"):
+                    return
+                existing = getattr(self, "sync_thread", None)
+                if existing and existing.is_alive():
+                    return
+                if getattr(self, "_sync_completed", False):
+                    return
+                # Probe the API: if it already has chats, start sync immediately
+                try:
+                    url = (
+                        f"{self.evolution_server}:{self.evolution_port}"
+                        f"/chat/findChats/{self.token}"
+                    )
+                    r = requests.post(
+                        url,
+                        headers={"apikey": self.token, "Content-Type": "application/json"},
+                        timeout=5,
+                    )
+                    if r.ok and isinstance(r.json(), list) and r.json():
+                        self.settings.setdefault("status", {})["messages_set_completed"] = True
+                        self.save_settings()
+                        self.sync_thread = threading.Thread(
+                            target=self.start_sync, daemon=True
+                        )
+                        self.sync_thread.start()
+                        return
+                except Exception:
+                    pass
         threading.Thread(target=_fallback, daemon=True).start()
 
     def create_basic_files(self):
@@ -1827,12 +1961,20 @@ class MainWindow(wx.Frame):
                     chat["remoteJid"] = jid
                     chats[jid] = chat
                 else:
-                    # Chat already in local cache: refresh metadata (unreadCount,
-                    # name, lastMessage, etc.) from the API without overwriting
-                    # locally-accumulated messages or the normalized remoteJid.
+                    # Chat already in local cache: refresh metadata from the
+                    # server without overwriting local messages or the normalised
+                    # remoteJid.
                     for k, v in chat.items():
-                        if k not in ("messages", "remoteJid"):
-                            chats[jid][k] = v
+                        if k in ("messages", "remoteJid"):
+                            continue
+                        # Don't let a stale server unreadCount re-mark a
+                        # conversation the user already read locally.
+                        # mark_conversation_as_read() sets it to 0 in-memory
+                        # and notifies the server, but the server may not have
+                        # propagated the change yet when this sync runs.
+                        if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
+                            continue
+                        chats[jid][k] = v
             self.save_data(chats, self.contacts)
             return chats
         except Exception as e:
@@ -1908,7 +2050,10 @@ class MainWindow(wx.Frame):
             lid_chat = chats[lid_jid]
             alt_jid  = self._find_alt_jid_from_messages(lid_chat)
             if not alt_jid:
-                continue  # no phone-number JID found in messages — keep @lid as-is
+                # Fallback: consult the pre-built _lid_to_phone cache
+                alt_jid = getattr(self, "_lid_to_phone", {}).get(lid_jid, "")
+            if not alt_jid:
+                continue  # no phone-number JID found anywhere — keep @lid as-is
 
             src_records = (
                 lid_chat.get("messages", {})
@@ -1974,7 +2119,13 @@ class MainWindow(wx.Frame):
                 if not isinstance(contact, dict):
                     continue
                 if contact.get("type", "") == "contact":
-                    contacts[contact.get("remoteJid", "")] = contact
+                    # Normalise @c.us → @s.whatsapp.net so lookups are consistent
+                    jid = self._normalize_jid(contact.get("remoteJid", ""))
+                    if not jid:
+                        continue
+                    contact = dict(contact)
+                    contact["remoteJid"] = jid
+                    contacts[jid] = contact
             self.save_data(self.chats, contacts)
             return contacts
         except Exception as e:
@@ -1983,7 +2134,8 @@ class MainWindow(wx.Frame):
 
     def _is_self_jid(self, jid: str) -> bool:
         """Return True if jid refers to the user's own WhatsApp account.
-        Bridges @lid JIDs before comparing so self-chats exposed as @lid are detected.
+        Bridges @lid JIDs via cache and strips Baileys device suffixes (':N')
+        so self-chats stored under any JID variant are correctly detected.
         """
         if not jid or jid.endswith("@g.us"):
             return False
@@ -1993,7 +2145,9 @@ class MainWindow(wx.Frame):
         compare = jid
         if jid.endswith("@lid"):
             compare = getattr(self, "_lid_to_phone", {}).get(jid, jid)
-        return compare.split("@")[0] == my_jid.split("@")[0]
+        def _phone_part(j: str) -> str:
+            return j.rsplit("@", 1)[0].split(":")[0]
+        return _phone_part(compare) == _phone_part(my_jid)
 
     def _compute_chat_lists(self):
         """Compute sorted/filtered chat lists. Safe to run on a background thread."""
@@ -2008,14 +2162,15 @@ class MainWindow(wx.Frame):
         for jid, chat in list(self.chats.items()):
             if jid in deleted:
                 continue
-            name = (
-                self._resolve_contact_name(chat)
-                or self.find_name_through_messages(chat)
-                or chat.get("name", "")
-                or chat.get("pushName", "")
-                or self.find_jid_through_messages(chat)
-                or (format_number(jid) if not jid.endswith("@lid") else "")
-            )
+            # Priority: saved contact name → chat pushName (group/profile fallback)
+            # → phone number. @lid JIDs must be converted via cache before format_number.
+            name = self._resolve_contact_name(chat) or chat.get("pushName", "")
+            if not name:
+                if jid.endswith("@lid"):
+                    phone = getattr(self, "_lid_to_phone", {}).get(jid, "")
+                    name = format_number(phone) if phone else ""
+                else:
+                    name = format_number(jid)
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
             if jid in archived:
@@ -2115,6 +2270,14 @@ class MainWindow(wx.Frame):
                 remote = key.get("remoteJid", "")
                 alt    = key.get("remoteJidAlt", "")
 
+                # Normalise @c.us → @s.whatsapp.net so the cache is always keyed
+                # under the modern format regardless of which API version wrote
+                # the message.
+                if alt and alt.endswith("@c.us"):
+                    alt = alt[:-5] + "@s.whatsapp.net"
+                if remote and remote.endswith("@c.us"):
+                    remote = remote[:-5] + "@s.whatsapp.net"
+
                 if alt and alt.endswith("@s.whatsapp.net"):
                     # OLD format: remoteJid=@lid, remoteJidAlt=phone
                     if remote.endswith("@lid"):
@@ -2133,99 +2296,86 @@ class MainWindow(wx.Frame):
         # Populated by WebSocketClient.on_presence_update via wx.CallAfter.
         if not hasattr(self, "_presence_cache"):
             self._presence_cache = {}
-        # Maps chat JID → set of participant JIDs currently composing
+        # Maps chat JID → {participant_jid: "composing"|"recording"}
         if not hasattr(self, "_composing_chats"):
             self._composing_chats = {}
+        # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
+        if not hasattr(self, "_presence_timers"):
+            self._presence_timers = {}
 
     def _find_alt_jid_from_messages(self, chat):
         """
-        Find the @s.whatsapp.net phone-number JID for a chat by scanning all
-        message keys.  Handles both Evolution API v2 key formats:
-          OLD: remoteJid=@lid,   remoteJidAlt=@s.whatsapp.net → return alt
-          NEW: remoteJid=phone, remoteJidAlt=@lid             → return remoteJid
-        Returns the phone JID string, or None if not found.
+        Find the canonical @s.whatsapp.net phone JID for a chat by scanning its
+        message keys.  Handles both Evolution API v2 key formats and normalises
+        any @c.us JIDs encountered to @s.whatsapp.net on the fly:
+
+          OLD: remoteJid=@lid,   remoteJidAlt=@s.whatsapp.net|@c.us → return alt (normalised)
+          NEW: remoteJid=phone,  remoteJidAlt=@lid                  → return remoteJid
+        Returns the phone JID (@s.whatsapp.net) string, or None if not found.
         """
+        def _norm(j: str) -> str:
+            return j[:-5] + "@s.whatsapp.net" if j.endswith("@c.us") else j
+
         for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
             key    = msg.get("key", {})
-            remote = key.get("remoteJid", "")
-            alt    = key.get("remoteJidAlt", "")
+            remote = _norm(key.get("remoteJid", ""))
+            alt    = _norm(key.get("remoteJidAlt", ""))
+            # alt is the phone JID, remote is @lid (OLD format)
             if alt and alt.endswith("@s.whatsapp.net"):
                 return alt
+            # remote is the phone JID, alt is @lid (NEW post-swap format)
             if remote and remote.endswith("@s.whatsapp.net") and alt and alt.endswith("@lid"):
                 return remote
         return None
 
     def _resolve_contact_name(self, chat):
         """
-        Return the address-book contact name (e.g. "mãe") for a private chat,
-        or None for groups or when no saved contact name is available.
+        Return the saved contact name (contact.pushName) for a private chat, or None.
 
-        WhatsApp uses two JID formats:
-          - @s.whatsapp.net  traditional phone-number-based identifier
-          - @lid             opaque Linked Device ID (newer accounts)
-
-        The contacts dict is indexed by whichever JID format Evolution API
-        stored for each contact.  When a chat's remoteJid is @lid but the
-        contact is stored under the phone-number JID (or vice-versa), the
-        direct lookup fails.  In that case we scan the chat's message keys
-        for the key.remoteJidAlt bridge field that Evolution API v2 sets
-        when addressingMode == "lid", giving us the alternate JID to try.
+        Tries all three JID formats (@s.whatsapp.net, @c.us, @lid) and returns
+        the first valid pushName found.  Groups are skipped (always return None).
         """
         remoteJid = chat.get("remoteJid", "")
         if not remoteJid or remoteJid.endswith("@g.us"):
-            return None  # groups don't have address-book entries
-
-        def _name_from_contact(c):
-            # Prefer the address-book name ('name') over the WhatsApp profile
-            # name ('pushName').  Both fields may be absent or a bare phone
-            # number — reject those in either case.
-            for field in ("name", "pushName"):
-                val = c.get(field)
-                if val and isinstance(val, str):
-                    val = val.strip()
-                    if val and not val.isdigit() and not is_phone_like(val):
-                        return val
             return None
 
-        # 1. Direct lookup by chat's own remoteJid
-        contact = self.contacts.get(remoteJid)
-        if contact:
-            n = _name_from_contact(contact)
-            if n:
-                return n
+        def _name_from_contact(c) -> str:
+            val = (c.get("pushName") or "").strip()
+            return val if val and not val.isdigit() and not is_phone_like(val) else ""
 
-        # 2. @lid chat — bridge to phone-number JID via message keys
-        if remoteJid.endswith("@lid"):
-            alt_jid = self._find_alt_jid_from_messages(chat)
-            if alt_jid:
-                contact = self.contacts.get(alt_jid)
-                if contact:
-                    n = _name_from_contact(contact)
-                    if n:
-                        return n
+        def _try(jid: str) -> str:
+            if not jid:
+                return ""
+            c = self.contacts.get(jid)
+            return _name_from_contact(c) if c else ""
 
-        # 3. Try the global @lid → @s.whatsapp.net cache (covers JIDs seen in
-        #    other chats' message keys, e.g. group participants)
-        phone_jid = getattr(self, "_lid_to_phone", {}).get(remoteJid)
-        if phone_jid:
-            contact = self.contacts.get(phone_jid)
-            if contact:
-                n = _name_from_contact(contact)
-                if n:
-                    return n
-
-        # 4. Fall back to the chat's own 'name' field, which Baileys populates
-        #    from the address-book when the contact is saved.  This is a
-        #    reliable source when the contacts dict has a stale pushName (e.g.
-        #    the contact was first seen as a group member and stored with just
-        #    a phone number before being added to the address book).
-        chat_name = chat.get("name", "")
-        if chat_name and isinstance(chat_name, str):
-            chat_name = chat_name.strip()
-            if chat_name and not chat_name.isdigit() and not is_phone_like(chat_name):
-                return chat_name
-
-        return None
+        local = remoteJid.rsplit("@", 1)[0]
+        if remoteJid.endswith("@s.whatsapp.net"):
+            return (
+                _try(remoteJid)
+                or _try(local + "@c.us")
+                or _try(getattr(self, "_phone_to_lid", {}).get(remoteJid, ""))
+                or ""
+            ) or None
+        elif remoteJid.endswith("@c.us"):
+            return (
+                _try(remoteJid)
+                or _try(local + "@s.whatsapp.net")
+                or _try(getattr(self, "_phone_to_lid", {}).get(local + "@s.whatsapp.net", ""))
+                or ""
+            ) or None
+        elif remoteJid.endswith("@lid"):
+            phone = (
+                getattr(self, "_lid_to_phone", {}).get(remoteJid, "")
+                or self._find_alt_jid_from_messages(chat)
+                or ""
+            )
+            return (
+                _try(remoteJid)
+                or (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
+                or ""
+            ) or None
+        return _try(remoteJid) or None
 
     def find_name_through_messages(self, chat):
         if chat.get("remoteJid", "").endswith("@g.us"):
@@ -2649,19 +2799,95 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback)."""
-        contact = self.contacts.get(jid_norm)
-        if contact:
-            name = (contact.get("name") or contact.get("pushName") or "").strip()
-            if name and not name.isdigit():
-                return name
-        chat = self.chats.get(jid_norm)
-        if chat:
-            name = (chat.get("name") or chat.get("pushName") or "").strip()
-            if name and not name.isdigit():
-                return name
+        # Build candidate list covering all three JID formats for the same person.
+        candidates = [jid_norm]
+        local = jid_norm.rsplit("@", 1)[0]
+        if jid_norm.endswith("@s.whatsapp.net"):
+            candidates.append(local + "@c.us")
+            lid = getattr(self, "_phone_to_lid", {}).get(jid_norm, "")
+            if lid:
+                candidates.append(lid)
+        elif jid_norm.endswith("@c.us"):
+            candidates.append(local + "@s.whatsapp.net")
+        elif jid_norm.endswith("@lid"):
+            phone = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
+            if phone:
+                candidates.append(phone)
+                candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
+
+        for cjid in candidates:
+            contact = self.contacts.get(cjid)
+            if contact:
+                name = (contact.get("pushName") or "").strip()
+                if name and not name.isdigit():
+                    return name
+            chat = self.chats.get(cjid)
+            if chat:
+                name = (chat.get("name") or chat.get("pushName") or "").strip()
+                if name and not name.isdigit():
+                    return name
+
         if not jid_norm.endswith(("@g.us", "@lid")):
             return format_number(jid_norm)
-        return jid_norm.split("@")[0]
+        return local
+
+    def _presence_label_for_chat(self, chat_jid_norm: str, is_group: bool) -> str:
+        """Return the typing/recording label to append to a chat-list row, or ''."""
+        active = getattr(self, "_composing_chats", {}).get(chat_jid_norm, {})
+        if not active:
+            return ""
+        participant_jid, action = next(iter(active.items()))
+        if action == "composing":
+            action_label = self.i18n.t("typing_indicator")
+        elif action == "recording":
+            action_label = self.i18n.t("recording_indicator")
+        else:
+            return ""
+        if is_group:
+            name = self._resolve_jid_name(participant_jid)
+            if name:
+                return self.i18n.t("group_presence_indicator").format(
+                    name=name, action=action_label
+                )
+        return action_label
+
+    def _refresh_presence_label_in_list(self, chat_jid_norm: str):
+        """Update only the chat-list row for chat_jid_norm via SetItem().
+
+        Replaces the full _schedule_set_chats() rebuild for presence-only changes.
+        Using SetItem() on a single row prevents NVDA from re-reading the entire
+        list and stuttering in TTS echo while the user is typing a message.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        if panel is None:
+            return
+        lst       = getattr(panel, "conversations_list", None)
+        displayed = getattr(panel, "chats_list", [])
+        names     = getattr(panel, "chat_names", [])
+        if lst is None:
+            return
+        for idx, chat in enumerate(displayed):
+            if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
+                continue
+            name   = names[idx] if idx < len(names) else ""
+            unread = int(chat.get("unreadCount") or 0)
+            unread_str = (
+                f" {unread} " + (
+                    self.i18n.t("unread_messages") if unread > 1
+                    else self.i18n.t("unread_message")
+                )
+                if unread > 0 else ""
+            )
+            preview   = self._last_msg_preview(chat)
+            item_text = name + unread_str
+            if preview:
+                item_text += f" {preview}"
+            is_group = chat_jid_norm.endswith("@g.us")
+            label = self._presence_label_for_chat(chat_jid_norm, is_group)
+            if label:
+                item_text += f" {label}"
+            lst.SetItem(idx, 0, item_text)
+            break
 
     def on_presence_update(self, jid: str, presences: dict):
         """
@@ -2713,26 +2939,57 @@ class MainWindow(wx.Frame):
             if new_lkp != old_lkp:
                 presence_changed = True
 
-            # Update composing index for this chat
+            # Update composing/recording index for this chat
             if chat_jid_norm not in composing_chats:
-                composing_chats[chat_jid_norm] = set()
-            if new_lkp == "composing":
-                composing_chats[chat_jid_norm].add(canonical)
-            else:
-                composing_chats[chat_jid_norm].discard(canonical)
-
-            # Speak via AO2 when a new composing event starts in the active conversation
-            if new_lkp == "composing" and old_lkp != "composing" and chat_jid_norm == conv_jid:
-                name = self._resolve_jid_name(canonical)
-                if name:
+                composing_chats[chat_jid_norm] = {}
+            timer_key = (chat_jid_norm, canonical)
+            if new_lkp in ("composing", "recording"):
+                composing_chats[chat_jid_norm][canonical] = new_lkp
+                # Reset the 10-second auto-clear timer on every new event
+                old_timer = self._presence_timers.pop(timer_key, None)
+                if old_timer is not None:
                     try:
-                        self.speak_output.output(self.i18n.t("typing_text").format(name=name))
+                        old_timer.Stop()
+                    except Exception:
+                        pass
+                def _make_clear(cjid, part):
+                    def _clear():
+                        self._composing_chats.get(cjid, {}).pop(part, None)
+                        self._presence_timers.pop((cjid, part), None)
+                        self._refresh_presence_label_in_list(cjid)
+                    return _clear
+                self._presence_timers[timer_key] = wx.CallLater(
+                    10_000, _make_clear(chat_jid_norm, canonical)
+                )
+            else:
+                composing_chats[chat_jid_norm].pop(canonical, None)
+                old_timer = self._presence_timers.pop(timer_key, None)
+                if old_timer is not None:
+                    try:
+                        old_timer.Stop()
                     except Exception:
                         pass
 
-        # Refresh the chat list when any presence state changed (debounced)
+            # Speak via AO2 when a new composing/recording event starts in the open conversation
+            if chat_jid_norm == conv_jid and new_lkp != old_lkp:
+                name = self._resolve_jid_name(canonical)
+                if name:
+                    try:
+                        if new_lkp == "composing":
+                            self.speak_output.output(
+                                self.i18n.t("typing_text").format(name=name)
+                            )
+                        elif new_lkp == "recording":
+                            self.speak_output.output(
+                                self.i18n.t("recording_text").format(name=name)
+                            )
+                    except Exception:
+                        pass
+
+        # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
+        # that causes NVDA to re-read the full list and stutter during TTS echo.
         if presence_changed:
-            self._schedule_set_chats()
+            self._refresh_presence_label_in_list(chat_jid_norm)
 
         # Refresh the data-button note for the open conversation
         if panel is None or conv is None:
@@ -2750,6 +3007,11 @@ class MainWindow(wx.Frame):
         if old_count == unread_count:
             return
         chat["unreadCount"] = unread_count
+        # Persist immediately so the updated count survives a crash or a
+        # connection drop before the next full save_data() call.
+        threading.Thread(
+            target=self.save_data, args=(self.chats, self.contacts), daemon=True
+        ).start()
         self._schedule_set_chats()
 
     def handle_audio_message(self, msg, timeout=60):
@@ -2843,6 +3105,11 @@ class MainWindow(wx.Frame):
 
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
+        # Persist immediately so the 0 survives an app restart even if the user
+        # closes the app before the next automatic save_data() call.
+        threading.Thread(
+            target=self.save_data, args=(self.chats, self.contacts), daemon=True
+        ).start()
         wx.CallAfter(self.set_chats)
 
         if unread == 0:
@@ -3304,9 +3571,9 @@ class MainWindow(wx.Frame):
                     orig_type = m.get("messageType", "")
                     orig_obj  = m.get("message") or {}
                     if orig_type == "conversation":
-                        orig_text = (orig_obj.get("conversation") or "")[:40]
+                        orig_text = (orig_obj.get("conversation") or "")
                     elif orig_type == "extendedTextMessage":
-                        orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")[:40]
+                        orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
                     elif orig_type == "audioMessage":
                         orig_text = i18n.t("message_type_audio")
                     elif orig_type == "videoMessage":
@@ -3367,12 +3634,8 @@ class MainWindow(wx.Frame):
 
         if msg_type == "conversation":
             content = msg_obj.get("conversation") or ""
-            if len(content) > 60:
-                content = content[:57] + "..."
         elif msg_type == "extendedTextMessage":
             content = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
-            if len(content) > 60:
-                content = content[:57] + "..."
         elif msg_type == "audioMessage":
             dur     = _dur((msg_obj.get("audioMessage") or {}).get("seconds"))
             content = f"{i18n.t('message_type_audio')} {dur}"
@@ -3383,7 +3646,7 @@ class MainWindow(wx.Frame):
         elif msg_type == "imageMessage":
             img     = msg_obj.get("imageMessage") or {}
             caption = (img.get("caption") or "").strip()
-            content = i18n.t("photo") + (f" {caption[:40]}" if caption else "")
+            content = i18n.t("photo") + (f" {caption}" if caption else "")
         elif msg_type == "documentMessage":
             content = i18n.t("document")
         elif msg_type == "stickerMessage":
@@ -3485,10 +3748,14 @@ class MainWindow(wx.Frame):
                 item_text = name + unread_str
                 if preview:
                     item_text += f" {preview}"
-                # Show typing indicator when any participant is composing
+                # Show typing/recording indicator when any participant is active
                 chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
-                if chat_jid_norm and getattr(self, "_composing_chats", {}).get(chat_jid_norm):
-                    item_text += f" {self.i18n.t('typing_indicator')}"
+                if chat_jid_norm:
+                    presence_label = self._presence_label_for_chat(
+                        chat_jid_norm, chat_jid_norm.endswith("@g.us")
+                    )
+                    if presence_label:
+                        item_text += f" {presence_label}"
                 lst.Append((item_text,))
                 displayed_chats.append(chat)
                 displayed_names.append(name)

@@ -146,10 +146,7 @@ class TrayIcon(wx.adv.TaskBarIcon):
         else:
             text = i18n.t("tray_unread_plural").format(count=total, names=names_str)
 
-        full = prefix + text
-        if len(full) > 127:
-            full = full[:124] + "..."
-        return full
+        return prefix + text
 
     # ── Context menu ──────────────────────────────────────────────────────────
 
