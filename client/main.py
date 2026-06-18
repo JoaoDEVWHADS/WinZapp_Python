@@ -3355,6 +3355,89 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self.set_chats)
 
     # ── Evolution API — profile / group info ─────────────────────────────────
+    
+    def register_jid_mapping(self, lid_jid, phone_jid):
+        """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it."""
+        if not lid_jid or not phone_jid:
+            return
+        if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
+            return
+            
+        if not hasattr(self, "_lid_to_phone"):
+            self._lid_to_phone = {}
+        if not hasattr(self, "_phone_to_lid"):
+            self._phone_to_lid = {}
+            
+        current_phone = self._lid_to_phone.get(lid_jid)
+        if current_phone != phone_jid:
+            self._lid_to_phone[lid_jid] = phone_jid
+            self._phone_to_lid[phone_jid] = lid_jid
+            logging.info(f"[LID Mapping] Registered JID mapping: {lid_jid} <-> {phone_jid}")
+            
+            # Update the contact name display mappings in contacts if possible
+            if phone_jid in self.contacts and self.contacts[phone_jid]:
+                if lid_jid not in self.contacts or self.contacts[lid_jid].get("name") in (None, "", "Contato sem nome"):
+                    self.contacts[lid_jid] = self.contacts[phone_jid].copy()
+                    self.contacts[lid_jid]["id"] = lid_jid
+                    self.contacts[lid_jid]["remoteJid"] = lid_jid
+            
+            # Save the cache to disk
+            self.save_data(self.chats, self.contacts)
+            wx.CallAfter(self._schedule_set_chats)
+
+    def resolve_lid_jids_via_api(self, jids):
+        """Query /chat/whatsappNumbers/ to resolve a list of @lid JIDs to phone JIDs."""
+        if not jids:
+            return
+            
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/whatsappNumbers/{self.token}"
+        headers = {
+            "apikey": self.token,
+            "Content-Type": "application/json"
+        }
+        
+        # Prepare list of numbers to query
+        query_numbers = []
+        for jid in jids:
+            query_numbers.append(jid)
+            
+        payload = {
+            "numbers": query_numbers
+        }
+        
+        try:
+            logging.info(f"[LID Resolution] Querying whatsappNumbers for {len(jids)} JIDs...")
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            if response.status_code in (200, 201):
+                results = response.json()
+                if isinstance(results, list):
+                    for item in results:
+                        if not isinstance(item, dict):
+                            continue
+                        exists = item.get("exists")
+                        jid = item.get("jid")
+                        query_num = item.get("number")
+                        
+                        if exists and jid and jid.endswith("@s.whatsapp.net"):
+                            matched_lid = None
+                            if query_num:
+                                if str(query_num).endswith("@lid"):
+                                    matched_lid = str(query_num)
+                                else:
+                                    matched_lid = f"{query_num}@lid"
+                            
+                            if not matched_lid:
+                                for orig in jids:
+                                    if orig.startswith(str(query_num)):
+                                        matched_lid = orig
+                                        break
+                                        
+                            if matched_lid and matched_lid.endswith("@lid"):
+                                self.register_jid_mapping(matched_lid, jid)
+            else:
+                logging.error(f"[LID Resolution] whatsappNumbers API error {response.status_code}: {response.text}")
+        except Exception as e:
+            logging.exception(f"[LID Resolution] Exception during batch resolution: {e}")
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from Evolution API (runs on background thread)."""
@@ -3363,6 +3446,12 @@ class MainWindow(wx.Frame):
             resolved = getattr(self, "_lid_to_phone", {}).get(jid, "")
             if resolved:
                 jid = resolved
+            else:
+                # Resolve mapping via API before querying profile
+                self.resolve_lid_jids_via_api([original_jid])
+                resolved = getattr(self, "_lid_to_phone", {}).get(original_jid, "")
+                if resolved:
+                    jid = resolved
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/chat/fetchProfile/{self.token}"
