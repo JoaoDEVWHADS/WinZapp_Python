@@ -144,7 +144,7 @@ def patch_compiled_file(path: Path, label: str) -> bool:
         f"(await this.whatsappNumber({{numbers:[{jid_var}]}}))?.shift();"
         f"if(!{exists_var}.exists)throw new {err_class}({exists_var});"
         f"let phoneJid={jid_var};"
-        f"if({jid_var}.endswith(\"@lid\")){{try{{let a=await this.client.signalRepository.lidMapping.getPNForLID({jid_var});a&&(phoneJid=a)}}catch(a){{this.logger.error(`Error resolving LID mapping for {{{jid_var}}}: ${{a.message}}`)}}}}try{{"
+        f"if({jid_var}.endsWith(\"@lid\")){{try{{let a=await this.client.signalRepository.lidMapping.getPNForLID({jid_var});a&&(phoneJid=a)}}catch(a){{this.logger.error(`Error resolving LID mapping for {{{jid_var}}}: ${{a.message}}`)}}}}try{{"
     )
 
     # Perform function header replacement
