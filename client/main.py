@@ -996,7 +996,25 @@ class MainWindow(wx.Frame):
             self.notification_manager.send(title, body, remote_jid)
 
     def connect_websocket(self):
-        self.ws.sio.connect(f"{self.evolution_ws_server}:{self.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.token}, namespaces=[f"/{self.token}"])
+        import time
+        max_attempts = 6
+        delay = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logging.info("connect_websocket: Attempting connection %d/%d...", attempt, max_attempts)
+                self.ws.sio.connect(
+                    f"{self.evolution_ws_server}:{self.evolution_port}/",
+                    socketio_path="socket.io",
+                    headers={"apikey": self.token},
+                    namespaces=[f"/{self.token}"]
+                )
+                logging.info("connect_websocket: Connected successfully on attempt %d.", attempt)
+                return
+            except Exception as e:
+                logging.warning("connect_websocket: Attempt %d failed: %s", attempt, e)
+                if attempt == max_attempts:
+                    raise e
+                time.sleep(delay)
 
     # ── First-run module installation ──────────────────────────────────────
 
