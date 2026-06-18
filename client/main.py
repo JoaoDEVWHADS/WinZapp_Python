@@ -338,6 +338,10 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Loading settings...")
         self.load_settings()
 
+        # Synchronize registry key with the autostart setting on Windows
+        self._sync_autostart_registry()
+
+
         # ── Auto-updater ──────────────────────────────────────────────────────
         # Schedule the update checker on the event loop early so it runs even
         # if language selection, terms acceptance, or pairing dialogs are shown (modal).
@@ -1563,6 +1567,33 @@ class MainWindow(wx.Frame):
             disable_autostart()
             self.settings.setdefault("general", {})["autostart"] = False
             self.save_settings()
+
+    def _sync_autostart_registry(self):
+        """
+        Synchronize the Windows Run registry key with the current settings.
+        Only runs on Windows. If autostart setting is True, ensures the registry key exists.
+        If autostart setting is False (and it's not the first run), ensures the key is removed.
+        """
+        import sys
+        if sys.platform != "win32":
+            return
+
+        if self.settings.get("general", {}).get("first_run", True):
+            return
+
+        try:
+            from autostart import is_autostart_enabled, enable_autostart, disable_autostart
+            setting_enabled = self.settings.get("general", {}).get("autostart", False)
+            registry_enabled = is_autostart_enabled()
+
+            if setting_enabled and not registry_enabled:
+                logging.info("Startup: Autostart is enabled in settings but missing in registry. Enabling...")
+                enable_autostart()
+            elif not setting_enabled and registry_enabled:
+                logging.info("Startup: Autostart is disabled in settings but present in registry. Disabling...")
+                disable_autostart()
+        except Exception as e:
+            logging.error("Startup: Failed to sync autostart registry key: %s", e)
 
     # ── Quick tip ─────────────────────────────────────────────────────────────
 
