@@ -114,7 +114,12 @@ class ApiStartupDialog(wx.Dialog):
             return
         self._done = True
         self._timer.Stop()
-        self.EndModal(wx.ID_OK)
+        try:
+            self.EndModal(wx.ID_OK)
+        except Exception:
+            self._done = False
+            self._timer.Start(self._PULSE_MS)
+            wx.CallLater(50, self._finish_success)
 
     def _finish_timeout(self):
         if self._done:
@@ -124,4 +129,9 @@ class ApiStartupDialog(wx.Dialog):
             return
         self._done = True
         self._timer.Stop()
-        self.EndModal(wx.ID_CANCEL)
+        try:
+            self.EndModal(wx.ID_CANCEL)
+        except Exception:
+            self._done = False
+            self._timer.Start(self._PULSE_MS)
+            wx.CallLater(50, self._finish_timeout)
