@@ -3491,7 +3491,15 @@ class MainWindow(wx.Frame):
             for jid in list(self.chats.keys()):
                 if jid.endswith("@lid"):
                     mapped = getattr(self, "_lid_to_phone", {}).get(jid)
-                    if not mapped:
+                    needs_resolve = True
+                    if mapped:
+                        c = self.contacts.get(mapped)
+                        if c:
+                            name = c.get("name")
+                            # If we have a valid contact name that is not a placeholder and not pushName, skip
+                            if name and name != "Contato sem nome" and name != c.get("pushName"):
+                                needs_resolve = False
+                    if needs_resolve:
                         lids_to_resolve.append(jid)
             
             if not lids_to_resolve:
@@ -3499,16 +3507,18 @@ class MainWindow(wx.Frame):
                 return
                 
             logging.info(f"[start_background_lid_resolution] START: Found {len(lids_to_resolve)} @lid JIDs to resolve in background.")
-            for index, jid in enumerate(lids_to_resolve, 1):
+            batch_size = 25
+            for i in range(0, len(lids_to_resolve), batch_size):
                 if not getattr(self, "_wa_connected", False):
                     logging.info("[start_background_lid_resolution] Aborting resolution loop (WhatsApp disconnected)")
                     break
+                batch = lids_to_resolve[i:i+batch_size]
                 try:
-                    logging.info(f"[start_background_lid_resolution] [{index}/{len(lids_to_resolve)}] Querying profile for JID: {jid}")
-                    self.get_contact_profile(jid)
-                    time.sleep(0.5)  # Throttling delay
+                    logging.info(f"[start_background_lid_resolution] Querying batch of {len(batch)} JIDs...")
+                    self.resolve_lid_jids_via_api(batch)
+                    time.sleep(1.0)
                 except Exception as e:
-                    logging.error(f"[start_background_lid_resolution] Error JID {jid}: {e}")
+                    logging.error(f"[start_background_lid_resolution] Error JID batch: {e}")
             logging.info("[start_background_lid_resolution] COMPLETED background JID resolution loop.")
         
         threading.Thread(target=_resolve_lids, daemon=True).start()
