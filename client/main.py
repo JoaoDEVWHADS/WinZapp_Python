@@ -2178,27 +2178,38 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, json={}, headers=headers)
             if response.status_code not in (200, 201):
-                print(f"[get_remote_contacts] API error {response.status_code}: {response.text}")
+                logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text}")
                 response_data = []
             else:
                 response_data = response.json()
             if not isinstance(response_data, list):
                 response_data = []
+            
+            logging.info(f"[get_remote_contacts] Downloaded {len(response_data)} contacts from Evolution API.")
+            
             for contact in response_data:
                 if not isinstance(contact, dict):
                     continue
                 jid = contact.get("remoteJid") or contact.get("id", "")
                 if jid and not jid.endswith("@g.us") and not jid.endswith("@broadcast"):
+                    name = contact.get("name") or contact.get("pushname") or "Contato sem nome"
                     if jid not in self.contacts:
+                        logging.info(f"[get_remote_contacts] Adding contact: {name} ({jid})")
                         self.contacts[jid] = contact
                     else:
+                        updated_fields = []
                         for k, v in contact.items():
                             if v is not None and v != "":
-                                self.contacts[jid][k] = v
+                                if self.contacts[jid].get(k) != v:
+                                    self.contacts[jid][k] = v
+                                    updated_fields.append(k)
+                        if updated_fields:
+                            logging.info(f"[get_remote_contacts] Updated fields {updated_fields} for contact: {name} ({jid})")
             self.save_data(self.chats, self.contacts)
             return self.contacts
         except Exception as e:
             self.error_sound.play()
+            logging.exception("Exception in get_remote_contacts")
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
 
     def start_periodic_contacts_sync(self):
