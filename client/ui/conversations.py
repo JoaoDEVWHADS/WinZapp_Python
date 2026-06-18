@@ -2926,6 +2926,11 @@ class ConversationsPanel(wx.Panel):
                 # Private chat: resolve the canonical JID for cache lookup
                 canonical = mw._normalize_jid(jid)
                 if canonical.endswith("@lid"):
+                    mapped = getattr(mw, "_lid_to_phone", {}).get(canonical)
+                    if not mapped:
+                        logging.info(f"[_fetch_and_update_profile] On-demand JID mapping missing for {canonical}. Triggering background query.")
+                        # Fetch profile in background to resolve JID mapping
+                        mw.get_contact_profile(canonical)
                     canonical = getattr(mw, "_lid_to_phone", {}).get(canonical, canonical)
                 presence = getattr(mw, "_presence_cache", {}).get(canonical, {})
                 lkp      = presence.get("lastKnownPresence", "")

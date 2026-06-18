@@ -1820,6 +1820,7 @@ class MainWindow(wx.Frame):
         self.chats = self.get_chats()
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
+        self._load_local_lid_cache()
         self.contacts = self.get_contacts()
         self.connected_sound.play()
         if self.settings.get("status", {}).get("messages_set_completed"):
@@ -1855,6 +1856,9 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
             self.output(self.i18n.t("synchronization_started"), interrupt=True)
+
+        # ── Start background resolving of unknown LIDs ──────────────────
+        self.start_background_lid_resolution()
 
         # ── Phase 1: sync all messages ────────────────────────────────────
         self.sync_remote_chats()
@@ -2147,12 +2151,34 @@ class MainWindow(wx.Frame):
         #Save back to file
         messages_file = data_path("messages.dat")
         try:
-            encrypted_data = encrypt_json({"chats": chats, "contacts": contacts}, self.key)
+            lid_to_phone = getattr(self, "_lid_to_phone", {})
+            encrypted_data = encrypt_json({
+                "chats": chats, 
+                "contacts": contacts,
+                "lid_to_phone": lid_to_phone
+            }, self.key)
             with open(messages_file, "wb") as f:
                 f.write(encrypted_data)
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('data_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
+
+    def _load_local_lid_cache(self):
+        messages_file = data_path("messages.dat")
+        try:
+            if os.path.exists(messages_file):
+                with open(messages_file, "rb") as f:
+                    encrypted_data = f.read()
+                    if encrypted_data:
+                        decrypted_data = decrypt_json(encrypted_data, self.key)
+                        self._lid_to_phone = decrypted_data.get("lid_to_phone", {})
+                        self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
+                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings from local cache: {self._lid_to_phone}")
+                        return
+        except Exception as e:
+            logging.error(f"[LID Cache] Error loading JID mappings from cache: {e}")
+        self._lid_to_phone = {}
+        self._phone_to_lid = {}
 
     def get_contacts(self):
         messages_file = data_path("messages.dat")
@@ -3243,12 +3269,11 @@ class MainWindow(wx.Frame):
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from Evolution API (runs on background thread)."""
-        # The API only accepts phone-number JIDs; resolve @lid first.
+        original_jid = jid
         if jid.endswith("@lid"):
             resolved = getattr(self, "_lid_to_phone", {}).get(jid, "")
-            if not resolved:
-                return {}
-            jid = resolved
+            if resolved:
+                jid = resolved
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/chat/fetchProfile/{self.token}"
@@ -3256,11 +3281,59 @@ class MainWindow(wx.Frame):
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json={"number": jid}, headers=headers, timeout=10)
+            logging.info(f"[get_contact_profile] Querying for {original_jid} (using JID: {jid}). Response status: {r.status_code}")
             if r.status_code in (200, 201):
-                return r.json() or {}
-        except Exception:
-            pass
+                res = r.json() or {}
+                logging.info(f"[get_contact_profile] API Response for {original_jid}: {res}")
+                
+                # If queried directly with @lid, check if we got back a canonical @s.whatsapp.net JID
+                if original_jid.endswith("@lid") and jid.endswith("@lid"):
+                    canonical_jid = res.get("jid") or res.get("id") or ""
+                    if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
+                        logging.info(f"[get_contact_profile] SUCCESS: Mapped {original_jid} to {canonical_jid} via profile query")
+                        if not hasattr(self, "_lid_to_phone"):
+                            self._lid_to_phone = {}
+                        if not hasattr(self, "_phone_to_lid"):
+                            self._phone_to_lid = {}
+                        self._lid_to_phone[original_jid] = canonical_jid
+                        self._phone_to_lid[canonical_jid] = original_jid
+                        
+                        # Trigger UI refresh and save mapped JIDs
+                        wx.CallAfter(self._schedule_set_chats)
+                        self.save_data(self.chats, self.contacts)
+                return res
+        except Exception as e:
+            logging.exception(f"[get_contact_profile] Error querying for {original_jid}: {e}")
         return {}
+
+    def start_background_lid_resolution(self):
+        def _resolve_lids():
+            time.sleep(2)  # Wait for startup to settle
+            lids_to_resolve = []
+            for jid in list(self.chats.keys()):
+                if jid.endswith("@lid"):
+                    mapped = getattr(self, "_lid_to_phone", {}).get(jid)
+                    if not mapped:
+                        lids_to_resolve.append(jid)
+            
+            if not lids_to_resolve:
+                logging.info("[start_background_lid_resolution] No @lid JIDs to resolve.")
+                return
+                
+            logging.info(f"[start_background_lid_resolution] START: Found {len(lids_to_resolve)} @lid JIDs to resolve in background.")
+            for index, jid in enumerate(lids_to_resolve, 1):
+                if not getattr(self, "_wa_connected", False):
+                    logging.info("[start_background_lid_resolution] Aborting resolution loop (WhatsApp disconnected)")
+                    break
+                try:
+                    logging.info(f"[start_background_lid_resolution] [{index}/{len(lids_to_resolve)}] Querying profile for JID: {jid}")
+                    self.get_contact_profile(jid)
+                    time.sleep(0.5)  # Throttling delay
+                except Exception as e:
+                    logging.error(f"[start_background_lid_resolution] Error JID {jid}: {e}")
+            logging.info("[start_background_lid_resolution] COMPLETED background JID resolution loop.")
+        
+        threading.Thread(target=_resolve_lids, daemon=True).start()
 
     def get_group_info(self, jid: str) -> dict:
         """Fetch group metadata via GET /group/findGroupInfos?groupJid=...
