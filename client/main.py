@@ -2173,7 +2173,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(url, json={}, headers=headers)
+            response = requests.get(url, headers=headers)
             if response.status_code not in (200, 201):
                 print(f"[get_remote_contacts] API error {response.status_code}: {response.text}")
                 response_data = []
