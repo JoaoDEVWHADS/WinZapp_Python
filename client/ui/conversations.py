@@ -8,10 +8,9 @@ import time
 import uuid
 import wx
 import wx.adv
-import numpy as np
 import pyperclip
-import sounddevice as sd
-import soundfile as sf
+import pyaudio
+import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from ui.accessible import (
@@ -98,8 +97,9 @@ class ConversationsPanel(wx.Panel):
         # ── Voice recording state ───────────────────────────────────────────
         self._is_recording         = False
         self._recording_paused     = False
-        self._recording_frames: list = []   # list of numpy arrays from callback
-        self._recording_stream     = None   # sd.InputStream
+        self._recording_frames: list = []   # list of bytes chunks from callback
+        self._recording_stream     = None   # pyaudio.Stream
+        self._recording_pa         = None   # pyaudio.PyAudio instance
         # Actual rate/channels are resolved at open time (stereo → mono fallback).
         self._recording_actual_rate: int = 48000
         self._recording_actual_ch:   int = 1
@@ -1049,7 +1049,7 @@ class ConversationsPanel(wx.Panel):
         Quality strategy (highest to lowest preference):
           48 000 Hz stereo → 48 000 Hz mono → 44 100 Hz stereo → 44 100 Hz mono
 
-        sounddevice delivers raw, unprocessed PCM — no noise suppression,
+        PyAudio delivers raw, unprocessed PCM — no noise suppression,
         no automatic-gain control, no resampling.  This preserves full voice
         naturalness and quality.
         """
@@ -1060,11 +1060,12 @@ class ConversationsPanel(wx.Panel):
         self._recording_paused = False
 
         # Define callback once, outside the loop; captures self for pause check.
-        def _callback(indata, frames, t, status):
-            # Runs on sounddevice's internal callback thread.
+        def _callback(in_data, frame_count, time_info, status):
+            # Runs on PyAudio's internal callback thread.
             # list.append is atomic under the GIL — no explicit lock needed.
             if not self._recording_paused:
-                self._recording_frames.append(indata.copy())
+                self._recording_frames.append(in_data)
+            return (None, pyaudio.paContinue)
 
         # Try each (rate, channels) combination in preference order.
         _configs = [
@@ -1074,16 +1075,20 @@ class ConversationsPanel(wx.Panel):
             (44100, 1),   # 44.1 kHz mono  — last resort
         ]
         opened = False
+        pa = pyaudio.PyAudio()
         for rate, ch in _configs:
             try:
-                stream = sd.InputStream(
-                    samplerate=rate,
+                stream = pa.open(
+                    rate=rate,
                     channels=ch,
-                    dtype="float32",   # float32 → best internal precision
-                    callback=_callback,
+                    format=pyaudio.paInt16,
+                    input=True,
+                    frames_per_buffer=1024,
+                    stream_callback=_callback,
                 )
-                stream.start()
+                stream.start_stream()
                 self._recording_stream      = stream
+                self._recording_pa          = pa
                 self._recording_actual_rate = rate
                 self._recording_actual_ch   = ch
                 opened = True
@@ -1092,6 +1097,7 @@ class ConversationsPanel(wx.Panel):
                 self._recording_stream = None
 
         if not opened:
+            pa.terminate()
             return
 
         self._is_recording = True
@@ -1115,14 +1121,20 @@ class ConversationsPanel(wx.Panel):
             self._send_voice_btn.SetFocus()
 
     def _stop_recording_stream(self):
-        """Stop and close the active InputStream (safe to call when None)."""
+        """Stop and close the active PyAudio stream (safe to call when None)."""
         if self._recording_stream is not None:
             try:
-                self._recording_stream.stop()
+                self._recording_stream.stop_stream()
                 self._recording_stream.close()
             except Exception:
                 pass
             self._recording_stream = None
+        if self._recording_pa is not None:
+            try:
+                self._recording_pa.terminate()
+            except Exception:
+                pass
+            self._recording_pa = None
 
     def _hide_voice_panel(self):
         """Hide the voice panel and restore the record / send button visibility."""
@@ -1176,11 +1188,16 @@ class ConversationsPanel(wx.Panel):
         # PCM_16 (16-bit integer) halves the file size vs float32 while remaining
         # perceptually transparent at 48 / 44.1 kHz.
         try:
-            audio_data = np.concatenate(frames, axis=0)
+            audio_data  = b"".join(frames)
             actual_rate = self._recording_actual_rate
+            actual_ch   = self._recording_actual_ch
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp.close()
-            sf.write(tmp.name, audio_data, actual_rate, subtype="PCM_16")
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(actual_ch)
+                wf.setsampwidth(2)   # 16-bit PCM
+                wf.setframerate(actual_rate)
+                wf.writeframes(audio_data)
             wav_path = tmp.name
         except Exception:
             self._hide_voice_panel()
@@ -1189,7 +1206,8 @@ class ConversationsPanel(wx.Panel):
 
         remote_jid   = self.conversation.get("remoteJid", "")
         local_id     = str(uuid.uuid4())
-        duration_sec = int(len(audio_data) / self._recording_actual_rate)
+        bytes_per_frame = 2 * self._recording_actual_ch
+        duration_sec    = int(len(audio_data) / bytes_per_frame / self._recording_actual_rate)
 
         # Virtual message shown immediately as pending in the messages list.
         virtual_msg = {
