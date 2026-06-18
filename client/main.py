@@ -2339,6 +2339,16 @@ class MainWindow(wx.Frame):
                     name = self.i18n.t("unknown_group")
                 else:
                     name = self.i18n.t("unknown_contact")
+            
+            # Detailed logging for name resolution debugging
+            if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
+                logging.info(
+                    f"[Name Resolution] jid={jid} phone_jid={phone_jid} "
+                    f"resolved_name={self._resolve_contact_name(chat)} "
+                    f"msg_name={self.find_name_through_messages(chat)} "
+                    f"chat_name={chat.get('name')} push_name={chat.get('pushName')} -> final_name='{name}'"
+                )
+
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
             is_archived = (
