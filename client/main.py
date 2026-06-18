@@ -3414,6 +3414,7 @@ class MainWindow(wx.Frame):
                 response = requests.post(url, json={"number": lid_jid}, headers=headers, timeout=10)
                 if response.status_code in (200, 201):
                     res = response.json() or {}
+                    logging.info(f"[LID Resolution] Response for {lid_jid}: {res}")
                     canonical_jid = res.get("jid") or res.get("id") or ""
                     if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                         self.register_jid_mapping(lid_jid, canonical_jid)
