@@ -13,6 +13,7 @@ Usage:
 import argparse
 import shutil
 import sys
+import re
 from pathlib import Path
 
 BASE = Path(__file__).parent / "client" / "api"
@@ -64,80 +65,133 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
           name: info?.name,"""
 
 # ---------------------------------------------------------------------------
-# Compiled main.js patch
+# Regex for Compiled main.js / main.mjs
 # ---------------------------------------------------------------------------
-JS_ORIGINAL = b"""(await this.whatsappNumber({numbers:[o]}))?.shift();if(!r.exists)throw new y(r);try{"""
+JS_REGEX = re.compile(
+    r"\(await this\.whatsappNumber\(\{numbers:\[([a-zA-Z0-9_$]+)\]\}\)\)\?\.shift\(\);if\(!([a-zA-Z0-9_$]+)\.exists\)throw new ([a-zA-Z0-9_$]+)\(\2\);try\{"
+)
 
-JS_PATCHED = b"""(await this.whatsappNumber({numbers:[o]}))?.shift();if(!r.exists)throw new y(r);let phoneJid=o;if(o.endsWith("@lid")){try{let a=await this.client.signalRepository.lidMapping.getPNForLID(o);a&&(phoneJid=a)}catch(a){this.logger.error(`Error resolving LID mapping for ${o}: ${a.message}`)}}try{"""
-
-# ---------------------------------------------------------------------------
-# Compiled main.mjs patch
-# ---------------------------------------------------------------------------
-MJS_ORIGINAL = b"""(await this.whatsappNumber({numbers:[o]}))?.shift();if(!r.exists)throw new y(r);try{"""
-
-MJS_PATCHED = b"""(await this.whatsappNumber({numbers:[o]}))?.shift();if(!r.exists)throw new y(r);let phoneJid=o;if(o.endsWith("@lid")){try{let a=await this.client.signalRepository.lidMapping.getPNForLID(o);a&&(phoneJid=a)}catch(a){this.logger.error(`Error resolving LID mapping for ${o}: ${a.message}`)}}try{"""
+# Return mapping replacement regex: we need to insert `jid:phoneJid,` into the returned object.
+# The original compiled return is:
+# return{wuid:n?.jid||o,name:n?.name,...} -> return{jid:phoneJid,wuid:n?.jid||o,name:n?.name,...}
+# Let's match the return block following the try statement.
+# To be robust, we'll locate `return{wuid:` and replace it with `return{jid:phoneJid,wuid:`
+JS_RETURN_REGEX = re.compile(r"return\{wuid:")
 
 BACKUP_SUFFIX = ".lid_resolution_patch_backup"
 
-PATCHES = [
-    (
-        BASE / "src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts",
-        TS_ORIGINAL,
-        TS_PATCHED,
-        "TypeScript source",
-    ),
-    (
-        BASE / "dist/main.js",
-        JS_ORIGINAL,
-        JS_PATCHED,
-        "compiled main.js",
-    ),
-    (
-        BASE / "dist/main.mjs",
-        MJS_ORIGINAL,
-        MJS_PATCHED,
-        "compiled main.mjs",
-    ),
-]
+
+def patch_typescript_file(path: Path) -> bool:
+    if not path.exists():
+        print(f"[SKIP]  TypeScript source: file not found -- {path}")
+        return True
+
+    data = path.read_bytes()
+    # Normalize CRLF to LF for consistent matching
+    has_crlf = b"\r\n" in data
+    normalized_data = data.replace(b"\r\n", b"\n")
+
+    if TS_PATCHED in normalized_data:
+        print(f"[OK]    TypeScript source: already patched ({path.name})")
+        return True
+
+    if TS_ORIGINAL not in normalized_data:
+        print(f"[WARN]  TypeScript source: expected pattern not found -- patch may be outdated ({path.name})")
+        return False
+
+    # Perform the replacement on normalized (LF) content
+    patched_data = normalized_data.replace(TS_ORIGINAL, TS_PATCHED, 1)
+
+    # Convert back to CRLF if the original file had it
+    if has_crlf:
+        patched_data = patched_data.replace(b"\n", b"\r\n")
+
+    # Create backup
+    backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
+    if not backup.exists():
+        shutil.copy2(path, backup)
+        print(f"  Backup created: {backup.name}")
+
+    path.write_bytes(patched_data)
+    print(f"[DONE]  TypeScript source: patched {path.name}")
+    return True
+
+
+def patch_compiled_file(path: Path, label: str) -> bool:
+    if not path.exists():
+        print(f"[SKIP]  {label}: file not found -- {path}")
+        return True
+
+    content = path.read_text(encoding="utf-8")
+
+    # Check if already patched
+    if "let phoneJid=" in content and "jid:phoneJid" in content:
+        print(f"[OK]    {label}: already patched ({path.name})")
+        return True
+
+    # Search for the function header using Regex
+    match = JS_REGEX.search(content)
+    if not match:
+        print(f"[WARN]  {label}: expected function pattern not found ({path.name})")
+        return True # Don't fail the build for compiled files as we rebuilt them
+
+    jid_var = match.group(1)
+    exists_var = match.group(2)
+    err_class = match.group(3)
+
+    # Construct the patched try-block header
+    patched_header = (
+        f"(await this.whatsappNumber({{numbers:[{jid_var}]}}))?.shift();"
+        f"if(!{exists_var}.exists)throw new {err_class}({exists_var});"
+        f"let phoneJid={jid_var};"
+        f"if({jid_var}.endswith(\"@lid\")){{try{{let a=await this.client.signalRepository.lidMapping.getPNForLID({jid_var});a&&(phoneJid=a)}}catch(a){{this.logger.error(`Error resolving LID mapping for {{{jid_var}}}: ${{a.message}}`)}}}}try{{"
+    )
+
+    # Perform function header replacement
+    patched_content = JS_REGEX.sub(patched_header, content, count=1)
+
+    # Now we need to insert `jid:phoneJid,` into the returned object structure `return{wuid:`
+    # We find the next return{wuid: after our patch
+    patched_index = patched_content.find("let phoneJid=")
+    if patched_index != -1:
+        # Search and replace only after that index
+        rest = patched_content[patched_index:]
+        if "return{wuid:" in rest:
+            rest_patched = rest.replace("return{wuid:", "return{jid:phoneJid,wuid:", 1)
+            patched_content = patched_content[:patched_index] + rest_patched
+        else:
+            print(f"[WARN]  {label}: return pattern not found after function header ({path.name})")
+            return True
+
+    # Create backup
+    backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
+    if not backup.exists():
+        shutil.copy2(path, backup)
+        print(f"  Backup created: {backup.name}")
+
+    path.write_text(patched_content, encoding="utf-8")
+    print(f"[DONE]  {label}: patched {path.name}")
+    return True
 
 
 def apply_patches() -> bool:
-    ok = True
-    for path, original, patched, label in PATCHES:
-        if not path.exists():
-            print(f"[SKIP]  {label}: file not found -- {path}")
-            continue
+    ts_path = BASE / "src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts"
+    js_path = BASE / "dist/main.js"
+    mjs_path = BASE / "dist/main.mjs"
 
-        data = path.read_bytes()
+    ts_ok = patch_typescript_file(ts_path)
+    js_ok = patch_compiled_file(js_path, "compiled main.js")
+    mjs_ok = patch_compiled_file(mjs_path, "compiled main.mjs")
 
-        if patched in data:
-            print(f"[OK]    {label}: already patched ({path.name})")
-            continue
-
-        if original not in data:
-            print(
-                f"[WARN]  {label}: expected pattern not found -- patch may be "
-                f"outdated or file has changed ({path.name})"
-            )
-            # We don't fail the build if it's only the compiled files, because npm run build
-            # runs after this script in release.yml. But TypeScript source MUST be patched.
-            if "TypeScript source" in label:
-                ok = False
-            continue
-
-        backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
-        if not backup.exists():
-            shutil.copy2(path, backup)
-            print(f"  Backup created: {backup.name}")
-        path.write_bytes(data.replace(original, patched, 1))
-        print(f"[DONE]  {label}: patched {path.name}")
-
-    return ok
+    return ts_ok and js_ok and mjs_ok
 
 
 def revert_patches() -> bool:
-    ok = True
-    for path, _original, _patched, label in PATCHES:
+    ts_path = BASE / "src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts"
+    js_path = BASE / "dist/main.js"
+    mjs_path = BASE / "dist/main.mjs"
+
+    for path, label in [(ts_path, "TypeScript source"), (js_path, "compiled main.js"), (mjs_path, "compiled main.mjs")]:
         backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
         if not backup.exists():
             print(f"[SKIP]  {label}: no backup found -- {backup.name}")
@@ -145,7 +199,7 @@ def revert_patches() -> bool:
         shutil.copy2(backup, path)
         backup.unlink()
         print(f"[DONE]  {label}: restored {path.name}")
-    return ok
+    return True
 
 
 def main() -> None:
