@@ -2103,15 +2103,17 @@ class MainWindow(wx.Frame):
             response_data = response.json()
             if not isinstance(response_data, list):
                 response_data = []
-            contacts = {}
             for contact in response_data:
                 if not isinstance(contact, dict):
                     continue
                 jid = contact.get("remoteJid") or contact.get("id", "")
                 if jid and not jid.endswith("@g.us") and not jid.endswith("@broadcast"):
-                    contacts[jid] = contact
-            self.save_data(self.chats, contacts)
-            return contacts
+                    if jid not in self.contacts:
+                        self.contacts[jid] = contact
+                    else:
+                        self.contacts[jid].update(contact)
+            self.save_data(self.chats, self.contacts)
+            return self.contacts
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
