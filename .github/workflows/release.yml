@@ -148,6 +148,7 @@ jobs:
           python baileys_apply_patch_pairing_time.py
           python baileys_apply_patch_mark_read.py
           python baileys_apply_patch_auth_state.py
+          python baileys_apply_patch_lid_resolution.py
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
