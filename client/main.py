@@ -1283,7 +1283,8 @@ class MainWindow(wx.Frame):
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs Evolution separately
         try:
-            self._evolution_log_path = resource_path("api", "evolution.log")
+            from app_paths import log_path
+            self._evolution_log_path = log_path("evolution.log")
             log_fh = open(self._evolution_log_path, "w",
                           encoding="utf-8", errors="replace")
             # Use the short (8.3) path so PostgreSQL's initdb doesn't choke on
