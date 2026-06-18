@@ -2167,14 +2167,18 @@ class MainWindow(wx.Frame):
             return {}
 
     def get_remote_contacts(self):
-        url = f"{self.evolution_server}:{self.evolution_port}/chat/findContacts/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/contact/findContacts/{self.token}"
         headers = {
             "apikey": self.token,
             "Content-Type": "application/json"
         }
         try:
             response = requests.post(url, json={}, headers=headers)
-            response_data = response.json()
+            if response.status_code not in (200, 201):
+                print(f"[get_remote_contacts] API error {response.status_code}: {response.text}")
+                response_data = []
+            else:
+                response_data = response.json()
             if not isinstance(response_data, list):
                 response_data = []
             for contact in response_data:
