@@ -1830,6 +1830,16 @@ class MainWindow(wx.Frame):
             self.wait_messages_set()
 
     def start_sync(self):
+        logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
+        waited = 0
+        while waited < 30:
+            if getattr(self, "_wa_connected", False):
+                break
+            time.sleep(1)
+            waited += 1
+        if not getattr(self, "_wa_connected", False):
+            logging.warning("[start_sync] Sync starting without active WhatsApp connection (timeout).")
+
         # After first pairing the API may need a few seconds to populate chats.
         # Retry only when starting cold (no local cache); if we already have
         # local chats just refresh once and move on — the API is ready.
