@@ -401,7 +401,7 @@ class MainWindow(wx.Frame):
         self.offline_mode = False
         # True while the Baileys/WhatsApp WebSocket is connected; False after a
         # "Connection Closed" error. The MessageQueue checks this before sending.
-        self._wa_connected = True
+        self._wa_connected = False
         # IDs of messages sent by WinZapp itself (via MessageQueue).  Used by
         # WebSocketClient.on_messages_upsert to distinguish "echo of our own
         # send" (skip — already in UI) from "sent on another device" (show).

@@ -55,28 +55,35 @@ class WebSocketClient:
                 self.main_window.message_queue.flush()
             self.on_pairing_complete()
         elif connection_state == "close":
-            # Must run on the main thread — wx.MessageBox from a Socket.IO
-            # I/O thread triggers COM cross-thread errors and can freeze the app.
-            def _show_error():
-                self.main_window.error_sound.play()
-                parent_dialog = None
-                for name in ('pairing_dial', 'connection_dial'):
-                    dial = getattr(self.connect, name, None)
-                    if dial:
-                        try:
-                            if not wx.IsDestroyed(dial):
-                                parent_dialog = dial
-                                break
-                        except Exception:
-                            pass
+            was_connected = self.main_window._wa_connected
+            self.main_window._wa_connected = False
+            
+            if was_connected:
+                # Must run on the main thread — wx.MessageBox from a Socket.IO
+                # I/O thread triggers COM cross-thread errors and can freeze the app.
+                def _show_error():
+                    parent_dialog = None
+                    for name in ('pairing_dial', 'connection_dial'):
+                        dial = getattr(self.connect, name, None)
+                        if dial:
+                            try:
+                                if not wx.IsDestroyed(dial):
+                                    parent_dialog = dial
+                                    break
+                            except Exception:
+                                pass
 
-                wx.MessageBox(
-                    self.i18n.t("instance_state_changed"),
-                    self.i18n.t("error").format(app_name=self.main_window.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                    parent_dialog,
-                )
-            wx.CallAfter(_show_error)
+                    if parent_dialog:
+                        return  # Do not show error popup if connecting/pairing dialog is open
+
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("instance_state_changed"),
+                        self.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                        None,
+                    )
+                wx.CallAfter(_show_error)
 
     def on_pairing_complete(self):
         # Destroy dialogs on the main thread to avoid wx thread-safety issues.
@@ -100,18 +107,28 @@ class WebSocketClient:
         print(info)
         # Check if this is QR-CODE mode (base64) or pairing code mode
         qr_data = info.get("data", {}).get("qrcode", {})
+        pairing_code = qr_data.get("pairingCode")
+        base64_img = qr_data.get("base64")
 
-        # Use connection_mode to determine which mode we're in
-        if self.connect.connection_mode == "qrcode" and qr_data.get("base64"):
-            # QR-CODE mode: update the image
-            self.main_window.pairing_code_updated_sound.play()
-            self.main_window.speak_output.output(self.i18n.t("qrcode_image_updated"))
-            self.connect.display_qrcode_image(qr_data.get("base64"))
-        elif self.connect.connection_mode == "phone" and qr_data.get("pairingCode"):
-            # Pairing code mode: update the text field
-            self.main_window.pairing_code_updated_sound.play()
-            self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
-            self.connect.pairing_code_field.SetValue(qr_data.get("pairingCode", ""))
+        def _update_ui():
+            # Use connection_mode to determine which mode we're in
+            if self.connect.connection_mode == "qrcode" and base64_img:
+                # QR-CODE mode: update the image
+                self.main_window.pairing_code_updated_sound.play()
+                self.main_window.speak_output.output(self.i18n.t("qrcode_image_updated"))
+                self.connect.display_qrcode_image(base64_img)
+            elif self.connect.connection_mode == "phone" and pairing_code:
+                # Pairing code mode: update the text field only if it exists and not destroyed
+                if hasattr(self.connect, "pairing_code_field") and self.connect.pairing_code_field:
+                    try:
+                        if not wx.IsDestroyed(self.connect.pairing_code_field):
+                            self.main_window.pairing_code_updated_sound.play()
+                            self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
+                            self.connect.pairing_code_field.SetValue(pairing_code)
+                    except Exception:
+                        pass
+
+        wx.CallAfter(_update_ui)
 
     def on_messages_set(self, info):
         self.main_window.settings.setdefault("status", {})["messages_set_completed"] = True
