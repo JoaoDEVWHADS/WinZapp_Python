@@ -3470,7 +3470,18 @@ class MainWindow(wx.Frame):
 
     def start_background_lid_resolution(self):
         def _resolve_lids():
-            time.sleep(2)  # Wait for startup to settle
+            logging.info("[start_background_lid_resolution] Waiting for WhatsApp connection...")
+            waited = 0
+            while waited < 30:
+                if getattr(self, "_wa_connected", False):
+                    break
+                time.sleep(1)
+                waited += 1
+            
+            if not getattr(self, "_wa_connected", False):
+                logging.info("[start_background_lid_resolution] Aborting: WhatsApp not connected after 30 seconds.")
+                return
+                
             lids_to_resolve = []
             for jid in list(self.chats.keys()):
                 if jid.endswith("@lid"):
