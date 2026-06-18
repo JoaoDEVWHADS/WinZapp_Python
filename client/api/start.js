@@ -52,6 +52,8 @@ process.env.SERVER_TYPE             = 'http';
 process.env.WEBSOCKET_ENABLED       = 'true';
 process.env.WEBSOCKET_GLOBAL_EVENTS = 'true';
 process.env.AUTHENTICATION_API_KEY  = process.env.AUTHENTICATION_API_KEY || 'wz-local-api-key';
+process.env.WPP_LID_MODE            = 'false';
+
 
 async function main() {
   // ── 1. Start embedded PostgreSQL ─────────────────────────────────────────
