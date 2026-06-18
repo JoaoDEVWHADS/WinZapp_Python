@@ -2186,6 +2186,8 @@ class MainWindow(wx.Frame):
                 response_data = []
             
             logging.info(f"[get_remote_contacts] Downloaded {len(response_data)} contacts from Evolution API.")
+            sample_names = [c.get("name") or c.get("pushname") or "Contato sem nome" for c in response_data if isinstance(c, dict)]
+            logging.info(f"[get_remote_contacts] Sample names retrieved: {', '.join(sample_names[:50])}...")
             
             for contact in response_data:
                 if not isinstance(contact, dict):
