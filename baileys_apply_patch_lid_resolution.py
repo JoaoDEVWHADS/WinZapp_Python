@@ -179,29 +179,18 @@ def patch_compiled_file(path: Path, label: str) -> bool:
 
 def apply_patches() -> bool:
     ts_path = BASE / "src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts"
-    js_path = BASE / "dist/main.js"
-    mjs_path = BASE / "dist/main.mjs"
-
-    ts_ok = patch_typescript_file(ts_path)
-    js_ok = patch_compiled_file(js_path, "compiled main.js")
-    mjs_ok = patch_compiled_file(mjs_path, "compiled main.mjs")
-
-    return ts_ok and js_ok and mjs_ok
+    return patch_typescript_file(ts_path)
 
 
 def revert_patches() -> bool:
     ts_path = BASE / "src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts"
-    js_path = BASE / "dist/main.js"
-    mjs_path = BASE / "dist/main.mjs"
-
-    for path, label in [(ts_path, "TypeScript source"), (js_path, "compiled main.js"), (mjs_path, "compiled main.mjs")]:
-        backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
-        if not backup.exists():
-            print(f"[SKIP]  {label}: no backup found -- {backup.name}")
-            continue
-        shutil.copy2(backup, path)
-        backup.unlink()
-        print(f"[DONE]  {label}: restored {path.name}")
+    backup = ts_path.with_suffix(ts_path.suffix + BACKUP_SUFFIX)
+    if not backup.exists():
+        print(f"[SKIP]  TypeScript source: no backup found -- {backup.name}")
+        return True
+    shutil.copy2(backup, ts_path)
+    backup.unlink()
+    print(f"[DONE]  TypeScript source: restored {ts_path.name}")
     return True
 
 
