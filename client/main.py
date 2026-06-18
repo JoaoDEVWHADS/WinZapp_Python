@@ -1936,7 +1936,13 @@ class MainWindow(wx.Frame):
         for key, chat in chats.items():
             if chat.get("unreadCount") is None:
                 chat["unreadCount"] = 0
-            if chat.get("archived") is True or chat.get("archive") is True:
+            is_arch = (
+                chat.get("archived") is True 
+                or chat.get("archive") is True
+                or str(chat.get("archived")).lower() == "true"
+                or str(chat.get("archive")).lower() == "true"
+            )
+            if is_arch:
                 if key not in archived:
                     archived.append(key)
                     settings_changed = True
@@ -2108,12 +2114,14 @@ class MainWindow(wx.Frame):
         for jid, chat in list(self.chats.items()):
             if jid in deleted:
                 continue
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
             name = (
                 self._resolve_contact_name(chat)
                 or self.find_name_through_messages(chat)
                 or chat.get("name", "")
                 or chat.get("pushName", "")
                 or self.find_jid_through_messages(chat)
+                or (format_number(phone_jid) if phone_jid else "")
                 or (format_number(jid) if not jid.endswith("@lid") and not jid.endswith("@g.us") else "")
             )
             if not name or not name.strip():
@@ -2123,7 +2131,14 @@ class MainWindow(wx.Frame):
                     name = self.i18n.t("unknown_contact")
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
-            if jid in archived or chat.get("archived") is True or chat.get("archive") is True:
+            is_archived = (
+                jid in archived 
+                or chat.get("archived") is True 
+                or chat.get("archive") is True
+                or str(chat.get("archived")).lower() == "true"
+                or str(chat.get("archive")).lower() == "true"
+            )
+            if is_archived:
                 arch_chats.append(chat)
                 arch_names.append(name)
             else:
@@ -3114,7 +3129,10 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(jid, {})
         return (jid in self.settings.get("archived_chats", []) 
                 or chat.get("archived") is True 
-                or chat.get("archive") is True)
+                or chat.get("archive") is True
+                or str(chat.get("archived")).lower() == "true"
+                or str(chat.get("archive")).lower() == "true")
+
 
     def archive_chat(self, jid: str):
         lst = self.settings.setdefault("archived_chats", [])
