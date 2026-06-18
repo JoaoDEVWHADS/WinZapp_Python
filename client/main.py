@@ -876,19 +876,73 @@ class MainWindow(wx.Frame):
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
-        # Evolution API v2 swaps key.remoteJid/@remoteJidAlt so the delivered
-        # message always has remoteJid=phone and remoteJidAlt=@lid.  If we
-        # already have a chat stored under the @lid key (e.g. from the initial
-        # chats sync), rename it to the phone JID so both old and new messages
-        # end up in one entry.
+        canonical_jid = remote_jid
         alt_jid = key.get("remoteJidAlt", "")
-        if (remote_jid.endswith("@s.whatsapp.net")
-                and alt_jid.endswith("@lid")
-                and alt_jid in self.chats
-                and remote_jid not in self.chats):
-            lid_chat = self.chats.pop(alt_jid)
-            lid_chat["remoteJid"] = remote_jid
-            self.chats[remote_jid] = lid_chat
+
+        # Cross-reference with our global caches first
+        if remote_jid.endswith("@lid"):
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid)
+            if phone_jid:
+                canonical_jid = phone_jid
+        elif remote_jid.endswith("@s.whatsapp.net"):
+            lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid)
+            if lid_jid:
+                alt_jid = lid_jid
+
+        # Use remoteJidAlt to populate cache and resolve JID
+        if alt_jid:
+            if remote_jid.endswith("@lid") and alt_jid.endswith("@s.whatsapp.net"):
+                canonical_jid = alt_jid
+                if not hasattr(self, "_lid_to_phone"):
+                    self._lid_to_phone = {}
+                if not hasattr(self, "_phone_to_lid"):
+                    self._phone_to_lid = {}
+                self._lid_to_phone[remote_jid] = alt_jid
+                self._phone_to_lid[alt_jid] = remote_jid
+            elif remote_jid.endswith("@s.whatsapp.net") and alt_jid.endswith("@lid"):
+                canonical_jid = remote_jid
+                if not hasattr(self, "_lid_to_phone"):
+                    self._lid_to_phone = {}
+                if not hasattr(self, "_phone_to_lid"):
+                    self._phone_to_lid = {}
+                self._lid_to_phone[alt_jid] = remote_jid
+                self._phone_to_lid[remote_jid] = alt_jid
+
+        # Merge or rename duplicates if the canonical JID is different
+        if canonical_jid != remote_jid:
+            if remote_jid in self.chats:
+                if canonical_jid in self.chats:
+                    # Merge remote_jid messages into canonical_jid
+                    dst_records = (
+                        self.chats[canonical_jid]
+                        .setdefault("messages", {})
+                        .setdefault("messages", {})
+                        .setdefault("records", [])
+                    )
+                    src_records = (
+                        self.chats[remote_jid]
+                        .get("messages", {})
+                        .get("messages", {})
+                        .get("records", [])
+                    )
+                    dst_ids = {r.get("key", {}).get("id") for r in dst_records}
+                    for r in src_records:
+                        if r.get("key", {}).get("id") not in dst_ids:
+                            dst_records.append(r)
+
+                    # Merge unread counts
+                    unread_dst = int(self.chats[canonical_jid].get("unreadCount") or 0)
+                    unread_src = int(self.chats[remote_jid].get("unreadCount") or 0)
+                    self.chats[canonical_jid]["unreadCount"] = unread_dst + unread_src
+
+                    del self.chats[remote_jid]
+                else:
+                    # Rename chat to canonical_jid
+                    chat_data = self.chats.pop(remote_jid)
+                    chat_data["remoteJid"] = canonical_jid
+                    self.chats[canonical_jid] = chat_data
+
+            remote_jid = canonical_jid
 
         # ── Ensure the chat record exists ─────────────────────────────────────
         if remote_jid not in self.chats:
