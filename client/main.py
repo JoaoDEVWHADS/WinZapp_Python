@@ -2186,16 +2186,15 @@ class MainWindow(wx.Frame):
                 response_data = []
             
             logging.info(f"[get_remote_contacts] Downloaded {len(response_data)} contacts from Evolution API.")
-            names_with_values = [c.get("name") or c.get("pushname") for c in response_data if isinstance(c, dict) and (c.get("name") or c.get("pushname"))]
-            logging.info(f"[get_remote_contacts] Total contacts with valid names/pushnames: {len(names_with_values)} out of {len(response_data)}")
+            filtered_contacts = [c for c in response_data if isinstance(c, dict) and c.get("type", "") == "contact"]
+            names_with_values = [c.get("name") or c.get("pushname") for c in filtered_contacts if c.get("name") or c.get("pushname")]
+            logging.info(f"[get_remote_contacts] Total filtered contacts (type='contact'): {len(filtered_contacts)} (with valid names: {len(names_with_values)})")
             if names_with_values:
                 logging.info(f"[get_remote_contacts] First 50 named contacts: {', '.join(names_with_values[:50])}")
             else:
-                logging.info("[get_remote_contacts] No contacts have a name or pushname field set in the API response.")
+                logging.info("[get_remote_contacts] No filtered contacts have a name or pushname field set in the API response.")
             
-            for contact in response_data:
-                if not isinstance(contact, dict):
-                    continue
+            for contact in filtered_contacts:
                 jid = contact.get("remoteJid") or contact.get("id", "")
                 if jid and not jid.endswith("@g.us") and not jid.endswith("@broadcast"):
                     name = contact.get("name") or contact.get("pushname") or "Contato sem nome"
