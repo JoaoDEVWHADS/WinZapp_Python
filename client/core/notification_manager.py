@@ -76,18 +76,11 @@ def format_notification_body(msg: dict, i18n) -> str:
 
     # ── Text ──────────────────────────────────────────────────────────────────
     if msg_type == "conversation":
-        text = msg_obj.get("conversation") or ""
-        # Truncate long text — Windows caps at ~256 chars in notification body
-        if len(text) > 200:
-            text = text[:197] + "..."
-        return text
+        return msg_obj.get("conversation") or ""
 
     if msg_type == "extendedTextMessage":
-        ext  = msg_obj.get("extendedTextMessage") or {}
-        text = ext.get("text") or ""
-        if len(text) > 200:
-            text = text[:197] + "..."
-        return text
+        ext = msg_obj.get("extendedTextMessage") or {}
+        return ext.get("text") or ""
 
     # ── Audio ─────────────────────────────────────────────────────────────────
     if msg_type == "audioMessage":
@@ -110,8 +103,6 @@ def format_notification_body(msg: dict, i18n) -> str:
         img     = msg_obj.get("imageMessage") or {}
         caption = (img.get("caption") or "").strip()
         if caption:
-            if len(caption) > 150:
-                caption = caption[:147] + "..."
             return f"{i18n.t('photo')}: {caption}"
         return i18n.t("photo_no_caption")
 

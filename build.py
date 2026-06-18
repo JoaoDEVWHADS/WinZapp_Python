@@ -208,8 +208,7 @@ def pyinstaller_compile():
         "packaging",
         "windows_toasts",
         "winrt",
-        "sounddevice",
-        "soundfile",
+        "pyaudio",
     ]
 
     cmd = [
@@ -224,9 +223,6 @@ def pyinstaller_compile():
 
     for pkg in collect_all:
         cmd += ["--collect-all", pkg]
-
-    # numpy / soundfile might need special handling
-    cmd += ["--collect-all", "numpy"]
 
     # Tell PyInstaller where to find local packages (core/, ui/, app_paths, etc.)
     cmd += ["--paths", CLIENT_DIR]

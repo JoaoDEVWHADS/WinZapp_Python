@@ -162,6 +162,13 @@ class NewConversationDialog(wx.Dialog):
             chat = {"remoteJid": jid, "pushName": name}
         self.EndModal(wx.ID_OK)
         mw = self._mw
+        # Register the chat in mw.chats so it appears in the sidebar list.
+        # Without this, the sent-message echo is filtered by _own_sent_ids
+        # before reaching on_new_message(), so the chat would never be added
+        # automatically and the conversation stays invisible in the list.
+        if jid not in mw.chats:
+            mw.chats[jid] = chat
+            mw._schedule_set_chats()
         # Navigate after the dialog is gone
         wx.CallAfter(mw.conversations_panel.navigate_to_conversation, chat)
         wx.CallAfter(mw.conversations_panel.message_field.SetFocus)
@@ -183,8 +190,11 @@ class NewConversationDialog(wx.Dialog):
             dlg.Destroy()
             if jid:
                 self.EndModal(wx.ID_OK)
-                chat = {"remoteJid": jid, "pushName": name}
                 mw   = self._mw
+                chat = mw.chats.get(jid) or {"remoteJid": jid, "pushName": name}
+                if jid not in mw.chats:
+                    mw.chats[jid] = chat
+                    mw._schedule_set_chats()
                 wx.CallAfter(mw.conversations_panel.navigate_to_conversation, chat)
                 wx.CallAfter(mw.conversations_panel.message_field.SetFocus)
         else:

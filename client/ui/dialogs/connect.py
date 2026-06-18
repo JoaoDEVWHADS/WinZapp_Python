@@ -632,47 +632,35 @@ class Connect:
             self._phone_updating = False
 
     def _format_phone_display(self, digits: str) -> str:
-        """
-        Convert a raw digit string (including country code) to the display
-        format used in the phone field.
+        """Convert a raw digit string (including country code) to display format.
 
-        Examples (CC = 55):
-          "5551987560609"  →  "+55 51 98756-0609"   (9-digit mobile)
-          "5551875606090"  →  "+55 51 8756-0609"    (8-digit landline)
-
-        Rules:
-          • Always begin with +CC.
-          • Next 2 digits = area code (DDD), separated by a space.
-          • Remaining digits: last 4 always appear after a hyphen once there
-            are 7+ digits in the body; 9-digit body uses 5-4 split.
-          • While the user is still typing (< 7 body digits) no hyphen is
-            shown so the field doesn't jump unexpectedly.
+        Brazil (CC=55): +55 DD XXXXX-XXXX or +55 DD XXXX-XXXX
+        All other countries: +CC local  (no area-code split, no hyphen)
         """
-        cc = self._current_dial_code
+        cc    = self._current_dial_code
         local = digits[len(cc):] if digits.startswith(cc) else digits
 
         result = f"+{cc}"
         if not local:
             return result
 
-        # Area code: first 2 digits
-        area = local[:2]
-        rest = local[2:]
-        result += f" {area}"
-        if not rest:
-            return result
-
-        # Phone body
-        if len(rest) < 7:
-            # Still typing — no hyphen yet
-            result += f" {rest}"
-        elif len(rest) == 9:
-            # Brazilian 9-digit mobile: 5-4 split
-            result += f" {rest[:5]}-{rest[5:]}"
+        if cc == "55":
+            # Brazil: 2-digit DDD + body with hyphen
+            area = local[:2]
+            rest = local[2:]
+            result += f" {area}"
+            if not rest:
+                return result
+            if len(rest) < 7:
+                result += f" {rest}"
+            elif len(rest) == 9:
+                result += f" {rest[:5]}-{rest[5:]}"
+            else:
+                split = len(rest) - 4
+                result += f" {rest[:split]}-{rest[split:]}"
         else:
-            # Generic: last 4 after hyphen
-            split   = len(rest) - 4
-            result += f" {rest[:split]}-{rest[split:]}"
+            # Generic international: just append local digits with a space
+            result += f" {local}"
 
         return result
 

@@ -8,10 +8,9 @@ import time
 import uuid
 import wx
 import wx.adv
-import numpy as np
 import pyperclip
-import sounddevice as sd
-import soundfile as sf
+import pyaudio
+import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from ui.accessible import (
@@ -98,8 +97,9 @@ class ConversationsPanel(wx.Panel):
         # ── Voice recording state ───────────────────────────────────────────
         self._is_recording         = False
         self._recording_paused     = False
-        self._recording_frames: list = []   # list of numpy arrays from callback
-        self._recording_stream     = None   # sd.InputStream
+        self._recording_frames: list = []   # list of bytes chunks from callback
+        self._recording_stream     = None   # pyaudio.Stream
+        self._recording_pa         = None   # pyaudio.PyAudio instance
         # Actual rate/channels are resolved at open time (stereo → mono fallback).
         self._recording_actual_rate: int = 48000
         self._recording_actual_ch:   int = 1
@@ -722,14 +722,16 @@ class ConversationsPanel(wx.Panel):
         # Set focus based on user preference
         focus_setting = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_setting == "unread_or_last":
+            # Always move keyboard focus to the list first; then position it.
+            self.messages_list.SetFocus()
             if self._unread_sep_idx < 0:
-                # No unread separator — focus on last message
+                # No unread separator — select and scroll to last message
                 last = self.messages_list.GetItemCount() - 1
                 if last >= 0:
                     self.messages_list.Focus(last)
                     self.messages_list.Select(last, True)
                     self.messages_list.EnsureVisible(last)
-            # else: populate_messages already made the separator visible
+            # else: populate_messages already scrolled to the unread separator
         else:
             self.message_field.SetFocus()
 
@@ -786,7 +788,15 @@ class ConversationsPanel(wx.Panel):
             return False
 
         key = event.GetUnicodeKey()
-        if key == wx.WXK_NONE or key <= 32:
+        if key == wx.WXK_NONE:
+            return False
+        try:
+            # Only redirect alphanumeric characters — this prevents special
+            # keys like Delete (127), Backspace (8), and other control/function
+            # characters from being swallowed and written into the message field.
+            if not chr(key).isalnum():
+                return False
+        except (ValueError, OverflowError):
             return False
 
         focus = wx.Window.FindFocus()
@@ -1039,7 +1049,7 @@ class ConversationsPanel(wx.Panel):
         Quality strategy (highest to lowest preference):
           48 000 Hz stereo → 48 000 Hz mono → 44 100 Hz stereo → 44 100 Hz mono
 
-        sounddevice delivers raw, unprocessed PCM — no noise suppression,
+        PyAudio delivers raw, unprocessed PCM — no noise suppression,
         no automatic-gain control, no resampling.  This preserves full voice
         naturalness and quality.
         """
@@ -1050,11 +1060,12 @@ class ConversationsPanel(wx.Panel):
         self._recording_paused = False
 
         # Define callback once, outside the loop; captures self for pause check.
-        def _callback(indata, frames, t, status):
-            # Runs on sounddevice's internal callback thread.
+        def _callback(in_data, frame_count, time_info, status):
+            # Runs on PyAudio's internal callback thread.
             # list.append is atomic under the GIL — no explicit lock needed.
             if not self._recording_paused:
-                self._recording_frames.append(indata.copy())
+                self._recording_frames.append(in_data)
+            return (None, pyaudio.paContinue)
 
         # Try each (rate, channels) combination in preference order.
         _configs = [
@@ -1064,16 +1075,20 @@ class ConversationsPanel(wx.Panel):
             (44100, 1),   # 44.1 kHz mono  — last resort
         ]
         opened = False
+        pa = pyaudio.PyAudio()
         for rate, ch in _configs:
             try:
-                stream = sd.InputStream(
-                    samplerate=rate,
+                stream = pa.open(
+                    rate=rate,
                     channels=ch,
-                    dtype="float32",   # float32 → best internal precision
-                    callback=_callback,
+                    format=pyaudio.paInt16,
+                    input=True,
+                    frames_per_buffer=1024,
+                    stream_callback=_callback,
                 )
-                stream.start()
+                stream.start_stream()
                 self._recording_stream      = stream
+                self._recording_pa          = pa
                 self._recording_actual_rate = rate
                 self._recording_actual_ch   = ch
                 opened = True
@@ -1082,6 +1097,7 @@ class ConversationsPanel(wx.Panel):
                 self._recording_stream = None
 
         if not opened:
+            pa.terminate()
             return
 
         self._is_recording = True
@@ -1105,14 +1121,20 @@ class ConversationsPanel(wx.Panel):
             self._send_voice_btn.SetFocus()
 
     def _stop_recording_stream(self):
-        """Stop and close the active InputStream (safe to call when None)."""
+        """Stop and close the active PyAudio stream (safe to call when None)."""
         if self._recording_stream is not None:
             try:
-                self._recording_stream.stop()
+                self._recording_stream.stop_stream()
                 self._recording_stream.close()
             except Exception:
                 pass
             self._recording_stream = None
+        if self._recording_pa is not None:
+            try:
+                self._recording_pa.terminate()
+            except Exception:
+                pass
+            self._recording_pa = None
 
     def _hide_voice_panel(self):
         """Hide the voice panel and restore the record / send button visibility."""
@@ -1166,11 +1188,16 @@ class ConversationsPanel(wx.Panel):
         # PCM_16 (16-bit integer) halves the file size vs float32 while remaining
         # perceptually transparent at 48 / 44.1 kHz.
         try:
-            audio_data = np.concatenate(frames, axis=0)
+            audio_data  = b"".join(frames)
             actual_rate = self._recording_actual_rate
+            actual_ch   = self._recording_actual_ch
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp.close()
-            sf.write(tmp.name, audio_data, actual_rate, subtype="PCM_16")
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(actual_ch)
+                wf.setsampwidth(2)   # 16-bit PCM
+                wf.setframerate(actual_rate)
+                wf.writeframes(audio_data)
             wav_path = tmp.name
         except Exception:
             self._hide_voice_panel()
@@ -1179,7 +1206,8 @@ class ConversationsPanel(wx.Panel):
 
         remote_jid   = self.conversation.get("remoteJid", "")
         local_id     = str(uuid.uuid4())
-        duration_sec = int(len(audio_data) / self._recording_actual_rate)
+        bytes_per_frame = 2 * self._recording_actual_ch
+        duration_sec    = int(len(audio_data) / bytes_per_frame / self._recording_actual_rate)
 
         # Virtual message shown immediately as pending in the messages list.
         virtual_msg = {
@@ -2617,21 +2645,25 @@ class ConversationsPanel(wx.Panel):
             return j
 
         def _contact_name(lj: str) -> str:
-            """Return saved contact name for lj, trying @lid ↔ phone both ways,
-            stripping Baileys device suffixes, then the chat 'name' as fallback."""
-            lj_clean   = _strip_device(lj)
-            # Legacy @c.us JIDs: contacts and chats are stored under @s.whatsapp.net
+            """Return saved contact name for lj, trying all three JID formats
+            (@s.whatsapp.net, @c.us, @lid), stripping Baileys device suffixes."""
+            lj_clean = _strip_device(lj)
+            # Normalise @c.us → @s.whatsapp.net so we always start from the modern format
             if lj_clean.endswith("@c.us"):
                 lj_clean = lj_clean[:-5] + "@s.whatsapp.net"
             candidates = [lj_clean]
             if lj_clean != lj:
-                candidates.append(lj)  # also try original
+                candidates.append(lj)  # also try original pre-normalisation form
             if lj_clean.endswith("@lid"):
                 phone = lid_to_phone.get(lj_clean, "")
                 if phone:
                     candidates.append(phone)
+                    # contacts may be indexed under @c.us legacy format
+                    candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
             elif lj_clean.endswith("@s.whatsapp.net"):
-                # O(1) reverse lookup instead of scanning the entire lid_to_phone dict
+                # Also try @c.us — contacts dict may still hold the legacy format
+                candidates.append(lj_clean.rsplit("@", 1)[0] + "@c.us")
+                # O(1) reverse lookup for @lid equivalent
                 lid = getattr(mw, "_phone_to_lid", {}).get(lj_clean, "")
                 if lid:
                     candidates.append(lid)
@@ -2639,17 +2671,13 @@ class ConversationsPanel(wx.Panel):
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
-                    # Prefer address-book name ('name') over WhatsApp profile name ('pushName')
-                    n = (c.get("name") or c.get("pushName") or "").strip()
+                    n = (c.get("pushName") or "").strip()
                     if n and not n.isdigit() and not is_phone_like(n):
-                        n_lower = n.lower()
-                        if "sem nome" in n_lower or "unnamed" in n_lower or n_lower in ("no name", "unknown", "desconhecido"):
-                            pass
-                        else:
-                            return n
-                # Also check the direct-chat object's 'name' field — Baileys
-                # stores the address-book name there during chats.upsert, which
-                # may be more up-to-date than a stale pushName in the contacts dict.
+                         n_lower = n.lower()
+                         if "sem nome" in n_lower or "unnamed" in n_lower or n_lower in ("no name", "unknown", "desconhecido"):
+                             pass
+                         else:
+                             return n
                 chat_obj = mw.chats.get(cjid)
                 if chat_obj:
                     cn = (chat_obj.get("name") or "").strip()
@@ -2661,7 +2689,11 @@ class ConversationsPanel(wx.Panel):
                             return cn
             return ""
 
-        if lookup_jid:
+        # Don't use the group JID (@g.us) itself as a sender lookup — when
+        # key.participant is absent, lookup_jid falls back to the remoteJid of
+        # the group, and _contact_name would return the group name for every
+        # message, making all messages appear to be from the same sender.
+        if lookup_jid and not lookup_jid.endswith("@g.us"):
             n = _contact_name(lookup_jid)
             if n:
                 return n
@@ -2693,7 +2725,8 @@ class ConversationsPanel(wx.Panel):
         phone_jid = participant or jid
         if phone_jid.endswith("@lid"):
             phone_jid = lid_to_phone.get(phone_jid, "")
-        if phone_jid and not phone_jid.endswith("@lid"):
+        # Never use the group JID itself as a display name for a message sender.
+        if phone_jid and not phone_jid.endswith("@lid") and not phone_jid.endswith("@g.us"):
             return format_number(phone_jid)
         return ""
 
@@ -2771,6 +2804,9 @@ class ConversationsPanel(wx.Panel):
                 return f"{local.split(':')[0]}@{domain}"
             return j
 
+        def _phone_part(j: str) -> str:
+            return j.rsplit("@", 1)[0].split(":")[0]
+
         participant = ctx.get("participant", "")
 
         if not participant:
@@ -2786,8 +2822,6 @@ class ConversationsPanel(wx.Panel):
                         remote = conv.get("remoteJid", "")
                         return (
                             mw._resolve_contact_name(conv)
-                            or mw.find_name_through_messages(conv)
-                            or conv.get("name", "")
                             or conv.get("pushName", "")
                             or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
                         )
@@ -2800,14 +2834,14 @@ class ConversationsPanel(wx.Panel):
         if clean_p.endswith("@lid"):
             clean_p = getattr(mw, "_lid_to_phone", {}).get(clean_p, clean_p)
 
-        # Check if the quoted sender is "me"
+        # Check if the quoted sender is "me" — strip device suffix from both sides
         my_jid = getattr(mw, "my_jid", "")
-        if my_jid and clean_p.split("@")[0] == my_jid.split("@")[0]:
+        if my_jid and _phone_part(clean_p) == _phone_part(my_jid):
             return i18n.t("sender_you")
 
         contact = mw.contacts.get(clean_p) or mw.contacts.get(participant)
         if contact:
-            name = (contact.get("name") or contact.get("pushName") or "").strip()
+            name = (contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
                 return name
 
@@ -3190,17 +3224,22 @@ class ConversationsPanel(wx.Panel):
         mw = self.main_window
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
 
-        # Try direct lookup, then @lid↔phone cross-lookup, then chat's name field
+        # Build candidates covering all three JID formats for the same person.
+        # Address-book name (contact["name"]) always takes priority over pushName.
+        local = participant_jid.rsplit("@", 1)[0]
         candidates = [participant_jid]
         if participant_jid.endswith("@lid"):
             phone = lid_to_phone.get(participant_jid, "")
             if phone:
                 candidates.append(phone)
+                candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
         elif participant_jid.endswith("@s.whatsapp.net"):
-            for lid, ph in lid_to_phone.items():
-                if ph == participant_jid:
-                    candidates.append(lid)
-                    break
+            candidates.append(local + "@c.us")
+            lid = getattr(mw, "_phone_to_lid", {}).get(participant_jid, "")
+            if lid:
+                candidates.append(lid)
+        elif participant_jid.endswith("@c.us"):
+            candidates.append(local + "@s.whatsapp.net")
 
         for cjid in candidates:
             contact = mw.contacts.get(cjid)
@@ -3208,7 +3247,6 @@ class ConversationsPanel(wx.Panel):
                 name = (contact.get("pushName") or "").strip()
                 if name and not name.isdigit() and not is_phone_like(name):
                     return name
-            # Check the direct-chat's 'name' field (address-book name from Baileys)
             chat_obj = mw.chats.get(cjid)
             if chat_obj:
                 cn = (chat_obj.get("name") or "").strip()
@@ -3891,7 +3929,7 @@ class ConversationsPanel(wx.Panel):
         self.main_window.output(ann, interrupt=True)
 
     def _show_message_text_popup(self, msg: dict):
-        """Open a read-only dialog showing the full message text (100-char lines)."""
+        """Open a read-only dialog showing the full message text."""
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         text = ""
@@ -3903,14 +3941,26 @@ class ConversationsPanel(wx.Panel):
             return
 
         i18n = self.main_window.i18n
-        # Split into 100-char lines
-        lines = []
-        while len(text) > 100:
-            lines.append(text[:100])
-            text = text[100:]
-        if text:
-            lines.append(text)
-        full_text = "\n".join(lines)
+
+        def _word_wrap(raw: str, width: int = 100) -> str:
+            """Wrap at word boundaries around *width* chars; never breaks mid-word."""
+            out = []
+            for para in raw.split("\n"):
+                if not para:
+                    out.append("")
+                    continue
+                line = ""
+                for word in para.split(" "):
+                    if not line:
+                        line = word
+                    elif len(line) + 1 + len(word) <= width:
+                        line += " " + word
+                    else:
+                        out.append(line)
+                        line = word
+                if line:
+                    out.append(line)
+            return "\n".join(out)
 
         dlg = wx.Dialog(
             self.main_window,
@@ -3921,7 +3971,7 @@ class ConversationsPanel(wx.Panel):
         panel = wx.Panel(dlg)
         sizer = wx.BoxSizer(wx.VERTICAL)
         text_ctrl = wx.TextCtrl(
-            panel, value=full_text,
+            panel, value=_word_wrap(text),
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)

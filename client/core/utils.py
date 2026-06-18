@@ -69,25 +69,55 @@ def is_phone_like(name: str) -> bool:
     digit_count = sum(1 for c in stripped if c.isdigit())
     return digit_count >= 7 and digit_count >= len(stripped) * 0.7
 
+_CC_SORTED: list[str] | None = None
+
+def _known_country_codes() -> list[str]:
+    """Return country codes sorted longest-first (cached). Thread-safe for reads."""
+    global _CC_SORTED
+    if _CC_SORTED is None:
+        try:
+            from countries import COUNTRIES
+            _CC_SORTED = sorted({code for _, code in COUNTRIES}, key=len, reverse=True)
+        except Exception:
+            _CC_SORTED = []
+    return _CC_SORTED
+
 def format_number(string_number):
-    #Removes any non-digit characters
-    clean_number = string_number.split('@')[0]
+    """Format a raw digit string (or JID) as a human-readable phone number.
 
-    #Extracts DDI and DDD
-    ddi = clean_number[:2]
-    ddd = clean_number[2:4]
-    remaining = clean_number[4:]
+    Brazil (+55): +55 DD XXXXX-XXXX or +55 DD XXXX-XXXX
+    All other countries: +CC local  (no area-code assumptions)
+    Falls back to '+<digits>' if no known country code matches.
+    """
+    digits = "".join(c for c in string_number.split('@')[0] if c.isdigit())
+    if not digits:
+        return string_number
 
-    # If the number has 9 digits in the remaining part
-    if len(remaining) == 9:
-        part1 = remaining[:5]
-        part2 = remaining[5:]
-    else:
-        # Assumes the number has 8 digits in the remaining part
-        part1 = remaining[:4]
-        part2 = remaining[4:]
+    cc = None
+    for candidate in _known_country_codes():
+        if digits.startswith(candidate):
+            cc = candidate
+            break
 
-    return f'+{ddi} {ddd} {part1}-{part2}'
+    if cc is None:
+        return f"+{digits}"
+
+    local = digits[len(cc):]
+
+    if cc == "55":
+        ddd = local[:2]
+        rest = local[2:]
+        if not ddd:
+            return f"+{cc}"
+        if not rest:
+            return f"+{cc} {ddd}"
+        if len(rest) == 9:
+            return f"+{cc} {ddd} {rest[:5]}-{rest[5:]}"
+        split = max(len(rest) - 4, 1)
+        return f"+{cc} {ddd} {rest[:split]}-{rest[split:]}"
+
+    # Generic international
+    return f"+{cc} {local}" if local else f"+{cc}"
 
 def check_internet_connection(test_url="https://www.google.com", timeout=10):
     try:
