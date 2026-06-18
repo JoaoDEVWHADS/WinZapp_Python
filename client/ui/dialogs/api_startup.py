@@ -109,12 +109,18 @@ class ApiStartupDialog(wx.Dialog):
     def _finish_success(self):
         if self._done:
             return
+        if not self.IsModal():
+            wx.CallLater(50, self._finish_success)
+            return
         self._done = True
         self._timer.Stop()
         self.EndModal(wx.ID_OK)
 
     def _finish_timeout(self):
         if self._done:
+            return
+        if not self.IsModal():
+            wx.CallLater(50, self._finish_timeout)
             return
         self._done = True
         self._timer.Stop()
