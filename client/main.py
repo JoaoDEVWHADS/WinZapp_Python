@@ -2338,8 +2338,28 @@ class MainWindow(wx.Frame):
                         return val
             return None
 
+        def _get_contact_tolerant(jid):
+            if not jid:
+                return None
+            c = self.contacts.get(jid)
+            if c:
+                return c
+            # Brazilian number 9-digit tolerance fallback
+            if jid.endswith("@s.whatsapp.net"):
+                phone = jid.split("@")[0]
+                if phone.startswith("55"):
+                    if len(phone) == 13 and phone[4] == "9":
+                        # e.g., 5511999999999 -> try 551199999999
+                        alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
+                        return self.contacts.get(alt)
+                    elif len(phone) == 12:
+                        # e.g., 551199999999 -> try 5511999999999
+                        alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
+                        return self.contacts.get(alt)
+            return None
+
         # 1. Direct lookup by chat's own remoteJid
-        contact = self.contacts.get(remoteJid)
+        contact = _get_contact_tolerant(remoteJid)
         if contact:
             n = _name_from_contact(contact)
             if n:
@@ -2349,7 +2369,7 @@ class MainWindow(wx.Frame):
         if remoteJid.endswith("@lid"):
             alt_jid = self._find_alt_jid_from_messages(chat)
             if alt_jid:
-                contact = self.contacts.get(alt_jid)
+                contact = _get_contact_tolerant(alt_jid)
                 if contact:
                     n = _name_from_contact(contact)
                     if n:
@@ -2359,7 +2379,7 @@ class MainWindow(wx.Frame):
         #    other chats' message keys, e.g. group participants)
         phone_jid = getattr(self, "_lid_to_phone", {}).get(remoteJid)
         if phone_jid:
-            contact = self.contacts.get(phone_jid)
+            contact = _get_contact_tolerant(phone_jid)
             if contact:
                 n = _name_from_contact(contact)
                 if n:
@@ -2369,7 +2389,7 @@ class MainWindow(wx.Frame):
         if remoteJid.endswith("@s.whatsapp.net"):
             lid_jid = getattr(self, "_phone_to_lid", {}).get(remoteJid)
             if lid_jid:
-                contact = self.contacts.get(lid_jid)
+                contact = _get_contact_tolerant(lid_jid)
                 if contact:
                     n = _name_from_contact(contact)
                     if n:
@@ -2810,7 +2830,24 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback)."""
-        contact = self.contacts.get(jid_norm)
+        def _get_contact_tolerant(jid):
+            if not jid:
+                return None
+            c = self.contacts.get(jid)
+            if c:
+                return c
+            if jid.endswith("@s.whatsapp.net"):
+                phone = jid.split("@")[0]
+                if phone.startswith("55"):
+                    if len(phone) == 13 and phone[4] == "9":
+                        alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
+                        return self.contacts.get(alt)
+                    elif len(phone) == 12:
+                        alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
+                        return self.contacts.get(alt)
+            return None
+
+        contact = _get_contact_tolerant(jid_norm)
         if contact:
             name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not name.isdigit():
@@ -3435,11 +3472,28 @@ class MainWindow(wx.Frame):
         """
         if not jid:
             return ""
-        contact = self.contacts.get(jid)
+        def _get_contact_tolerant(j):
+            if not j:
+                return None
+            c = self.contacts.get(j)
+            if c:
+                return c
+            if j.endswith("@s.whatsapp.net"):
+                phone = j.split("@")[0]
+                if phone.startswith("55"):
+                    if len(phone) == 13 and phone[4] == "9":
+                        alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
+                        return self.contacts.get(alt)
+                    elif len(phone) == 12:
+                        alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
+                        return self.contacts.get(alt)
+            return None
+
+        contact = _get_contact_tolerant(jid)
         if not contact and jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
             if phone_jid:
-                contact = self.contacts.get(phone_jid)
+                contact = _get_contact_tolerant(phone_jid)
         if contact:
             name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
