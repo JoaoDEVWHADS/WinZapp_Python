@@ -25,21 +25,6 @@ TS_ORIGINAL = b"""    if (!onWhatsapp.exists) {
       throw new BadRequestException(onWhatsapp);
     }
 
-    try {
-      if (number) {
-        const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
-        const picture = await this.profilePicture(info?.jid);
-        const status = await this.getStatus(info?.jid);
-        const business = await this.fetchBusinessProfile(info?.jid);
-
-        return {
-          wuid: info?.jid || jid,
-          name: info?.name,"""
-
-TS_PATCHED = b"""    if (!onWhatsapp.exists) {
-      throw new BadRequestException(onWhatsapp);
-    }
-
     let phoneJid = jid;
     if (jid.endsWith('@lid')) {
       try {
@@ -66,6 +51,58 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
           jid: phoneJid,
           wuid: info?.jid || jid,
           name: contact?.pushName || info?.name || null,"""
+
+TS_PATCHED = b"""    if (!onWhatsapp.exists) {
+      throw new BadRequestException(onWhatsapp);
+    }
+
+    let phoneJid = jid;
+    if (jid.endsWith('@lid')) {
+      try {
+        const mapped = await this.client.signalRepository.lidMapping.getPNForLID(jid);
+        if (mapped) {
+          phoneJid = mapped;
+        }
+      } catch (err) {
+        this.logger.error(`Error resolving LID mapping for ${jid}: ${err.message}`);
+      }
+    }
+
+    try {
+      if (number) {
+        const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        const picture = await this.profilePicture(info?.jid);
+        const status = await this.getStatus(info?.jid);
+        const business = await this.fetchBusinessProfile(info?.jid);
+        const contact = await this.prismaRepository.contact.findFirst({
+          where: { remoteJid: phoneJid, instanceId: this.instanceId }
+        });
+        let resolvedName = contact?.pushName || info?.name || null;
+        if (!resolvedName) {
+          try {
+            const lastMsg = await this.prismaRepository.message.findFirst({
+              where: {
+                instanceId: this.instanceId,
+                pushName: { not: null },
+                OR: [
+                  { key: { path: ['remoteJid'], equals: phoneJid } },
+                  { key: { path: ['remoteJid'], equals: jid } }
+                ]
+              },
+              orderBy: { messageTimestamp: 'desc' }
+            });
+            if (lastMsg && lastMsg.pushName) {
+              resolvedName = lastMsg.pushName;
+            }
+          } catch (e) {
+            this.logger.error(`Error fetching pushName from message history: ${e.message}`);
+          }
+        }
+
+        return {
+          jid: phoneJid,
+          wuid: info?.jid || jid,
+          name: resolvedName,"""
 
 # ---------------------------------------------------------------------------
 # Regex for Compiled main.js / main.mjs
