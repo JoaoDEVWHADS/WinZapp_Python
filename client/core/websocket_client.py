@@ -237,6 +237,10 @@ class WebSocketClient:
                 unread = chat_update.get("unreadCount")
                 if unread is not None:
                     wx.CallAfter(self.main_window.on_chat_unread_update, jid, int(unread))
+                
+                archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
+                if archive is not None:
+                    wx.CallAfter(self.main_window.on_chat_archive_update, jid, bool(archive))
         except Exception as e:
             print(f"[WebSocketClient] on_chats_update error: {e}")
 

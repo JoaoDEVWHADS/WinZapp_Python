@@ -2818,6 +2818,26 @@ class MainWindow(wx.Frame):
         chat["unreadCount"] = unread_count
         self._schedule_set_chats()
 
+    def on_chat_archive_update(self, jid: str, archived: bool):
+        """Handle archive/unarchive status change from chats.update."""
+        normalized = self._normalize_jid(jid)
+        chat = self.chats.get(normalized)
+        if chat is None:
+            return
+        chat["archived"] = archived
+        chat["archive"] = archived
+        
+        # Keep local settings synchronized
+        lst = self.settings.setdefault("archived_chats", [])
+        if archived:
+            if normalized not in lst:
+                lst.append(normalized)
+        else:
+            if normalized in lst:
+                lst.remove(normalized)
+        self.save_settings()
+        self._schedule_set_chats()
+
     def handle_audio_message(self, msg, timeout=60):
         voice_messages_dir = data_path("voice_messages")
         audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
