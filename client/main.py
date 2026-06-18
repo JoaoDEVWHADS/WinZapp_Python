@@ -2189,6 +2189,9 @@ class MainWindow(wx.Frame):
             filtered_contacts = [c for c in response_data if isinstance(c, dict) and c.get("type", "") == "contact"]
             names_with_values = [c.get("name") or c.get("pushname") for c in filtered_contacts if c.get("name") or c.get("pushname")]
             logging.info(f"[get_remote_contacts] Total filtered contacts (type='contact'): {len(filtered_contacts)} (with valid names: {len(names_with_values)})")
+            if filtered_contacts:
+                logging.info(f"[get_remote_contacts] First contact raw keys: {list(filtered_contacts[0].keys())}")
+                logging.info(f"[get_remote_contacts] First contact raw data: {filtered_contacts[0]}")
             if names_with_values:
                 logging.info(f"[get_remote_contacts] First 50 named contacts: {', '.join(names_with_values[:50])}")
             else:
