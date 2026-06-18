@@ -1894,7 +1894,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(url, headers=headers)
+            response = requests.post(url, json={}, headers=headers)
             response_data = response.json()
             if not isinstance(response_data, list):
                 response_data = []
@@ -1905,6 +1905,35 @@ class MainWindow(wx.Frame):
                 # Skip status@broadcast — statuses are shown in the Status tab
                 if not jid or jid.endswith("@broadcast"):
                     continue
+                # Populate/update self.contacts from chat name metadata
+                if jid and not jid.endswith("@g.us"):
+                    name = chat.get("name")
+                    pushName = chat.get("pushName")
+                    if jid not in self.contacts:
+                        self.contacts[jid] = {"id": jid, "remoteJid": jid}
+                    if name:
+                        self.contacts[jid]["name"] = name
+                    if pushName:
+                        self.contacts[jid]["pushName"] = pushName
+                    
+                    phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                    if phone_jid:
+                        if phone_jid not in self.contacts:
+                            self.contacts[phone_jid] = {"id": phone_jid, "remoteJid": phone_jid}
+                        if name:
+                            self.contacts[phone_jid]["name"] = name
+                        if pushName:
+                            self.contacts[phone_jid]["pushName"] = pushName
+                            
+                    lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
+                    if lid_jid:
+                        if lid_jid not in self.contacts:
+                            self.contacts[lid_jid] = {"id": lid_jid, "remoteJid": lid_jid}
+                        if name:
+                            self.contacts[lid_jid]["name"] = name
+                        if pushName:
+                            self.contacts[lid_jid]["pushName"] = pushName
+
                 # If this is a @lid JID and we already have the canonical
                 # @s.whatsapp.net entry (from the _lid_to_phone cache built at
                 # startup), skip the @lid entirely — it's a duplicate.
@@ -2070,7 +2099,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(url, headers=headers)
+            response = requests.post(url, json={}, headers=headers)
             response_data = response.json()
             if not isinstance(response_data, list):
                 response_data = []
@@ -2333,6 +2362,16 @@ class MainWindow(wx.Frame):
                 n = _name_from_contact(contact)
                 if n:
                     return n
+
+        # 3b. Try the global @s.whatsapp.net → @lid cache
+        if remoteJid.endswith("@s.whatsapp.net"):
+            lid_jid = getattr(self, "_phone_to_lid", {}).get(remoteJid)
+            if lid_jid:
+                contact = self.contacts.get(lid_jid)
+                if contact:
+                    n = _name_from_contact(contact)
+                    if n:
+                        return n
 
         # 4. Fall back to the chat's own 'name' field, which Baileys populates
         #    from the address-book when the contact is saved.  This is a
