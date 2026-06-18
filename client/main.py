@@ -3414,6 +3414,8 @@ class MainWindow(wx.Frame):
                 p_key      = last.get("key", {})
                 sender_jid = last.get("participant") or p_key.get("participant", "") or p_key.get("remoteJid", "")
                 push       = last.get("pushName", "")
+                if sender_jid.endswith("@g.us") and push and push.isdigit():
+                    sender_jid = f"{push}@s.whatsapp.net"
                 sender_name = (
                     self._resolve_contact_name({"remoteJid": sender_jid})
                     or (push if push and not is_phone_like(push) else "")
@@ -3493,6 +3495,8 @@ class MainWindow(wx.Frame):
             p_key      = last.get("key", {})
             sender_jid = last.get("participant") or p_key.get("participant") or p_key.get("remoteJid", "")
             push       = last.get("pushName", "")
+            if sender_jid.endswith("@g.us") and push and push.isdigit():
+                sender_jid = f"{push}@s.whatsapp.net"
             sender_name = (
                 self._resolve_contact_name({"remoteJid": sender_jid})
                 or (push if push and not is_phone_like(push) else "")

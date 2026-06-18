@@ -181,6 +181,8 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
 
     if remote_jid.endswith("@g.us"):
         p_jid = key.get("participant") or msg.get("participant") or ""
+        if (not p_jid or p_jid.endswith("@g.us")) and push_name and push_name.isdigit():
+            p_jid = f"{push_name}@s.whatsapp.net"
         return _resolve_participant_name(p_jid, push_name, main_window) or remote_jid.split("@")[0]
 
     chat = main_window.chats.get(remote_jid, {})
@@ -215,6 +217,8 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         )
         # Resolve participant name — saved name takes priority over pushName
         p_jid = key.get("participant") or msg.get("participant") or ""
+        if (not p_jid or p_jid.endswith("@g.us")) and push_name and push_name.isdigit():
+            p_jid = f"{push_name}@s.whatsapp.net"
         participant_name = _resolve_participant_name(p_jid, push_name, main_window)
         if not participant_name:
             participant_name = remote_jid.split("@")[0]
