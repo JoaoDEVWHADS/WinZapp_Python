@@ -3386,58 +3386,31 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._schedule_set_chats)
 
     def resolve_lid_jids_via_api(self, jids):
-        """Query /chat/whatsappNumbers/ to resolve a list of @lid JIDs to phone JIDs."""
+        """Resolve a list of @lid JIDs to phone JIDs using fetchProfile."""
         if not jids:
             return
             
-        url = f"{self.evolution_server}:{self.evolution_port}/chat/whatsappNumbers/{self.token}"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/fetchProfile/{self.token}"
         headers = {
             "apikey": self.token,
             "Content-Type": "application/json"
         }
         
-        # Prepare list of numbers to query
-        query_numbers = []
-        for jid in jids:
-            query_numbers.append(jid)
-            
-        payload = {
-            "numbers": query_numbers
-        }
-        
-        try:
-            logging.info(f"[LID Resolution] Querying whatsappNumbers for {len(jids)} JIDs...")
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
-            if response.status_code in (200, 201):
-                results = response.json()
-                if isinstance(results, list):
-                    for item in results:
-                        if not isinstance(item, dict):
-                            continue
-                        exists = item.get("exists")
-                        jid = item.get("jid")
-                        query_num = item.get("number")
-                        
-                        if exists and jid and jid.endswith("@s.whatsapp.net"):
-                            matched_lid = None
-                            if query_num:
-                                if str(query_num).endswith("@lid"):
-                                    matched_lid = str(query_num)
-                                else:
-                                    matched_lid = f"{query_num}@lid"
-                            
-                            if not matched_lid:
-                                for orig in jids:
-                                    if orig.startswith(str(query_num)):
-                                        matched_lid = orig
-                                        break
-                                        
-                            if matched_lid and matched_lid.endswith("@lid"):
-                                self.register_jid_mapping(matched_lid, jid)
-            else:
-                logging.error(f"[LID Resolution] whatsappNumbers API error {response.status_code}: {response.text}")
-        except Exception as e:
-            logging.exception(f"[LID Resolution] Exception during batch resolution: {e}")
+        for lid_jid in jids:
+            if not lid_jid.endswith("@lid"):
+                continue
+            try:
+                logging.info(f"[LID Resolution] Querying fetchProfile for {lid_jid}...")
+                response = requests.post(url, json={"number": lid_jid}, headers=headers, timeout=10)
+                if response.status_code in (200, 201):
+                    res = response.json() or {}
+                    canonical_jid = res.get("jid") or res.get("id") or ""
+                    if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
+                        self.register_jid_mapping(lid_jid, canonical_jid)
+                else:
+                    logging.error(f"[LID Resolution] fetchProfile API error {response.status_code} for {lid_jid}: {response.text}")
+            except Exception as e:
+                logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from Evolution API (runs on background thread)."""
