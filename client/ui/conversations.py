@@ -2642,7 +2642,11 @@ class ConversationsPanel(wx.Panel):
                     # Prefer address-book name ('name') over WhatsApp profile name ('pushName')
                     n = (c.get("name") or c.get("pushName") or "").strip()
                     if n and not n.isdigit() and not is_phone_like(n):
-                        return n
+                        n_lower = n.lower()
+                        if "sem nome" in n_lower or "unnamed" in n_lower or n_lower in ("no name", "unknown", "desconhecido"):
+                            pass
+                        else:
+                            return n
                 # Also check the direct-chat object's 'name' field — Baileys
                 # stores the address-book name there during chats.upsert, which
                 # may be more up-to-date than a stale pushName in the contacts dict.
@@ -2650,7 +2654,11 @@ class ConversationsPanel(wx.Panel):
                 if chat_obj:
                     cn = (chat_obj.get("name") or "").strip()
                     if cn and not cn.isdigit() and not is_phone_like(cn):
-                        return cn
+                        cn_lower = cn.lower()
+                        if "sem nome" in cn_lower or "unnamed" in cn_lower or cn_lower in ("no name", "unknown", "desconhecido"):
+                            pass
+                        else:
+                            return cn
             return ""
 
         if lookup_jid:

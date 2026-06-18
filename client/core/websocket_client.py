@@ -156,6 +156,9 @@ class WebSocketClient:
             msg = info.get("data", {})
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
+            
+            # Extract JID mapping from WebSocket message
+            self.main_window._extract_lid_mapping(msg)
             # Guard: ignore messages older than 60 seconds before the last
             # WebSocket connection.  Using _connect_time as the reference point
             # (rather than the ever-advancing time.time()) means that a message

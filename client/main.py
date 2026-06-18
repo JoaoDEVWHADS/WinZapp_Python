@@ -1818,9 +1818,9 @@ class MainWindow(wx.Frame):
 
         #Get Local Chats
         self.chats = self.get_chats()
+        self._load_local_lid_cache()
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
-        self._load_local_lid_cache()
         self.contacts = self.get_contacts()
         self.connected_sound.play()
         if self.settings.get("status", {}).get("messages_set_completed"):
@@ -1969,6 +1969,34 @@ class MainWindow(wx.Frame):
                 if not isinstance(chat, dict):
                     continue
                 jid = self._normalize_jid(chat.get("remoteJid", ""))
+                
+                # Try to extract JID mapping from lastMessage if present
+                last_msg = chat.get("lastMessage")
+                if isinstance(last_msg, dict):
+                    key = last_msg.get("key")
+                    if isinstance(key, dict):
+                        remote = key.get("remoteJid", "")
+                        alt = key.get("remoteJidAlt", "")
+                        if remote and alt:
+                            if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
+                                if not hasattr(self, "_lid_to_phone"):
+                                    self._lid_to_phone = {}
+                                if not hasattr(self, "_phone_to_lid"):
+                                    self._phone_to_lid = {}
+                                if self._lid_to_phone.get(remote) != alt:
+                                    self._lid_to_phone[remote] = alt
+                                    self._phone_to_lid[alt] = remote
+                                    logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
+                            elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                                if not hasattr(self, "_lid_to_phone"):
+                                    self._lid_to_phone = {}
+                                if not hasattr(self, "_phone_to_lid"):
+                                    self._phone_to_lid = {}
+                                if self._lid_to_phone.get(alt) != remote:
+                                    self._lid_to_phone[alt] = remote
+                                    self._phone_to_lid[remote] = alt
+                                    logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
+
                 # Skip status@broadcast — statuses are shown in the Status tab
                 if not jid or jid.endswith("@broadcast"):
                     continue
@@ -2439,6 +2467,54 @@ class MainWindow(wx.Frame):
         if not hasattr(self, "_composing_chats"):
             self._composing_chats = {}
 
+    def _extract_lid_mapping(self, msg):
+        """Extract JID mapping from a message object and update cache & persist if new."""
+        if not isinstance(msg, dict):
+            return
+        key = msg.get("key")
+        if not isinstance(key, dict):
+            return
+        remote = key.get("remoteJid", "")
+        alt = key.get("remoteJidAlt", "")
+        participant = key.get("participant", "")
+
+        updated = False
+        # Initialize dictionary if not present
+        if not hasattr(self, "_lid_to_phone"):
+            self._lid_to_phone = {}
+        if not hasattr(self, "_phone_to_lid"):
+            self._phone_to_lid = {}
+
+        if alt and alt.endswith("@s.whatsapp.net"):
+            if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
+                self._lid_to_phone[remote] = alt
+                self._phone_to_lid[alt] = remote
+                updated = True
+                logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
+            if participant and participant.endswith("@lid") and self._lid_to_phone.get(participant) != alt:
+                self._lid_to_phone[participant] = alt
+                self._phone_to_lid[alt] = participant
+                updated = True
+                logging.info(f"[LID Mapping] Extracted participant mapping: {participant} <-> {alt}")
+        elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+            if self._lid_to_phone.get(alt) != remote:
+                self._lid_to_phone[alt] = remote
+                self._phone_to_lid[remote] = alt
+                updated = True
+                logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
+
+        if updated:
+            # Propagate contact details from phone contact to LID contact to make it immediately available
+            for lid, phone in list(self._lid_to_phone.items()):
+                if phone in self.contacts and self.contacts[phone]:
+                    if lid not in self.contacts or self.contacts[lid].get("name") in (None, "", "Contato sem nome"):
+                        self.contacts[lid] = self.contacts[phone].copy()
+                        self.contacts[lid]["id"] = lid
+                        self.contacts[lid]["remoteJid"] = lid
+
+            self.save_data(self.chats, self.contacts)
+            wx.CallAfter(self._schedule_set_chats)
+
     def _find_alt_jid_from_messages(self, chat):
         """
         Find the @s.whatsapp.net phone-number JID for a chat by scanning all
@@ -2486,6 +2562,11 @@ class MainWindow(wx.Frame):
                 if val and isinstance(val, str):
                     val = val.strip()
                     if val and not val.isdigit() and not is_phone_like(val):
+                        # Reject placeholder names (e.g. "Contato sem nome")
+                        val_lower = val.lower()
+                        if "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido"):
+                            logging.info(f"[LID Mapping] Rejecting placeholder name '{val}' for contact JID '{c.get('id') or c.get('remoteJid')}'")
+                            continue
                         return val
             return None
 
@@ -2677,6 +2758,8 @@ class MainWindow(wx.Frame):
 
         # After fetching all pages, update chat messages
         if all_messages:
+            for msg in all_messages:
+                self._extract_lid_mapping(msg)
             # Preserve any messages received via WebSocket during this sync that
             # the API hasn't indexed yet (they arrived after the API snapshot).
             local_chat    = self.chats.get(remote_jid, {})
