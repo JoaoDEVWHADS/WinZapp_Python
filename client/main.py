@@ -2089,12 +2089,27 @@ class MainWindow(wx.Frame):
                 chats[normalized] = cus_chat
 
         # ── Pass 2: merge or rename @lid to its @s.whatsapp.net equivalent ───
+        temp_cache = {}
+        for jid_key, chat_obj in chats.items():
+            for msg in chat_obj.get("messages", {}).get("messages", {}).get("records", []):
+                key    = msg.get("key", {})
+                remote = key.get("remoteJid", "")
+                alt    = key.get("remoteJidAlt", "")
+                if alt and alt.endswith("@s.whatsapp.net"):
+                    if remote.endswith("@lid"):
+                        temp_cache[remote] = alt
+                    participant = key.get("participant", "")
+                    if participant.endswith("@lid"):
+                        temp_cache[participant] = alt
+                elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                    temp_cache[alt] = remote
+
         lid_jids = [j for j in list(chats.keys()) if j.endswith("@lid")]
         for lid_jid in lid_jids:
             if lid_jid not in chats:
                 continue
             lid_chat = chats[lid_jid]
-            alt_jid  = self._find_alt_jid_from_messages(lid_chat)
+            alt_jid  = self._find_alt_jid_from_messages(lid_chat) or temp_cache.get(lid_jid)
             if not alt_jid:
                 continue  # no phone-number JID found in messages — keep @lid as-is
 
@@ -2112,6 +2127,11 @@ class MainWindow(wx.Frame):
                     .setdefault("records", [])
                 )
                 _merge_records(dst_records, src_records)
+                
+                # Merge unread counts
+                unread_dst = int(chats[alt_jid].get("unreadCount") or 0)
+                unread_src = int(lid_chat.get("unreadCount") or 0)
+                chats[alt_jid]["unreadCount"] = unread_dst + unread_src
             else:
                 # Only the @lid version exists — rename it to @s.whatsapp.net
                 lid_chat["remoteJid"] = alt_jid
