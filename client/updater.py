@@ -95,6 +95,11 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
       4. Restarts the client executable.
     Then launches it (elevated if the directory needs admin).
     """
+    source_dir = extracted_dir
+    winzapp_sub = os.path.join(extracted_dir, "WinZapp")
+    if os.path.isdir(winzapp_sub):
+        source_dir = winzapp_sub
+
     bat_fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="winzapp_upd_")
     os.close(bat_fd)
 
@@ -106,7 +111,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :3417 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "timeout /t 2 /nobreak >NUL\n"
-        f'xcopy /E /Y /I "{extracted_dir}\\*" "{install_dir}\\"\n'
+        f'xcopy /E /Y /I "{source_dir}\\*" "{install_dir}\\"\n'
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
     )
