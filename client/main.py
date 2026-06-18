@@ -805,7 +805,7 @@ class MainWindow(wx.Frame):
         # Stop the presence keep-alive timer before tearing down
         if hasattr(self, "_presence_timer") and self._presence_timer.IsRunning():
             self._presence_timer.Stop()
-        if self.tray_icon is not None:
+        if getattr(self, "tray_icon", None) is not None:
             try:
                 self.tray_icon.RemoveIcon()
                 self.tray_icon.Destroy()
@@ -2033,8 +2033,9 @@ class MainWindow(wx.Frame):
             for contact in response_data:
                 if not isinstance(contact, dict):
                     continue
-                if contact.get("type", "") == "contact":
-                    contacts[contact.get("remoteJid", "")] = contact
+                jid = contact.get("remoteJid") or contact.get("id", "")
+                if jid and not jid.endswith("@g.us") and not jid.endswith("@broadcast"):
+                    contacts[jid] = contact
             self.save_data(self.chats, contacts)
             return contacts
         except Exception as e:
@@ -2083,7 +2084,7 @@ class MainWindow(wx.Frame):
                     name = self.i18n.t("unknown_contact")
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
-            if jid in archived:
+            if jid in archived or chat.get("archived") is True or chat.get("archive") is True:
                 arch_chats.append(chat)
                 arch_names.append(name)
             else:
@@ -3051,7 +3052,10 @@ class MainWindow(wx.Frame):
     # ── Archive ───────────────────────────────────────────────────────────────
 
     def is_chat_archived(self, jid: str) -> bool:
-        return jid in self.settings.get("archived_chats", [])
+        chat = self.chats.get(jid, {})
+        return (jid in self.settings.get("archived_chats", []) 
+                or chat.get("archived") is True 
+                or chat.get("archive") is True)
 
     def archive_chat(self, jid: str):
         lst = self.settings.setdefault("archived_chats", [])
@@ -3408,7 +3412,7 @@ class MainWindow(wx.Frame):
                 label = i18n.t("reaction_preview_you").format(emoji=emoji)
             else:
                 p_key      = last.get("key", {})
-                sender_jid = p_key.get("participant", "") or p_key.get("remoteJid", "")
+                sender_jid = last.get("participant") or p_key.get("participant", "") or p_key.get("remoteJid", "")
                 push       = last.get("pushName", "")
                 sender_name = (
                     self._resolve_contact_name({"remoteJid": sender_jid})
@@ -3487,7 +3491,7 @@ class MainWindow(wx.Frame):
             sender_prefix = i18n.t("conv_preview_you") + " "
         elif is_group:
             p_key      = last.get("key", {})
-            sender_jid = p_key.get("participant") or p_key.get("remoteJid", "")
+            sender_jid = last.get("participant") or p_key.get("participant") or p_key.get("remoteJid", "")
             push       = last.get("pushName", "")
             sender_name = (
                 self._resolve_contact_name({"remoteJid": sender_jid})

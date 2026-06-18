@@ -180,7 +180,7 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
     push_name  = msg.get("pushName", "")
 
     if remote_jid.endswith("@g.us"):
-        p_jid = key.get("participant", "")
+        p_jid = key.get("participant") or msg.get("participant") or ""
         return _resolve_participant_name(p_jid, push_name, main_window) or remote_jid.split("@")[0]
 
     chat = main_window.chats.get(remote_jid, {})
@@ -214,7 +214,7 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
             or remote_jid.split("@")[0]
         )
         # Resolve participant name — saved name takes priority over pushName
-        p_jid = key.get("participant", "")
+        p_jid = key.get("participant") or msg.get("participant") or ""
         participant_name = _resolve_participant_name(p_jid, push_name, main_window)
         if not participant_name:
             participant_name = remote_jid.split("@")[0]
