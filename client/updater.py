@@ -115,16 +115,21 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         f.write(bat)
     logging.info("Auto-updater: Wrote batch installer script to %s", bat_path)
 
-    needs_admin = _needs_admin()
-    if needs_admin:
-        ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
-        )
+    if sys.platform == "win32":
+        needs_admin = _needs_admin()
+        if needs_admin:
+            import ctypes
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
+            )
+        else:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACH_PROCESS", 0)
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                creationflags=flags,
+            )
     else:
-        subprocess.Popen(
-            ["cmd.exe", "/c", bat_path],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACH_PROCESS,
-        )
+        logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
 
 
 # ── UpdateProgressDialog ──────────────────────────────────────────────────────
