@@ -1454,16 +1454,6 @@ class MainWindow(wx.Frame):
         self.settings.setdefault("general", {})["first_run"] = False
         self.save_settings()
 
-        # Check if autostart is already active in the Windows Registry (from a previous install)
-        try:
-            from autostart import is_autostart_enabled
-            if is_autostart_enabled():
-                self.settings.setdefault("general", {})["autostart"] = True
-                self.save_settings()
-                return
-        except Exception:
-            pass
-
         result = wx.MessageBox(
             self.i18n.t("autostart_ask_message"),
             self.i18n.t("autostart_ask_title"),
