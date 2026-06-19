@@ -81,6 +81,20 @@ def main():
         has_start_js = os.path.isfile(start_js_src)
         has_package_json = os.path.isfile(package_json_src)
         
+        # Additional custom files to backup and restore
+        custom_files = [
+            "src/util/functions.ts",
+            "src/middleware/statusConnection.ts",
+            "src/controller/deviceController.ts"
+        ]
+        custom_contents = {}
+        for rel_path in custom_files:
+            full_path = os.path.join(CLIENT_API_DIR, rel_path)
+            if os.path.isfile(full_path):
+                with open(full_path, "rb") as f:
+                    custom_contents[rel_path] = f.read()
+                print(f"[INFO] Stashed custom file: {rel_path}")
+        
         start_js_content = None
         package_json_content = None
         if has_start_js:
@@ -116,6 +130,14 @@ def main():
             with open(os.path.join(CLIENT_API_DIR, "package.json"), "wb") as f:
                 f.write(package_json_content)
             print("[INFO] Restored custom package.json.")
+            
+        # Restore other custom files
+        for rel_path, content in custom_contents.items():
+            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(content)
+            print(f"[INFO] Restored custom file: {rel_path}")
 
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
@@ -128,7 +150,12 @@ def main():
         if package_json_content is not None:
             with open(os.path.join(CLIENT_API_DIR, "package.json"), "wb") as f:
                 f.write(package_json_content)
-            print("[INFO] Re-applied custom files after checking out tag.")
+        for rel_path, content in custom_contents.items():
+            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(content)
+        print("[INFO] Re-applied custom files after checking out tag.")
     else:
         print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
 

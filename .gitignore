@@ -194,3 +194,6 @@ db.sqlite3-journal
 !/api/.gitignore
 !/api/start.js
 !/api/.env
+!/client/api/src/util/functions.ts
+!/client/api/src/middleware/statusConnection.ts
+!/client/api/src/controller/deviceController.ts
