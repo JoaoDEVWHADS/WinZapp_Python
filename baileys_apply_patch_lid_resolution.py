@@ -235,6 +235,7 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
               where: {
                 instanceId: this.instanceId,
                 pushName: { not: null },
+                key: { path: ['fromMe'], equals: false },
                 OR: [
                   { key: { path: ['remoteJid'], equals: phoneJid } },
                   { key: { path: ['remoteJid'], equals: jid } }
