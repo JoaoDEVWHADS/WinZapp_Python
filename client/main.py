@@ -1982,6 +1982,7 @@ class MainWindow(wx.Frame):
         if not self._ui_ready_event.wait(timeout=120):
             return  # UI never initialized; bail out silently
 
+        self._initial_sync_running = True
         logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
         self.check_wa_connection_http()
         waited = 0
@@ -2070,6 +2071,7 @@ class MainWindow(wx.Frame):
         # events (Evolution API sends them in batches) don't restart the full
         # sync process after it already completed successfully.
         self._sync_completed = True
+        self._initial_sync_running = False
 
     def wait_messages_set(self):
         if not self.background_mode:
@@ -3063,7 +3065,8 @@ class MainWindow(wx.Frame):
 
         if chat.get("messages", {}) and chat["messages"] != self.chats.get(remote_jid, {}).get("messages", {}): #update only if necessary
             self.chats[remote_jid] = chat
-            wx.CallAfter(self._schedule_set_chats)
+            if not getattr(self, "_initial_sync_running", False):
+                wx.CallAfter(self._schedule_set_chats)
             self.save_data(self.chats, self.contacts)
 
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
