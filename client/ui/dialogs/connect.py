@@ -132,29 +132,33 @@ class Connect:
             if entry == keep_raw:
                 continue
             session_id = entry
-            try:
-                # Generate token for this orphan session first to bypass 401 Authentication error.
-                gen_url = (
-                    f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{session_id}"
-                    f"/{self.main_window.evolution_api_key}/generate-token"
-                )
-                res = requests.post(gen_url, timeout=5)
-                if res.status_code in (200, 201):
-                    hash_token = res.json().get("token")
-                    token = f"{session_id}:{hash_token}"
-                    url = (
+            
+            # Spawn a daemon thread to clean up this session in parallel
+            def _clean_single(sid):
+                try:
+                    gen_url = (
                         f"{self.main_window.evolution_server}"
-                        f":{self.main_window.evolution_port}/api/{token}/close-session"
+                        f":{self.main_window.evolution_port}/api/{sid}"
+                        f"/{self.main_window.evolution_api_key}/generate-token"
                     )
-                    requests.post(
-                        url,
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        timeout=5,
-                    )
-                    logging.info("[cleanup_orphan_sessions] Closed orphan session: %s", session_id)
-            except Exception:
-                pass
+                    res = requests.post(gen_url, timeout=5)
+                    if res.status_code in (200, 201):
+                        hash_token = res.json().get("token")
+                        token = f"{sid}:{hash_token}"
+                        url = (
+                            f"{self.main_window.evolution_server}"
+                            f":{self.main_window.evolution_port}/api/{token}/close-session"
+                        )
+                        requests.post(
+                            url,
+                            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                            timeout=5,
+                        )
+                        logging.info("[cleanup_orphan_sessions] Closed orphan session: %s", sid)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_clean_single, args=(session_id,), daemon=True).start()
 
 
 
@@ -473,119 +477,136 @@ class Connect:
             wx.MessageBox(f"{self.i18n.t('websocket_init_failed')} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
     def on_continue(self, event):
-        """Phone-number pairing flow."""
-        try:
-            # Always send raw digits to the API (strip formatting chars)
-            self.phone_number = "".join(
-                c for c in self.phone_field.GetValue() if c.isdigit()
-            )
-            if not self.phone_number:
-                return
-            # Normalise stored number to digits-only for comparison
-            stored_raw = "".join(
-                c for c in self.main_window.settings.get("privateinfo", {}).get(
-                    "WA_phone_number", ""
-                )
-                if c.isdigit()
-            )
-            # Check if the user has already paired with this number.
-            existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
-            _instance_exists = bool(stored_raw == self.phone_number and existing_token)
-            if not _instance_exists:
-                # New pairing: reset sync flag so we wait for messages.set
-                self.main_window.settings["status"]["messages_set_completed"] = False
-                # DON'T save yet — token is only persisted after we get the pairing code.
+        """Phone-number pairing flow (asynchronous to prevent GUI freeze)."""
+        self.phone_number = "".join(
+            c for c in self.phone_field.GetValue() if c.isdigit()
+        )
+        if not self.phone_number:
+            return
 
-            if _instance_exists:
-                self.main_window.token = existing_token
-            else:
-                # Kill any leftover Chromium sessions from previous failed attempts
-                # so only ONE browser runs at a time (prevents Auto Close race).
-                self._cleanup_orphan_sessions(keep_token="")
-                raw_token = self.generate_random_token()
-                url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
-                try:
-                    res = requests.post(url, timeout=10)
-                    if res.status_code in (200, 201):
-                        hash_token = res.json().get("token")
-                        self.main_window.token = f"{raw_token}:{hash_token}"
-                    else:
-                        self.main_window.token = raw_token
-                except Exception:
-                    self.main_window.token = raw_token
+        # Disable continue button and show connecting status to user
+        self.continue_btn.Disable()
+        self.continue_btn.SetLabel(self.i18n.t("connecting") or "Conectando...")
+        self.main_window.output(self.i18n.t("connecting") or "Conectando...")
 
-            # Set websocket client and connect BEFORE calling /start-session so
-            # the 'phoneCode' Socket.IO event can be received.
-            self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
+        def _bg_pairing_flow():
             try:
-                self.main_window.connect_websocket()
-            except Exception:
-                pass
+                # Normalise stored number to digits-only for comparison
+                stored_raw = "".join(
+                    c for c in self.main_window.settings.get("privateinfo", {}).get(
+                        "WA_phone_number", ""
+                    )
+                    if c.isdigit()
+                )
+                # Check if the user has already paired with this number.
+                existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+                _instance_exists = bool(stored_raw == self.phone_number and existing_token)
+                if not _instance_exists:
+                    # New pairing: reset sync flag so we wait for messages.set
+                    self.main_window.settings["status"]["messages_set_completed"] = False
 
-            # Reset the phoneCode event in case a previous pairing attempt set it.
-            self.main_window.ws._phone_code_event.clear()
-            self.main_window.ws._phone_code_value = ""
+                if _instance_exists:
+                    self.main_window.token = existing_token
+                else:
+                    # Kill any leftover Chromium sessions from previous failed attempts
+                    # so only ONE browser runs at a time (prevents Auto Close race).
+                    self._cleanup_orphan_sessions(keep_token="")
+                    raw_token = self.generate_random_token()
+                    url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
+                    try:
+                        res = requests.post(url, timeout=10)
+                        if res.status_code in (200, 201):
+                            hash_token = res.json().get("token")
+                            self.main_window.token = f"{raw_token}:{hash_token}"
+                        else:
+                            self.main_window.token = raw_token
+                    except Exception:
+                        self.main_window.token = raw_token
 
-            # Call /start-session in a background thread — WPPConnect can take
-            # 60-90 s to initialise the browser and generate the pairing code.
-            # Blocking here with timeout=30 causes a ReadTimeout before the code
-            # arrives.  The code is delivered asynchronously via the 'phoneCode'
-            # Socket.IO event; we just need to keep the connection alive and wait.
-            url = (
-                f"{self.main_window.evolution_server}"
-                f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
-            )
-            payload = {"phone": self.phone_number, "waitQrCode": True}
-            headers = self._evolution_headers(use_global_key=True)
-            ws_ref = self.main_window.ws  # capture before thread starts
-
-            def _call_start_session():
+                # Set websocket client and connect BEFORE calling /start-session so
+                # the 'phoneCode' Socket.IO event can be received.
+                self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
                 try:
-                    resp = requests.post(url, json=payload, headers=headers, timeout=120)
-                    # If the code came back inline (rare), unblock the wait loop.
-                    inline_code = resp.json().get("phoneCode", "")
-                    if inline_code and not ws_ref._phone_code_event.is_set():
-                        ws_ref._phone_code_value = str(inline_code)
-                        ws_ref._phone_code_event.set()
+                    self.main_window.connect_websocket()
                 except Exception:
-                    # Signal the event so the main thread doesn't wait forever.
-                    ws_ref._phone_code_event.set()
+                    pass
 
-            threading.Thread(target=_call_start_session, daemon=True).start()
+                # Reset the phoneCode event in case a previous pairing attempt set it.
+                self.main_window.ws._phone_code_event.clear()
+                self.main_window.ws._phone_code_value = ""
 
-            # Wait up to 90 s for WPPConnect to emit the phoneCode via Socket.IO.
-            got_code = self.main_window.ws._phone_code_event.wait(timeout=90)
-            pairing_code = self.main_window.ws._phone_code_value if got_code else ""
+                # Call /start-session in a background thread — WPPConnect can take
+                # 60-90 s to initialise the browser and generate the pairing code.
+                url = (
+                    f"{self.main_window.evolution_server}"
+                    f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
+                )
+                payload = {"phone": self.phone_number, "waitQrCode": True}
+                headers = self._evolution_headers(use_global_key=True)
+                ws_ref = self.main_window.ws  # capture before thread starts
 
-            if pairing_code:
-                # Only now persist the token — pairing has actually started.
-                if "privateinfo" not in self.main_window.settings:
-                    self.main_window.settings["privateinfo"] = {}
-                self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
-                self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
-                self.main_window.save_settings()
-                self.show_pairing_dial(pairing_code)
-            else:
-                # No code received — clear any partially-saved token so next
-                # launch shows the connection dialog instead of acting connected.
+                def _call_start_session():
+                    try:
+                        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+                        # If the code came back inline (rare), unblock the wait loop.
+                        inline_code = resp.json().get("phoneCode", "")
+                        if inline_code and not ws_ref._phone_code_event.is_set():
+                            ws_ref._phone_code_value = str(inline_code)
+                            ws_ref._phone_code_event.set()
+                    except Exception:
+                        # Signal the event so the main thread doesn't wait forever.
+                        ws_ref._phone_code_event.set()
+
+                threading.Thread(target=_call_start_session, daemon=True).start()
+
+                # Wait up to 90 s for WPPConnect to emit the phoneCode via Socket.IO.
+                got_code = self.main_window.ws._phone_code_event.wait(timeout=90)
+                pairing_code = self.main_window.ws._phone_code_value if got_code else ""
+
+                if pairing_code:
+                    # Only now persist the token — pairing has actually started.
+                    if "privateinfo" not in self.main_window.settings:
+                        self.main_window.settings["privateinfo"] = {}
+                    self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
+                    self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
+                    self.main_window.save_settings()
+                    wx.CallAfter(self._on_pairing_code_success, pairing_code)
+                else:
+                    # No code received — clear any partially-saved token so next
+                    # launch shows the connection dialog instead of acting connected.
+                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                    self.main_window.save_settings()
+                    wx.CallAfter(self._on_pairing_code_error)
+
+            except Exception as exc:
+                # On any unexpected error, clear the token so next launch works correctly.
                 self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
                 self.main_window.save_settings()
-                wx.MessageBox(
-                    self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name),
-                    self.i18n.t("connection_error"),
-                    wx.OK | wx.ICON_ERROR,
-                )
+                wx.CallAfter(self._on_pairing_code_exception, str(exc))
 
-        except Exception:
-            # On any unexpected error, clear the token so next launch works correctly.
-            self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
-            self.main_window.save_settings()
-            self.main_window.error_sound.play()
-            wx.MessageBox(
-                f"{self.i18n.t('connection_failed').format(app_name=self.main_window.app_name)} {format_exc()}",
-                self.i18n.t('connection_error').format(app_name=self.main_window.app_name),
-                wx.OK | wx.ICON_ERROR,
-            )
+    def _on_pairing_code_success(self, pairing_code):
+        self.continue_btn.Enable()
+        self.continue_btn.SetLabel(self.i18n.t("continue"))
+        self.show_pairing_dial(pairing_code)
+
+    def _on_pairing_code_error(self):
+        self.continue_btn.Enable()
+        self.continue_btn.SetLabel(self.i18n.t("continue"))
+        wx.MessageBox(
+            self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name),
+            self.i18n.t("connection_error"),
+            wx.OK | wx.ICON_ERROR,
+        )
+
+    def _on_pairing_code_exception(self, err_msg):
+        self.continue_btn.Enable()
+        self.continue_btn.SetLabel(self.i18n.t("continue"))
+        self.main_window.error_sound.play()
+        wx.MessageBox(
+            f"{self.i18n.t('connection_failed').format(app_name=self.main_window.app_name)} {err_msg}",
+            self.i18n.t('connection_error').format(app_name=self.main_window.app_name),
+            wx.OK | wx.ICON_ERROR,
+        )
 
 
     # ── Phone formatter ────────────────────────────────────────────────────
