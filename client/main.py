@@ -2651,7 +2651,7 @@ class MainWindow(wx.Frame):
         # Pinned chats float to the top; within each group sort by most-recent
         # message timestamp descending (newest first), then alphabetically.
         def _chat_last_ts(c):
-            ts = 0
+            ts = int(c.get("t", 0) or 0)
             for m in c.get("messages", {}).get("messages", {}).get("records", []):
                 t = int(m.get("messageTimestamp", 0) or 0)
                 if t > ts:
@@ -2667,6 +2667,11 @@ class MainWindow(wx.Frame):
         pairs = sorted(zip(main_chats, main_names), key=_sort_key)
         main_chats = [c for c, _ in pairs]
         main_names = [n for _, n in pairs]
+
+        arch_pairs = sorted(zip(arch_chats, arch_names), key=_sort_key)
+        arch_chats = [c for c, _ in arch_pairs]
+        arch_names = [n for _, n in arch_pairs]
+
         return main_chats, main_names, arch_chats, arch_names
 
     def _apply_chat_lists(self, main_chats, main_names, arch_chats, arch_names):
