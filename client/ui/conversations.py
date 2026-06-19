@@ -1834,11 +1834,84 @@ class ConversationsPanel(wx.Panel):
     def _on_message_focused(self, event):
         if (
             event.GetIndex() == 0
-            and self._messages_offset > 0
             and not self._is_loading_more
         ):
-            self._load_more_messages()
+            if self._messages_offset > 0:
+                self._load_more_messages()
+            else:
+                self._load_older_messages_from_server()
         event.Skip()
+
+    def _load_older_messages_from_server(self):
+        """Fetch older messages from server when the beginning of local history is reached."""
+        if not self.conversation or not self._all_sorted_messages:
+            return
+        
+        # Get oldest non-separator message ID
+        oldest_msg = self._all_sorted_messages[0]
+        if oldest_msg.get("_type") == "unread_separator" and len(self._all_sorted_messages) > 1:
+            oldest_msg = self._all_sorted_messages[1]
+            
+        oldest_id = oldest_msg.get("key", {}).get("id", "")
+        if not oldest_id:
+            return
+
+        self._is_loading_more = True
+        
+        def _fetch():
+            try:
+                phone_jid = self.conversation.get("remoteJid", "")
+                fetched = self.main_window.fetch_older_messages(phone_jid, oldest_msg)
+                if fetched:
+                    wx.CallAfter(self._on_older_messages_loaded, fetched)
+                else:
+                    self._is_loading_more = False
+            except Exception as e:
+                print(f"[_load_older_messages_from_server] error: {e}")
+                self._is_loading_more = False
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_older_messages_loaded(self, fetched_messages):
+        """Prepend fetched history to UI message list."""
+        self._is_loading_more = False
+        if not fetched_messages:
+            return
+            
+        displayable = [
+            m for m in fetched_messages if m.get("messageType", "") != "reactionMessage"
+        ]
+        if not displayable:
+            return
+            
+        # Sort displayable older messages
+        try:
+            displayable = sorted(
+                displayable, key=lambda m: self._extract_timestamp(m) or 0
+            )
+        except Exception:
+            pass
+            
+        n_new = len(displayable)
+        
+        self.messages_list.Freeze()
+        try:
+            self._all_sorted_messages = displayable + self._all_sorted_messages
+            self._sorted_messages     = displayable + self._sorted_messages
+            self._messages_offset     = 0
+            if self._unread_sep_idx >= 0:
+                self._unread_sep_idx += n_new
+                
+            self.messages_list.DeleteAllItems()
+            for msg in self._sorted_messages:
+                self.messages_list.Append((self._render_message_line(msg),))
+                
+            self.messages_list.Focus(n_new)
+            self.messages_list.Select(n_new, True)
+            self.messages_list.EnsureVisible(n_new)
+        finally:
+            self.messages_list.Thaw()
+
 
     def _load_more_messages(self):
         """Prepend the previous page of messages to the list."""

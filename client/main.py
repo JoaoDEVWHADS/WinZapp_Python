@@ -3012,7 +3012,8 @@ class MainWindow(wx.Frame):
         else:
             phone = remote_jid
 
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-messages/{phone}"
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -3680,6 +3681,14 @@ class MainWindow(wx.Frame):
             if remote_jid.endswith("@s.whatsapp.net"):
                 remote_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
             msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
+            
+            # For group messages, append the participant JID if present
+            if remote_jid.endswith("@g.us"):
+                participant = _key.get("participant", "")
+                if participant:
+                    if participant.endswith("@s.whatsapp.net"):
+                        participant = participant.replace("@s.whatsapp.net", "@c.us")
+                    msg_id = f"{msg_id}_{participant}"
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -3720,6 +3729,72 @@ class MainWindow(wx.Frame):
             raise
         except Exception:
             return ""
+
+    def fetch_older_messages(self, remote_jid, oldest_msg):
+        """Fetch older messages from server starting before the oldest_msg."""
+        remote_jid = self._normalize_jid(remote_jid)
+        if remote_jid.endswith("@s.whatsapp.net"):
+            phone = remote_jid.split("@")[0] + "@c.us"
+        else:
+            phone = remote_jid
+
+        _key = oldest_msg.get("key", {})
+        msg_id = _key.get("id", "")
+        if msg_id and "_" not in msg_id:
+            from_me = _key.get("fromMe", False)
+            from_me_str = "true" if from_me else "false"
+            if remote_jid.endswith("@s.whatsapp.net"):
+                remote_jid_formatted = remote_jid.replace("@s.whatsapp.net", "@c.us")
+            else:
+                remote_jid_formatted = remote_jid
+            msg_id = f"{from_me_str}_{remote_jid_formatted}_{msg_id}"
+            if remote_jid.endswith("@g.us"):
+                participant = _key.get("participant", "")
+                if participant:
+                    if participant.endswith("@s.whatsapp.net"):
+                        participant = participant.replace("@s.whatsapp.net", "@c.us")
+                    msg_id = f"{msg_id}_{participant}"
+
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={msg_id}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code in (200, 201):
+                body = response.json()
+                wpp_messages = body.get("response", []) if isinstance(body, dict) else []
+                if not isinstance(wpp_messages, list):
+                    wpp_messages = []
+                
+                fetched_messages = []
+                for wm in wpp_messages:
+                    if isinstance(wm, dict) and self.ws:
+                        try:
+                            normalized = self.ws._normalize_wpp_message(wm)
+                            fetched_messages.append(normalized)
+                        except Exception:
+                            pass
+                
+                if fetched_messages:
+                    # Update local database/memory
+                    chat = self.chats.get(remote_jid, {})
+                    if chat:
+                        local_records = chat.get("messages", {}).get("messages", {}).get("records", [])
+                        existing_ids = {r.get("key", {}).get("id") for r in local_records}
+                        new_records = [m for m in fetched_messages if m.get("key", {}).get("id") not in existing_ids]
+                        if new_records:
+                            all_records = new_records + local_records
+                            chat.setdefault("messages", {}).setdefault("messages", {})["records"] = all_records
+                            chat["messages"]["messages"]["total"] = len(all_records)
+                            self.save_data(self.chats, self.contacts)
+                    return fetched_messages
+        except Exception as e:
+            logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
+        return []
 
     def save_audio_locally(self, msg, audio_content):
         voice_messages_dir = data_path("voice_messages")
