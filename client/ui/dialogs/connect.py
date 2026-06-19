@@ -602,6 +602,8 @@ class Connect:
                 self.main_window.save_settings()
                 wx.CallAfter(self._on_pairing_code_exception, str(exc))
 
+        threading.Thread(target=_bg_pairing_flow, daemon=True).start()
+
     def _on_pairing_code_success(self, pairing_code):
         self.continue_btn.Enable()
         self.continue_btn.SetLabel(self.i18n.t("continue"))
