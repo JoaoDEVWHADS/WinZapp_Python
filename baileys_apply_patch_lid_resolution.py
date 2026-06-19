@@ -203,12 +203,23 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
           }
         }
 
-        // 3. Search for the contact using the resolved phoneJid.
+        // 3. Search for the contact in the address book (Contact table) using either phoneJid or original jid.
+        let resolvedName = null;
         const contact = await this.prismaRepository.contact.findFirst({
-          where: { remoteJid: phoneJid, instanceId: this.instanceId }
+          where: {
+            instanceId: this.instanceId,
+            OR: [
+              { remoteJid: phoneJid },
+              { remoteJid: jid }
+            ]
+          }
         });
-        let resolvedName = contact?.pushName || info?.name || null;
-        if (!resolvedName) {
+        if (contact && contact.pushName) {
+          resolvedName = contact.pushName;
+        }
+
+        // 4. If not found in Contact table, check the Message history table for previous pushName records.
+        if (!resolvedName || resolvedName.includes('@lid') || resolvedName === 'Voc\xc3\xaa') {
           try {
             const lastMsg = await this.prismaRepository.message.findFirst({
               where: {
@@ -221,12 +232,17 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
               },
               orderBy: { messageTimestamp: 'desc' }
             });
-            if (lastMsg && lastMsg.pushName) {
+            if (lastMsg && lastMsg.pushName && lastMsg.pushName !== 'Voc\xc3\xaa') {
               resolvedName = lastMsg.pushName;
             }
           } catch (e) {
             this.logger.error(`Error fetching pushName from message history: ${e.message}`);
           }
+        }
+
+        // 5. Fallback to info?.name only if no historical name could be resolved
+        if (!resolvedName) {
+          resolvedName = info?.name || null;
         }
 
         return {
