@@ -104,6 +104,52 @@ class Connect:
         """
         return True
 
+    def _cleanup_orphan_sessions(self, keep_token: str = "") -> None:
+        """Close all WPPConnect browser sessions except *keep_token*.
+
+        Each failed / abandoned pairing attempt leaves a headless Chromium
+        process running (visible in the evolution.log as
+        '[session:client] Auto close remain: Xs').  Having two or more
+        browsers initialising simultaneously eats CPU/RAM and causes the
+        new session to miss the 60 s Auto Close window → ReadTimeout.
+
+        We enumerate the userDataDir sub-folders (one per session) and
+        call /close-session for every entry that is NOT keep_token.
+        Errors are silently swallowed — this is best-effort cleanup.
+        """
+        import os
+        api_dir = resource_path("api")
+        udd = os.path.join(api_dir, "userDataDir")
+        if not os.path.isdir(udd):
+            return
+
+        # Keep only the first component of the token (before the colon).
+        keep_raw = keep_token.split(":")[0] if keep_token else ""
+
+        for entry in os.listdir(udd):
+            if entry == keep_raw:
+                continue
+            session_id = entry
+            try:
+                # Reconstruct a best-effort token for this orphan session.
+                # We use the global api-key as bearer since we don't have the
+                # session-specific hash anymore.
+                url = (
+                    f"{self.main_window.evolution_server}"
+                    f":{self.main_window.evolution_port}/api/{session_id}/close-session"
+                )
+                requests.post(
+                    url,
+                    headers=self._evolution_headers(use_global_key=True),
+                    timeout=5,
+                )
+                import logging as _log
+                _log.info("[cleanup_orphan_sessions] Closed orphan session: %s", session_id)
+            except Exception:
+                pass
+
+
+
     def _activate_instance(self, instance_id: str) -> str | None:
         """
         Register this Evolution API installation with the licensing server
@@ -445,6 +491,9 @@ class Connect:
             if _instance_exists:
                 self.main_window.token = existing_token
             else:
+                # Kill any leftover Chromium sessions from previous failed attempts
+                # so only ONE browser runs at a time (prevents Auto Close race).
+                self._cleanup_orphan_sessions(keep_token="")
                 raw_token = self.generate_random_token()
                 url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
                 try:
