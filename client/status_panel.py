@@ -317,37 +317,13 @@ class StatusPanel(wx.Panel):
     def _load_statuses(self):
         """
         Fetch WhatsApp statuses (stories).
-
-        In Evolution API v2 statuses are regular messages whose
-        key.remoteJid == "status@broadcast", retrieved with
-        POST /chat/findMessages/{instance} (paginated).
         """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
+        # WPPConnect Server does not support retrieving other users' status updates
+        # via the HTTP API. We gracefully initialize empty status lists.
         records = []
-        try:
-            url = (
-                f"{mw.evolution_server}:{mw.evolution_port}"
-                f"/chat/findMessages/{mw.token}"
-            )
-            headers = {"apikey": mw.token, "Content-Type": "application/json"}
-            current_page = 1
-            total_pages  = 1
-            while current_page <= total_pages:
-                payload = {
-                    "where": {"key": {"remoteJid": "status@broadcast"}},
-                    "page":  current_page,
-                }
-                resp = requests.post(url, json=payload, headers=headers, timeout=15)
-                if resp.status_code not in (200, 201):
-                    break
-                messages    = resp.json().get("messages", {})
-                total_pages = messages.get("pages", 1)
-                records.extend(messages.get("records", []))
-                current_page += 1
-        except Exception:
-            records = []
         my_statuses, contacts = self._parse_statuses(records, i18n)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 

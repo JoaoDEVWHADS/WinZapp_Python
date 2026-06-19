@@ -1079,12 +1079,21 @@ class MainWindow(wx.Frame):
                 if self.ws.sio.connected:
                     self.ws.sio.disconnect()
                 raw_token = self.token.split(":")[0]
-                self.ws.sio.connect(
-                    f"{self.evolution_ws_server}:{self.evolution_port}/",
-                    socketio_path="socket.io",
-                    headers={"apikey": self.token},
-                    namespaces=[f"/{raw_token}"],
-                )
+                try:
+                    self.ws.sio.connect(
+                        f"{self.evolution_ws_server}:{self.evolution_port}/",
+                        socketio_path="socket.io",
+                        headers={"apikey": self.token},
+                        namespaces=[f"/{raw_token}"],
+                    )
+                except socketio.exceptions.ConnectionError as exc:
+                    logging.warning("connect_websocket: Namespace connection failed, trying root namespace fallback: %s", exc)
+                    self.ws.sio.connect(
+                        f"{self.evolution_ws_server}:{self.evolution_port}/",
+                        socketio_path="socket.io",
+                        headers={"apikey": self.token},
+                        namespaces=["/"],
+                    )
                 logging.info("connect_websocket: Connected successfully on attempt %d.", attempt)
                 return
             except Exception as exc:
@@ -2039,11 +2048,15 @@ class MainWindow(wx.Frame):
                 try:
                     url = (
                         f"{self.evolution_server}:{self.evolution_port}"
-                        f"/chat/findChats/{self.token}"
+                        f"/api/{self.token}/list-chats"
                     )
+                    headers = {
+                        "Authorization": f"Bearer {self.token}",
+                        "Content-Type": "application/json"
+                    }
                     r = requests.post(
                         url,
-                        headers={"apikey": self.token, "Content-Type": "application/json"},
+                        headers=headers,
                         timeout=5,
                     )
                     if r.ok and isinstance(r.json(), list) and r.json():
@@ -3656,13 +3669,16 @@ class MainWindow(wx.Frame):
 
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/chat/markMessageAsRead/{self.token}"
+            f"/api/{self.token}/send-seen"
         )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
             resp = requests.post(
                 url,
-                json={"readMessages": [msg_key]},
+                json={"phone": [remote_jid]},
                 headers=headers,
                 timeout=10,
             )
@@ -3710,31 +3726,33 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._schedule_set_chats)
 
     def resolve_lid_jids_via_api(self, jids):
-        """Resolve a list of @lid JIDs to phone JIDs using fetchProfile."""
+        """Resolve a list of @lid JIDs to phone JIDs using WPPConnect contact endpoint."""
         if not jids:
             return
             
-        url = f"{self.evolution_server}:{self.evolution_port}/chat/fetchProfile/{self.token}"
-        headers = {
-            "apikey": self.token,
-            "Content-Type": "application/json"
-        }
-        
         for lid_jid in jids:
             if not lid_jid.endswith("@lid"):
                 continue
             try:
-                logging.info(f"[LID Resolution] Querying fetchProfile for {lid_jid}...")
-                response = requests.post(url, json={"number": lid_jid}, headers=headers, timeout=10)
+                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{lid_jid}"
+                headers = {
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json"
+                }
+                logging.info(f"[LID Resolution] Querying WPPConnect contact for {lid_jid}...")
+                response = requests.get(url, headers=headers, timeout=10)
                 if response.status_code in (200, 201):
                     res = response.json() or {}
                     logging.info(f"[LID Resolution] Response for {lid_jid}: {res}")
-                    canonical_jid = res.get("jid") or res.get("id") or ""
+                    res_data = res.get("response", {})
+                    if not isinstance(res_data, dict):
+                        res_data = {}
+                    canonical_jid = self._normalize_jid(res_data.get("id", {}).get("_serialized") or res_data.get("id") or "")
                     if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                         self.register_jid_mapping(lid_jid, canonical_jid)
                     
                     # Store name directly under @lid in local contacts dictionary if mapping fails
-                    name = res.get("name")
+                    name = res_data.get("name") or res_data.get("pushname")
                     if name and name != "Contato sem nome" and not is_phone_like(name):
                         if lid_jid not in self.contacts:
                             self.contacts[lid_jid] = {}
@@ -3758,21 +3776,24 @@ class MainWindow(wx.Frame):
                 resolved = getattr(self, "_lid_to_phone", {}).get(original_jid, "")
                 if resolved:
                     jid = resolved
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/chat/fetchProfile/{self.token}"
-        )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{jid}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
-            r = requests.post(url, json={"number": jid}, headers=headers, timeout=10)
+            r = requests.get(url, headers=headers, timeout=10)
             logging.info(f"[get_contact_profile] Querying for {original_jid} (using JID: {jid}). Response status: {r.status_code}")
             if r.status_code in (200, 201):
                 res = r.json() or {}
                 logging.info(f"[get_contact_profile] API Response for {original_jid}: {res}")
+                res_data = res.get("response", {})
+                if not isinstance(res_data, dict):
+                    res_data = {}
                 
                 # If queried directly with @lid, check if we got back a canonical @s.whatsapp.net JID
                 if original_jid.endswith("@lid") and jid.endswith("@lid"):
-                    canonical_jid = res.get("jid") or res.get("id") or ""
+                    canonical_jid = self._normalize_jid(res_data.get("id", {}).get("_serialized") or res_data.get("id") or "")
                     if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                         logging.info(f"[get_contact_profile] SUCCESS: Mapped {original_jid} to {canonical_jid} via profile query")
                         if not hasattr(self, "_lid_to_phone"):
@@ -3860,14 +3881,18 @@ class MainWindow(wx.Frame):
 
     def block_contact(self, jid: str, action: str = "block"):
         """action: 'block' or 'unblock'"""
+        endpoint = "block-contact" if action == "block" else "unblock-contact"
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/chat/updateBlockStatus/{self.token}"
+            f"/api/{self.token}/{endpoint}"
         )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
             requests.post(
-                url, json={"number": jid, "status": action},
+                url, json={"phone": jid},
                 headers=headers, timeout=10,
             )
         except Exception:
@@ -3927,12 +3952,15 @@ class MainWindow(wx.Frame):
 
     def _api_archive_chat(self, jid: str, archive: bool):
         url = (f"{self.evolution_server}:{self.evolution_port}"
-               f"/chat/archiveChat/{self.token}")
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+               f"/api/{self.token}/archive-chat")
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
             resp = requests.post(
                 url,
-                json={"chat": jid, "archive": archive},
+                json={"phone": jid, "value": archive},
                 headers=headers,
                 timeout=10,
             )
@@ -4125,39 +4153,51 @@ class MainWindow(wx.Frame):
     # ── Message edit / delete-for-everyone ────────────────────────────────────
 
     def edit_message(self, remote_jid: str, message_id: str, new_text: str):
-        """Send an edited message via POST /chat/updateMessage (Evolution API v2)."""
+        """Send an edited message via POST /api/session/edit-message."""
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/chat/updateMessage/{self.token}"
+            f"/api/{self.token}/edit-message"
         )
+        if remote_jid.endswith("@g.us"):
+            full_id = f"true_{remote_jid}_{message_id}"
+        else:
+            full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
+        
         payload = {
-            "number": remote_jid,
-            "key":    {"remoteJid": remote_jid, "fromMe": True, "id": message_id},
-            "text":   new_text,
+            "id":      full_id,
+            "newText": new_text,
         }
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
             requests.post(url, json=payload, headers=headers, timeout=15)
         except Exception:
             pass
 
     def delete_message_for_everyone(self, remote_jid: str, message_id: str, from_me: bool):
-        """Delete a message for everyone via DELETE /chat/deleteMessageForEveryone.
-
-        Evolution API v2 expects a flat body: {"id", "fromMe", "remoteJid"}.
-        """
+        """Delete a message for everyone via POST /api/session/delete-message."""
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/chat/deleteMessageForEveryone/{self.token}"
+            f"/api/{self.token}/delete-message"
         )
+        if remote_jid.endswith("@g.us"):
+            full_id = f"true_{remote_jid}_{message_id}"
+        else:
+            full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
+
         payload = {
-            "id":        message_id,
-            "fromMe":    from_me,
-            "remoteJid": remote_jid,
+            "phone":     remote_jid,
+            "messageId": full_id,
+            "onlyLocal": False,
         }
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
-            requests.delete(url, json=payload, headers=headers, timeout=15)
+            requests.post(url, json=payload, headers=headers, timeout=15)
         except Exception:
             pass
 
