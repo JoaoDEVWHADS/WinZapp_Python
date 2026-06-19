@@ -3767,7 +3767,14 @@ class MainWindow(wx.Frame):
                     res = response.json() or {}
                     logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
                     res_data = res.get("response") if isinstance(res.get("response"), dict) else res
-                    pn_jid = res_data.get("pnJid")
+                    pn_obj = res_data.get("phoneNumber") or {}
+                    pn_jid = None
+                    if isinstance(pn_obj, dict):
+                        pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
+                    elif isinstance(pn_obj, str):
+                        pn_jid = pn_obj
+                    if not pn_jid:
+                        pn_jid = res_data.get("pnJid")
                     if pn_jid:
                         canonical_jid = self._normalize_jid(pn_jid)
                         if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
