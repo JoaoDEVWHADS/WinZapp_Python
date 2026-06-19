@@ -177,9 +177,17 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
     try {
       if (number) {
         const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        
+        // 1. Fetch metadata first using the original JID (which could be a @lid).
+        // This prompts the WhatsApp server to respond with metadata, populating Baileys' lidMapping cache.
+        const picture = await this.profilePicture(info?.jid);
+        const status = await this.getStatus(info?.jid);
+        const business = await this.fetchBusinessProfile(info?.jid);
+
         let phoneJid = jid;
         if (jid.endsWith('@lid')) {
           try {
+            // 2. Fetch the resolved phone JID from cache which has now been populated by the metadata requests.
             let mapped = await this.client.signalRepository.lidMapping.getPNForLID(jid);
             if (!mapped) {
               const res = await this.client.onWhatsApp(jid);
@@ -194,9 +202,8 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
             this.logger.error(`Error resolving LID mapping for ${jid}: ${err.message}`);
           }
         }
-        const picture = await this.profilePicture(info?.jid);
-        const status = await this.getStatus(info?.jid);
-        const business = await this.fetchBusinessProfile(info?.jid);
+
+        // 3. Search for the contact using the resolved phoneJid.
         const contact = await this.prismaRepository.contact.findFirst({
           where: { remoteJid: phoneJid, instanceId: this.instanceId }
         });
@@ -225,7 +232,15 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
         return {
           jid: phoneJid,
           wuid: info?.jid || jid,
-          name: resolvedName,"""
+          name: resolvedName,
+          numberExists: info?.exists,
+          picture: picture?.profilePictureUrl,
+          status: status?.status,
+          isBusiness: business.isBusiness,
+          email: business?.email,
+          description: business?.description,
+          website: business?.website?.shift(),
+        };"""
 
 # ---------------------------------------------------------------------------
 # Regex for Compiled main.js / main.mjs
