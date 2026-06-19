@@ -515,6 +515,65 @@ class WebSocketClient:
                     "seconds": wpp_msg.get("duration") or wpp_msg.get("seconds") or 0
                 }
             }
+        elif msg_type == "image":
+            message_content = {
+                "imageMessage": {
+                    "caption": wpp_msg.get("caption", "") or wpp_msg.get("body", ""),
+                    "url": wpp_msg.get("clientUrl", ""),
+                    "mimetype": wpp_msg.get("mimetype", "image/jpeg")
+                }
+            }
+        elif msg_type == "video":
+            message_content = {
+                "videoMessage": {
+                    "caption": wpp_msg.get("caption", ""),
+                    "seconds": wpp_msg.get("duration") or wpp_msg.get("seconds") or 0,
+                    "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
+                    "url": wpp_msg.get("clientUrl", ""),
+                    "mimetype": wpp_msg.get("mimetype", "video/mp4")
+                }
+            }
+        elif msg_type == "document":
+            message_content = {
+                "documentMessage": {
+                    "fileName": wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or "Document",
+                    "fileLength": wpp_msg.get("size") or wpp_msg.get("fileLength") or 0,
+                    "url": wpp_msg.get("clientUrl", ""),
+                    "mimetype": wpp_msg.get("mimetype", "")
+                }
+            }
+        elif msg_type == "sticker":
+            message_content = {
+                "stickerMessage": {
+                    "url": wpp_msg.get("clientUrl", ""),
+                    "mimetype": wpp_msg.get("mimetype", "image/webp")
+                }
+            }
+        elif msg_type == "vcard":
+            message_content = {
+                "contactMessage": {
+                    "displayName": wpp_msg.get("displayName") or wpp_msg.get("body") or "Contato",
+                }
+            }
+
+        type_mapping = {
+            "chat": "conversation",
+            "audio": "audioMessage",
+            "ptt": "audioMessage",
+            "image": "imageMessage",
+            "video": "videoMessage",
+            "document": "documentMessage",
+            "sticker": "stickerMessage",
+            "vcard": "contactMessage"
+        }
+        mapped_type = type_mapping.get(msg_type, msg_type)
+
+        ack = wpp_msg.get("ack")
+        message_updates = []
+        if ack is not None:
+            status_map = {1: 2, 2: 3, 3: 4, 4: 5}
+            mapped_status = status_map.get(ack, ack)
+            message_updates.append({"status": str(mapped_status)})
 
         normalized = {
             "key": {
@@ -525,7 +584,8 @@ class WebSocketClient:
             "pushName": wpp_msg.get("sender", {}).get("pushname") or wpp_msg.get("notifyName") or "",
             "message": message_content,
             "messageTimestamp": ts,
-            "messageType": "conversation" if msg_type == "chat" else ("audioMessage" if msg_type in ("audio", "ptt") else msg_type)
+            "messageType": mapped_type,
+            "MessageUpdate": message_updates
         }
 
         if remote_jid.endswith("@g.us"):

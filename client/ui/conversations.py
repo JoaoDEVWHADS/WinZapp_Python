@@ -1616,6 +1616,16 @@ class ConversationsPanel(wx.Panel):
                 copy_item,
             )
 
+        # Copy file (only for image, video, document messages)
+        _MEDIA_TYPES = ("imageMessage", "videoMessage", "documentMessage")
+        if msg_type in _MEDIA_TYPES:
+            copy_file_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_file')}\tCtrl+C")
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_copy_file(m),
+                copy_file_item,
+            )
+
         # Reply (Alt+R)
         reply_item = menu.Append(wx.ID_ANY, f"{i18n.t('reply_message')}\tAlt+R")
         self.Bind(
@@ -2619,13 +2629,16 @@ class ConversationsPanel(wx.Panel):
                     st = u.get("status") or ""
                     statuses.append(str(st).upper())
             for s in statuses:
-                if "READ" in s:
+                if "PLAYED" in s or s == "5":
+                    return i18n.t("status_played")
+            for s in statuses:
+                if "READ" in s or s == "4":
                     return i18n.t("status_read")
             for s in statuses:
-                if "DELIVERED" in s or "DELIVERY_ACK" in s:
+                if "DELIVERED" in s or "DELIVERY_ACK" in s or s == "3":
                     return i18n.t("status_delivered")
             for s in statuses:
-                if "SENT" in s or "ACK" in s:
+                if "SENT" in s or "ACK" in s or s == "2":
                     return i18n.t("status_sent")
         return ""
 
@@ -3203,6 +3216,64 @@ class ConversationsPanel(wx.Panel):
         else:
             self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
 
+    def _on_menu_copy_file(self, msg: dict):
+        """Decrypt media file and place it on the clipboard as a file object."""
+        msg_type = msg.get("messageType", "")
+        msg_obj  = msg.get("message") or {}
+        msg_id   = msg.get("key", {}).get("id", "")
+        if not msg_id:
+            return
+
+        if msg_type == "documentMessage":
+            ext = ""
+            doc = msg_obj.get("documentMessage") or {}
+            filename = doc.get("fileName", f"documento_{msg_id}")
+            if "." in filename:
+                ext = "." + filename.split(".")[-1]
+        elif msg_type == "imageMessage":
+            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
+            ext  = "." + (mime.split("/")[-1] if "/" in mime else "jpg")
+        elif msg_type == "videoMessage":
+            mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
+            ext  = "." + (mime.split("/")[-1] if "/" in mime else "mp4")
+        else:
+            return
+
+        media_path = data_path("media", f"{msg_id}.wzmedia")
+
+        def _run():
+            if not os.path.isfile(media_path):
+                wx.CallAfter(
+                    self.main_window.output, self.main_window.i18n.t("downloading")
+                )
+                try:
+                    self.main_window.handle_media_message(msg)
+                except Exception:
+                    return
+            try:
+                with open(media_path, "rb") as fh:
+                    content = decrypt_bytes(fh.read(), self.main_window.key)
+                
+                # Write decrypted content to a temp file
+                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                tmp.write(content)
+                tmp.close()
+                
+                # Copy the temporary file to clipboard
+                if wx.TheClipboard.Open():
+                    file_data = wx.FileDataObject()
+                    file_data.AddFile(tmp.name)
+                    wx.TheClipboard.SetData(file_data)
+                    wx.TheClipboard.Close()
+                    wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copied"))
+                else:
+                    wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copy_error"))
+            except Exception as exc:
+                print(f"[_on_menu_copy_file] Error copying file: {exc}")
+                wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copy_error"))
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _on_menu_reply(self, msg: dict):
         """Enter reply mode: change field label, store quoted message, focus field."""
         self._quoted_message = msg
@@ -3706,7 +3777,11 @@ class ConversationsPanel(wx.Panel):
         msg = self._sorted_messages[index]
         if self._is_separator(msg):
             return
-        self._on_menu_copy_message(msg)
+        msg_type = msg.get("messageType", "")
+        if msg_type in ("imageMessage", "videoMessage", "documentMessage"):
+            self._on_menu_copy_file(msg)
+        else:
+            self._on_menu_copy_message(msg)
 
     def _on_accel_show_text_popup(self, event):
         """Alt+C: show focused message text in a popup dialog."""
