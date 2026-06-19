@@ -793,12 +793,45 @@ class Connect:
 
     def on_cancel_pairing(self, event):
         self.pairing_dial.Destroy()
-        self.main_window.ws.sio.disconnect()
+        
+        # Disconnect WebSocket
+        if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
+            self.main_window.ws.sio.disconnect()
+
+        # Call close-session API endpoint to terminate the headless browser and clear state
+        token = getattr(self.main_window, 'token', '')
+        if token:
+            def _close_api_session():
+                try:
+                    close_url = (
+                        f"{self.main_window.evolution_server}"
+                        f":{self.main_window.evolution_port}/api/{token}/close-session"
+                    )
+                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                    requests.post(close_url, headers=headers, timeout=5)
+                except Exception:
+                    pass
+            threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_dialog_close(self, event):
         # Disconnect WebSocket if connected
         if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
             self.main_window.ws.sio.disconnect()
+        
+        # Call close-session API endpoint to terminate the headless browser
+        token = getattr(self.main_window, 'token', '')
+        if token:
+            def _close_api_session():
+                try:
+                    close_url = (
+                        f"{self.main_window.evolution_server}"
+                        f":{self.main_window.evolution_port}/api/{token}/close-session"
+                    )
+                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                    requests.post(close_url, headers=headers, timeout=5)
+                except Exception:
+                    pass
+            threading.Thread(target=_close_api_session, daemon=True).start()
         event.Skip()
 
     def on_quit_from_connect(self, event):

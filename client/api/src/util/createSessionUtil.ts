@@ -274,12 +274,34 @@ export default class CreateSessionUtil {
   }
 
   async checkStateSession(client: WhatsAppServer, req: Request) {
-    await client.onStateChange((state) => {
+    await client.onStateChange(async (state) => {
       req.logger.info(`State Change ${state}: ${client.session}`);
       const conflits = [SocketState.CONFLICT];
 
       if (conflits.includes(state)) {
         client.useHere();
+      }
+
+      if (state === SocketState.UNPAIRED || state === SocketState.UNPAIRED_IDLE) {
+        req.logger.warn(`Device disconnected from phone (state: ${state}) for session: ${client.session}`);
+        client.status = 'CLOSED';
+        (client as any).qrcode = null;
+        try {
+          await client.close();
+        } catch (err) {}
+        clientsArray[client.session] = undefined;
+
+        req.io.emit('status-find', {
+          status: 'desconectado',
+          session: client.session,
+        });
+        
+        req.io.emit('whatsapp-status', false);
+
+        callWebHook(client, req, 'status-find', {
+          status: 'desconectado',
+          session: client.session,
+        });
       }
     });
   }

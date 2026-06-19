@@ -220,6 +220,10 @@ export async function listChats(req: Request, res: Response) {
       withLabels,
     } = req.body;
 
+    if (!req.client || typeof req.client.listChats !== 'function') {
+      return res.status(200).json([]);
+    }
+
     const response = await req.client.listChats({
       id: id,
       count: count,
@@ -253,6 +257,9 @@ export async function getAllChatsWithMessages(req: Request, res: Response) {
      }
    */
   try {
+    if (!req.client || typeof req.client.listChats !== 'function') {
+      return res.status(200).json({ status: 'success', response: [] });
+    }
     const response = await req.client.listChats();
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
