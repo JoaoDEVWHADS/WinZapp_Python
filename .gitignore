@@ -25,6 +25,7 @@ client/logs/
 !/client/api/start.js
 !/client/api/.env
 !/client/api/package.json
+!/client/api/config.json
 
 # Evolution API runtime state (redundant with /api/* but explicit for clarity)
 /client/api/pgdata/
@@ -199,4 +200,6 @@ db.sqlite3-journal
 !/client/api/src/controller/deviceController.ts
 !/client/api/src/controller/messageController.ts
 !/client/api/src/controller/sessionController.ts
+!/client/api/config.json
+
 

@@ -4,7 +4,7 @@
   "port": "3417",
   "deviceName": "WinZapp",
   "poweredBy": "WinZapp-API",
-  "startAllSession": true,
+  "startAllSession": false,
   "tokenStoreType": "file",
   "maxListeners": 15,
   "customUserDataDir": "./userDataDir/",
