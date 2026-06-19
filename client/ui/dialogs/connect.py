@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import threading
 import socketio
 import wx
@@ -491,6 +492,12 @@ class Connect:
         self.continue_btn.Disable()
         self.continue_btn.SetLabel(self.i18n.t("connecting") or "Conectando...")
         self.main_window.output(self.i18n.t("connecting") or "Conectando...")
+
+        # Monkey-patch wx.GetApp to ensure background threads can access the app instance
+        # even before the MainLoop is entered (which is blocked by ShowModal).
+        app = wx.GetApp()
+        if app:
+            wx.GetApp = lambda: app
 
         def _bg_pairing_flow():
             try:
