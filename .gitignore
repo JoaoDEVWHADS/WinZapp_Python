@@ -197,3 +197,4 @@ db.sqlite3-journal
 !/client/api/src/util/functions.ts
 !/client/api/src/middleware/statusConnection.ts
 !/client/api/src/controller/deviceController.ts
+!/client/api/src/controller/messageController.ts

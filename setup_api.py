@@ -85,7 +85,8 @@ def main():
         custom_files = [
             "src/util/functions.ts",
             "src/middleware/statusConnection.ts",
-            "src/controller/deviceController.ts"
+            "src/controller/deviceController.ts",
+            "src/controller/messageController.ts"
         ]
         custom_contents = {}
         for rel_path in custom_files:

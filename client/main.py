@@ -1970,9 +1970,7 @@ class MainWindow(wx.Frame):
         # because WhatsApp delivers contacts to the Evolution API concurrently
         # with messages.  We'll do a second, definitive fetch after messages are
         # synced (by then the API has received all contacts from WhatsApp).
-        _initial_contacts = self.get_remote_contacts()
-        if _initial_contacts:
-            self.contacts = _initial_contacts
+        self.get_remote_contacts()
 
         self.synchronizing_sound.play()
         if not self.background_mode:
@@ -1995,9 +1993,7 @@ class MainWindow(wx.Frame):
         # message sync takes long enough that by this point the Evolution API
         # has received all contacts from WhatsApp — solving the first-pairing
         # issue where names were missing because the initial fetch was too early.
-        _fresh_contacts = self.get_remote_contacts()
-        if _fresh_contacts:
-            self.contacts = _fresh_contacts
+        self.get_remote_contacts()
 
         # Conversations are fully sorted as soon as messages are synced.
         # Sort, display, play sync-complete sound, and announce to the user
