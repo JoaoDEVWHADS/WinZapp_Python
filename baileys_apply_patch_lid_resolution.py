@@ -213,13 +213,20 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
           }
         }
 
-        // 3. Search for the contact in the address book (Contact table) using either phoneJid or original jid.
+        // 3. Search for the contact in the address book (Contact table) using clean phoneJid or original jid.
         let resolvedName = null;
+        let cleanPhoneJid = phoneJid;
+        if (cleanPhoneJid.includes(':')) {
+          const parts = cleanPhoneJid.split('@');
+          if (parts.length === 2) {
+            cleanPhoneJid = `${parts[0].split(':')[0]}@${parts[1]}`;
+          }
+        }
         const contact = await this.prismaRepository.contact.findFirst({
           where: {
             instanceId: this.instanceId,
             OR: [
-              { remoteJid: phoneJid },
+              { remoteJid: cleanPhoneJid },
               { remoteJid: jid }
             ]
           }
