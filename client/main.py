@@ -2528,6 +2528,15 @@ class MainWindow(wx.Frame):
         for jid, chat in list(self.chats.items()):
             if jid in deleted:
                 continue
+                
+            # Filter out contacts/chats with no messages, no unread messages, and not pinned
+            records = chat.get("messages", {}).get("messages", {}).get("records", [])
+            last_msg = chat.get("lastMessage")
+            unread = int(chat.get("unreadCount", 0) or 0)
+            is_pinned = jid in pinned
+            if not records and not last_msg and unread == 0 and not is_pinned:
+                continue
+                
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
             name = (
                 self._resolve_contact_name(chat)
