@@ -1313,6 +1313,7 @@ class MainWindow(wx.Frame):
             # regardless of whether the local start.js or .env has been preserved.
             os.environ["AUTHENTICATION_API_KEY"] = self.evolution_api_key
             os.environ["WPP_LID_MODE"] = "false"
+            os.environ["PORT"] = str(self.evolution_port)
 
             spawned = False
             if _is_elevated():
