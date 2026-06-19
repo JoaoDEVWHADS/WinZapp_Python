@@ -3332,15 +3332,22 @@ class ConversationsPanel(wx.Panel):
                 tmp.write(content)
                 tmp.close()
                 
-                # Copy the temporary file to clipboard
-                if wx.TheClipboard.Open():
-                    file_data = wx.FileDataObject()
-                    file_data.AddFile(tmp.name)
-                    wx.TheClipboard.SetData(file_data)
-                    wx.TheClipboard.Close()
-                    wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copied"))
-                else:
-                    wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copy_error"))
+                # Copy the temporary file to clipboard (must run on the main thread)
+                def _to_clipboard(path=tmp.name):
+                    try:
+                        if wx.TheClipboard.Open():
+                            file_data = wx.FileDataObject()
+                            file_data.AddFile(path)
+                            wx.TheClipboard.SetData(file_data)
+                            wx.TheClipboard.Close()
+                            self.main_window.output(self.main_window.i18n.t("msg_copied"))
+                        else:
+                            self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+                    except Exception as e:
+                        print(f"[_to_clipboard] Clipboard error: {e}")
+                        self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+
+                wx.CallAfter(_to_clipboard)
             except Exception as exc:
                 print(f"[_on_menu_copy_file] Error copying file: {exc}")
                 wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copy_error"))
@@ -4707,11 +4714,17 @@ class ConversationsPanel(wx.Panel):
         for msg in paginated:
             self.messages_list.Append((self._render_message_line(msg),))
 
-        # Make the unread separator visible (focus is set by navigate_to_conversation)
+        # Make the unread separator visible, or select and focus the last (newest) message by default
         if self._unread_sep_idx >= 0:
             self.messages_list.EnsureVisible(self._unread_sep_idx)
             self.messages_list.Focus(self._unread_sep_idx)
             self.messages_list.Select(self._unread_sep_idx)
+        else:
+            last = self.messages_list.GetItemCount() - 1
+            if last >= 0:
+                self.messages_list.EnsureVisible(last)
+                self.messages_list.Focus(last)
+                self.messages_list.Select(last)
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────

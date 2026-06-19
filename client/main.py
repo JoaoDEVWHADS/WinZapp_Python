@@ -4709,7 +4709,10 @@ class MainWindow(wx.Frame):
         # When no conversation is open, prefer the last-opened JID; fall back
         # to item 0 so the list is never left with nothing focused.
         panel = self.conversations_panel
-        if panel.conversation is None and displayed_chats:
+        if getattr(self, "_initial_sync_running", False):
+            # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
+            pass
+        elif panel.conversation is None and displayed_chats:
             last_jid    = getattr(panel, "_last_open_jid", "")
             target_idx  = 0
             if last_jid:
@@ -4717,8 +4720,10 @@ class MainWindow(wx.Frame):
                     if chat.get("remoteJid") == last_jid:
                         target_idx = i
                         break
-            panel.conversations_list.Focus(target_idx)
-            panel.conversations_list.Select(target_idx)
+            if panel.conversations_list.GetFocusedItem() != target_idx:
+                panel.conversations_list.Focus(target_idx)
+            if not panel.conversations_list.IsSelected(target_idx):
+                panel.conversations_list.Select(target_idx)
             panel.conversations_list.EnsureVisible(target_idx)
         elif panel.conversation is not None:
             open_jid = panel.conversation.get("remoteJid", "")
@@ -4728,8 +4733,10 @@ class MainWindow(wx.Frame):
                     target_idx = i
                     break
             if target_idx != -1:
-                panel.conversations_list.Focus(target_idx)
-                panel.conversations_list.Select(target_idx)
+                if panel.conversations_list.GetFocusedItem() != target_idx:
+                    panel.conversations_list.Focus(target_idx)
+                if not panel.conversations_list.IsSelected(target_idx):
+                    panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
 
             # A conversation is already open.  Only re-anchor focus to the
