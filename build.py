@@ -94,8 +94,17 @@ SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
 # Directories inside api/ that must NOT be copied into the distribution
-API_EXCLUDE_DIRS  = {"wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules"}
-API_EXCLUDE_FILES = {".gitignore", "README-SETUP.md"}
+API_EXCLUDE_DIRS  = {
+    "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
+    ".github", ".husky", ".vscode", "src", "log", "tokens", "uploads", "WhatsAppImages",
+    "tests", "coverage"
+}
+API_EXCLUDE_FILES = {
+    ".gitignore", "README-SETUP.md", ".babelrc", ".eslintignore", ".eslintrc.js",
+    ".prettierrc", "jest.config.js", "tsconfig.json", "tsconfig.tsbuildinfo",
+    "README.md", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    ".env.example", "nodemon.json"
+}
 
 # -- Helpers -----------------------------------------------------------------
 

@@ -526,6 +526,11 @@ class WebSocketClient:
             "messageType": "conversation" if msg_type == "chat" else ("audioMessage" if msg_type in ("audio", "ptt") else msg_type)
         }
 
+        if remote_jid.endswith("@g.us"):
+            participant = wpp_msg.get("author") or (wpp_msg.get("sender") or {}).get("id") or ""
+            if participant:
+                normalized["key"]["participant"] = participant.replace("@c.us", "@s.whatsapp.net")
+
         quoted_msg = wpp_msg.get("quotedMsg")
         if quoted_msg:
             quoted_id = quoted_msg.get("id")

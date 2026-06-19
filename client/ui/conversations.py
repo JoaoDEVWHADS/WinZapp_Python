@@ -637,6 +637,9 @@ class ConversationsPanel(wx.Panel):
             return
 
     def navigate_to_conversation(self, conversation):
+        if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
+            self.conversation = conversation
+            return
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.

@@ -3208,8 +3208,16 @@ class MainWindow(wx.Frame):
         if quoted:
             _cq = self._clean_quoted(quoted)
             if _cq and _cq.get("key", {}).get("id"):
+                quoted_id = _cq.get("key", {}).get("id")
+                if "_" not in quoted_id:
+                    from_me = _cq.get("key", {}).get("fromMe", False)
+                    from_me_str = "true" if from_me else "false"
+                    quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
+                    if quoted_remote_jid.endswith("@s.whatsapp.net"):
+                        quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
+                    quoted_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
                 payload["options"] = {
-                    "quotedMsg": _cq.get("key", {}).get("id")
+                    "quotedMsg": quoted_id
                 }
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -3260,7 +3268,15 @@ class MainWindow(wx.Frame):
         if quoted:
             _cq = self._clean_quoted(quoted)
             if _cq and _cq.get("key", {}).get("id"):
-                payload["quotedMessageId"] = _cq.get("key", {}).get("id")
+                quoted_id = _cq.get("key", {}).get("id")
+                if "_" not in quoted_id:
+                    from_me = _cq.get("key", {}).get("fromMe", False)
+                    from_me_str = "true" if from_me else "false"
+                    quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
+                    if quoted_remote_jid.endswith("@s.whatsapp.net"):
+                        quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
+                    quoted_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
+                payload["quotedMessageId"] = quoted_id
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -3628,7 +3644,14 @@ class MainWindow(wx.Frame):
         """
         _key = media.get("key", {})
         msg_id = _key.get("id", "")
-        # No WPPConnect, se o JID foi mapeado, passamos o ID limpo
+        if msg_id and "_" not in msg_id:
+            # Reconstruct the full serialized WPPConnect message ID: {fromMe}_{remoteJid}_{cleanId}
+            from_me = _key.get("fromMe", False)
+            from_me_str = "true" if from_me else "false"
+            remote_jid = _key.get("remoteJid", "")
+            if remote_jid.endswith("@s.whatsapp.net"):
+                remote_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
+            msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -4595,6 +4618,17 @@ class MainWindow(wx.Frame):
             panel.conversations_list.Select(target_idx)
             panel.conversations_list.EnsureVisible(target_idx)
         elif panel.conversation is not None:
+            open_jid = panel.conversation.get("remoteJid", "")
+            target_idx = -1
+            for i, chat in enumerate(displayed_chats):
+                if chat.get("remoteJid") == open_jid:
+                    target_idx = i
+                    break
+            if target_idx != -1:
+                panel.conversations_list.Focus(target_idx)
+                panel.conversations_list.Select(target_idx)
+                panel.conversations_list.EnsureVisible(target_idx)
+
             # A conversation is already open.  Only re-anchor focus to the
             # message field if the app has completely lost focus (FindFocus()
             # returns None) AND WinZapp is the active foreground window.
