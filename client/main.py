@@ -2680,7 +2680,15 @@ class MainWindow(wx.Frame):
         Returns the phone JID (@s.whatsapp.net) string, or None if not found.
         """
         def _norm(j: str) -> str:
-            return j[:-5] + "@s.whatsapp.net" if j.endswith("@c.us") else j
+            if not j:
+                return j
+            if j.endswith("@c.us"):
+                j = j[:-5] + "@s.whatsapp.net"
+            if ":" in j:
+                parts = j.split("@")
+                if len(parts) == 2:
+                    j = parts[0].split(":")[0] + "@" + parts[1]
+            return j
 
         for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
             key    = msg.get("key", {})
@@ -2725,6 +2733,10 @@ class MainWindow(wx.Frame):
         def _get_contact_tolerant(jid):
             if not jid:
                 return None
+            if ":" in jid:
+                parts = jid.split("@")
+                if len(parts) == 2:
+                    jid = parts[0].split(":")[0] + "@" + parts[1]
             c = self.contacts.get(jid)
             if c:
                 return c
