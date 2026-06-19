@@ -3150,6 +3150,10 @@ class MainWindow(wx.Frame):
 
     def send_text_message(self, remote_jid, text, quoted=None):
         """Send a plain-text message via the WPPConnect Server API."""
+        if remote_jid.endswith("@lid"):
+            resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+            if resolved:
+                remote_jid = resolved
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
         payload = {
             "phone": remote_jid,
@@ -3193,6 +3197,10 @@ class MainWindow(wx.Frame):
         Base64-encode a WAV/audio file and send it as a PTT voice message via the
         WPPConnect Server API. Uses /api/{session}/send-voice-base64.
         """
+        if remote_jid.endswith("@lid"):
+            resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+            if resolved:
+                remote_jid = resolved
         try:
             with open(wav_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
