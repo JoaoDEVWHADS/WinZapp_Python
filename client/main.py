@@ -448,6 +448,8 @@ class MainWindow(wx.Frame):
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
+        # Ensure session is active on WPPConnect Server before connecting WebSocket
+        self.check_wa_connection_http()
         try:
             logging.info("MainWindow: Connecting WebSocket...")
             self.connect_websocket()
