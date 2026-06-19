@@ -67,7 +67,7 @@ TS_ORIGINAL_V1 = b"""    if (!onWhatsapp.exists) {
           wuid: info?.jid || jid,
           name: contact?.pushName || info?.name || null,"""
 
-TS_PATCHED = b"""    if (!onWhatsapp.exists) {
+TS_ORIGINAL_V2 = b"""    if (!onWhatsapp.exists) {
       throw new BadRequestException(onWhatsapp);
     }
 
@@ -86,6 +86,57 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
     try {
       if (number) {
         const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        const picture = await this.profilePicture(info?.jid);
+        const status = await this.getStatus(info?.jid);
+        const business = await this.fetchBusinessProfile(info?.jid);
+        const contact = await this.prismaRepository.contact.findFirst({
+          where: { remoteJid: phoneJid, instanceId: this.instanceId }
+        });
+        let resolvedName = contact?.pushName || info?.name || null;
+        if (!resolvedName) {
+          try {
+            const lastMsg = await this.prismaRepository.message.findFirst({
+              where: {
+                instanceId: this.instanceId,
+                pushName: { not: null },
+                OR: [
+                  { key: { path: ['remoteJid'], equals: phoneJid } },
+                  { key: { path: ['remoteJid'], equals: jid } }
+                ]
+              },
+              orderBy: { messageTimestamp: 'desc' }
+            });
+            if (lastMsg && lastMsg.pushName) {
+              resolvedName = lastMsg.pushName;
+            }
+          } catch (e) {
+            this.logger.error(`Error fetching pushName from message history: ${e.message}`);
+          }
+        }
+
+        return {
+          jid: phoneJid,
+          wuid: info?.jid || jid,
+          name: resolvedName,"""
+
+TS_PATCHED = b"""    if (!onWhatsapp.exists) {
+      throw new BadRequestException(onWhatsapp);
+    }
+
+    try {
+      if (number) {
+        const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        let phoneJid = jid;
+        if (jid.endsWith('@lid')) {
+          try {
+            const mapped = await this.client.signalRepository.lidMapping.getPNForLID(jid);
+            if (mapped) {
+              phoneJid = mapped;
+            }
+          } catch (err) {
+            this.logger.error(`Error resolving LID mapping for ${jid}: ${err.message}`);
+          }
+        }
         const picture = await this.profilePicture(info?.jid);
         const status = await this.getStatus(info?.jid);
         const business = await this.fetchBusinessProfile(info?.jid);
@@ -157,6 +208,9 @@ def patch_typescript_file(path: Path) -> bool:
     elif TS_ORIGINAL_V1 in normalized_data:
         target_original = TS_ORIGINAL_V1
         print(f"  Found previous patch v1 in {path.name}")
+    elif TS_ORIGINAL_V2 in normalized_data:
+        target_original = TS_ORIGINAL_V2
+        print(f"  Found previous patch v2 in {path.name}")
     else:
         print(f"[WARN]  TypeScript source: expected patterns not found -- patch may be outdated ({path.name})")
         return False
