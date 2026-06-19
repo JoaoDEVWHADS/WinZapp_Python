@@ -60,143 +60,49 @@ class Connect:
         return default
 
     def _evolution_headers(self, use_global_key=False):
-        """Return headers for Evolution API requests."""
+        """Return headers for WPPConnect Server API requests."""
         apikey = (
             self.main_window.evolution_api_key
             if use_global_key
             else self.main_window.token
         )
-        return {"apikey": apikey, "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {apikey}", "Content-Type": "application/json"}
 
     def _create_instance(self, token):
         """
-        Create a WhatsApp instance in the local Evolution API.
-
-        If the instance already exists (HTTP 409) that is fine — we simply
-        reuse it.  Any other non-2xx response is raised as a RuntimeError so
-        the caller can surface a meaningful error to the user.
-
-        Special case — HTTP 503 / LICENSE_REQUIRED (Evolution API v2.4+):
-        The local Evolution API has not been activated yet.  We call
-        ``_activate_instance()`` which posts to the external auto-activation
-        endpoint and returns the api_key issued by the licensing server.  That
-        key is stored in settings (persisted across restarts) and used as the
-        ``apikey`` header for the retry.  If the retry still fails or the
-        external call raises, the exception propagates to the caller.
-
-        Note: the phone number for pairing-code flows does NOT belong in the
-        create payload; it is passed later to /instance/connect as a query
-        parameter.
+        Start/Create a WhatsApp session in the local WPPConnect Server.
         """
         url = (
             f"{self.main_window.evolution_server}"
-            f":{self.main_window.evolution_port}/instance/create"
+            f":{self.main_window.evolution_port}/api/{token}/start-session"
         )
         payload = {
-            "instanceName": token,
-            "token":        token,
-            "integration":  "WHATSAPP-BAILEYS",
-            "qrcode":       False,
-            "syncFullHistory": True,
+            "waitQrCode": False
         }
         headers = self._evolution_headers(use_global_key=True)
 
-        for attempt in range(2):
+        try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
-
-            if response.status_code in (200, 201):
-                try:
-                    data = response.json()
-                    instance_id = (
-                        data.get("instance", {}).get("instanceId")
-                        or data.get("instance", {}).get("id")
-                        or data.get("instanceId")
-                        or data.get("id")
-                    )
-                    return instance_id  # May be None if not present in response
-                except Exception:
-                    return None
-
-            if response.status_code == 409:
-                return None  # Already exists — reuse it
-
-            # HTTP 503 + LICENSE_REQUIRED (Evolution API v2.4+):
-            # Auto-activate via the licensing server, then retry once.
-            # _activate_instance() returns the api_key issued by the licensing
-            # server; that key must replace the default global key for all
-            # subsequent calls so the local API accepts them.
-            if response.status_code == 503 and attempt == 0:
-                try:
-                    data = response.json()
-                except Exception:
-                    data = {}
-                if data.get("code") == "LICENSE_REQUIRED":
-                    instance_id_from_503 = (
-                        data.get("instance_id")
-                        or data.get("instanceId")
-                        or data.get("id")
-                    )
-                    if instance_id_from_503:
-                        # May raise RuntimeError — let it propagate so the
-                        # caller shows a meaningful error to the user.
-                        new_api_key = self._activate_instance(instance_id_from_503)
-                        if new_api_key:
-                            # Persist the key: main.py reads evolution_api_key
-                            # from settings["connection"]["evolution_api_key"],
-                            # so this survives across restarts.
-                            self.main_window.evolution_api_key = new_api_key
-                            self.main_window.settings.setdefault("connection", {})[
-                                "evolution_api_key"
-                            ] = new_api_key
-                            self.main_window.save_settings()
-                            headers = {
-                                "apikey": new_api_key,
-                                "Content-Type": "application/json",
-                            }
-                        continue  # retry with updated (or same) headers
-                    # 503 LICENSE_REQUIRED but no instance_id in body — fall through
-
+            # 200, 201 are success. 400 might mean session already active which is fine.
+            if response.status_code in (200, 201, 400):
+                return token
+            
             # Any other status is a real failure
             try:
                 detail = response.json()
             except Exception:
                 detail = response.text
             raise RuntimeError(f"HTTP {response.status_code}: {detail}")
+        except Exception as exc:
+            if "already" in str(exc).lower() or "active" in str(exc).lower():
+                return token
+            raise exc
 
     def _setup_websocket_for_instance(self, token):
         """
-        Enable and configure Socket.IO event delivery for this instance.
-
-        The Evolution API expects the payload nested under a "websocket" key:
-            {"websocket": {"enabled": true, "events": [...]}}
-
-        Uses the global api_key (works before and after license activation).
-        Raises RuntimeError on any non-2xx response so the caller can surface
-        the error rather than silently proceeding to a doomed connect_websocket.
+        No-op for WPPConnect Server as Socket.io events are active by default.
         """
-        url = (
-            f"{self.main_window.evolution_server}"
-            f":{self.main_window.evolution_port}/websocket/set/{token}"
-        )
-        payload = {
-            "websocket": {
-                "enabled": True,
-                "events": _WEBSOCKET_EVENTS,
-            }
-        }
-        response = requests.post(
-            url, json=payload,
-            headers=self._evolution_headers(use_global_key=True),
-            timeout=10,
-        )
-        if response.status_code not in (200, 201):
-            try:
-                detail = response.json()
-            except Exception:
-                detail = response.text
-            raise RuntimeError(
-                f"websocket/set failed — HTTP {response.status_code}: {detail}"
-            )
+        return True
 
     def _activate_instance(self, instance_id: str) -> str | None:
         """
@@ -385,12 +291,8 @@ class Connect:
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
             if not _instance_exists:
-                # Step 1 – Create Evolution API instance (first time only).
-                # Handles 503/LICENSE_REQUIRED via auto-activation internally.
+                # Step 1 – Create WPPConnect session (first time only).
                 self._create_instance(self.main_window.token)
-
-                # Step 2 – Configure WebSocket events for this instance
-                self._setup_websocket_for_instance(self.main_window.token)
 
             # Save settings
             self.main_window.save_settings()
@@ -398,26 +300,28 @@ class Connect:
             # Set websocket client
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
 
-            # Step 3 – Connect instance (get QR-CODE)
+            try:
+                self.main_window.connect_websocket()
+            except Exception:
+                self.main_window.error_sound.play()
+                wx.MessageBox(self.i18n.t("websocket_failed_reconnect"), self.i18n.t("connection_error"), wx.OK | wx.ICON_WARNING)
+                self.show_connection_dial()
+                return
+
+            # Step 3 – Check status of session (to see if QR code is already available)
             url = (
                 f"{self.main_window.evolution_server}"
-                f":{self.main_window.evolution_port}/instance/connect/{self.main_window.token}/"
+                f":{self.main_window.evolution_port}/api/{self.main_window.token}/status-session"
             )
-            response = requests.get(url, headers=self._evolution_headers())
-            response_data = response.json()
-
-            if response_data.get("base64"):
-                try:
-                    self.main_window.connect_websocket()
-                except Exception:
-                    self.main_window.error_sound.play()
-                    wx.MessageBox(self.i18n.t("websocket_failed_reconnect"), self.i18n.t("connection_error"), wx.OK | wx.ICON_WARNING)
-                    self.show_connection_dial()
-                    return
-                # Display QR-CODE image
-                self.display_qrcode_image(response_data.get("base64"))
-            else:
-                wx.MessageBox(self.i18n.t("no_QRcode_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
+            try:
+                response = requests.get(url, headers=self._evolution_headers())
+                response_data = response.json()
+                qrcode_base64 = response_data.get("qrcode") or response_data.get("urlcode")
+                if qrcode_base64:
+                    self.display_qrcode_image(qrcode_base64)
+            except Exception:
+                # If status query fails temporarily, we will rely on the WebSocket qrCode event
+                pass
 
         except Exception:
             self.main_window.error_sound.play()
@@ -493,37 +397,45 @@ class Connect:
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
-            if not _instance_exists:
-                # Step 1 – Create Evolution API instance (first time only).
-                # Handles 503/LICENSE_REQUIRED via auto-activation internally.
-                self._create_instance(self.main_window.token)
-
-                # Step 2 – Configure WebSocket events for this instance
-                self._setup_websocket_for_instance(self.main_window.token)
-
             # Save settings
             self.main_window.save_settings()
             # Set websocket client
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
 
-            # Step 3 – Connect instance (get pairing code)
+            try:
+                self.main_window.connect_websocket()
+            except Exception:
+                pass
+
+            # Step 3 – Connect instance (get pairing code via start-session)
             url = (
                 f"{self.main_window.evolution_server}"
-                f":{self.main_window.evolution_port}/instance/connect/{self.main_window.token}/"
+                f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
             )
-            response = requests.get(url, params={"number": self.phone_number}, headers=self._evolution_headers())
+            payload = {
+                "phone": self.phone_number,
+                "waitQrCode": True
+            }
+            response = requests.post(url, json=payload, headers=self._evolution_headers(use_global_key=True), timeout=30)
             response_data = response.json()
 
-            if response_data.get("pairingCode"):
-                try:
-                    self.main_window.connect_websocket()
-                except Exception:
-                    self.main_window.error_sound.play()
-                    wx.MessageBox(self.i18n.t("websocket_failed_reconnect"), self.i18n.t("connection_error"), wx.OK | wx.ICON_WARNING)
-                    self.show_connection_dial()
-                    return
-                self.show_pairing_dial(response_data.get("pairingCode"))
+            pairing_code = response_data.get("phoneCode")
+            if pairing_code:
+                self.show_pairing_dial(pairing_code)
             else:
+                # Fallback: check status-session
+                status_url = (
+                    f"{self.main_window.evolution_server}"
+                    f":{self.main_window.evolution_port}/api/{self.main_window.token}/status-session"
+                )
+                try:
+                    status_resp = requests.get(status_url, headers=self._evolution_headers())
+                    status_data = status_resp.json()
+                    if status_data.get("phoneCode"):
+                        self.show_pairing_dial(status_data.get("phoneCode"))
+                        return
+                except Exception:
+                    pass
                 wx.MessageBox(self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
         except Exception:
