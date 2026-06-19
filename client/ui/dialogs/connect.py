@@ -222,22 +222,33 @@ class Connect:
             return os.path.exists(data_path("token.tk"))
 
         # Validate with the API that this token's session is actually connected.
-        # States that mean "pairing was never completed" → treat as not paired.
-        # We do NOT include "CLOSED" here because WPPConnect returns "CLOSED" when the
-        # session is simply not started/loaded yet (e.g. after a restart). If we treated
-        # it as incomplete, we would delete the valid token on every app launch.
-        # However, to avoid staying stuck when a user exits mid-pairing, we also check
-        # the 'paired' flag. If the session was never logged in successfully, we treat
-        # it as incomplete.
-        _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", ""}
-        is_paired = private_info.get("paired", False)
-
+        # We query the specific check-connection-session endpoint which tells us if the WhatsApp
+        # account is genuinely authenticated/linked.
         try:
+            check_url = (
+                f"{self.main_window.evolution_server}"
+                f":{self.main_window.evolution_port}/api/{token}/check-connection-session"
+            )
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            check_resp = requests.get(check_url, headers=headers, timeout=5)
+            if check_resp.status_code in (200, 201):
+                check_data = check_resp.json()
+                # If the API returns status: false, the session is disconnected/unlinked on WhatsApp.
+                if check_data.get("status") is False:
+                    logging.warning(
+                        "[check_connection_status] check-connection-session returned false. "
+                        "Session is unlinked from mobile. Clearing WA_token."
+                    )
+                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                    self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                    self.main_window.save_settings()
+                    return False
+
+            # Fallback/Safety Check: also check general status-session
             url = (
                 f"{self.main_window.evolution_server}"
                 f":{self.main_window.evolution_port}/api/{token}/status-session"
             )
-            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             resp = requests.get(url, headers=headers, timeout=5)
             if resp.status_code in (200, 201):
                 data = resp.json()
@@ -247,8 +258,9 @@ class Connect:
                     or data.get("response", {}).get("status")
                     or ""
                 )
+                _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", ""}
                 if status not in _INCOMPLETE and is_paired:
-                    # Session is genuinely connected (e.g. CONNECTED or CLOSED) and has been paired.
+                    # Session is connected or closed (but closed is allowed if still paired)
                     return True
                 # Stale token — pairing was never finished. Clear it so the
                 # connection dialog is shown on this and future launches.
