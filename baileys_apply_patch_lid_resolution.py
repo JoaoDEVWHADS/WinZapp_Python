@@ -187,16 +187,26 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
         let phoneJid = jid;
         if (jid.endsWith('@lid')) {
           try {
-            // 2. Fetch the resolved phone JID from cache which has now been populated by the metadata requests.
+            // 2a. Fetch the resolved phone JID from cache which has now been populated by the metadata requests.
             let mapped = await this.client.signalRepository.lidMapping.getPNForLID(jid);
-            if (!mapped) {
-              const res = await this.client.onWhatsApp(jid);
-              if (res && res.length > 0) {
-                mapped = res[0].jid;
-              }
-            }
             if (mapped) {
               phoneJid = mapped;
+            } else {
+              // 2b. If not in cache, query the local Message history JSON key for remoteJidAlt / participantAlt.
+              const msgWithAlt = await this.prismaRepository.message.findFirst({
+                where: {
+                  instanceId: this.instanceId,
+                  key: { path: ['remoteJid'], equals: jid }
+                },
+                orderBy: { messageTimestamp: 'desc' }
+              });
+              if (msgWithAlt && msgWithAlt.key) {
+                const keyObj = msgWithAlt.key as any;
+                const altJid = keyObj.remoteJidAlt || keyObj.participantAlt;
+                if (altJid && altJid.endsWith('@s.whatsapp.net')) {
+                  phoneJid = altJid;
+                }
+              }
             }
           } catch (err) {
             this.logger.error(`Error resolving LID mapping for ${jid}: ${err.message}`);
