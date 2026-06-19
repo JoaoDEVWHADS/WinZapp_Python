@@ -1154,6 +1154,55 @@ class MainWindow(wx.Frame):
             except Exception as e:
                 logging.error("[ensure_api_modules_installed] Failed to remove legacy node_modules: %s", e)
 
+        # ── Check for new required packages in an existing node_modules ──────
+        # When we add a new npm dependency (e.g. @ffmpeg-installer/ffmpeg) the
+        # user's node_modules is already installed from a previous run, so the
+        # normal "node_modules absent" gate never fires.  We compare a list of
+        # required package markers and run `npm install` silently in the
+        # background if any are missing — no dialog needed.
+        _REQUIRED_MARKERS = [
+            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
+        ]
+        if os.path.isfile(dist_server) and os.path.isdir(node_modules):
+            missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
+            if missing:
+                logging.info(
+                    "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
+                    missing,
+                )
+                node_exe = resource_path("node", "node.exe")
+                npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                node_dir = resource_path("node")
+                npm_env  = {
+                    **os.environ,
+                    "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+                }
+                api_dir  = resource_path("api")
+                creation_flags = 0
+                if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                    creation_flags = subprocess.CREATE_NO_WINDOW
+
+                try:
+                    proc = subprocess.Popen(
+                        [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
+                        cwd=api_dir,
+                        env=npm_env,
+                        creationflags=creation_flags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                    )
+                    _, stderr_bytes = proc.communicate()
+                    if proc.returncode != 0:
+                        logging.error(
+                            "[ensure_api_modules_installed] npm install failed: %s",
+                            (stderr_bytes or b"").decode("utf-8", errors="replace"),
+                        )
+                    else:
+                        logging.info("[ensure_api_modules_installed] npm install completed OK")
+                except Exception as exc:
+                    logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
+            return
+
         # Everything already set up — nothing to do.
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             return

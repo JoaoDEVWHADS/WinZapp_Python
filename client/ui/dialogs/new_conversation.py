@@ -131,7 +131,7 @@ class NewConversationDialog(wx.Dialog):
         for jid, contact in mw.contacts.items():
             if jid in seen:
                 continue
-            name = contact.get("pushName") or format_number(jid)
+            name = contact.get("name") or contact.get("pushName") or format_number(jid)
             if qlow in (name or "").lower() or qlow in format_number(jid).lower():
                 seen.add(jid)
                 self._results.append((name or format_number(jid), jid, None))

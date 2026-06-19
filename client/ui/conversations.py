@@ -2841,7 +2841,7 @@ class ConversationsPanel(wx.Panel):
 
         contact = mw.contacts.get(clean_p) or mw.contacts.get(participant)
         if contact:
-            name = (contact.get("pushName") or "").strip()
+            name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
                 return name
 
@@ -3244,7 +3244,7 @@ class ConversationsPanel(wx.Panel):
         for cjid in candidates:
             contact = mw.contacts.get(cjid)
             if contact:
-                name = (contact.get("pushName") or "").strip()
+                name = (contact.get("name") or contact.get("pushName") or "").strip()
                 if name and not name.isdigit() and not is_phone_like(name):
                     return name
             chat_obj = mw.chats.get(cjid)

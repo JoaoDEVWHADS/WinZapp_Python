@@ -67,7 +67,7 @@ class NewGroupDialog(wx.Dialog):
         contacts = self._mw.contacts
         for jid in known_jids:
             contact = contacts.get(jid, {})
-            name = contact.get("pushName") or jid
+            name = contact.get("name") or contact.get("pushName") or jid
             self._all_contact_labels.append(name)
             self._all_contact_jids.append(jid)
 
