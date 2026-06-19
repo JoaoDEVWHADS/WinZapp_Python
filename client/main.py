@@ -1076,11 +1076,12 @@ class MainWindow(wx.Frame):
                 logging.info("connect_websocket: Attempting connection %d/%d...", attempt, max_attempts)
                 if self.ws.sio.connected:
                     self.ws.sio.disconnect()
+                raw_token = self.token.split(":")[0]
                 self.ws.sio.connect(
                     f"{self.evolution_ws_server}:{self.evolution_port}/",
                     socketio_path="socket.io",
                     headers={"apikey": self.token},
-                    namespaces=[f"/{self.token}"],
+                    namespaces=[f"/{raw_token}"],
                 )
                 logging.info("connect_websocket: Connected successfully on attempt %d.", attempt)
                 return
