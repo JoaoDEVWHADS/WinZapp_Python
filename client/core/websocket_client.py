@@ -507,16 +507,25 @@ class WebSocketClient:
 
     def on_wpp_ack(self, data):
         try:
-            status_mapping = {1: 2, 2: 3, 3: 4}
+            status_mapping = {1: 2, 2: 3, 3: 4, 4: 5}
             wpp_ack = data.get("ack")
             msg_id = data.get("id", {}).get("_serialized") if isinstance(data.get("id"), dict) else data.get("id")
             parts = msg_id.split("_") if msg_id else []
             clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
 
+            remote_jid = data.get("to")
+            if not remote_jid and isinstance(data.get("id"), dict):
+                remote_jid = data.get("id", {}).get("remote")
+            if not remote_jid and len(parts) > 1:
+                remote_jid = parts[1]
+            if remote_jid:
+                remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+
             self.on_messages_update({
                 "data": {
                     "key": {
                         "id": clean_id,
+                        "remoteJid": remote_jid or "",
                         "fromMe": True
                     },
                     "update": {

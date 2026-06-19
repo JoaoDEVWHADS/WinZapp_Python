@@ -231,18 +231,38 @@ class Connect:
             )
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             check_resp = requests.get(check_url, headers=headers, timeout=5)
+            is_paired = private_info.get("paired", False)
             if check_resp.status_code in (200, 201):
                 check_data = check_resp.json()
-                # If the API returns status: false, the session is disconnected/unlinked on WhatsApp.
-                if check_data.get("status") is False:
-                    logging.warning(
-                        "[check_connection_status] check-connection-session returned false. "
-                        "Session is unlinked from mobile. Clearing WA_token."
-                    )
-                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
-                    self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
-                    self.main_window.save_settings()
-                    return False
+                if check_data.get("status") is True:
+                    return True
+                
+                # If the API returns status: false, check if the session is registered in the API's token store.
+                # If it is, the session is paired but currently offline (headless browser closed).
+                show_url = (
+                    f"{self.main_window.evolution_server}"
+                    f":{self.main_window.evolution_port}/api/{self.main_window.evolution_apikey}/show-all-sessions"
+                )
+                try:
+                    show_resp = requests.get(show_url, headers={"Authorization": f"Bearer {self.main_window.evolution_apikey}"}, timeout=5)
+                    if show_resp.status_code in (200, 201):
+                        sessions = show_resp.json().get("response", [])
+                        clean_token = lambda t: "".join(c for c in t if c not in ['/', '\\', '?', '<', '>', ':', '*', '|', '"'])
+                        target = clean_token(token)
+                        if any(clean_token(s) == target or target in clean_token(s) for s in sessions):
+                            logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
+                            return True
+                except Exception as show_exc:
+                    logging.warning("[check_connection_status] Failed to fetch session list: %s", show_exc)
+
+                logging.warning(
+                    "[check_connection_status] check-connection-session returned false and session not found in token store. "
+                    "Session is unlinked from mobile. Clearing WA_token."
+                )
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                self.main_window.save_settings()
+                return False
 
             # Fallback/Safety Check: also check general status-session
             url = (
