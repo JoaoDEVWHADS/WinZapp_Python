@@ -2950,8 +2950,11 @@ class MainWindow(wx.Frame):
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
-        # Limpa o sufixo @s.whatsapp.net para o WPPConnect
-        phone = remote_jid.split("@")[0]
+        # Formata o JID corretamente para o WPPConnect
+        if remote_jid.endswith("@s.whatsapp.net"):
+            phone = remote_jid.split("@")[0] + "@c.us"
+        else:
+            phone = remote_jid
 
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-messages/{phone}"
         headers = {
@@ -3734,32 +3737,51 @@ class MainWindow(wx.Frame):
             if not lid_jid.endswith("@lid"):
                 continue
             try:
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{lid_jid}"
+                # First, resolve pn-lid mapping
+                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
                 headers = {
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
                 }
-                logging.info(f"[LID Resolution] Querying WPPConnect contact for {lid_jid}...")
+                logging.info(f"[LID Resolution] Querying WPPConnect pn-lid mapping for {lid_jid}...")
                 response = requests.get(url, headers=headers, timeout=10)
+                canonical_jid = None
                 if response.status_code in (200, 201):
                     res = response.json() or {}
-                    logging.info(f"[LID Resolution] Response for {lid_jid}: {res}")
-                    res_data = res.get("response", {})
+                    logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
+                    res_data = res.get("response") if isinstance(res.get("response"), dict) else res
+                    pn_jid = res_data.get("pnJid")
+                    if pn_jid:
+                        canonical_jid = self._normalize_jid(pn_jid)
+                        if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
+                            self.register_jid_mapping(lid_jid, canonical_jid)
+                
+                # Fetch profile info for name caching
+                # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
+                target_jid = canonical_jid if canonical_jid else lid_jid
+                url_profile = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{target_jid}"
+                logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
+                resp_profile = requests.get(url_profile, headers=headers, timeout=10)
+                if resp_profile.status_code in (200, 201):
+                    res_prof = resp_profile.json() or {}
+                    res_data = res_prof.get("response", {})
                     if not isinstance(res_data, dict):
                         res_data = {}
-                    canonical_jid = self._normalize_jid(res_data.get("id", {}).get("_serialized") or res_data.get("id") or "")
-                    if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
-                        self.register_jid_mapping(lid_jid, canonical_jid)
-                    
-                    # Store name directly under @lid in local contacts dictionary if mapping fails
                     name = res_data.get("name") or res_data.get("pushname")
                     if name and name != "Contato sem nome" and not is_phone_like(name):
                         if lid_jid not in self.contacts:
                             self.contacts[lid_jid] = {}
                         self.contacts[lid_jid]["name"] = name
                         self.contacts[lid_jid]["pushName"] = name
+                        
+                        # Also copy to phone contact cache if mapped
+                        if canonical_jid:
+                            if canonical_jid not in self.contacts:
+                                self.contacts[canonical_jid] = {}
+                            self.contacts[canonical_jid]["name"] = name
+                            self.contacts[canonical_jid]["pushName"] = name
                 else:
-                    logging.error(f"[LID Resolution] fetchProfile API error {response.status_code} for {lid_jid}: {response.text}")
+                    logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
             except Exception as e:
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
 
