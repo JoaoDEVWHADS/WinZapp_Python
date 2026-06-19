@@ -44,19 +44,19 @@ from app_paths import resource_path
 
 # GitHub download URLs — no git required
 _REPO_ZIP_MAIN = (
-    "https://github.com/evolution-foundation/evolution-api"
+    "https://github.com/wppconnect-team/wppconnect-server"
     "/archive/refs/heads/main.zip"
 )
 _REPO_ZIP_TAG  = (
-    "https://github.com/evolution-foundation/evolution-api"
+    "https://github.com/wppconnect-team/wppconnect-server"
     "/archive/refs/tags/{tag}.zip"
 )
 
 # Root-level files whose pre-included content always takes precedence.
-_PRESERVE = {"start.js", ".env"}
+_PRESERVE = {"start.js", ".env", "config.json"}
 
 # Runtime state dirs/files that should survive a re-download.
-_KEEP_RUNTIME = {"pgdata", "instances", "store", "evolution.log"}
+_KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
 
 class ApiSetupDialog(wx.Dialog):
@@ -301,7 +301,7 @@ class ApiSetupDialog(wx.Dialog):
         node_dir = resource_path("node")
         npm_env  = {**os.environ, "PATH": node_dir + os.pathsep + os.environ.get("PATH", "")}
         # forced_tag (from update flow) takes precedence over the .env value
-        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("EVOLUTION_TAG_VERSION")
+        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION", self._read_env_value("EVOLUTION_TAG_VERSION"))
 
         try:
             # ── Step 1: download source ZIP ───────────────────────────────
@@ -350,33 +350,7 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 4: npm install embedded-postgres --save ──────────────
-            # Pin to the latest PostgreSQL 16 package.
-            # All embedded-postgres releases are labelled "beta" by the package
-            # author — that is simply their versioning convention, not an
-            # instability indicator.  The real issue is that PostgreSQL 18
-            # (npm @latest) enables data-page checksums by default for the
-            # first time; its initdb crashes with ACCESS_VIOLATION (0xC0000005)
-            # on certain Windows hardware during post-bootstrap initialization.
-            # PostgreSQL 16 has checksums DISABLED by default and its Windows
-            # binaries are production-hardened.
-            self._set_status("Adicionando embedded-postgres...")
-            ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "install", "embedded-postgres@16.13.0-beta.17",
-                 "--save", "--no-audit", "--no-fund"],
-                cwd=api_dir,
-                env=npm_env,
-            )
-            if not ok:
-                if not self._cancelled:
-                    wx.CallAfter(self._finish_error,
-                                 f"Falha ao instalar embedded-postgres:\n\n{err}")
-                return
-
-            if self._cancelled:
-                return
-
-            # ── Step 5: npm install ───────────────────────────────────────
+            # ── Step 4: npm install ───────────────────────────────────────
             self._set_status("Instalando dependências (npm install)...")
             ok, err = self._run_subprocess(
                 [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
@@ -392,35 +366,9 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 6: npm run db:generate (only if the script exists) ───
-            pkg_json_path = os.path.join(api_dir, "package.json")
-            has_db_generate = False
-            try:
-                with open(pkg_json_path, encoding="utf-8") as f:
-                    pkg = json.load(f)
-                has_db_generate = "db:generate" in pkg.get("scripts", {})
-            except Exception:
-                pass
-
-            if has_db_generate:
-                self._set_status("Gerando cliente Prisma (db:generate)...")
-                db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
-                ok, err = self._run_subprocess(
-                    [node_exe, npm_cli, "run", "db:generate"],
-                    cwd=api_dir,
-                    env=db_env,
-                )
-                if not ok and not self._cancelled:
-                    wx.CallAfter(self._finish_error,
-                                 f"Falha em npm run db:generate:\n\n{err}")
-                    return
-
-            if self._cancelled:
-                return
-
-            # ── Step 7: npm run build ─────────────────────────────────────
+            # ── Step 5: npm run build ─────────────────────────────────────
             self._set_status(
-                "Compilando a Evolution API (npm run build) — "
+                "Compilando o WPPConnect Server (npm run build) — "
                 "isso pode levar alguns minutos..."
             )
             ok, err = self._run_subprocess(
@@ -472,7 +420,7 @@ class ApiSetupDialog(wx.Dialog):
     def _finish_success(self):
         self._timer.Stop()
         wx.MessageBox(
-            "A Evolution API foi configurada com sucesso!\n\n"
+            "O WPPConnect Server foi configurado com sucesso!\n\n"
             "O WinZapp irá agora iniciar a API.",
             "Configuração concluída",
             wx.OK | wx.ICON_INFORMATION,
@@ -482,7 +430,7 @@ class ApiSetupDialog(wx.Dialog):
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
-        msg = "Ocorreu um erro durante a configuração da Evolution API."
+        msg = "Ocorreu um erro durante a configuração do WPPConnect Server."
         if details:
             msg = f"{msg}\n\n{details}"
         wx.MessageBox(msg, "Erro de configuração", wx.OK | wx.ICON_ERROR, self)

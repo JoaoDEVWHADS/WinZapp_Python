@@ -94,7 +94,7 @@ SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
 # Directories inside api/ that must NOT be copied into the distribution
-API_EXCLUDE_DIRS  = {"pgdata", "instances", "store", ".git", "__pycache__", "node_modules"}
+API_EXCLUDE_DIRS  = {"wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules"}
 API_EXCLUDE_FILES = {".gitignore", "README-SETUP.md"}
 
 # -- Helpers -----------------------------------------------------------------
@@ -155,16 +155,14 @@ def check_tools():
             f"extract to {NODE_DIR})"
         )
 
-    # Pre-built Evolution API
-    api_main = os.path.join(API_DIR, "dist", "main.js")
+    # Pre-built WPPConnect Server API
+    api_main = os.path.join(API_DIR, "dist", "server.js")
     if not os.path.isfile(api_main):
         missing.append(
-            "client/api/dist/main.js  -- Evolution API not built.\n"
+            "client/api/dist/server.js  -- WPPConnect Server API not built.\n"
             "    1. Run:  venv\\Scripts\\python.exe setup_api.py\n"
             "    2. Then inside client/api/ run:\n"
-            "         npm install embedded-postgres --save\n"
             "         npm install\n"
-            "         npm run db:generate\n"
             "         npm run build"
         )
 

@@ -1,13 +1,14 @@
+#!/usr/bin/env python3
 """
-WinZapp — Evolution API setup script.
+WinZapp — WPPConnect Server setup script.
 
-Clones the Evolution API repository into client/api/ and optionally checks
-out a specific tag.  After cloning, follow the build instructions printed at
+Clones the WPPConnect Server repository into client/api/ and optionally checks
+out a specific tag. After cloning, follow the build instructions printed at
 the end to compile the API before running build.py.
 
 Configuration (via .env at the project root):
-  EVOLUTION_TAG_VERSION  — git tag to check out after cloning.
-                           Leave unset or empty to keep the default branch (main).
+  WPPCONNECT_TAG_VERSION  — git tag to check out after cloning.
+                            Leave unset or empty to keep the default branch (main).
 
 Usage:
   venv\\Scripts\\python.exe setup_api.py
@@ -21,7 +22,7 @@ import sys
 
 ROOT_DIR       = os.path.dirname(os.path.abspath(__file__))
 CLIENT_API_DIR = os.path.join(ROOT_DIR, "client", "api")
-EVOLUTION_REPO = "https://github.com/EvolutionAPI/evolution-api.git"
+WPPCONNECT_REPO = "https://github.com/wppconnect-team/wppconnect-server.git"
 
 
 def _load_env() -> dict:
@@ -50,7 +51,8 @@ def _run(cmd: list, cwd: str = None):
 
 def main():
     env = _load_env()
-    tag = env.get("EVOLUTION_TAG_VERSION", "").strip()
+    # Backwards compatibility fallback to EVOLUTION_TAG_VERSION if WPPCONNECT_TAG_VERSION isn't set yet
+    tag = env.get("WPPCONNECT_TAG_VERSION", env.get("EVOLUTION_TAG_VERSION", "")).strip()
 
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
     already_cloned = os.path.isdir(git_dir)
@@ -58,7 +60,7 @@ def main():
     if already_cloned:
         print(f"[INFO] client/api/ already exists — skipping clone.")
     else:
-        print(f"[INFO] Cloning Evolution API …")
+        print(f"[INFO] Cloning WPPConnect Server …")
         import shutil
         temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
         node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
@@ -96,7 +98,7 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to remove client/api: {e}")
         os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
-        _run(["git", "clone", EVOLUTION_REPO, CLIENT_API_DIR])
+        _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
 
         if has_node_modules:
             try:
@@ -128,16 +130,14 @@ def main():
                 f.write(package_json_content)
             print("[INFO] Re-applied custom files after checking out tag.")
     else:
-        print("[INFO] EVOLUTION_TAG_VERSION not set — using default branch (main).")
+        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
 
     print()
-    print("[OK] Evolution API ready at client/api/")
+    print("[OK] WPPConnect Server ready at client/api/")
     print()
     print("Next steps — build the API before running build.py:")
     print(f"  cd {CLIENT_API_DIR}")
-    print("  npm install embedded-postgres --save")
     print("  npm install")
-    print("  npm run db:generate")
     print("  npm run build")
 
 

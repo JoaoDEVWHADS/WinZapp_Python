@@ -30,6 +30,12 @@ class WebSocketClient:
         self.sio.on("contacts.update",  self.on_contacts_update,  namespace=f"/{self.instance_name}")
         self.sio.on("presence.update",  self.on_presence_update,  namespace=f"/{self.instance_name}")
 
+        # WPPConnect Server Events
+        self.sio.on("qrCode", self.on_wpp_qrcode)
+        self.sio.on("session-logged", self.on_wpp_session_logged)
+        self.sio.on("received-message", self.on_wpp_message_received)
+        self.sio.on("onack", self.on_wpp_ack)
+
     def on_connect(self):
         print("WebSocket connected.")
         # Record when we connected so on_messages_upsert can use a stable
@@ -393,3 +399,118 @@ class WebSocketClient:
                 wx.CallAfter(self.main_window._schedule_set_chats)
         except Exception as e:
             print(f"[WebSocketClient] on_contacts_update error: {e}")
+
+    # ── WPPConnect Event Handlers ─────────────────────────────────────────────
+
+    def on_wpp_qrcode(self, data):
+        try:
+            qrcode_base64 = data.get("qrCode")
+            if qrcode_base64:
+                self.on_qrcode_update({
+                    "data": {
+                        "qrcode": {
+                            "base64": qrcode_base64
+                        }
+                    }
+                })
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_qrcode error: {e}")
+
+    def on_wpp_session_logged(self, data):
+        try:
+            status = data.get("status", False)
+            self.on_connection_update({
+                "data": {
+                    "state": "open" if status else "close"
+                }
+            })
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+
+    def on_wpp_message_received(self, data):
+        try:
+            wpp_msg = data.get("response")
+            if not wpp_msg:
+                return
+            normalized = self._normalize_wpp_message(wpp_msg)
+            self.on_messages_upsert({"data": normalized})
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_message_received error: {e}")
+
+    def on_wpp_ack(self, data):
+        try:
+            status_mapping = {1: 2, 2: 3, 3: 4}
+            wpp_ack = data.get("ack")
+            msg_id = data.get("id", {}).get("_serialized") if isinstance(data.get("id"), dict) else data.get("id")
+            clean_id = msg_id.split("_")[-1] if "_" in msg_id else msg_id
+
+            self.on_messages_update({
+                "data": {
+                    "key": {
+                        "id": clean_id,
+                        "fromMe": True
+                    },
+                    "update": {
+                        "status": status_mapping.get(wpp_ack, 2)
+                    }
+                }
+            })
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_ack error: {e}")
+
+    def _normalize_wpp_message(self, wpp_msg):
+        msg_id = wpp_msg.get("id")
+        if isinstance(msg_id, dict):
+            msg_id = msg_id.get("_serialized", "")
+        elif not isinstance(msg_id, str):
+            msg_id = ""
+
+        clean_id = msg_id.split("_")[-1] if "_" in msg_id else msg_id
+
+        from_jid = wpp_msg.get("from", "")
+        to_jid = wpp_msg.get("to", "")
+        from_me = bool(wpp_msg.get("fromMe", False))
+
+        remote_jid = to_jid if from_me else from_jid
+        remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+
+        ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
+
+        msg_type = wpp_msg.get("type", "chat")
+        conversation = wpp_msg.get("body", "")
+
+        message_content = {}
+        if msg_type == "chat":
+            message_content = {"conversation": conversation}
+        elif msg_type in ("audio", "ptt"):
+            message_content = {"audioMessage": {"url": wpp_msg.get("clientUrl", "")}}
+
+        normalized = {
+            "key": {
+                "remoteJid": remote_jid,
+                "fromMe": from_me,
+                "id": clean_id
+            },
+            "pushName": wpp_msg.get("sender", {}).get("pushname") or wpp_msg.get("notifyName") or "",
+            "message": message_content,
+            "messageTimestamp": ts,
+            "messageType": "conversation" if msg_type == "chat" else msg_type
+        }
+
+        quoted_msg = wpp_msg.get("quotedMsg")
+        if quoted_msg:
+            quoted_id = quoted_msg.get("id")
+            if isinstance(quoted_id, dict):
+                quoted_id = quoted_id.get("_serialized", "")
+            clean_quoted_id = quoted_id.split("_")[-1] if "_" in quoted_id else quoted_id
+
+            normalized["message"]["extendedTextMessage"] = {
+                "text": conversation,
+                "contextInfo": {
+                    "stanzaId": clean_quoted_id,
+                    "participant": quoted_msg.get("author", "").replace("@c.us", "@s.whatsapp.net"),
+                    "quotedMessage": {"conversation": quoted_msg.get("body", "")}
+                }
+            }
+
+        return normalized

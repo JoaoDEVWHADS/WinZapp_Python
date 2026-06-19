@@ -62,8 +62,8 @@ jobs:
         shell: pwsh
         run: |
           $envContent = @"
-          EVOLUTION_TAG_VERSION=2.4.0-rc2
-          EVOLUTION_API_MINIMUM_VERSION=2.4.0-rc2
+          WPPCONNECT_TAG_VERSION=2.10.0
+          WPPCONNECT_API_MINIMUM_VERSION=2.10.0
           LICENSING_USER_EMAIL=gabrielhaberkamp@gmail.com
           "@
           $envContent | Out-File -FilePath ".env" -Encoding utf8
@@ -109,7 +109,7 @@ jobs:
           Copy-Item -Path "node-temp\node-v24.15.0-win-x64\*" -Destination "client/node" -Recurse -Force
           Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
 
-      - name: Cache Node Modules da Evolution API
+      - name: Cache Node Modules da WPPConnect API
         id: cache-api-modules
         uses: actions/cache@v4
         with:
@@ -118,7 +118,7 @@ jobs:
           restore-keys: |
             npm-packages-
 
-      - name: Configurar Evolution API
+      - name: Configurar WPPConnect API
         shell: pwsh
         run: |
           # 1. Clonar a API se não existir
@@ -134,24 +134,10 @@ jobs:
           
           # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
           if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install embedded-postgres@16.13.0-beta.17 --save --no-audit --no-fund
               &$nodeExe $npmCli install --no-audit --no-fund
           }
           
-          # Aplicar patches no código-fonte antes de compilar
-          cd ../..
-          python baileys_apply_patch_quoted_context.py
-          python baileys_apply_patch_pairing_time.py
-          python baileys_apply_patch_mark_read.py
-          python baileys_apply_patch_auth_state.py
-          python baileys_apply_patch_lid_resolution.py
-          
-          # Remove backup files from source tree to prevent esbuild compilation failures
-          Get-ChildItem -Path "client/api/src" -Filter "*_backup*" -Recurse | Remove-Item -Force
-          
-          # Sempre gera o Prisma client e compila
-          cd client/api
-          &$nodeExe $npmCli run db:generate
+          # Compilar a API
           &$nodeExe $npmCli run build
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
