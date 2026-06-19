@@ -1132,6 +1132,16 @@ class MainWindow(wx.Frame):
             )
             sys.exit(1)
 
+        # Detect and clean legacy node_modules from Evolution API to force a clean install of WPPConnect
+        wpp_marker = os.path.join(node_modules, "@wppconnect-team")
+        if os.path.isdir(node_modules) and not os.path.isdir(wpp_marker):
+            logging.info("[ensure_api_modules_installed] Legacy node_modules detected. Cleaning for WPPConnect...")
+            try:
+                import shutil
+                shutil.rmtree(node_modules, ignore_errors=True)
+            except Exception as e:
+                logging.error("[ensure_api_modules_installed] Failed to remove legacy node_modules: %s", e)
+
         # Everything already set up — nothing to do.
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             return
