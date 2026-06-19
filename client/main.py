@@ -2474,7 +2474,7 @@ class MainWindow(wx.Frame):
                         if updated_fields:
                             logging.info(f"[get_remote_contacts] Updated fields {updated_fields} for contact: {name} ({jid})")
                     contacts[jid] = self.contacts[jid]
-            self.save_data(self.chats, contacts)
+            self.save_data(self.chats, self.contacts)
             return contacts
         except Exception as e:
             self.error_sound.play()
