@@ -12,6 +12,8 @@ import json
 import base64
 from io import BytesIO
 from countries import COUNTRIES
+import logging
+
 
 # Events forwarded to the WinZapp client via Socket.IO
 _WEBSOCKET_EVENTS = [
@@ -131,20 +133,26 @@ class Connect:
                 continue
             session_id = entry
             try:
-                # Reconstruct a best-effort token for this orphan session.
-                # We use the global api-key as bearer since we don't have the
-                # session-specific hash anymore.
-                url = (
+                # Generate token for this orphan session first to bypass 401 Authentication error.
+                gen_url = (
                     f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{session_id}/close-session"
+                    f":{self.main_window.evolution_port}/api/{session_id}"
+                    f"/{self.main_window.evolution_api_key}/generate-token"
                 )
-                requests.post(
-                    url,
-                    headers=self._evolution_headers(use_global_key=True),
-                    timeout=5,
-                )
-                import logging as _log
-                _log.info("[cleanup_orphan_sessions] Closed orphan session: %s", session_id)
+                res = requests.post(gen_url, timeout=5)
+                if res.status_code in (200, 201):
+                    hash_token = res.json().get("token")
+                    token = f"{session_id}:{hash_token}"
+                    url = (
+                        f"{self.main_window.evolution_server}"
+                        f":{self.main_window.evolution_port}/api/{token}/close-session"
+                    )
+                    requests.post(
+                        url,
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        timeout=5,
+                    )
+                    logging.info("[cleanup_orphan_sessions] Closed orphan session: %s", session_id)
             except Exception:
                 pass
 
