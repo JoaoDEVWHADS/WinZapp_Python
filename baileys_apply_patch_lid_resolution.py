@@ -21,7 +21,22 @@ BASE = Path(__file__).parent / "client" / "api"
 # ---------------------------------------------------------------------------
 # TypeScript source patch
 # ---------------------------------------------------------------------------
-TS_ORIGINAL = b"""    if (!onWhatsapp.exists) {
+TS_ORIGINAL_CLEAN = b"""    if (!onWhatsapp.exists) {
+      throw new BadRequestException(onWhatsapp);
+    }
+
+    try {
+      if (number) {
+        const info = (await this.whatsappNumber({ numbers: [jid] }))?.shift();
+        const picture = await this.profilePicture(info?.jid);
+        const status = await this.getStatus(info?.jid);
+        const business = await this.fetchBusinessProfile(info?.jid);
+
+        return {
+          wuid: info?.jid || jid,
+          name: info?.name,"""
+
+TS_ORIGINAL_V1 = b"""    if (!onWhatsapp.exists) {
       throw new BadRequestException(onWhatsapp);
     }
 
@@ -135,12 +150,19 @@ def patch_typescript_file(path: Path) -> bool:
         print(f"[OK]    TypeScript source: already patched ({path.name})")
         return True
 
-    if TS_ORIGINAL not in normalized_data:
-        print(f"[WARN]  TypeScript source: expected pattern not found -- patch may be outdated ({path.name})")
+    target_original = None
+    if TS_ORIGINAL_CLEAN in normalized_data:
+        target_original = TS_ORIGINAL_CLEAN
+        print(f"  Found clean original code in {path.name}")
+    elif TS_ORIGINAL_V1 in normalized_data:
+        target_original = TS_ORIGINAL_V1
+        print(f"  Found previous patch v1 in {path.name}")
+    else:
+        print(f"[WARN]  TypeScript source: expected patterns not found -- patch may be outdated ({path.name})")
         return False
 
     # Perform the replacement on normalized (LF) content
-    patched_data = normalized_data.replace(TS_ORIGINAL, TS_PATCHED, 1)
+    patched_data = normalized_data.replace(target_original, TS_PATCHED, 1)
 
     # Convert back to CRLF if the original file had it
     if has_crlf:
