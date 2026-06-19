@@ -36,6 +36,7 @@ class WebSocketClient:
         self.sio.on("received-message", self.on_wpp_message_received)
         self.sio.on("onack", self.on_wpp_ack)
         self.sio.on("phoneCode", self.on_wpp_phone_code)
+        self.sio.on("status-find", self.on_wpp_status_find)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -461,6 +462,18 @@ class WebSocketClient:
             })
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+
+    def on_wpp_status_find(self, data):
+        try:
+            status = data.get("status")
+            print(f"[WebSocketClient] Received status-find: {status}")
+            if status in ("disconnectedMobile", "notLogged"):
+                # Handle permanent WhatsApp logout / disconnection.
+                # Only trigger if the main window was previously marked as paired/connected.
+                if self.main_window.settings.get("privateinfo", {}).get("paired"):
+                    wx.CallAfter(self._handle_logout)
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_status_find error: {e}")
 
     def on_wpp_phone_code(self, data):
         """Handle the 'phoneCode' Socket.IO event emitted by WPPConnect Server.
