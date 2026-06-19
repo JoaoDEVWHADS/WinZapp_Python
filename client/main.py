@@ -1944,11 +1944,20 @@ class MainWindow(wx.Frame):
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code in (200, 201):
                 data = response.json()
-                # WPPConnect status-session retorna state: CONNECTED se ativo
-                state = data.get("state") or data.get("response", {}).get("state") or ""
-                
-                logging.info("[check_wa_connection_http] Instance connection state: %s", state)
-                if state in ("CONNECTED", "open"):
+                # WPPConnect /status-session returns {"status": "CONNECTED"} — the key is
+                # "status", not "state".  Reading "state" always yields "" which incorrectly
+                # triggers /start-session even when a session is already alive.
+                status = (
+                    data.get("status")
+                    or data.get("state")
+                    or data.get("response", {}).get("status")
+                    or data.get("response", {}).get("state")
+                    or ""
+                )
+
+                logging.info("[check_wa_connection_http] Instance status: %s", status)
+
+                if status in ("CONNECTED", "open"):
                     self._wa_connected = True
                     try:
                         dev_url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/host-device"
@@ -1965,7 +1974,17 @@ class MainWindow(wx.Frame):
                                 self.my_jid = wuid
                     except Exception as e:
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
+                elif status in ("INITIALIZING", "QRCODE", "PHONECODE"):
+                    # Session is already starting up (e.g. fresh after pairing) — do NOT
+                    # call /start-session again: a second call attempts to open a second
+                    # browser instance, which fails with "browser is already running" and
+                    # causes the WPPConnect auto-close timer to fire, disconnecting us.
+                    logging.info(
+                        "[check_wa_connection_http] Session is %s — skipping /start-session to avoid browser conflict.",
+                        status,
+                    )
                 else:
+                    # Status is CLOSED or unknown: safe to start a new session.
                     try:
                         start_url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/start-session"
                         requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
