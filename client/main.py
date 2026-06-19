@@ -1819,6 +1819,21 @@ class MainWindow(wx.Frame):
                     self.save_settings()
             except Exception:
                 pass
+        if token and ":" not in token:
+            try:
+                url = f"{self.evolution_server}:{self.evolution_port}/api/{token}/{self.evolution_api_key}/generate-token"
+                import requests
+                response = requests.post(url, timeout=10)
+                if response.status_code in (200, 201):
+                    data = response.json()
+                    hash_token = data.get("token")
+                    if hash_token:
+                        token = f"{token}:{hash_token}"
+                        self.settings["privateinfo"]["WA_token"] = token
+                        self.save_settings()
+            except Exception as e:
+                import logging
+                logging.error("[retrieve_token] Failed to migrate WPPConnect token: %s", e)
         if not token:
             if self.background_mode:
                 # No token means WhatsApp has never been paired — exit silently.

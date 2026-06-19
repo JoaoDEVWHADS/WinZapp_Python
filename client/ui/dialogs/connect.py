@@ -285,7 +285,17 @@ class Connect:
                 # New pairing: reset sync flag so we wait for messages.set
                 self.main_window.settings["status"]["messages_set_completed"] = False
                 self.main_window.save_settings()
-                self.main_window.token = self.generate_random_token()
+                raw_token = self.generate_random_token()
+                url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
+                try:
+                    res = requests.post(url, timeout=10)
+                    if res.status_code in (200, 201):
+                        hash_token = res.json().get("token")
+                        self.main_window.token = f"{raw_token}:{hash_token}"
+                    else:
+                        self.main_window.token = raw_token
+                except Exception:
+                    self.main_window.token = raw_token
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
@@ -390,7 +400,17 @@ class Connect:
             if _instance_exists:
                 self.main_window.token = existing_token
             else:
-                self.main_window.token = self.generate_random_token()
+                raw_token = self.generate_random_token()
+                url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
+                try:
+                    res = requests.post(url, timeout=10)
+                    if res.status_code in (200, 201):
+                        hash_token = res.json().get("token")
+                        self.main_window.token = f"{raw_token}:{hash_token}"
+                    else:
+                        self.main_window.token = raw_token
+                except Exception:
+                    self.main_window.token = raw_token
                 # Set the new token and phone number in settings
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}

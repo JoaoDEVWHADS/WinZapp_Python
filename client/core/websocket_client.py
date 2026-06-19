@@ -9,7 +9,7 @@ class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
         self.connect = connect
-        self.instance_name = instance_name
+        self.instance_name = instance_name.split(":")[0]
         #Initialize i18n
         self.i18n = I18n(self.main_window)
         self.i18n.get_language()
