@@ -419,6 +419,27 @@ class WebSocketClient:
     def on_wpp_session_logged(self, data):
         try:
             status = data.get("status", False)
+            if status:
+                try:
+                    url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{self.main_window.token}/host-device"
+                    headers = {
+                        "Authorization": f"Bearer {self.main_window.token}",
+                        "Content-Type": "application/json"
+                    }
+                    res = requests.get(url, headers=headers, timeout=5)
+                    if res.status_code in (200, 201):
+                        res_data = res.json()
+                        phoneNumberObj = res_data.get("response", {}).get("phoneNumber", {})
+                        wuid = ""
+                        if isinstance(phoneNumberObj, dict):
+                            wuid = phoneNumberObj.get("_serialized", "")
+                        elif isinstance(phoneNumberObj, str):
+                            wuid = phoneNumberObj
+                        if wuid:
+                            self.main_window.my_jid = wuid
+                except Exception as ex:
+                    print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
+
             self.on_connection_update({
                 "data": {
                     "state": "open" if status else "close"

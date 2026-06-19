@@ -1890,11 +1890,21 @@ class MainWindow(wx.Frame):
                 logging.info("[check_wa_connection_http] Instance connection state: %s", state)
                 if state in ("CONNECTED", "open"):
                     self._wa_connected = True
-                    # Tenta obter o JID do próprio profile ou host-device
-                    wuid = data.get("status") or data.get("response", {}).get("status") or ""
-                    # Se não vier JID no status, podemos deixar vazio e o socket atualiza depois
-                    if isinstance(wuid, str) and "@" in wuid:
-                        self.my_jid = wuid
+                    try:
+                        dev_url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/host-device"
+                        dev_resp = requests.get(dev_url, headers=headers, timeout=5)
+                        if dev_resp.status_code in (200, 201):
+                            dev_data = dev_resp.json()
+                            phoneNumberObj = dev_data.get("response", {}).get("phoneNumber", {})
+                            wuid = ""
+                            if isinstance(phoneNumberObj, dict):
+                                wuid = phoneNumberObj.get("_serialized", "")
+                            elif isinstance(phoneNumberObj, str):
+                                wuid = phoneNumberObj
+                            if wuid:
+                                self.my_jid = wuid
+                    except Exception as e:
+                        logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
         except Exception as e:
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
 
