@@ -66,6 +66,13 @@ class WebSocketClient:
             self.main_window._wa_connected = True
             if hasattr(self.main_window, "message_queue"):
                 self.main_window.message_queue.flush()
+            
+            # Save the paired status so next startup knows pairing was fully completed.
+            pi = self.main_window.settings.setdefault("privateinfo", {})
+            if not pi.get("paired"):
+                pi["paired"] = True
+                self.main_window.save_settings()
+
             self.on_pairing_complete()
         elif connection_state == "close":
             was_connected = self.main_window._wa_connected
@@ -134,6 +141,7 @@ class WebSocketClient:
         pi = mw.settings.setdefault("privateinfo", {})
         old_token = pi.pop("WA_token", "")
         pi.pop("WA_phone_number", None)
+        pi.pop("paired", None)
         mw.settings.setdefault("status", {})["messages_set_completed"] = False
         mw.token = ""
         mw.save_settings()

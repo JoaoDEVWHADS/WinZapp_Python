@@ -226,7 +226,12 @@ class Connect:
         # We do NOT include "CLOSED" here because WPPConnect returns "CLOSED" when the
         # session is simply not started/loaded yet (e.g. after a restart). If we treated
         # it as incomplete, we would delete the valid token on every app launch.
+        # However, to avoid staying stuck when a user exits mid-pairing, we also check
+        # the 'paired' flag. If the session was never logged in successfully, we treat
+        # it as incomplete.
         _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", ""}
+        is_paired = private_info.get("paired", False)
+
         try:
             url = (
                 f"{self.main_window.evolution_server}"
@@ -242,17 +247,19 @@ class Connect:
                     or data.get("response", {}).get("status")
                     or ""
                 )
-                if status not in _INCOMPLETE:
-                    # Session is genuinely connected (e.g. CONNECTED or CLOSED).
+                if status not in _INCOMPLETE and is_paired:
+                    # Session is genuinely connected (e.g. CONNECTED or CLOSED) and has been paired.
                     return True
                 # Stale token — pairing was never finished. Clear it so the
                 # connection dialog is shown on this and future launches.
                 logging.warning(
                     "[check_connection_status] Token exists but session status is '%s' "
-                    "(pairing incomplete). Clearing stale WA_token.",
+                    "and paired=%s (pairing incomplete). Clearing stale WA_token.",
                     status,
+                    is_paired,
                 )
                 self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
                 return False
         except Exception as exc:

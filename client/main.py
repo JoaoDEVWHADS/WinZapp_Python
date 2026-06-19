@@ -1972,6 +1972,11 @@ class MainWindow(wx.Frame):
                                 wuid = phoneNumberObj
                             if wuid:
                                 self.my_jid = wuid
+                                # Mark as paired on successful HTTP host check too
+                                pi = self.settings.setdefault("privateinfo", {})
+                                if not pi.get("paired"):
+                                    pi["paired"] = True
+                                    self.save_settings()
                     except Exception as e:
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
                 elif status in ("INITIALIZING", "QRCODE", "PHONECODE"):
