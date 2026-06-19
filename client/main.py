@@ -3209,14 +3209,14 @@ class MainWindow(wx.Frame):
             _cq = self._clean_quoted(quoted)
             if _cq and _cq.get("key", {}).get("id"):
                 payload["options"] = {
-                    "quotedMessageId": _cq.get("key", {}).get("id")
+                    "quotedMsg": _cq.get("key", {}).get("id")
                 }
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
         if quoted and "options" in payload:
-            print(f"[send_text_message] sending quoted reply to {remote_jid}, quoted key.id={payload['options'].get('quotedMessageId')}")
+            print(f"[send_text_message] sending quoted reply to {remote_jid}, quoted key.id={payload['options'].get('quotedMsg')}")
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
@@ -3257,6 +3257,10 @@ class MainWindow(wx.Frame):
             "base64": f"data:audio/wav;base64,{audio_b64}",
             "isGroup": remote_jid.endswith("@g.us")
         }
+        if quoted:
+            _cq = self._clean_quoted(quoted)
+            if _cq and _cq.get("key", {}).get("id"):
+                payload["quotedMessageId"] = _cq.get("key", {}).get("id")
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -3388,7 +3392,7 @@ class MainWindow(wx.Frame):
         for cjid in candidates:
             contact = _get_contact_tolerant(cjid)
             if contact:
-                name = (contact.get("pushName") or "").strip()
+                name = (contact.get("name") or contact.get("pushName") or "").strip()
                 if name and not name.isdigit():
                     return name
             chat = self.chats.get(cjid)

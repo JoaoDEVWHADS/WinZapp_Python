@@ -507,7 +507,12 @@ class WebSocketClient:
         if msg_type == "chat":
             message_content = {"conversation": conversation}
         elif msg_type in ("audio", "ptt"):
-            message_content = {"audioMessage": {"url": wpp_msg.get("clientUrl", "")}}
+            message_content = {
+                "audioMessage": {
+                    "url": wpp_msg.get("clientUrl", ""),
+                    "seconds": wpp_msg.get("duration") or wpp_msg.get("seconds") or 0
+                }
+            }
 
         normalized = {
             "key": {
@@ -518,7 +523,7 @@ class WebSocketClient:
             "pushName": wpp_msg.get("sender", {}).get("pushname") or wpp_msg.get("notifyName") or "",
             "message": message_content,
             "messageTimestamp": ts,
-            "messageType": "conversation" if msg_type == "chat" else msg_type
+            "messageType": "conversation" if msg_type == "chat" else ("audioMessage" if msg_type in ("audio", "ptt") else msg_type)
         }
 
         quoted_msg = wpp_msg.get("quotedMsg")

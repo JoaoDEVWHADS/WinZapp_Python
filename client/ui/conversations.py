@@ -2671,7 +2671,7 @@ class ConversationsPanel(wx.Panel):
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
-                    n = (c.get("pushName") or "").strip()
+                    n = (c.get("name") or c.get("pushName") or "").strip()
                     if n and not n.isdigit() and not is_phone_like(n):
                          n_lower = n.lower()
                          if "sem nome" in n_lower or "unnamed" in n_lower or n_lower in ("no name", "unknown", "desconhecido"):
