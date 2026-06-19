@@ -15,8 +15,82 @@
  */
 
 import { Request, Response } from 'express';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 import { unlinkAsync } from '../util/functions';
+
+/// ffmpeg setup for WAV→OGG/Opus conversion (PTT audio requires OGG/Opus)
+let ffmpegBinPath: string | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const installer = require('@ffmpeg-installer/ffmpeg');
+  ffmpegBinPath = installer.path;
+  console.log('[messageController] ffmpeg available at:', ffmpegBinPath);
+} catch (_e) {
+  console.warn('[messageController] @ffmpeg-installer/ffmpeg not available, PTT audio may fail');
+}
+
+/**
+ * Convert a WAV base64 data URI to an OGG/Opus base64 data URI.
+ * WhatsApp requires OGG/Opus for PTT (voice note) messages.
+ * Returns the converted base64 data URI, or the original if conversion fails.
+ */
+async function convertWavToOgg(base64Input: string): Promise<string> {
+  if (!ffmpegBinPath) {
+    console.warn('[convertWavToOgg] ffmpeg not available, skipping conversion');
+    return base64Input;
+  }
+
+  // Extract raw base64 and MIME type from data URI
+  const mimeMatch = base64Input.match(/^data:([^;]+);base64,(.+)$/s);
+  const mimeType  = mimeMatch ? mimeMatch[1] : '';
+  const rawB64    = mimeMatch ? mimeMatch[2] : base64Input;
+
+  // Already OGG/Opus — no conversion needed
+  if (mimeType === 'audio/ogg' || mimeType === 'audio/opus') {
+    return base64Input;
+  }
+
+  const { spawn } = require('child_process');
+  const tmpDir  = os.tmpdir();
+  const ts      = Date.now();
+  const inFile  = path.join(tmpDir, `wz_in_${ts}.wav`);
+  const outFile = path.join(tmpDir, `wz_out_${ts}.ogg`);
+
+  try {
+    fs.writeFileSync(inFile, Buffer.from(rawB64, 'base64'));
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(ffmpegBinPath!, [
+        '-y',
+        '-i', inFile,
+        '-c:a', 'libopus',
+        '-ac', '1',
+        '-ar', '48000',
+        '-b:a', '64k',
+        '-f', 'ogg',
+        outFile,
+      ]);
+      proc.on('close', (code: number) => {
+        if (code === 0) resolve();
+        else reject(new Error(`ffmpeg exited with code ${code}`));
+      });
+      proc.on('error', reject);
+    });
+
+    const outBuf = fs.readFileSync(outFile);
+    return `data:audio/ogg;base64,${outBuf.toString('base64')}`;
+  } catch (err) {
+    console.error('[convertWavToOgg] conversion failed:', err);
+    return base64Input; // fallback: send as-is
+  } finally {
+    try { fs.unlinkSync(inFile); } catch (_) {}
+    try { fs.unlinkSync(outFile); } catch (_) {}
+  }
+}
+
 
 function returnError(req: Request, res: Response, error: any) {
   req.logger.error(error);
@@ -342,14 +416,21 @@ export async function sendVoice64(req: Request, res: Response) {
    */
   const { phone, base64Ptt, base64, quotedMessageId } = req.body;
   const audioData = base64Ptt || base64;
+  console.log('[sendVoice64] phone:', phone);
+  console.log('[sendVoice64] audioData length:', audioData ? audioData.length : 'undefined');
 
   try {
+    // WhatsApp requires OGG/Opus for PTT voice notes. Convert WAV→OGG/Opus
+    // using fluent-ffmpeg so the browser context doesn't reject the audio.
+    const convertedAudio = await convertWavToOgg(audioData);
+    console.log('[sendVoice64] converted audio MIME:', convertedAudio.substring(0, 30));
+
     const results: any = [];
     for (const contato of phone) {
       results.push(
         await req.client.sendPttFromBase64(
           contato,
-          audioData,
+          convertedAudio,
           'Voice Audio',
           '',
           quotedMessageId

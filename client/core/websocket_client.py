@@ -453,6 +453,9 @@ class WebSocketClient:
             wpp_msg = data.get("response")
             if not wpp_msg:
                 return
+            # Ignore WPPConnect echo if it's fromMe
+            if wpp_msg.get("fromMe"):
+                return
             normalized = self._normalize_wpp_message(wpp_msg)
             self.on_messages_upsert({"data": normalized})
         except Exception as e:
