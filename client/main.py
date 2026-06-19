@@ -3239,9 +3239,16 @@ class MainWindow(wx.Frame):
                 body = response.json()
                 # WPPConnect retorna a resposta dentro de 'response'
                 resp = body.get("response", {})
-                msg_id = resp.get("id") if not isinstance(resp.get("id"), dict) else resp.get("id", {}).get("_serialized")
-                clean_id = msg_id.split("_")[-1] if msg_id and "_" in msg_id else msg_id
-                return clean_id or True
+                if isinstance(resp, list) and len(resp) > 0:
+                    resp = resp[0]
+                if isinstance(resp, dict):
+                    msg_id = resp.get("id")
+                    if isinstance(msg_id, dict):
+                        msg_id = msg_id.get("_serialized", "")
+                    parts = msg_id.split("_") if msg_id else []
+                    clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                    return clean_id or True
+                return True
             except Exception:
                 return True
         except Exception as exc:
@@ -3291,9 +3298,16 @@ class MainWindow(wx.Frame):
                 try:
                     body = response.json()
                     resp = body.get("response", {})
-                    msg_id = resp.get("id") if not isinstance(resp.get("id"), dict) else resp.get("id", {}).get("_serialized")
-                    clean_id = msg_id.split("_")[-1] if msg_id and "_" in msg_id else msg_id
-                    return clean_id or True
+                    if isinstance(resp, list) and len(resp) > 0:
+                        resp = resp[0]
+                    if isinstance(resp, dict):
+                        msg_id = resp.get("id")
+                        if isinstance(msg_id, dict):
+                            msg_id = msg_id.get("_serialized", "")
+                        parts = msg_id.split("_") if msg_id else []
+                        clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                        return clean_id or True
+                    return True
                 except Exception:
                     return True
             self._check_wa_connection_closed(response)
@@ -3333,6 +3347,17 @@ class MainWindow(wx.Frame):
             self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
         # Clean up temp WAV for voice messages (media attachments keep their file).
         if audio_path and os.path.isfile(audio_path):
+            if real_id and isinstance(real_id, str):
+                try:
+                    with open(audio_path, "rb") as f:
+                        wav_data = f.read()
+                    voice_messages_dir = data_path("voice_messages")
+                    os.makedirs(voice_messages_dir, exist_ok=True)
+                    audio_file_path = os.path.join(voice_messages_dir, f"{real_id}.msv")
+                    with open(audio_file_path, "wb") as f_out:
+                        f_out.write(encrypt(wav_data, self.key))
+                except Exception as e:
+                    print(f"[_on_message_sent] error saving sent audio locally: {e}")
             try:
                 os.unlink(audio_path)
             except Exception:

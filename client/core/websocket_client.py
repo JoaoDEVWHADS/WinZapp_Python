@@ -466,7 +466,8 @@ class WebSocketClient:
             status_mapping = {1: 2, 2: 3, 3: 4}
             wpp_ack = data.get("ack")
             msg_id = data.get("id", {}).get("_serialized") if isinstance(data.get("id"), dict) else data.get("id")
-            clean_id = msg_id.split("_")[-1] if "_" in msg_id else msg_id
+            parts = msg_id.split("_") if msg_id else []
+            clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
 
             self.on_messages_update({
                 "data": {
@@ -489,7 +490,8 @@ class WebSocketClient:
         elif not isinstance(msg_id, str):
             msg_id = ""
 
-        clean_id = msg_id.split("_")[-1] if "_" in msg_id else msg_id
+        parts = msg_id.split("_") if msg_id else []
+        clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
 
         from_jid = wpp_msg.get("from", "")
         to_jid = wpp_msg.get("to", "")
@@ -536,7 +538,8 @@ class WebSocketClient:
             quoted_id = quoted_msg.get("id")
             if isinstance(quoted_id, dict):
                 quoted_id = quoted_id.get("_serialized", "")
-            clean_quoted_id = quoted_id.split("_")[-1] if "_" in quoted_id else quoted_id
+            parts = quoted_id.split("_") if quoted_id else []
+            clean_quoted_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else quoted_id)
 
             normalized["message"]["extendedTextMessage"] = {
                 "text": conversation,
