@@ -147,11 +147,59 @@ class Connect:
     # ── Connection status ──────────────────────────────────────────────────
 
     def check_connection_status(self):
+        """Return True only if there is a saved token AND the API confirms the session is connected.
+
+        A token is written to settings as soon as the user clicks "Connect" — before
+        pairing is actually completed.  If the app is closed mid-pairing or an error
+        occurs, the stale token remains in settings.  On the next launch we must
+        validate with the server that the session is genuinely connected; otherwise
+        the connection dialog is never shown and the user is stuck with a broken state.
+        """
         private_info = self.main_window.settings.get("privateinfo", {})
-        if private_info.get("WA_token", "").strip():
+        token = private_info.get("WA_token", "").strip()
+
+        # Legacy fallback: token.tk file means old-format paired session.
+        if not token:
+            return os.path.exists(data_path("token.tk"))
+
+        # Validate with the API that this token's session is actually connected.
+        # States that mean "pairing was never completed" → treat as not paired.
+        _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", "CLOSED", ""}
+        try:
+            url = (
+                f"{self.main_window.evolution_server}"
+                f":{self.main_window.evolution_port}/api/{token}/status-session"
+            )
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                status = (
+                    data.get("status")
+                    or data.get("state")
+                    or data.get("response", {}).get("status")
+                    or ""
+                )
+                if status not in _INCOMPLETE:
+                    # Session is genuinely connected (e.g. CONNECTED).
+                    return True
+                # Stale token — pairing was never finished. Clear it so the
+                # connection dialog is shown on this and future launches.
+                logging.warning(
+                    "[check_connection_status] Token exists but session status is '%s' "
+                    "(pairing incomplete). Clearing stale WA_token.",
+                    status,
+                )
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.save_settings()
+                return False
+        except Exception as exc:
+            # If the API is not reachable yet (still starting), assume the token
+            # is valid — the connection check later will handle any real failure.
+            logging.warning("[check_connection_status] Could not reach API to validate token: %s", exc)
             return True
-        # Legacy fallback: accept token.tk so migrate path in retrieve_token() runs
-        return os.path.exists(data_path("token.tk"))
+
+        return False
 
     # ── Connection dialog ──────────────────────────────────────────────────
 
@@ -387,15 +435,12 @@ class Connect:
                 if c.isdigit()
             )
             # Check if the user has already paired with this number.
-            # If both the phone number and WA_token are already saved, the
-            # Evolution API instance was created in a previous session — skip
-            # create + websocket-setup and jump straight to /instance/connect.
             existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
             _instance_exists = bool(stored_raw == self.phone_number and existing_token)
             if not _instance_exists:
                 # New pairing: reset sync flag so we wait for messages.set
                 self.main_window.settings["status"]["messages_set_completed"] = False
-                self.main_window.save_settings()
+                # DON'T save yet — token is only persisted after we get the pairing code.
 
             if _instance_exists:
                 self.main_window.token = existing_token
@@ -411,23 +456,20 @@ class Connect:
                         self.main_window.token = raw_token
                 except Exception:
                     self.main_window.token = raw_token
-                # Set the new token and phone number in settings
-                if "privateinfo" not in self.main_window.settings:
-                    self.main_window.settings["privateinfo"] = {}
-                self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
-                self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
-            # Save settings
-            self.main_window.save_settings()
-            # Set websocket client
+            # Set websocket client and connect BEFORE calling /start-session so
+            # the 'phoneCode' Socket.IO event can be received.
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
-
             try:
                 self.main_window.connect_websocket()
             except Exception:
                 pass
 
-            # Step 3 – Connect instance (get pairing code via start-session)
+            # Reset the phoneCode event in case a previous pairing attempt set it.
+            self.main_window.ws._phone_code_event.clear()
+            self.main_window.ws._phone_code_value = ""
+
+            # Call /start-session with the phone number to trigger pairing code generation.
             url = (
                 f"{self.main_window.evolution_server}"
                 f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
@@ -439,28 +481,46 @@ class Connect:
             response = requests.post(url, json=payload, headers=self._evolution_headers(use_global_key=True), timeout=30)
             response_data = response.json()
 
+            # Check if the code came back inline in the HTTP response (rare but possible).
             pairing_code = response_data.get("phoneCode")
+
+            if not pairing_code:
+                # WPPConnect normally emits the code asynchronously via Socket.IO.
+                # Wait up to 60 seconds for the 'phoneCode' event.
+                got_code = self.main_window.ws._phone_code_event.wait(timeout=60)
+                if got_code:
+                    pairing_code = self.main_window.ws._phone_code_value
+
             if pairing_code:
+                # Only now persist the token — pairing has actually started.
+                if "privateinfo" not in self.main_window.settings:
+                    self.main_window.settings["privateinfo"] = {}
+                self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
+                self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
+                self.main_window.save_settings()
                 self.show_pairing_dial(pairing_code)
             else:
-                # Fallback: check status-session
-                status_url = (
-                    f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{self.main_window.token}/status-session"
+                # No code received — clear any partially-saved token so next
+                # launch shows the connection dialog instead of acting connected.
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.save_settings()
+                wx.MessageBox(
+                    self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name),
+                    self.i18n.t("connection_error"),
+                    wx.OK | wx.ICON_ERROR,
                 )
-                try:
-                    status_resp = requests.get(status_url, headers=self._evolution_headers())
-                    status_data = status_resp.json()
-                    if status_data.get("phoneCode"):
-                        self.show_pairing_dial(status_data.get("phoneCode"))
-                        return
-                except Exception:
-                    pass
-                wx.MessageBox(self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
         except Exception:
+            # On any unexpected error, clear the token so next launch works correctly.
+            self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+            self.main_window.save_settings()
             self.main_window.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('connection_failed').format(app_name=self.main_window.app_name)} {format_exc()}", self.i18n.t('connection_error').format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(
+                f"{self.i18n.t('connection_failed').format(app_name=self.main_window.app_name)} {format_exc()}",
+                self.i18n.t('connection_error').format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+            )
+
 
     # ── Phone formatter ────────────────────────────────────────────────────
 

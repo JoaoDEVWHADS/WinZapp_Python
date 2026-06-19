@@ -35,6 +35,12 @@ class WebSocketClient:
         self.sio.on("session-logged", self.on_wpp_session_logged)
         self.sio.on("received-message", self.on_wpp_message_received)
         self.sio.on("onack", self.on_wpp_ack)
+        self.sio.on("phoneCode", self.on_wpp_phone_code)
+
+        # threading.Event used by on_continue() to wait for the phoneCode that
+        # WPPConnect emits asynchronously via Socket.IO after /start-session.
+        self._phone_code_event = threading.Event()
+        self._phone_code_value: str = ""
 
     def on_connect(self):
         print("WebSocket connected.")
@@ -447,6 +453,23 @@ class WebSocketClient:
             })
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+
+    def on_wpp_phone_code(self, data):
+        """Handle the 'phoneCode' Socket.IO event emitted by WPPConnect Server.
+
+        WPPConnect does NOT return the pairing code in the HTTP response of
+        /start-session — it emits it asynchronously via Socket.IO.  We store
+        the code and set a threading.Event so that on_continue() in connect.py
+        can unblock its wait loop and immediately show the pairing dialog.
+        """
+        try:
+            code = data.get("data") or data.get("phoneCode") or ""
+            if code:
+                self._phone_code_value = str(code)
+                self._phone_code_event.set()
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_phone_code error: {e}")
+
 
     def on_wpp_message_received(self, data):
         try:
