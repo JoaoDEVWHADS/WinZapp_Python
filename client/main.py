@@ -1905,6 +1905,13 @@ class MainWindow(wx.Frame):
                                 self.my_jid = wuid
                     except Exception as e:
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
+                else:
+                    try:
+                        start_url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/start-session"
+                        requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
+                        logging.info("[check_wa_connection_http] Sent auto-start session command")
+                    except Exception as e:
+                        logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
         except Exception as e:
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
 
