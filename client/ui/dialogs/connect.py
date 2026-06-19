@@ -469,27 +469,36 @@ class Connect:
             self.main_window.ws._phone_code_event.clear()
             self.main_window.ws._phone_code_value = ""
 
-            # Call /start-session with the phone number to trigger pairing code generation.
+            # Call /start-session in a background thread — WPPConnect can take
+            # 60-90 s to initialise the browser and generate the pairing code.
+            # Blocking here with timeout=30 causes a ReadTimeout before the code
+            # arrives.  The code is delivered asynchronously via the 'phoneCode'
+            # Socket.IO event; we just need to keep the connection alive and wait.
             url = (
                 f"{self.main_window.evolution_server}"
                 f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
             )
-            payload = {
-                "phone": self.phone_number,
-                "waitQrCode": True
-            }
-            response = requests.post(url, json=payload, headers=self._evolution_headers(use_global_key=True), timeout=30)
-            response_data = response.json()
+            payload = {"phone": self.phone_number, "waitQrCode": True}
+            headers = self._evolution_headers(use_global_key=True)
+            ws_ref = self.main_window.ws  # capture before thread starts
 
-            # Check if the code came back inline in the HTTP response (rare but possible).
-            pairing_code = response_data.get("phoneCode")
+            def _call_start_session():
+                try:
+                    resp = requests.post(url, json=payload, headers=headers, timeout=120)
+                    # If the code came back inline (rare), unblock the wait loop.
+                    inline_code = resp.json().get("phoneCode", "")
+                    if inline_code and not ws_ref._phone_code_event.is_set():
+                        ws_ref._phone_code_value = str(inline_code)
+                        ws_ref._phone_code_event.set()
+                except Exception:
+                    # Signal the event so the main thread doesn't wait forever.
+                    ws_ref._phone_code_event.set()
 
-            if not pairing_code:
-                # WPPConnect normally emits the code asynchronously via Socket.IO.
-                # Wait up to 60 seconds for the 'phoneCode' event.
-                got_code = self.main_window.ws._phone_code_event.wait(timeout=60)
-                if got_code:
-                    pairing_code = self.main_window.ws._phone_code_value
+            threading.Thread(target=_call_start_session, daemon=True).start()
+
+            # Wait up to 90 s for WPPConnect to emit the phoneCode via Socket.IO.
+            got_code = self.main_window.ws._phone_code_event.wait(timeout=90)
+            pairing_code = self.main_window.ws._phone_code_value if got_code else ""
 
             if pairing_code:
                 # Only now persist the token — pairing has actually started.
