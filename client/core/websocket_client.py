@@ -495,7 +495,16 @@ class WebSocketClient:
 
         from_jid = wpp_msg.get("from", "")
         to_jid = wpp_msg.get("to", "")
-        from_me = bool(wpp_msg.get("fromMe", False))
+        
+        # Safely parse fromMe supporting boolean, string representation, or ID prefix fallback
+        from_me_val = wpp_msg.get("fromMe")
+        if from_me_val is not None:
+            if isinstance(from_me_val, bool):
+                from_me = from_me_val
+            else:
+                from_me = (str(from_me_val).lower() == "true")
+        else:
+            from_me = (parts[0] == "true") if parts else False
 
         remote_jid = to_jid if from_me else from_jid
         remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
@@ -589,7 +598,13 @@ class WebSocketClient:
         }
 
         if remote_jid.endswith("@g.us"):
-            participant = wpp_msg.get("author") or (wpp_msg.get("sender") or {}).get("id") or ""
+            participant = (
+                wpp_msg.get("author")
+                or wpp_msg.get("participant")
+                or (wpp_msg.get("key") or {}).get("participant")
+                or (wpp_msg.get("sender") or {}).get("id")
+                or ""
+            )
             if participant:
                 normalized["key"]["participant"] = participant.replace("@c.us", "@s.whatsapp.net")
 
