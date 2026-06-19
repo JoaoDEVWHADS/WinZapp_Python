@@ -222,7 +222,10 @@ class Connect:
 
         # Validate with the API that this token's session is actually connected.
         # States that mean "pairing was never completed" → treat as not paired.
-        _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", "CLOSED", ""}
+        # We do NOT include "CLOSED" here because WPPConnect returns "CLOSED" when the
+        # session is simply not started/loaded yet (e.g. after a restart). If we treated
+        # it as incomplete, we would delete the valid token on every app launch.
+        _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", ""}
         try:
             url = (
                 f"{self.main_window.evolution_server}"
@@ -239,7 +242,7 @@ class Connect:
                     or ""
                 )
                 if status not in _INCOMPLETE:
-                    # Session is genuinely connected (e.g. CONNECTED).
+                    # Session is genuinely connected (e.g. CONNECTED or CLOSED).
                     return True
                 # Stale token — pairing was never finished. Clear it so the
                 # connection dialog is shown on this and future launches.
@@ -523,6 +526,21 @@ class Connect:
                     except Exception:
                         self.main_window.token = raw_token
 
+                # Terminate any existing session running on the server. If a session is already
+                # active/initializing in QR code mode (e.g. from the startup check), WPPConnect
+                # will ignore new start-session requests, and the pairing code will never generate.
+                headers = self._evolution_headers(use_global_key=True)
+                try:
+                    close_url = (
+                        f"{self.main_window.evolution_server}"
+                        f":{self.main_window.evolution_port}/api/{self.main_window.token}/close-session"
+                    )
+                    requests.post(close_url, headers=headers, timeout=10)
+                    logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
+                    time.sleep(2) # Allow session cleanup to complete on Node side
+                except Exception as e:
+                    logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
+
                 # Set websocket client and connect BEFORE calling /start-session so
                 # the 'phoneCode' Socket.IO event can be received.
                 self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
@@ -532,8 +550,9 @@ class Connect:
                     pass
 
                 # Reset the phoneCode event in case a previous pairing attempt set it.
-                self.main_window.ws._phone_code_event.clear()
-                self.main_window.ws._phone_code_value = ""
+                if self.main_window.ws:
+                    self.main_window.ws._phone_code_event.clear()
+                    self.main_window.ws._phone_code_value = ""
 
                 # Call /start-session in a background thread — WPPConnect can take
                 # 60-90 s to initialise the browser and generate the pairing code.
@@ -542,7 +561,6 @@ class Connect:
                     f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
                 )
                 payload = {"phone": self.phone_number, "waitQrCode": True}
-                headers = self._evolution_headers(use_global_key=True)
                 ws_ref = self.main_window.ws  # capture before thread starts
 
                 def _call_start_session():
