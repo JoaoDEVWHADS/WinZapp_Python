@@ -232,15 +232,7 @@ TS_PATCHED = b"""    if (!onWhatsapp.exists) {
         return {
           jid: phoneJid,
           wuid: info?.jid || jid,
-          name: resolvedName,
-          numberExists: info?.exists,
-          picture: picture?.profilePictureUrl,
-          status: status?.status,
-          isBusiness: business.isBusiness,
-          email: business?.email,
-          description: business?.description,
-          website: business?.website?.shift(),
-        };"""
+          name: resolvedName,"""
 
 # ---------------------------------------------------------------------------
 # Regex for Compiled main.js / main.mjs
