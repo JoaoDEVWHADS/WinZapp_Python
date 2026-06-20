@@ -3226,6 +3226,31 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
+    def _serialize_quoted_id(self, quoted: dict) -> str:
+        """Serialize a quoted message key into the format expected by WPPConnect.
+        For groups, this correctly appends the participant's JID."""
+        if not quoted:
+            return None
+        _cq = self._clean_quoted(quoted)
+        if not _cq or not _cq.get("key", {}).get("id"):
+            return None
+        quoted_id = _cq.get("key", {}).get("id")
+        if "_" in quoted_id:
+            return quoted_id
+        from_me = _cq.get("key", {}).get("fromMe", False)
+        from_me_str = "true" if from_me else "false"
+        quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
+        if quoted_remote_jid.endswith("@s.whatsapp.net"):
+            quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
+        quoted_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
+        if quoted_remote_jid.endswith("@g.us"):
+            participant = _cq.get("key", {}).get("participant", "")
+            if participant:
+                if participant.endswith("@s.whatsapp.net"):
+                    participant = participant.replace("@s.whatsapp.net", "@c.us")
+                quoted_id = f"{quoted_id}_{participant}"
+        return quoted_id
+
     def send_text_message(self, remote_jid, text, quoted=None):
         """Send a plain-text message via the WPPConnect Server API."""
         if remote_jid.endswith("@lid"):
@@ -3239,16 +3264,8 @@ class MainWindow(wx.Frame):
             "isGroup": remote_jid.endswith("@g.us")
         }
         if quoted:
-            _cq = self._clean_quoted(quoted)
-            if _cq and _cq.get("key", {}).get("id"):
-                quoted_id = _cq.get("key", {}).get("id")
-                if "_" not in quoted_id:
-                    from_me = _cq.get("key", {}).get("fromMe", False)
-                    from_me_str = "true" if from_me else "false"
-                    quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
-                    if quoted_remote_jid.endswith("@s.whatsapp.net"):
-                        quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
-                    quoted_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
+            quoted_id = self._serialize_quoted_id(quoted)
+            if quoted_id:
                 payload["options"] = {
                     "quotedMsg": quoted_id
                 }
@@ -3306,16 +3323,8 @@ class MainWindow(wx.Frame):
             "isGroup": remote_jid.endswith("@g.us")
         }
         if quoted:
-            _cq = self._clean_quoted(quoted)
-            if _cq and _cq.get("key", {}).get("id"):
-                quoted_id = _cq.get("key", {}).get("id")
-                if "_" not in quoted_id:
-                    from_me = _cq.get("key", {}).get("fromMe", False)
-                    from_me_str = "true" if from_me else "false"
-                    quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
-                    if quoted_remote_jid.endswith("@s.whatsapp.net"):
-                        quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
-                    quoted_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
+            quoted_id = self._serialize_quoted_id(quoted)
+            if quoted_id:
                 payload["quotedMessageId"] = quoted_id
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -3340,9 +3349,11 @@ class MainWindow(wx.Frame):
                     return True
                 except Exception:
                     return True
+            print(f"[send_audio_message] HTTP {response.status_code}: {response.text[:500]}")
             self._check_wa_connection_closed(response)
             return None
-        except Exception:
+        except Exception as e:
+            print(f"[send_audio_message] Request failed with exception: {e}")
             return None
 
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
@@ -4075,20 +4086,39 @@ class MainWindow(wx.Frame):
                 logging.info("[start_background_lid_resolution] Aborting: WhatsApp not connected after 30 seconds.")
                 return
                 
-            lids_to_resolve = []
+            raw_lids = set()
+            # 1. Collect JIDs from chats keys
             for jid in list(self.chats.keys()):
                 if jid.endswith("@lid"):
-                    mapped = getattr(self, "_lid_to_phone", {}).get(jid)
-                    needs_resolve = True
-                    if mapped:
-                        c = self.contacts.get(mapped)
-                        if c:
-                            name = c.get("name")
-                            # If we have a valid contact name that is not a placeholder and not pushName, skip
-                            if name and name != "Contato sem nome" and name != c.get("pushName"):
-                                needs_resolve = False
-                    if needs_resolve:
-                        lids_to_resolve.append(jid)
+                    raw_lids.add(jid)
+            # 2. Collect JIDs from contacts keys
+            for jid in list(self.contacts.keys()):
+                if jid.endswith("@lid"):
+                    raw_lids.add(jid)
+            # 3. Collect JIDs from message participants and keys
+            for chat in self.chats.values():
+                for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+                    part = msg.get("key", {}).get("participant") or msg.get("participant")
+                    if part and part.endswith("@lid"):
+                        raw_lids.add(part)
+                    rem = msg.get("key", {}).get("remoteJid")
+                    if rem and rem.endswith("@lid"):
+                        raw_lids.add(rem)
+
+            lids_to_resolve = []
+            lid_to_phone = getattr(self, "_lid_to_phone", {})
+            for jid in raw_lids:
+                mapped = lid_to_phone.get(jid)
+                needs_resolve = True
+                if mapped:
+                    c = self.contacts.get(mapped)
+                    if c:
+                        name = c.get("name")
+                        # If we have a valid contact name that is not a placeholder and not pushName, skip
+                        if name and name != "Contato sem nome" and name != c.get("pushName"):
+                            needs_resolve = False
+                if needs_resolve:
+                    lids_to_resolve.append(jid)
             
             if not lids_to_resolve:
                 logging.info("[start_background_lid_resolution] No @lid JIDs to resolve.")
