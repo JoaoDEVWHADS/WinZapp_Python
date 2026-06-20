@@ -465,6 +465,7 @@ class Connect:
                 # New pairing: reset sync flag so we wait for messages.set
                 self.main_window.settings["status"]["messages_set_completed"] = False
                 self.main_window.save_settings()
+                self.main_window.clear_local_data()
                 raw_token = self.generate_random_token()
                 url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
                 try:
@@ -584,6 +585,7 @@ class Connect:
                 if not _instance_exists:
                     # New pairing: reset sync flag so we wait for messages.set
                     self.main_window.settings["status"]["messages_set_completed"] = False
+                    self.main_window.clear_local_data()
 
                 if _instance_exists:
                     self.main_window.token = existing_token

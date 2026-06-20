@@ -2142,6 +2142,44 @@ class MainWindow(wx.Frame):
                     pass
         threading.Thread(target=_fallback, daemon=True).start()
 
+    def clear_local_data(self):
+        """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
+        logging.info("[clear_local_data] Clearing all local caches, media, and messages.dat...")
+        self.chats = {}
+        self.contacts = {}
+        if hasattr(self, "_lid_to_phone"):
+            self._lid_to_phone.clear()
+        else:
+            self._lid_to_phone = {}
+        if hasattr(self, "_phone_to_lid"):
+            self._phone_to_lid.clear()
+        else:
+            self._phone_to_lid = {}
+            
+        messages_file = data_path("messages.dat")
+        try:
+            with open(messages_file, "wb") as f:
+                f.write(encrypt_json({"chats": {}, "contacts": {}}, self.key))
+            logging.info("[clear_local_data] Reset messages.dat successfully.")
+        except Exception as e:
+            logging.error(f"[clear_local_data] Failed to reset messages.dat: {e}")
+            
+        # Clear local downloaded media files to prevent cross-account leakage
+        for subdir in ("media", "voice_messages"):
+            path = data_path(subdir)
+            if os.path.exists(path):
+                import shutil
+                try:
+                    for filename in os.listdir(path):
+                        file_path = os.path.join(path, filename)
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    logging.info(f"[clear_local_data] Cleared folder: {subdir}")
+                except Exception as e:
+                    logging.error(f"[clear_local_data] Failed to clear {subdir} folder: {e}")
+
     def create_basic_files(self):
         data_dir = data_path("")
         os.makedirs(data_dir, exist_ok=True)

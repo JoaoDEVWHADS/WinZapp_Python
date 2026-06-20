@@ -16,7 +16,7 @@ class WebSocketClient:
 
         self.sio = socketio.Client(
             reconnection=True, reconnection_attempts=5,
-            logger=True, engineio_logger=True,
+            logger=False, engineio_logger=False,
         )
         #Bind events
         self.sio.on("connect", self.on_connect)
@@ -146,6 +146,9 @@ class WebSocketClient:
         mw.settings.setdefault("status", {})["messages_set_completed"] = False
         mw.token = ""
         mw.save_settings()
+        
+        # Wipe all cached chats/contacts/media to avoid cross-account data leakage
+        mw.clear_local_data()
 
         # Best-effort: delete the orphaned instance from the local Evolution API.
         if old_token:
@@ -466,11 +469,17 @@ class WebSocketClient:
     def on_wpp_status_find(self, data):
         try:
             status = data.get("status")
-            print(f"[WebSocketClient] Received status-find: {status}")
+            session = data.get("session")
+            print(f"[WebSocketClient] Received status-find: {status}, session: {session}")
+            
+            # If session is provided in the payload, ignore it if it is not ours
+            if session and session != self.instance_name:
+                return
+                
             if status in ("disconnectedMobile", "notLogged"):
                 # Handle permanent WhatsApp logout / disconnection.
-                # Only trigger if the main window was previously marked as paired/connected.
-                if self.main_window.settings.get("privateinfo", {}).get("paired"):
+                # Only trigger if we were previously fully connected (preventing startup false positives).
+                if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):
                     wx.CallAfter(self._handle_logout)
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_status_find error: {e}")
