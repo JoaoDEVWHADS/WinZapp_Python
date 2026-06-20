@@ -234,8 +234,20 @@ class Connect:
             is_paired = private_info.get("paired", False)
             if check_resp.status_code in (200, 201):
                 check_data = check_resp.json()
-                if check_data.get("status") is True:
+                # Only trust check-connection-session if the user actually completed pairing.
+                # The WPPConnect browser can stay alive for a while after the app closes
+                # mid-pairing, causing this endpoint to return status:true even though the
+                # WhatsApp account was never linked. Requiring paired=True prevents that false positive.
+                if check_data.get("status") is True and is_paired:
                     return True
+                if check_data.get("status") is True and not is_paired:
+                    logging.warning(
+                        "[check_connection_status] check-connection-session returned true but "
+                        "paired=False — pairing was never completed. Clearing stale WA_token."
+                    )
+                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                    self.main_window.save_settings()
+                    return False
                 
                 # If the API returns status: false, check if the session is registered in the API's token store.
                 # If it is, the session is paired but currently offline (headless browser closed).
@@ -250,8 +262,17 @@ class Connect:
                         clean_token = lambda t: "".join(c for c in t if c not in ['/', '\\', '?', '<', '>', ':', '*', '|', '"'])
                         target = clean_token(token)
                         if any(clean_token(s) == target or target in clean_token(s) for s in sessions):
-                            logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
-                            return True
+                            if is_paired:
+                                logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
+                                return True
+                            else:
+                                logging.warning(
+                                    "[check_connection_status] Session found in token store but paired=False — "
+                                    "pairing was never completed. Clearing stale WA_token."
+                                )
+                                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                                self.main_window.save_settings()
+                                return False
                 except Exception as show_exc:
                     logging.warning("[check_connection_status] Failed to fetch session list: %s", show_exc)
 
@@ -575,17 +596,25 @@ class Connect:
                 # Terminate any existing session running on the server. If a session is already
                 # active/initializing in QR code mode (e.g. from the startup check), WPPConnect
                 # will ignore new start-session requests, and the pairing code will never generate.
+                # We fire close-session and immediately set up the WebSocket in parallel to avoid
+                # the 2s blocking wait — the Node side handles the close asynchronously.
                 headers = self._evolution_headers(use_global_key=True)
-                try:
-                    close_url = (
-                        f"{self.main_window.evolution_server}"
-                        f":{self.main_window.evolution_port}/api/{self.main_window.token}/close-session"
-                    )
-                    requests.post(close_url, headers=headers, timeout=10)
-                    logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
-                    time.sleep(2) # Allow session cleanup to complete on Node side
-                except Exception as e:
-                    logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
+                close_done = threading.Event()
+
+                def _close_and_signal():
+                    try:
+                        close_url = (
+                            f"{self.main_window.evolution_server}"
+                            f":{self.main_window.evolution_port}/api/{self.main_window.token}/close-session"
+                        )
+                        requests.post(close_url, headers=headers, timeout=10)
+                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
+                    except Exception as e:
+                        logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
+                    finally:
+                        close_done.set()
+
+                threading.Thread(target=_close_and_signal, daemon=True).start()
 
                 # Set websocket client and connect BEFORE calling /start-session so
                 # the 'phoneCode' Socket.IO event can be received.
@@ -594,6 +623,10 @@ class Connect:
                     self.main_window.connect_websocket()
                 except Exception:
                     pass
+
+                # Wait for close to finish (max 1s) so Node has time to release the session
+                # before we call /start-session. Using event instead of unconditional sleep.
+                close_done.wait(timeout=1)
 
                 # Reset the phoneCode event in case a previous pairing attempt set it.
                 if self.main_window.ws:
