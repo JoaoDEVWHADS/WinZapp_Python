@@ -685,7 +685,10 @@ class ConversationsPanel(wx.Panel):
         self._conv_data_btn.SetLabel(
             i18n.t("group_data") if is_group else i18n.t("conversation_data")
         )
-        self._conv_data_btn.SetNote(self.conversation_name)
+        display_note = self.conversation_name
+        if not is_group and is_phone_like(display_note):
+            display_note = f"{i18n.t('phone_label')}: {display_note}"
+        self._conv_data_btn.SetNote(display_note)
 
         self.message_label.SetLabel(
             f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
@@ -3079,7 +3082,10 @@ class ConversationsPanel(wx.Panel):
             if (self.conversation is not None
                     and self.conversation.get("remoteJid") == jid):
                 try:
-                    self._conv_data_btn.SetNote(note)
+                    display_note = note
+                    if not jid.endswith("@g.us") and is_phone_like(display_note):
+                        display_note = f"{i18n.t('phone_label')}: {display_note}"
+                    self._conv_data_btn.SetNote(display_note)
                     self.conversation_panel.Layout()
                 except Exception:
                     pass
@@ -3118,7 +3124,10 @@ class ConversationsPanel(wx.Panel):
                 note = ls_str
 
         try:
-            self._conv_data_btn.SetNote(note)
+            display_note = note
+            if not jid.endswith("@g.us") and is_phone_like(display_note):
+                display_note = f"{i18n.t('phone_label')}: {display_note}"
+            self._conv_data_btn.SetNote(display_note)
             self.conversation_panel.Layout()
         except Exception:
             pass
