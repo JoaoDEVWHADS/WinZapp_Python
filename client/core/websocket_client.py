@@ -618,6 +618,11 @@ class WebSocketClient:
                 }
             }
 
+        # Fallback to plain text if the message type is unsupported/unmapped but contains body text
+        if not message_content and conversation:
+            msg_type = "chat"
+            message_content = {"conversation": conversation}
+
         type_mapping = {
             "chat": "conversation",
             "audio": "audioMessage",
