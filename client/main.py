@@ -2736,7 +2736,7 @@ class MainWindow(wx.Frame):
         Both formats are handled here so the cache is populated regardless of
         which version of the API produced the stored messages.
         """
-        cache = {}
+        cache = getattr(self, "_lid_to_phone", {}).copy()
         for chat in self.chats.values():
             for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
                 key    = msg.get("key", {})
