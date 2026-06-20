@@ -200,6 +200,8 @@ db.sqlite3-journal
 !/client/api/src/controller/deviceController.ts
 !/client/api/src/controller/messageController.ts
 !/client/api/src/controller/sessionController.ts
+!/client/api/src/util/createSessionUtil.ts
+!/client/api/src/config.ts
 !/client/api/config.json
 
 
