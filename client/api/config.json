@@ -1,5 +1,5 @@
 {
-  "secretKey": "THISISMYSECURETOKEN",
+  "secretKey": "wz-local-api-key",
   "host": "http://localhost",
   "port": "3417",
   "deviceName": "WinZapp",
