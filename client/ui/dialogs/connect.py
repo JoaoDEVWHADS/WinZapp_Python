@@ -253,10 +253,10 @@ class Connect:
                 # If it is, the session is paired but currently offline (headless browser closed).
                 show_url = (
                     f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{self.main_window.evolution_apikey}/show-all-sessions"
+                    f":{self.main_window.evolution_port}/api/{self.main_window.evolution_api_key}/show-all-sessions"
                 )
                 try:
-                    show_resp = requests.get(show_url, headers={"Authorization": f"Bearer {self.main_window.evolution_apikey}"}, timeout=5)
+                    show_resp = requests.get(show_url, headers={"Authorization": f"Bearer {self.main_window.evolution_api_key}"}, timeout=5)
                     if show_resp.status_code in (200, 201):
                         sessions = show_resp.json().get("response", [])
                         clean_token = lambda t: "".join(c for c in t if c not in ['/', '\\', '?', '<', '>', ':', '*', '|', '"'])
@@ -316,10 +316,20 @@ class Connect:
                 self.main_window.save_settings()
                 return False
         except Exception as exc:
-            # If the API is not reachable yet (still starting), assume the token
-            # is valid — the connection check later will handle any real failure.
+            # If the API is unreachable (still starting up), only assume the token is valid
+            # when the user has previously completed pairing. If paired=False, the connection
+            # dialog must be shown — the exception could have been an AttributeError or timeout
+            # that masked a stale/mid-pairing token.
             logging.warning("[check_connection_status] Could not reach API to validate token: %s", exc)
-            return True
+            is_paired = self.main_window.settings.get("privateinfo", {}).get("paired", False)
+            if is_paired:
+                return True
+            logging.warning(
+                "[check_connection_status] API unreachable and paired=False — clearing stale token and showing connection dialog."
+            )
+            self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+            self.main_window.save_settings()
+            return False
 
         return False
 
