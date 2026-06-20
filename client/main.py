@@ -3280,9 +3280,17 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
-                print(f"[send_text_message] HTTP {response.status_code}: {response.text[:500]}")
-                self._check_wa_connection_closed(response)
-                return False
+                # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
+                # try sending it as a plain message instead of leaving it pending forever.
+                if quoted and "options" in payload:
+                    print(f"[send_text_message] Quoted send failed (HTTP {response.status_code}). Retrying without quote...")
+                    payload.pop("options", None)
+                    response = requests.post(url, json=payload, headers=headers, timeout=15)
+                
+                if response.status_code not in (200, 201):
+                    print(f"[send_text_message] HTTP {response.status_code}: {response.text[:500]}")
+                    self._check_wa_connection_closed(response)
+                    return False
             self._wa_connected = True
             try:
                 body = response.json()
