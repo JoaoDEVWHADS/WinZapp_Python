@@ -4756,6 +4756,11 @@ class MainWindow(wx.Frame):
         focused_jid = None
         if focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
             focused_jid = self.conversations_panel.chats_list[focused_idx].get("remoteJid")
+            try:
+                # Clear focus state from this item before deleting to prevent NVDA COMError/freeze
+                lst.SetItemState(focused_idx, 0, wx.LIST_STATE_FOCUSED)
+            except Exception:
+                pass
 
         # Save currently focused archived chat JID if archived panel is present
         arch_focused_jid = None
@@ -4764,6 +4769,10 @@ class MainWindow(wx.Frame):
             arch_focused_idx = arch_lst.GetFocusedItem()
             if arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
                 arch_focused_jid = self.archived_conversations_panel.chats_list[arch_focused_idx].get("remoteJid")
+                try:
+                    arch_lst.SetItemState(arch_focused_idx, 0, wx.LIST_STATE_FOCUSED)
+                except Exception:
+                    pass
 
         lst.Freeze()
         try:
@@ -4822,9 +4831,12 @@ class MainWindow(wx.Frame):
                     target_idx = i
                     break
 
+        list_has_focus = (wx.Window.FindFocus() == panel.conversations_list)
+
         if target_idx != -1:
-            if panel.conversations_list.GetFocusedItem() != target_idx:
-                panel.conversations_list.Focus(target_idx)
+            if list_has_focus:
+                if panel.conversations_list.GetFocusedItem() != target_idx:
+                    panel.conversations_list.Focus(target_idx)
             if not panel.conversations_list.IsSelected(target_idx):
                 panel.conversations_list.Select(target_idx)
             panel.conversations_list.EnsureVisible(target_idx)
@@ -4839,8 +4851,9 @@ class MainWindow(wx.Frame):
                     if chat.get("remoteJid") == last_jid:
                         target_idx = i
                         break
-            if panel.conversations_list.GetFocusedItem() != target_idx:
-                panel.conversations_list.Focus(target_idx)
+            if list_has_focus:
+                if panel.conversations_list.GetFocusedItem() != target_idx:
+                    panel.conversations_list.Focus(target_idx)
             if not panel.conversations_list.IsSelected(target_idx):
                 panel.conversations_list.Select(target_idx)
             panel.conversations_list.EnsureVisible(target_idx)
@@ -4852,8 +4865,9 @@ class MainWindow(wx.Frame):
                     target_idx = i
                     break
             if target_idx != -1:
-                if panel.conversations_list.GetFocusedItem() != target_idx:
-                    panel.conversations_list.Focus(target_idx)
+                if list_has_focus:
+                    if panel.conversations_list.GetFocusedItem() != target_idx:
+                        panel.conversations_list.Focus(target_idx)
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
@@ -4895,6 +4909,9 @@ class MainWindow(wx.Frame):
                 arch_displayed_names.append(name)
             panel.chats_list = arch_displayed_chats
             panel.chat_names = arch_displayed_names
+            
+            arch_list_has_focus = (wx.Window.FindFocus() == panel.conversations_list)
+            
             # Keep focus on archived panel too
             if arch_displayed_chats:
                 target_idx = -1
@@ -4904,8 +4921,9 @@ class MainWindow(wx.Frame):
                             target_idx = i
                             break
                 if target_idx != -1:
-                    if panel.conversations_list.GetFocusedItem() != target_idx:
-                        panel.conversations_list.Focus(target_idx)
+                    if arch_list_has_focus:
+                        if panel.conversations_list.GetFocusedItem() != target_idx:
+                            panel.conversations_list.Focus(target_idx)
                     if not panel.conversations_list.IsSelected(target_idx):
                         panel.conversations_list.Select(target_idx)
                     panel.conversations_list.EnsureVisible(target_idx)
@@ -4917,7 +4935,8 @@ class MainWindow(wx.Frame):
                             if chat.get("remoteJid") == last_jid:
                                 target_idx = i
                                 break
-                    panel.conversations_list.Focus(target_idx)
+                    if arch_list_has_focus:
+                        panel.conversations_list.Focus(target_idx)
                     panel.conversations_list.Select(target_idx)
                     panel.conversations_list.EnsureVisible(target_idx)
 
