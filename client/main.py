@@ -2987,9 +2987,11 @@ class MainWindow(wx.Frame):
         if self.IsShown():
             lst = self.conversations_panel.conversations_list
             if lst.GetItemCount() > 0:
-                lst.Focus(0)
-                lst.Select(0)
-                lst.EnsureVisible(0)
+                # Only preselect if there is no current selection/focus
+                if lst.GetFocusedItem() == -1:
+                    lst.Focus(0)
+                    lst.Select(0)
+                    lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
         for chat in self.chats.values():
@@ -4748,6 +4750,21 @@ class MainWindow(wx.Frame):
         displayed_names: list = []
 
         lst = self.conversations_panel.conversations_list
+
+        # Save currently focused chat JID before clearing the list to preserve user focus
+        focused_idx = lst.GetFocusedItem()
+        focused_jid = None
+        if focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
+            focused_jid = self.conversations_panel.chats_list[focused_idx].get("remoteJid")
+
+        # Save currently focused archived chat JID if archived panel is present
+        arch_focused_jid = None
+        if hasattr(self, "archived_conversations_panel"):
+            arch_lst = self.archived_conversations_panel.conversations_list
+            arch_focused_idx = arch_lst.GetFocusedItem()
+            if arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
+                arch_focused_jid = self.archived_conversations_panel.chats_list[arch_focused_idx].get("remoteJid")
+
         lst.Freeze()
         try:
             lst.DeleteAllItems()
@@ -4796,10 +4813,22 @@ class MainWindow(wx.Frame):
         self.conversations_panel.chat_names = displayed_names
 
         # Restore selection / focus after DeleteAllItems() clears everything.
-        # When no conversation is open, prefer the last-opened JID; fall back
-        # to item 0 so the list is never left with nothing focused.
+        # Prefer the previously focused item if it is still in the list to prevent jumping.
         panel = self.conversations_panel
-        if getattr(self, "_initial_sync_running", False):
+        target_idx = -1
+        if focused_jid:
+            for i, chat in enumerate(displayed_chats):
+                if chat.get("remoteJid") == focused_jid:
+                    target_idx = i
+                    break
+
+        if target_idx != -1:
+            if panel.conversations_list.GetFocusedItem() != target_idx:
+                panel.conversations_list.Focus(target_idx)
+            if not panel.conversations_list.IsSelected(target_idx):
+                panel.conversations_list.Select(target_idx)
+            panel.conversations_list.EnsureVisible(target_idx)
+        elif getattr(self, "_initial_sync_running", False):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass
         elif panel.conversation is None and displayed_chats:
@@ -4867,19 +4896,30 @@ class MainWindow(wx.Frame):
             panel.chats_list = arch_displayed_chats
             panel.chat_names = arch_displayed_names
             # Keep focus on archived panel too
-            # ArchivedConversationsPanel has no 'conversation' attribute — it never
-            # keeps an "open" conversation, so we simply focus item 0 on first load.
             if arch_displayed_chats:
-                last_jid   = getattr(panel, "_last_open_jid", "")
-                target_idx = 0
-                if last_jid:
+                target_idx = -1
+                if arch_focused_jid:
                     for i, chat in enumerate(arch_displayed_chats):
-                        if chat.get("remoteJid") == last_jid:
+                        if chat.get("remoteJid") == arch_focused_jid:
                             target_idx = i
                             break
-                panel.conversations_list.Focus(target_idx)
-                panel.conversations_list.Select(target_idx)
-                panel.conversations_list.EnsureVisible(target_idx)
+                if target_idx != -1:
+                    if panel.conversations_list.GetFocusedItem() != target_idx:
+                        panel.conversations_list.Focus(target_idx)
+                    if not panel.conversations_list.IsSelected(target_idx):
+                        panel.conversations_list.Select(target_idx)
+                    panel.conversations_list.EnsureVisible(target_idx)
+                elif not getattr(self, "_initial_sync_running", False):
+                    last_jid   = getattr(panel, "_last_open_jid", "")
+                    target_idx = 0
+                    if last_jid:
+                        for i, chat in enumerate(arch_displayed_chats):
+                            if chat.get("remoteJid") == last_jid:
+                                target_idx = i
+                                break
+                    panel.conversations_list.Focus(target_idx)
+                    panel.conversations_list.Select(target_idx)
+                    panel.conversations_list.EnsureVisible(target_idx)
 
     def generate_secret_key(self):
         key_file = data_path("secret.key")
