@@ -93,6 +93,10 @@ def format_number(string_number):
     if not digits:
         return string_number
 
+    # Do not format LID JIDs (which are 15-digit internal identifiers) as phone numbers
+    if "@lid" in string_number or len(digits) >= 14:
+        return digits
+
     cc = None
     for candidate in _known_country_codes():
         if digits.startswith(candidate):
