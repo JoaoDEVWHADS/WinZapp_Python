@@ -617,6 +617,30 @@ class WebSocketClient:
                     "displayName": wpp_msg.get("displayName") or wpp_msg.get("body") or "Contato",
                 }
             }
+        elif msg_type == "pollCreation":
+            message_content = {
+                "pollCreationMessage": {
+                    "name": wpp_msg.get("pollName") or wpp_msg.get("body") or ""
+                }
+            }
+        elif msg_type == "buttons":
+            message_content = {
+                "buttonsMessage": {}
+            }
+        elif msg_type == "list":
+            message_content = {
+                "listMessage": {}
+            }
+        elif msg_type == "template":
+            message_content = {
+                "templateMessage": {}
+            }
+        elif msg_type == "revoked":
+            message_content = {
+                "protocolMessage": {
+                    "type": 3
+                }
+            }
 
         # Fallback to plain text if the message type is unsupported/unmapped but contains body text
         if not message_content and conversation:
@@ -631,7 +655,12 @@ class WebSocketClient:
             "video": "videoMessage",
             "document": "documentMessage",
             "sticker": "stickerMessage",
-            "vcard": "contactMessage"
+            "vcard": "contactMessage",
+            "pollCreation": "pollCreationMessage",
+            "buttons": "buttonsMessage",
+            "list": "listMessage",
+            "template": "templateMessage",
+            "revoked": "protocolMessage"
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
 

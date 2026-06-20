@@ -4541,7 +4541,8 @@ class MainWindow(wx.Frame):
             "conversation", "extendedTextMessage", "audioMessage", 
             "videoMessage", "imageMessage", "documentMessage", 
             "stickerMessage", "contactMessage", "locationMessage", 
-            "reactionMessage"
+            "reactionMessage", "pollCreationMessage", "buttonsMessage",
+            "listMessage", "templateMessage", "protocolMessage"
         }
         try:
             last = max(
@@ -4666,6 +4667,23 @@ class MainWindow(wx.Frame):
             )
         elif msg_type == "locationMessage":
             content = i18n.t("notif_location")
+        elif msg_type == "pollCreationMessage":
+            poll = msg_obj.get("pollCreationMessage") or {}
+            name = poll.get("name") or ""
+            content = f"📊 Enquete: {name}" if name else "📊 Enquete"
+        elif msg_type == "buttonsMessage":
+            content = "🔘 Botão"
+        elif msg_type == "listMessage":
+            content = "📋 Lista"
+        elif msg_type == "templateMessage":
+            content = "📝 Modelo"
+        elif msg_type == "protocolMessage":
+            protocol = msg_obj.get("protocolMessage") or {}
+            p_type = protocol.get("type")
+            if p_type in (3, "REVOKE", "revoke"):
+                content = "🚫 Mensagem apagada"
+            else:
+                content = "⚙️ Mensagem do sistema"
         else:
             content = i18n.t("notif_unsupported")
 
