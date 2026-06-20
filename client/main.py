@@ -373,7 +373,7 @@ class MainWindow(wx.Frame):
 
         #Get connection settings (no authentication_server - Evolution runs locally)
         self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "http://127.0.0.1")
-        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 3414)
+        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 6300)
         self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
         self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
         logging.info("MainWindow: Evolution config - server=%s, port=%s, apikey=%s", 

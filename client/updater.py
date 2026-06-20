@@ -90,7 +90,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     """
     Write a batch script that:
       1. Forcefully terminates the WinZapp client process and its children.
-      2. Finds and terminates any leftover Evolution API (port 3417) and PostgreSQL (port 5433) processes to release file locks.
+      2. Finds and terminates any leftover Evolution API (port 6300) and PostgreSQL (port 5433) processes to release file locks.
       3. Copies all extracted files to install_dir.
       4. Restarts the client executable.
     Then launches it (elevated if the directory needs admin).
@@ -108,7 +108,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     bat = (
         "@echo off\n"
         f"taskkill /F /PID {pid} >NUL 2>&1\n"
-        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :3417 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :6300 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "timeout /t 2 /nobreak >NUL\n"
         f'xcopy /E /Y /I "{source_dir}\\*" "{install_dir}\\"\n'

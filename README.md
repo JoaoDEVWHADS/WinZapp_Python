@@ -30,7 +30,7 @@ Since the original fork, a deep restructuring has been performed in the followin
 ### 2. Auto-Updater Redesign (Zero Conflicts)
 * **Direct GitHub Integration:** The dependency on static JSON and TXT files in the repository was removed. The updater now queries the GitHub Releases API directly, fetching the latest version and changelogs natively from the platform.
 * **Resolution of File Locks:** The old updater failed silently because the PostgreSQL database and the Evolution API remained running, locking the files in the installation folder. This was fixed in the update script by introducing dynamic port detection:
-  * The updater identifies and terminates processes bound to ports **3417** (Evolution API) and **5433** (PostgreSQL) using the active connection table (`netstat` + `taskkill`). This ensures that 100% of the locks are released and the update is completed without access denied errors.
+  * The updater identifies and terminates processes bound to ports **6300** (Evolution API) and **5433** (PostgreSQL) using the active connection table (`netstat` + `taskkill`). This ensures that 100% of the locks are released and the update is completed without access denied errors.
 
 ### 3. Compiler Migration to PyInstaller
 * The old compilation method (done via Nuitka) was replaced with a robust structure based on **PyInstaller** (`build.py`).

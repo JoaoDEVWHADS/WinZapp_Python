@@ -7,7 +7,7 @@ export default {
     process.env.secretKey ||
     'wz-local-api-key',
   host: 'http://localhost',
-  port: '3417',
+  port: '6300',
   deviceName: 'WppConnect',
   poweredBy: 'WPPConnect-Server',
   startAllSession: false,

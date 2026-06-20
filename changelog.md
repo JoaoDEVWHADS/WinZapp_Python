@@ -46,7 +46,7 @@ All notable changes to this fork of WinZapp are documented in this file.
 
 ## Auto-Updater System
 * **GitHub Release Integration:** Re-engineered the updater to query GitHub Releases API directly, fetching tags and release notes natively without needing extra files.
-* **File Lock Resolution:** Added dynamic process termination routines in the updater script to close PostgreSQL (port 5433) and Evolution API (port 3417) connections, preventing "Access Denied" errors during files overwrite.
+* **File Lock Resolution:** Added dynamic process termination routines in the updater script to close PostgreSQL (port 5433) and Evolution API (port 6300) connections, preventing "Access Denied" errors during files overwrite.
 
 ## Compilation & Packaging
 * **PyInstaller Migration:** Replaced the legacy Nuitka compiler with PyInstaller (`build.py`) for builds packaging.
