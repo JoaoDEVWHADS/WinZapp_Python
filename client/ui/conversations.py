@@ -675,7 +675,7 @@ class ConversationsPanel(wx.Panel):
             or conversation.get("name", "")
             or conversation.get("pushName", "")
             or self.main_window.find_jid_through_messages(conversation)
-            or (format_number(_conv_jid) if not _conv_jid.endswith("@lid") else "")
+            or format_number(_conv_jid)
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")

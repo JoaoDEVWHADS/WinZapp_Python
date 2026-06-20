@@ -2616,13 +2616,13 @@ class MainWindow(wx.Frame):
                 or chat.get("pushName", "")
                 or self.find_jid_through_messages(chat)
                 or (format_number(phone_jid) if phone_jid else "")
-                or (format_number(jid) if not jid.endswith("@lid") and not jid.endswith("@g.us") else "")
+                or (format_number(jid) if not jid.endswith("@g.us") else "")
             )
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
                     name = self.i18n.t("unknown_group")
                 else:
-                    name = self.i18n.t("unknown_contact")
+                    name = format_number(jid)
             
             # Detailed logging for name resolution debugging
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
