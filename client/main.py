@@ -3324,10 +3324,6 @@ class MainWindow(wx.Frame):
             "base64": f"data:audio/wav;base64,{audio_b64}",
             "isGroup": remote_jid.endswith("@g.us")
         }
-        if quoted:
-            quoted_id = self._serialize_quoted_id(quoted)
-            if quoted_id:
-                payload["quotedMessageId"] = quoted_id
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
