@@ -241,17 +241,18 @@ class Connect:
                 # If it is, the session is paired but currently offline (headless browser closed).
                 show_url = (
                     f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{self.main_window.evolution_apikey}/show-all-sessions"
+                    f":{self.main_window.evolution_port}/api/{self.main_window.evolution_api_key}/show-all-sessions"
                 )
                 try:
-                    show_resp = requests.get(show_url, headers={"Authorization": f"Bearer {self.main_window.evolution_apikey}"}, timeout=5)
+                    show_resp = requests.get(show_url, headers={"Authorization": f"Bearer {self.main_window.evolution_api_key}"}, timeout=5)
                     if show_resp.status_code in (200, 201):
                         sessions = show_resp.json().get("response", [])
                         clean_token = lambda t: "".join(c for c in t if c not in ['/', '\\', '?', '<', '>', ':', '*', '|', '"'])
                         target = clean_token(token)
                         if any(clean_token(s) == target or target in clean_token(s) for s in sessions):
-                            logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
-                            return True
+                            if is_paired:
+                                logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
+                                return True
                 except Exception as show_exc:
                     logging.warning("[check_connection_status] Failed to fetch session list: %s", show_exc)
 
@@ -606,7 +607,7 @@ class Connect:
                     f"{self.main_window.evolution_server}"
                     f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
                 )
-                payload = {"phone": self.phone_number, "waitQrCode": True}
+                payload = {"phone": self.phone_number, "waitQrCode": False}
                 ws_ref = self.main_window.ws  # capture before thread starts
 
                 def _call_start_session():
