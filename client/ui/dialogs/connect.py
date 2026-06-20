@@ -573,20 +573,20 @@ class Connect:
                     except Exception:
                         self.main_window.token = raw_token
 
-                # Terminate any existing session running on the server. If a session is already
-                # active/initializing in QR code mode (e.g. from the startup check), WPPConnect
-                # will ignore new start-session requests, and the pairing code will never generate.
-                headers = self._evolution_headers(use_global_key=True)
-                try:
-                    close_url = (
-                        f"{self.main_window.evolution_server}"
-                        f":{self.main_window.evolution_port}/api/{self.main_window.token}/close-session"
-                    )
-                    requests.post(close_url, headers=headers, timeout=10)
-                    logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
-                    time.sleep(2) # Allow session cleanup to complete on Node side
-                except Exception as e:
-                    logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
+                # Terminate any existing session running on the server if it exists.
+                # If we just launched the phone pairing directly, we don't need to close or sleep.
+                if _instance_exists or hasattr(self, 'qrcode_connection_started'):
+                    headers = self._evolution_headers(use_global_key=True)
+                    try:
+                        close_url = (
+                            f"{self.main_window.evolution_server}"
+                            f":{self.main_window.evolution_port}/api/{self.main_window.token}/close-session"
+                        )
+                        requests.post(close_url, headers=headers, timeout=10)
+                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
+                        time.sleep(2) # Allow session cleanup to complete on Node side
+                    except Exception as e:
+                        logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
 
                 # Set websocket client and connect BEFORE calling /start-session so
                 # the 'phoneCode' Socket.IO event can be received.

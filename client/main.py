@@ -358,6 +358,8 @@ class MainWindow(wx.Frame):
         #Initialize helper classes
         logging.info("MainWindow: Initializing Connect/I18n helpers...")
         self.connect = Connect(self)
+        # Clean up orphan sessions in the background on startup
+        threading.Thread(target=self.connect._cleanup_orphan_sessions, daemon=True).start()
         self.i18n = I18n(self)
         self.i18n.get_language()
 
