@@ -669,13 +669,14 @@ class ConversationsPanel(wx.Panel):
         self.conversation = conversation
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
+        _display_jid = getattr(self.main_window, "_lid_to_phone", {}).get(_conv_jid, _conv_jid) if _conv_jid.endswith("@lid") else _conv_jid
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
             or conversation.get("name", "")
             or conversation.get("pushName", "")
             or self.main_window.find_jid_through_messages(conversation)
-            or format_number(_conv_jid)
+            or format_number(_display_jid)
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")

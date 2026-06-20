@@ -4536,13 +4536,26 @@ class MainWindow(wx.Frame):
         if not records:
             return ""
 
-        # Find the most recent message (max by timestamp)
+        # Prefer supported user-facing message types for a cleaner preview
+        supported_types = {
+            "conversation", "extendedTextMessage", "audioMessage", 
+            "videoMessage", "imageMessage", "documentMessage", 
+            "stickerMessage", "contactMessage", "locationMessage", 
+            "reactionMessage"
+        }
         try:
             last = max(
-                (m for m in records if isinstance(m, dict)),
+                (m for m in records if isinstance(m, dict) and m.get("messageType") in supported_types),
                 key=lambda m: int(m.get("messageTimestamp", 0) or 0),
                 default=None,
             )
+            if last is None:
+                # Fallback to absolute latest message if no supported types found
+                last = max(
+                    (m for m in records if isinstance(m, dict)),
+                    key=lambda m: int(m.get("messageTimestamp", 0) or 0),
+                    default=None,
+                )
         except Exception:
             return ""
         if last is None:
