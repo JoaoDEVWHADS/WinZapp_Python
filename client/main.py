@@ -4107,19 +4107,34 @@ class MainWindow(wx.Frame):
                     if rem and rem.endswith("@lid"):
                         raw_lids.add(rem)
 
+            active_chat_lids = set()
+            for jid in list(self.chats.keys()):
+                if jid.endswith("@lid"):
+                    active_chat_lids.add(jid)
+
             lids_to_resolve = []
             lid_to_phone = getattr(self, "_lid_to_phone", {})
-            for jid in raw_lids:
+            
+            # Helper to filter whether a LID needs resolution
+            def _needs_resolve(jid):
                 mapped = lid_to_phone.get(jid)
-                needs_resolve = True
                 if mapped:
                     c = self.contacts.get(mapped)
                     if c:
                         name = c.get("name")
-                        # If we have a valid contact name that is not a placeholder and not pushName, skip
                         if name and name != "Contato sem nome" and name != c.get("pushName"):
-                            needs_resolve = False
-                if needs_resolve:
+                            return False
+                return True
+
+            # First: Add active chat LIDs that need resolution
+            for jid in sorted(active_chat_lids):
+                if _needs_resolve(jid):
+                    lids_to_resolve.append(jid)
+            
+            # Second: Add remaining collected LIDs that need resolution
+            other_lids = raw_lids - active_chat_lids
+            for jid in sorted(other_lids):
+                if _needs_resolve(jid):
                     lids_to_resolve.append(jid)
             
             if not lids_to_resolve:
@@ -4833,30 +4848,36 @@ class MainWindow(wx.Frame):
 
         list_has_focus = (wx.Window.FindFocus() == panel.conversations_list)
 
+        # Restore selection / focus after DeleteAllItems() clears everything.
+        # GATED: If the list does NOT have keyboard focus and no conversation is open,
+        # we completely avoid calling .Select() to prevent forcing virtual focus events on NVDA.
         if target_idx != -1:
             if list_has_focus:
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
-            if not panel.conversations_list.IsSelected(target_idx):
-                panel.conversations_list.Select(target_idx)
-            panel.conversations_list.EnsureVisible(target_idx)
+            # Only select if we already have focus or we have an open conversation we are tracking
+            if list_has_focus or panel.conversation is not None:
+                if not panel.conversations_list.IsSelected(target_idx):
+                    panel.conversations_list.Select(target_idx)
+                panel.conversations_list.EnsureVisible(target_idx)
         elif getattr(self, "_initial_sync_running", False):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass
         elif panel.conversation is None and displayed_chats:
-            last_jid    = getattr(panel, "_last_open_jid", "")
-            target_idx  = 0
-            if last_jid:
-                for i, chat in enumerate(displayed_chats):
-                    if chat.get("remoteJid") == last_jid:
-                        target_idx = i
-                        break
+            # Bypassed entirely if the list has no focus to prevent focus theft when changing filters
             if list_has_focus:
+                last_jid    = getattr(panel, "_last_open_jid", "")
+                target_idx  = 0
+                if last_jid:
+                    for i, chat in enumerate(displayed_chats):
+                        if chat.get("remoteJid") == last_jid:
+                            target_idx = i
+                            break
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
-            if not panel.conversations_list.IsSelected(target_idx):
-                panel.conversations_list.Select(target_idx)
-            panel.conversations_list.EnsureVisible(target_idx)
+                if not panel.conversations_list.IsSelected(target_idx):
+                    panel.conversations_list.Select(target_idx)
+                panel.conversations_list.EnsureVisible(target_idx)
         elif panel.conversation is not None:
             open_jid = panel.conversation.get("remoteJid", "")
             target_idx = -1

@@ -76,7 +76,10 @@ def _known_country_codes() -> list[str]:
     global _CC_SORTED
     if _CC_SORTED is None:
         try:
-            from countries import COUNTRIES
+            try:
+                from client.countries import COUNTRIES
+            except ImportError:
+                from countries import COUNTRIES
             _CC_SORTED = sorted({code for _, code in COUNTRIES}, key=len, reverse=True)
         except Exception:
             _CC_SORTED = []
