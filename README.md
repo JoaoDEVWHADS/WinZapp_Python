@@ -1,7 +1,7 @@
 # WinZapp (Fork)
 
 > **This repository is a [fork of the original repository by Gabriel Haberkamp](https://github.com/gabrielhhaber/WinZapp_Python).**  
-> All credits for the initial development and project architecture belong to the original author. This fork focuses on stabilization, build automation, accessibility bug fixes, and restructuring the update system.
+> All credits for the initial development and project architecture belong to the original author. This fork focuses on stabilization, build automation, accessibility bug fixes, and restructuring the update system for the WPPConnect Server backend.
 
 ---
 
@@ -10,7 +10,7 @@ It integrates seamlessly with screen readers (such as NVDA, JAWS, Narrator, and 
 
 The application runs in a hybrid manner:
 1. **Graphical Client:** Written in Python 3.13 + wxPython (responsible for the GUI, audio alerts, and screen-reading capabilities).
-2. **Evolution API:** Running locally on Node.js (with an embedded PostgreSQL database), acting as the communication gateway.
+2. **WPPConnect Server:** Running locally on Node.js, acting as the communication gateway.
 
 ---
 
@@ -18,33 +18,30 @@ The application runs in a hybrid manner:
 
 Since the original fork, a deep restructuring has been performed in the following areas:
 
-### 1. CI/CD & Releases Automation (GitHub Actions)
-* **Automated Release Pipeline:** The [release.yml](file:///.github/workflows/release.yml) workflow was created to run on Windows Server. On every `git push` to the `main` branch:
-  * A version based on the UTC date and time is automatically generated (`YYYY.MM.DD.HHMM`, e.g., `2026.06.17.2208`).
-  * The [version.py](file:///client/version.py) file is updated and committed to GitHub while avoiding recursive loops (`[skip ci]`).
-  * The entire build process is executed (configuring MSYS2 for GCC/windres, downloading portable Node.js, compiling Evolution API, and running PyInstaller).
-  * A GitHub Release is created and the ready-to-run executable binaries are published.
-* **Advanced Caches:** Structured caching was implemented for the MSYS2 compiler, `pip` packages (Python), Node.js binaries, and Evolution API `node_modules`, drastically reducing cloud build times.
-* **Concurrency Control:** Configured workflow concurrency to automatically cancel any in-progress runs when a new commit is pushed, preventing duplicate builds and resource conflicts.
+### 1. WPPConnect Server Integration
+* **API Framework Switch:** Restructured the startup launchers (`start.js`), configuration setup (`setup_api.py`), and Python controllers to support a compiled, highly responsive WPPConnect Server backend instead of Evolution API.
+* **Port Uniformity:** Shifted default API ports to `6300` throughout client configurators and launcher scripts to guarantee reliable out-of-the-box local connections.
 
 ### 2. Auto-Updater Redesign (Zero Conflicts)
-* **Direct GitHub Integration:** The dependency on static JSON and TXT files in the repository was removed. The updater now queries the GitHub Releases API directly, fetching the latest version and changelogs natively from the platform.
-* **Resolution of File Locks:** The old updater failed silently because the PostgreSQL database and the Evolution API remained running, locking the files in the installation folder. This was fixed in the update script by introducing dynamic port detection:
-  * The updater identifies and terminates processes bound to ports **6300** (Evolution API) and **5433** (PostgreSQL) using the active connection table (`netstat` + `taskkill`). This ensures that 100% of the locks are released and the update is completed without access denied errors.
+* **Direct GitHub Integration:** Removed the reliance on static files in the repository. The updater now queries the GitHub Releases API directly to pull notes and version info.
+* **Release of File Locks:** Resolved update-time access denied errors by adding netstat port scanners in the updater batch script. The updater dynamically terminates processes bound to port **6300** (WPPConnect Server) and port **5433** (Postgres) and kills remaining node processes before overwriting client files.
 
-### 3. Compiler Migration to PyInstaller
-* The old compilation method (done via Nuitka) was replaced with a robust structure based on **PyInstaller** (`build.py`).
-* Packaging of critical dynamic audio DLLs (BASS DLLs) and screen reader DLLs (`accessible-output2`), which were previously discarded and caused executable crashes, was fixed.
-* The build now bundles everything in a clean folder layout (`_internal/` and sibling directories) and generates the native Windows installer (`WinZappInstaller.exe`) using a stub binary compiled via GCC.
+### 3. @lid JID Resolution & Cache Overhaul
+* **Background Profiles Resolution:** Integrated background queries leveraging the `/contact/fetchProfile` endpoint to map linked secondary device JIDs (`@lid`) to standard phone numbers and contact names, resolving blank list items.
+* **Encrypted JID Cache:** Implemented local `_lid_to_phone` mappings that are encrypted and cached directly in the local database (`messages.dat`) on exit.
+* **Real-time Deduplication:** Merges messages and unread counts from `@lid` chats directly into standard `@s.whatsapp.net` chats on startup and on incoming events.
+* **Placeholder Exclusions:** Prevents placeholder names (e.g. "Contato sem nome") from polluting JID resolution.
+* **Brazilian 9-Digit Interchangeability:** Added support for matching and resolving Brazilian phone number JIDs interchangeably with and without the 9th digit (e.g. 55XX9YYYYYYYY vs 55XXYYYYYYYY).
 
-### 4. Critical App Bug Fixes
-* **Resolution of 401 (Unauthorized) Failures:** The local API boot script ([start.js](file:///client/api/start.js)) and the Python client were adjusted to synchronize and preserve the `AUTHENTICATION_API_KEY` environment variable (using registered license keys without overwriting the local token).
-* **Connection Initialization Crash Fix:** A crash occurring during connection setup (`TypeError: Cannot read properties of undefined (reading 'state')`) was resolved by implementing a defensive patch for the Baileys auth state and enabling PostgreSQL local database persistence by default.
-* **Evolution API WebSocket Activation:** Configured automatic activation of the Socket.IO WebSocket server in the local Evolution API (`WEBSOCKET_ENABLED=true` in `start.js`), preventing `404 Not Found` connection failures during application boot.
-* **Persistent & Highly Detailed Client Logging:** A persistent client-side logging system was added to store all runtime traces under `logs/log.log` at the `DEBUG` level. This includes global stdout redirection, HTTP/HTTPS connection traces, and full Socket.IO packet/payload data (including connection heartbeats) to facilitate debugging.
-* **Compatibility with Linked Devices (LID):** Empty contact names and chats caused by JIDs linked to secondary devices (`@lid`) were fixed.
-* **Dialog Stabilization:** An `AttributeError` in the client when attempting to reconnect or when destroying graphical elements during sudden disconnections was fixed.
-* **Group Filtering:** WhatsApp group JIDs are no longer incorrectly formatted as standard phone numbers.
+### 4. Advanced UX & NVDA Accessibility Safeguards
+* **NVDA COMError & Stuttering Fixes:** Added virtual focus guards (`list_has_focus` and sync status checks) to prevent NVDA/JAWS screen readers from stuttering or entering announcement loops when rebuilding chat lists. Also cleared selection states before deletions to prevent COMErrors.
+* **Debounced Local Writes:** Wrapped the disk writer in a thread-safe `_save_lock` and debounced disk access (`150ms` delay) to prevent `messages.dat` file corruption when receiving bulk message logs.
+* **Silent Disconnection Loop:** Adopted upstream's Socket.IO reconnection loop and silent status bar indicators for network glitches to avoid locking the UI with blocking popup dialogs.
+* **PTT Voice Note Audio Controls:** Added the upstream visual playback controls for playing voice notes directly within the conversation UI.
+* **Group Mentions Routing:** Integrated upstream's `@mention` lists and `mentioned_jids` parameters, routing them to WPPConnect's specialized `/api/:session/send-mentioned` endpoint.
+
+### 5. Persistent & High Verbosity Logging
+* **Full Debug Tracing:** Configured persistent client logging under `logs/log.log` at the `DEBUG` level. This captures HTTP headers, Socket.IO websocket payloads, and thread exceptions.
 
 ---
 
@@ -59,7 +56,8 @@ Since the original fork, a deep restructuring has been performed in the followin
 ```powershell
 # 1. Clone the repository
 git clone https://github.com/JoaoDEVWHADS/WinZapp_Python.git
-cd WinZapp_Python
+# Or for WPPConnect server setup:
+python setup_api.py
 
 # 2. Create and activate the virtual environment
 python -m venv venv
