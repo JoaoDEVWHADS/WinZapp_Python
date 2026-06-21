@@ -411,6 +411,8 @@ class WebSocketClient:
 
     def on_wpp_qrcode(self, data):
         try:
+            if not isinstance(data, dict):
+                return
             qrcode_base64 = data.get("qrCode")
             if qrcode_base64:
                 self.on_qrcode_update({
@@ -425,6 +427,8 @@ class WebSocketClient:
 
     def on_wpp_session_logged(self, data):
         try:
+            if not isinstance(data, dict):
+                return
             status = data.get("status", False)
             if status:
                 try:
@@ -457,6 +461,8 @@ class WebSocketClient:
 
     def on_wpp_status_find(self, data):
         try:
+            if not isinstance(data, dict):
+                return
             status = data.get("status")
             session = data.get("session")
             print(f"[WebSocketClient] Received status-find: {status}, session: {session}")
@@ -482,6 +488,8 @@ class WebSocketClient:
         can unblock its wait loop and immediately show the pairing dialog.
         """
         try:
+            if not isinstance(data, dict):
+                return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
                 self._phone_code_value = str(code)
@@ -492,6 +500,8 @@ class WebSocketClient:
 
     def on_wpp_message_received(self, data):
         try:
+            if not isinstance(data, dict):
+                return
             wpp_msg = data.get("response")
             if not wpp_msg:
                 return
@@ -502,6 +512,8 @@ class WebSocketClient:
 
     def on_wpp_ack(self, data):
         try:
+            if not isinstance(data, dict):
+                return
             status_mapping = {1: 2, 2: 3, 3: 4, 4: 5}
             wpp_ack = data.get("ack")
             msg_id = data.get("id", {}).get("_serialized") if isinstance(data.get("id"), dict) else data.get("id")
