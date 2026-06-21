@@ -257,7 +257,7 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
             p_jid = f"{push_name}@s.whatsapp.net"
         return _resolve_participant_name(p_jid, push_name, main_window) or remote_jid.split("@")[0]
 
-    chat = main_window.chats.get(remote_jid, {})
+    chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
     return (
         main_window._resolve_contact_name(chat)
         or push_name
@@ -282,7 +282,7 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
     push_name  = msg.get("pushName", "")
 
     if remote_jid.endswith("@g.us"):
-        chat = main_window.chats.get(remote_jid, {})
+        chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
         group_name = (
             main_window._resolve_contact_name(chat)
             or chat.get("name", "")
@@ -300,7 +300,7 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
             participant=participant_name, group=group_name
         )
     else:
-        chat = main_window.chats.get(remote_jid, {})
+        chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
         base = (
             main_window._resolve_contact_name(chat)
             or push_name

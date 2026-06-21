@@ -3052,7 +3052,7 @@ class MainWindow(wx.Frame):
             self.save_data(self.chats, self.contacts)
             wx.CallAfter(self._schedule_set_chats)
 
-        # Extract mentions and resolve in background if they are not in _lid_to_phone mapping
+        # Extract mentions and resolve in background if they are not in mapping/contacts
         msg_obj = msg.get("message") or {}
         ext = msg_obj.get("extendedTextMessage") or {}
         mentioned = (
@@ -3063,15 +3063,58 @@ class MainWindow(wx.Frame):
         )
         if isinstance(mentioned, list):
             lids_to_resolve = []
+            phone_jids_to_resolve = []
             for jid in mentioned:
-                if isinstance(jid, str) and jid.endswith("@lid"):
+                if not isinstance(jid, str):
+                    continue
+                if jid.endswith("@lid"):
                     if jid not in getattr(self, "_lid_to_phone", {}):
                         lids_to_resolve.append(jid)
+                elif jid.endswith("@s.whatsapp.net") or jid.endswith("@c.us"):
+                    normalized = self._normalize_jid(jid)
+                    contact = self.contacts.get(normalized)
+                    name = ""
+                    if contact:
+                        name = (contact.get("name") or contact.get("pushName") or "").strip()
+                    if not name or name == "Contato sem nome" or is_phone_like(name):
+                        phone_jids_to_resolve.append(jid)
+
             if lids_to_resolve:
                 logging.info(f"[LID Mapping] Found unresolved mentioned LIDs in message: {lids_to_resolve}")
                 def resolve_in_bg():
                     self.resolve_lid_jids_via_api(lids_to_resolve)
                 threading.Thread(target=resolve_in_bg, daemon=True).start()
+
+            if phone_jids_to_resolve:
+                logging.info(f"[Contact Resolution] Found unresolved mentioned phone JIDs in message: {phone_jids_to_resolve}")
+                def resolve_phones_in_bg():
+                    updated = False
+                    for p_jid in phone_jids_to_resolve:
+                        try:
+                            res = self.get_contact_profile(p_jid)
+                            if res:
+                                res_data = res.get("response", {})
+                                if isinstance(res_data, dict):
+                                    name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
+                                    if name and name != "Contato sem nome" and not is_phone_like(name):
+                                        normalized = self._normalize_jid(p_jid)
+                                        if normalized not in self.contacts:
+                                            self.contacts[normalized] = {}
+                                        self.contacts[normalized]["name"] = name
+                                        self.contacts[normalized]["pushName"] = name
+
+                                        if not hasattr(self, "_presence_pushname_map"):
+                                            self._presence_pushname_map = {}
+                                        self._presence_pushname_map[normalized] = name
+                                        updated = True
+                        except Exception as e:
+                            logging.error(f"[Contact Resolution] Error resolving {p_jid}: {e}")
+                    if updated:
+                        self.save_data(self.chats, self.contacts)
+                        wx.CallAfter(self._schedule_set_chats)
+                        if hasattr(self, "conversations_panel"):
+                            wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+                threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
 
     def _find_alt_jid_from_messages(self, chat):
         """
