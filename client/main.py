@@ -5,6 +5,7 @@ import shutil
 import socket as _socket
 import subprocess
 import threading
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import base64
@@ -25,6 +26,7 @@ from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
 from status_panel import StatusPanel
+from version import __version__
 import json
 from traceback import format_exc, format_exception
 import pyperclip
@@ -417,6 +419,11 @@ class MainWindow(wx.Frame):
         # API returns the real message ID, so it is always populated before the
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
+        self._own_sent_ids_lock = threading.Lock()
+        # Serialises concurrent writes to messages.dat (one lock, two helpers below).
+        self._save_lock = threading.Lock()
+        self._save_timer: "threading.Timer | None" = None
+        self._save_timer_lock = threading.Lock()
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
         self._tray_status = ""
 
@@ -562,6 +569,7 @@ class MainWindow(wx.Frame):
         self._ID_MARK_ALL_READ = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
+        self._ID_ABOUT         = wx.NewIdRef()
 
         menubar = wx.MenuBar()
 
@@ -581,12 +589,15 @@ class MainWindow(wx.Frame):
         )
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_FORCE_UPDATE, self.i18n.t("menu_force_update"))
+        help_menu.AppendSeparator()
+        help_menu.Append(self._ID_ABOUT, self.i18n.t("menu_about"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
 
         self.SetMenuBar(menubar)
         self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
+        self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _refresh_menubar(self):
         """Retranslate the menu bar labels after a language change."""
@@ -604,6 +615,45 @@ class MainWindow(wx.Frame):
         mb.GetMenu(1).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
             self.i18n.t("menu_force_update")
         )
+        mb.GetMenu(1).FindItemById(self._ID_ABOUT).SetItemLabel(
+            self.i18n.t("menu_about")
+        )
+
+    def _on_about(self, event=None):
+        """Show application authorship, version and license information."""
+        info = "\n".join(
+            textwrap.fill(line, width=100, break_long_words=False, break_on_hyphens=False)
+            for line in (
+                "Desenvolvido originalmente por: Gabriel Haberkamp.",
+                "",
+                "Agradecimentos especiais:",
+                "Wendrill Aksenow Brandão: pela tradução do programa WinZapp para Português de Portugal.",
+                "Fabiano Ferreira, Tadeu Junior, Wagner Soares da Silva, Ruan Matews Rebelo Santos e todos da comunidade que ajudaram, seja testando, implementando melhorias ou dando sugestões / relatórios de bugs.",
+                "",
+                f"Versão atual: {__version__}.",
+                "Licenciado sob a licença GNU Lesser General Public License V3 (GPLV3).",
+            )
+        )
+
+        dialog = wx.Dialog(
+            self,
+            title=self.i18n.t("about_dialog_title"),
+            size=(620, 260),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        panel = wx.Panel(dialog)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        info_ctrl = wx.TextCtrl(
+            panel,
+            value=info,
+            style=wx.TE_MULTILINE | wx.TE_READONLY,
+        )
+        sizer.Add(info_ctrl, 1, wx.EXPAND | wx.ALL, 10)
+        close_btn = wx.Button(panel, id=wx.ID_OK, label=self.i18n.t("close"))
+        sizer.Add(close_btn, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        panel.SetSizer(sizer)
+        dialog.ShowModal()
+        dialog.Destroy()
 
     def _on_mark_all_read(self, event=None):
         """Mark every conversation with unread messages as read."""
@@ -668,6 +718,16 @@ class MainWindow(wx.Frame):
         if self._tray_status:
             title += f" | {self._tray_status}"
         self.SetTitle(title)
+
+    def _allow_ui_focus_changes(self) -> bool:
+        """Return True only when WinZapp is already visible and active."""
+        return (
+            not self.background_mode
+            and not getattr(self, "_window_hidden", False)
+            and self.IsShown()
+            and not self.IsIconized()
+            and self.IsActive()
+        )
 
     def toggle_offline_mode(self):
         """
@@ -980,14 +1040,16 @@ class MainWindow(wx.Frame):
                 and _cp.conversation is not None
                 and _cp.conversation.get("remoteJid") == remote_jid
             )
-            if not _open:
+            _visible = (
+                not getattr(self, "_window_hidden", False)
+                and self.IsShown()
+                and not self.IsIconized()
+            )
+            if not (_open and _visible):
                 chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
 
-        # ── Persist in background (encrypting 19 MB on the UI thread causes
-        #    noticeable freezes when messages arrive rapidly) ──────────────────
-        threading.Thread(
-            target=self.save_data, args=(self.chats, self.contacts), daemon=True
-        ).start()
+        # ── Persist in background — debounced so rapid bursts produce one write ─
+        self._schedule_save()
 
         # ── Update conversation list UI (debounced to avoid rapid rebuilds) ───
         self._schedule_set_chats()
@@ -1022,7 +1084,12 @@ class MainWindow(wx.Frame):
         body  = format_notification_body(msg, self.i18n)
 
         # Check if the WinZapp window is currently active/focused
-        window_active = self.IsShown() and not self.IsIconized() and self.IsActive()
+        window_active = (
+            not getattr(self, "_window_hidden", False)
+            and self.IsShown()
+            and not self.IsIconized()
+            and self.IsActive()
+        )
 
         if window_active:
             # Determine if the incoming message is for the currently-open conversation
@@ -1843,6 +1910,21 @@ class MainWindow(wx.Frame):
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
 
+    def _schedule_save_settings(self):
+        """Debounce save_settings: coalesce rapid calls into one write after 2 s.
+
+        Used when background events (e.g. presence.update bursts) update settings
+        frequently — avoids hammering the disk on every event.
+        """
+        with self._save_timer_lock:
+            existing = getattr(self, "_settings_save_timer", None)
+            if existing is not None:
+                existing.cancel()
+            t = threading.Timer(2.0, self.save_settings)
+            t.daemon = True
+            self._settings_save_timer = t
+            t.start()
+
     def load_sounds(self):
         self.startup_sound = Sound(self.sound_system, "startup.ogg")
         self.error_sound = Sound(self.sound_system, "error.ogg")
@@ -2477,20 +2559,50 @@ class MainWindow(wx.Frame):
         return chats
 
     def save_data(self, chats, contacts):
-        #Save back to file
-        messages_file = data_path("messages.dat")
-        try:
-            lid_to_phone = getattr(self, "_lid_to_phone", {})
-            encrypted_data = encrypt_json({
-                "chats": chats, 
-                "contacts": contacts,
-                "lid_to_phone": lid_to_phone
-            }, self.key)
-            with open(messages_file, "wb") as f:
-                f.write(encrypted_data)
-        except Exception as e:
-            self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('data_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
+        """Write encrypted chat+contact data to disk.
+
+        Protected by _save_lock so concurrent callers (background threads)
+        never write the same file at the same time, which would corrupt it.
+        """
+        with self._save_lock:
+            messages_file = data_path("messages.dat")
+            try:
+                lid_to_phone = getattr(self, "_lid_to_phone", {})
+                encrypted_data = encrypt_json({
+                    "chats": chats,
+                    "contacts": contacts,
+                    "lid_to_phone": lid_to_phone
+                }, self.key)
+                with open(messages_file, "wb") as f:
+                    f.write(encrypted_data)
+            except Exception:
+                self.error_sound.play()
+                wx.CallAfter(
+                    wx.MessageBox,
+                    f"{self.i18n.t('data_save_failed')} {format_exc()}",
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+
+    def _do_save(self):
+        """Timer callback: persist current self.chats / self.contacts."""
+        self.save_data(self.chats, self.contacts)
+
+    def _schedule_save(self):
+        """Debounce save_data: coalesce rapid calls into one write after 150 ms.
+
+        Replaces bare ``threading.Thread(target=self.save_data, ...).start()``
+        calls so that a burst of incoming messages (e.g. 50 messages arriving
+        during a group sync) triggers exactly ONE disk write instead of 50
+        concurrent threads all racing to overwrite messages.dat.
+        """
+        with self._save_timer_lock:
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+            t = threading.Timer(0.15, self._do_save)
+            t.daemon = True
+            self._save_timer = t
+            t.start()
 
     def _load_local_lid_cache(self):
         messages_file = data_path("messages.dat")
@@ -2813,6 +2925,13 @@ class MainWindow(wx.Frame):
         # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
         if not hasattr(self, "_presence_timers"):
             self._presence_timers = {}
+        # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned from
+        # presence.update events.  Keyed by phone JID so @lid chats can resolve via
+        # _lid_to_phone lookup.  Loaded from settings and saved whenever updated.
+        if not hasattr(self, "_presence_pushname_map"):
+            self._presence_pushname_map = dict(
+                self.settings.get("presence_pushname_map", {})
+            )
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
@@ -2901,6 +3020,7 @@ class MainWindow(wx.Frame):
 
         Tries all three JID formats (@s.whatsapp.net, @c.us, @lid) and returns
         the first valid pushName found.  Groups are skipped (always return None).
+        Falls back to the presence-learned pushName map for @lid contacts.
         """
         remoteJid = chat.get("remoteJid", "")
         if not remoteJid or remoteJid.endswith("@g.us"):
@@ -2922,6 +3042,8 @@ class MainWindow(wx.Frame):
                             continue
                         return val
             return None
+
+        ppm = getattr(self, "_presence_pushname_map", {})
 
         def _get_contact_tolerant(jid):
             if not jid:
@@ -2947,53 +3069,64 @@ class MainWindow(wx.Frame):
                         return self.contacts.get(alt)
             return None
 
-        # 1. Direct lookup by chat's own remoteJid
-        contact = _get_contact_tolerant(remoteJid)
-        if contact:
-            n = _name_from_contact(contact)
-            if n:
-                return n
+        def _try(jid: str) -> str:
+            if not jid:
+                return ""
+            c = _get_contact_tolerant(jid)
+            if c:
+                return _name_from_contact(c) or ""
+            return ""
 
-        # 2. @lid chat — bridge to phone-number JID via message keys
-        if remoteJid.endswith("@lid"):
-            alt_jid = self._find_alt_jid_from_messages(chat)
-            if alt_jid:
-                contact = _get_contact_tolerant(alt_jid)
-                if contact:
-                    n = _name_from_contact(contact)
-                    if n:
-                        return n
+        def _ppm(jid: str) -> str:
+            val = (ppm.get(jid) or "").strip()
+            return val if val and not val.isdigit() and not is_phone_like(val) else ""
 
-        # 3. Try the global @lid → @s.whatsapp.net cache (covers JIDs seen in
-        #    other chats' message keys, e.g. group participants)
-        phone_jid = getattr(self, "_lid_to_phone", {}).get(remoteJid)
-        if phone_jid:
-            contact = _get_contact_tolerant(phone_jid)
-            if contact:
-                n = _name_from_contact(contact)
-                if n:
-                    return n
-
-        # 3b. Try the global @s.whatsapp.net → @lid cache
+        local = remoteJid.rsplit("@", 1)[0]
+        resolved = ""
         if remoteJid.endswith("@s.whatsapp.net"):
-            lid_jid = getattr(self, "_phone_to_lid", {}).get(remoteJid)
-            if lid_jid:
-                contact = _get_contact_tolerant(lid_jid)
-                if contact:
-                    n = _name_from_contact(contact)
-                    if n:
-                        return n
+            resolved = (
+                _try(remoteJid)
+                or _try(local + "@c.us")
+                or _try(getattr(self, "_phone_to_lid", {}).get(remoteJid, ""))
+                or _ppm(remoteJid)
+            )
+        elif remoteJid.endswith("@c.us"):
+            phone_net = local + "@s.whatsapp.net"
+            resolved = (
+                _try(remoteJid)
+                or _try(phone_net)
+                or _try(getattr(self, "_phone_to_lid", {}).get(phone_net, ""))
+                or _ppm(remoteJid)
+                or _ppm(phone_net)
+            )
+        elif remoteJid.endswith("@lid"):
+            phone = (
+                getattr(self, "_lid_to_phone", {}).get(remoteJid, "")
+                or self._find_alt_jid_from_messages(chat)
+                or ""
+            )
+            resolved = (
+                _try(remoteJid)
+                or (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
+                or _ppm(remoteJid)
+                or (phone and _ppm(phone))
+            )
+        else:
+            resolved = _try(remoteJid)
 
-        # 4. Fall back to the chat's own 'name' field, which Baileys populates
-        #    from the address-book when the contact is saved.  This is a
-        #    reliable source when the contacts dict has a stale pushName (e.g.
-        #    the contact was first seen as a group member and stored with just
-        #    a phone number before being added to the address book).
+        if resolved:
+            return resolved
+
+        # Fall back to the chat's own 'name' field
         chat_name = chat.get("name", "")
         if chat_name and isinstance(chat_name, str):
             chat_name = chat_name.strip()
             if chat_name and not chat_name.isdigit() and not is_phone_like(chat_name):
-                return chat_name
+                chat_name_lower = chat_name.lower()
+                if "sem nome" in chat_name_lower or "unnamed" in chat_name_lower or chat_name_lower in ("no name", "unknown", "desconhecido"):
+                    pass
+                else:
+                    return chat_name
 
         return None
 
@@ -3291,30 +3424,63 @@ class MainWindow(wx.Frame):
                 quoted_id = f"{quoted_id}_{participant}"
         return quoted_id
 
-    def send_text_message(self, remote_jid, text, quoted=None):
+    def _canonical_mention_jids(self, mentioned_jids):
+        """Return mention JIDs in the phone-number format Baileys/WPPConnect can tag."""
+        out = []
+        seen = set()
+        lid_to_phone = getattr(self, "_lid_to_phone", {})
+        for raw_jid in mentioned_jids or []:
+            jid = self._normalize_jid(str(raw_jid or ""))
+            if not jid:
+                continue
+            if jid.endswith("@lid"):
+                jid = lid_to_phone.get(jid, jid)
+            if jid not in seen:
+                seen.add(jid)
+                out.append(jid)
+        return out
+
+    def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
         if remote_jid.endswith("@lid"):
             resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
             if resolved:
                 remote_jid = resolved
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
-        payload = {
-            "phone": remote_jid,
-            "message": text,
-            "isGroup": remote_jid.endswith("@g.us")
-        }
-        if quoted:
-            quoted_id = self._serialize_quoted_id(quoted)
-            if quoted_id:
-                payload["options"] = {
-                    "quotedMsg": quoted_id
-                }
+
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        if quoted and "options" in payload:
-            print(f"[send_text_message] sending quoted reply to {remote_jid}, quoted key.id={payload['options'].get('quotedMsg')}")
+
+        if mentioned_jids:
+            url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-mentioned"
+            phone_net = remote_jid
+            if phone_net.endswith("@s.whatsapp.net"):
+                phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
+            
+            mentioned = self._canonical_mention_jids(mentioned_jids)
+            mentioned_clean = [m.replace("@s.whatsapp.net", "@c.us") if m.endswith("@s.whatsapp.net") else m for m in mentioned]
+            
+            payload = {
+                "phone": [phone_net],
+                "message": text,
+                "mentioned": mentioned_clean
+            }
+        else:
+            url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
+            payload = {
+                "phone": remote_jid,
+                "message": text,
+                "isGroup": remote_jid.endswith("@g.us")
+            }
+            if quoted:
+                quoted_id = self._serialize_quoted_id(quoted)
+                if quoted_id:
+                    payload["options"] = {
+                        "quotedMsg": quoted_id
+                    }
+            if quoted and "options" in payload:
+                print(f"[send_text_message] sending quoted reply to {remote_jid}, quoted key.id={payload['options'].get('quotedMsg')}")
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
@@ -3448,13 +3614,22 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
 
-    def _on_message_failed(self, local_id: str):
+    def _on_message_failed(self, local_id: str, error: str = "", show_dialog: bool = False):
         """
         Called on the main thread after a queued message exhausts all retries.
-        Marks the virtual message as failed in the UI.
+        Marks the virtual message as failed in the UI and, for media attachments,
+        shows an error dialog so the user knows the file was not delivered.
         """
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_failed(local_id)
+        if show_dialog:
+            self.error_sound.play()
+            detail = error[:300] if error else self.i18n.t("error").format(app_name=self.app_name)
+            wx.MessageBox(
+                self.i18n.t("media_send_failed").format(error=detail),
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_ERROR,
+            )
 
     def on_message_status_update(self, update: dict):
         """
@@ -3502,6 +3677,8 @@ class MainWindow(wx.Frame):
                         return self.contacts.get(alt)
             return None
 
+        ppm = getattr(self, "_presence_pushname_map", {})
+
         # Build candidate list covering all three JID formats for the same person.
         candidates = [jid_norm]
         local = jid_norm.rsplit("@", 1)[0]
@@ -3529,6 +3706,11 @@ class MainWindow(wx.Frame):
                 name = (chat.get("name") or chat.get("pushName") or "").strip()
                 if name and not name.isdigit():
                     return name
+        # Fallback: check the presence-learned pushName map
+        for cjid in candidates:
+            pname = (ppm.get(cjid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
         if not jid_norm.endswith(("@g.us", "@lid")):
             return format_number(jid_norm)
         return local
@@ -3623,12 +3805,30 @@ class MainWindow(wx.Frame):
 
         presence_changed = False
 
+        _ppm_updated = False
         for participant_jid, data in presences.items():
             if not isinstance(data, dict):
                 continue
             canonical = self._normalize_jid(participant_jid)
             if canonical.endswith("@lid"):
                 canonical = self._lid_to_phone.get(canonical, canonical)
+
+            # ── Persist pushName learned from presence so @lid contacts show
+            # the correct name even before they appear in _lid_to_phone. ──────
+            if canonical.endswith("@s.whatsapp.net"):
+                contact_entry = self.contacts.get(canonical)
+                if contact_entry:
+                    push = (contact_entry.get("pushName") or "").strip()
+                    if push and not push.isdigit() and not is_phone_like(push):
+                        if self._presence_pushname_map.get(canonical) != push:
+                            self._presence_pushname_map[canonical] = push
+                            _ppm_updated = True
+                        # Also index the corresponding @lid if known, so callers
+                        # can look up by lid_jid directly without bridging.
+                        lid = getattr(self, "_phone_to_lid", {}).get(canonical, "")
+                        if lid and self._presence_pushname_map.get(lid) != push:
+                            self._presence_pushname_map[lid] = push
+                            _ppm_updated = True
 
             old_lkp = self._presence_cache.get(canonical, {}).get("lastKnownPresence", "")
             new_lkp = data.get("lastKnownPresence", "unavailable")
@@ -3688,6 +3888,11 @@ class MainWindow(wx.Frame):
                     except Exception:
                         pass
 
+        # Persist the updated pushName map to settings (debounced via _schedule_save).
+        if _ppm_updated:
+            self.settings["presence_pushname_map"] = dict(self._presence_pushname_map)
+            self._schedule_save_settings()
+
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
         if presence_changed:
@@ -3709,11 +3914,8 @@ class MainWindow(wx.Frame):
         if old_count == unread_count:
             return
         chat["unreadCount"] = unread_count
-        # Persist immediately so the updated count survives a crash or a
-        # connection drop before the next full save_data() call.
-        threading.Thread(
-            target=self.save_data, args=(self.chats, self.contacts), daemon=True
-        ).start()
+        # Persist — debounced so rapid chats.update bursts produce one write.
+        self._schedule_save()
         self._schedule_set_chats()
 
     def on_chat_archive_update(self, jid: str, archived: bool):
@@ -3906,11 +4108,7 @@ class MainWindow(wx.Frame):
 
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
-        # Persist immediately so the 0 survives an app restart even if the user
-        # closes the app before the next automatic save_data() call.
-        threading.Thread(
-            target=self.save_data, args=(self.chats, self.contacts), daemon=True
-        ).start()
+        self._schedule_save()
         wx.CallAfter(self.set_chats)
 
         if unread == 0:
@@ -3970,7 +4168,7 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(remote_jid)
         if chat is not None:
             chat["unreadCount"] = 1
-            self.save_data(self.chats, self.contacts)
+            self._schedule_save()
             wx.CallAfter(self.set_chats)
 
     # ── Evolution API — profile / group info ─────────────────────────────────
@@ -4319,7 +4517,7 @@ class MainWindow(wx.Frame):
             lst.append(jid)
         self.save_settings()
         self.chats.pop(jid, None)
-        self.save_data(self.chats, self.contacts)
+        self._schedule_save()
         wx.CallAfter(self.set_chats)
 
     def clear_chat_messages_local(self, jid: str):
@@ -4327,7 +4525,7 @@ class MainWindow(wx.Frame):
         if chat:
             chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
-            self.save_data(self.chats, self.contacts)
+            self._schedule_save()
             self.save_settings()
 
     # ── Pin ───────────────────────────────────────────────────────────────────
@@ -4454,9 +4652,18 @@ class MainWindow(wx.Frame):
                     return r.json().get("key", {}).get("id") or True
                 except Exception:
                     return True
-            return None
-        except Exception:
-            return None
+            err = f"HTTP {r.status_code}"
+            try:
+                body = r.json()
+                msg = (body.get("message") or body.get("error") or "")
+                if msg:
+                    err = f"{err}: {msg}"
+            except Exception:
+                if r.text:
+                    err = f"{err}: {r.text[:200]}"
+            return {"ok": False, "error": err, "retry": False}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200], "retry": False}
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
@@ -4565,6 +4772,8 @@ class MainWindow(wx.Frame):
                         return self.contacts.get(alt)
             return None
 
+        ppm = getattr(self, "_presence_pushname_map", {})
+        phone_jid = ""
         contact = _get_contact_tolerant(jid)
         if not contact and jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
@@ -4574,8 +4783,14 @@ class MainWindow(wx.Frame):
             name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
                 return name
+        # Fallback: presence-learned pushName map
+        for lookup_jid in ([jid, phone_jid] if phone_jid else [jid]):
+            pname = (ppm.get(lookup_jid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
         if jid.endswith("@lid"):
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
+            if not phone_jid:
+                phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
             return format_number(phone_jid) if phone_jid else self.i18n.t("unnamed_participant")
         if jid.endswith("@g.us"):
             return self.i18n.t("unknown_group")
@@ -4807,7 +5022,6 @@ class MainWindow(wx.Frame):
         displayed_names: list = []
 
         lst = self.conversations_panel.conversations_list
-
         # Save currently focused chat JID before clearing the list to preserve user focus
         focused_idx = lst.GetFocusedItem()
         focused_jid = None
@@ -4831,6 +5045,8 @@ class MainWindow(wx.Frame):
                 except Exception:
                     pass
 
+        focus_allowed = self._allow_ui_focus_changes()
+        _lst_had_focus = (wx.Window.FindFocus() is lst)
         lst.Freeze()
         try:
             lst.DeleteAllItems()
@@ -4888,17 +5104,12 @@ class MainWindow(wx.Frame):
                     target_idx = i
                     break
 
-        list_has_focus = (wx.Window.FindFocus() == panel.conversations_list)
-
-        # Restore selection / focus after DeleteAllItems() clears everything.
-        # GATED: If the list does NOT have keyboard focus and no conversation is open,
-        # we completely avoid calling .Select() to prevent forcing virtual focus events on NVDA.
         if target_idx != -1:
-            if list_has_focus:
+            if _lst_had_focus:
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
             # Only select if we already have focus or we have an open conversation we are tracking
-            if list_has_focus or panel.conversation is not None:
+            if _lst_had_focus or panel.conversation is not None:
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
@@ -4906,20 +5117,25 @@ class MainWindow(wx.Frame):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass
         elif panel.conversation is None and displayed_chats:
-            # Bypassed entirely if the list has no focus to prevent focus theft when changing filters
-            if list_has_focus:
-                last_jid    = getattr(panel, "_last_open_jid", "")
-                target_idx  = 0
-                if last_jid:
-                    for i, chat in enumerate(displayed_chats):
-                        if chat.get("remoteJid") == last_jid:
-                            target_idx = i
-                            break
+            last_jid    = getattr(panel, "_last_open_jid", "")
+            target_idx  = 0
+            if last_jid:
+                for i, chat in enumerate(displayed_chats):
+                    if chat.get("remoteJid") == last_jid:
+                        target_idx = i
+                        break
+            if focus_allowed:
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
+                # Restore keyboard focus to the list when no conversation is open.
+                search = getattr(panel, "search_field", None)
+                focused_now = wx.Window.FindFocus()
+                if _lst_had_focus or focused_now is None or focused_now is lst:
+                    if focused_now is not search:
+                        wx.CallAfter(lst.SetFocus)
         elif panel.conversation is not None:
             open_jid = panel.conversation.get("remoteJid", "")
             target_idx = -1
@@ -4928,22 +5144,18 @@ class MainWindow(wx.Frame):
                     target_idx = i
                     break
             if target_idx != -1:
-                if list_has_focus:
+                if _lst_had_focus:
                     if panel.conversations_list.GetFocusedItem() != target_idx:
                         panel.conversations_list.Focus(target_idx)
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
 
-            # A conversation is already open.  Only re-anchor focus to the
-            # message field if the app has completely lost focus (FindFocus()
-            # returns None) AND WinZapp is the active foreground window.
-            # Skipping the IsActive() guard would cause wx.SetFocus() to run
-            # while the user has another app in front, stealing focus.
-            focus_ctrl = getattr(panel, "message_field", None)
-            if focus_ctrl and focus_ctrl.IsShownOnScreen():
-                if wx.Window.FindFocus() is None and self.IsActive():
-                    wx.CallAfter(focus_ctrl.SetFocus)
+            if focus_allowed:
+                focus_ctrl = getattr(panel, "message_field", None)
+                if focus_ctrl and focus_ctrl.IsShownOnScreen():
+                    if wx.Window.FindFocus() is None and self.IsActive():
+                        wx.CallAfter(focus_ctrl.SetFocus)
 
         # Also refresh the archived panel if present
         if hasattr(self, "archived_conversations_panel"):

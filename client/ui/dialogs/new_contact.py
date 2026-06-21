@@ -13,8 +13,9 @@ import wx
 class NewContactDialog(wx.Dialog):
     """Dialog for adding a new WhatsApp contact."""
 
-    def __init__(self, main_window, parent=None):
+    def __init__(self, main_window, parent=None, prefill_phone: str = ""):
         self._mw = main_window
+        self._prefill_phone = prefill_phone
         i18n = main_window.i18n
         super().__init__(
             parent or main_window,
@@ -69,6 +70,9 @@ class NewContactDialog(wx.Dialog):
         self.SetSizer(outer)
 
         ok_btn.Bind(wx.EVT_BUTTON, self._on_add)
+
+        if self._prefill_phone:
+            self._phone_field.SetValue(self._prefill_phone)
         self._name_field.SetFocus()
 
     # ── Add contact ───────────────────────────────────────────────────────────
@@ -111,7 +115,7 @@ class NewContactDialog(wx.Dialog):
         }
 
         # Persist to disk so the contact survives restarts
-        self._mw.save_data(self._mw.chats, self._mw.contacts)
+        self._mw._schedule_save()
 
         self.result_jid  = jid
         self.result_name = full_name

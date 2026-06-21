@@ -5,6 +5,7 @@ from app_paths import resource_path
 # The dict order determines the order shown in the Settings combobox.
 LANGUAGE_NAMES = {
     "pt-BR": "Português (Brasil)",
+    "pt-PT": "Português (Portugal)",
     "en-US": "English (United States)",
     "es-ES": "Español (España)",
 }

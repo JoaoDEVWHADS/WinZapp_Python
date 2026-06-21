@@ -15,6 +15,7 @@ import wx
 # Maps human-readable name → language code (same order as LANGUAGE_NAMES in core/i18n.py)
 _LANGUAGE_CHOICES = [
     ("Português (Brasil)",        "pt-BR"),
+    ("Português (Portugal)",      "pt-PT"),
     ("English (United States)",   "en-US"),
     ("Español (España)",          "es-ES"),
 ]

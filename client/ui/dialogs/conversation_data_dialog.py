@@ -112,6 +112,13 @@ class ConversationDataDialog(wx.Dialog):
         )
         outer.Add(self._info_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        # "Add contact" — only shown when this JID is not already in contacts.
+        jid = self._jid
+        if not jid.endswith("@g.us") and jid not in self._mw.contacts:
+            add_contact_btn = wx.Button(panel, label=self._i18n.t("add_contact"))
+            add_contact_btn.Bind(wx.EVT_BUTTON, self._on_add_contact)
+            outer.Add(add_contact_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         add_to_group_btn = wx.Button(panel, label=self._i18n.t("select_group"))
         add_to_group_btn.Bind(wx.EVT_BUTTON, self._on_add_to_group)
         outer.Add(add_to_group_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
@@ -310,6 +317,16 @@ class ConversationDataDialog(wx.Dialog):
         dlg = AddMemberDialog(self._mw, self._jid)
         dlg.ShowModal()
         dlg.Destroy()
+
+    def _on_add_contact(self, event):
+        """Open NewContactDialog with the phone pre-filled from this chat's JID."""
+        from ui.dialogs.new_contact import NewContactDialog
+        dlg = NewContactDialog(self._mw, self, prefill_phone=format_number(self._jid))
+        result = dlg.ShowModal()
+        dlg.Destroy()
+        if result == wx.ID_OK:
+            # Refresh the info panel so the new name is visible
+            threading.Thread(target=self._fetch_data, daemon=True).start()
 
     def _on_add_to_group(self, event):
         """Open SelectGroupDialog to pick a group to add this contact to."""

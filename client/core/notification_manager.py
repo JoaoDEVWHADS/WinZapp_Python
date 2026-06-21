@@ -23,6 +23,7 @@ Design decisions:
 
 import os
 import queue
+import re as _re
 import sys
 import threading
 import uuid
@@ -59,6 +60,86 @@ def _notif_filesize(size_bytes, decimal_separator=".") -> str:
         return f"{size / 1024:.1f}".replace(".", sep) + " KB"
     else:
         return f"{size / (1024 ** 2):.2f}".replace(".", sep) + " MB"
+
+
+def _extract_context_info(msg: dict) -> dict:
+    """Return the first non-empty contextInfo found anywhere in the message."""
+    ctx = msg.get("contextInfo")
+    if ctx and isinstance(ctx, dict):
+        return ctx
+    msg_obj = msg.get("message") or {}
+    for sub_key in ("extendedTextMessage", "audioMessage", "imageMessage",
+                    "videoMessage", "documentMessage", "stickerMessage",
+                    "contactMessage", "locationMessage"):
+        sub = msg_obj.get(sub_key)
+        if sub and isinstance(sub, dict):
+            ctx = sub.get("contextInfo")
+            if ctx and isinstance(ctx, dict):
+                return ctx
+    return {}
+
+
+def _extract_msg_text(msg: dict) -> str:
+    """Return the plain text body of a message (used for @all pattern detection)."""
+    msg_obj = msg.get("message") or {}
+    text = msg_obj.get("conversation") or ""
+    if not text:
+        text = (msg_obj.get("extendedTextMessage") or {}).get("text") or ""
+    return text
+
+
+def _build_notif_prefix(msg: dict, main_window, i18n) -> str:
+    """
+    Return the appropriate context prefix for a toast notification title:
+      notif_replied_to_you  — this message quotes one of the user's own messages
+      notif_mentioned_you   — the user is directly @mentioned
+      notif_mentioned_all   — @all / @todos / @everyone was used
+      ''                    — no special context
+    Only the first matching condition is returned (reply takes priority).
+    """
+    ctx = _extract_context_info(msg)
+    if not ctx:
+        return ""
+
+    my_jid   = getattr(main_window, "my_jid", "")
+    my_phone = my_jid.split("@")[0] if my_jid else ""
+
+    # ── Reply to me? ──────────────────────────────────────────────────────────
+    stanza_id = ctx.get("stanzaId", "")
+    if stanza_id:
+        # participant = JID of whoever sent the quoted message
+        participant = (ctx.get("participant") or ctx.get("quotedParticipant") or "")
+        remote_jid  = msg.get("key", {}).get("remoteJid", "")
+        is_group    = remote_jid.endswith("@g.us")
+
+        if my_jid:
+            p_phone = participant.split("@")[0] if participant else ""
+            replied_to_me = (
+                participant == my_jid               # exact JID match
+                or (p_phone and p_phone == my_phone)  # phone prefix match
+                # In a private chat, participant may be absent — any reply comes from them to us
+                or (not participant and not is_group)
+            )
+            if replied_to_me:
+                return i18n.t("notif_replied_to_you")
+
+    # ── Mentions ──────────────────────────────────────────────────────────────
+    mentioned = ctx.get("mentionedJid") or []
+    if not mentioned:
+        return ""
+
+    # @all / @todos / @everyone — check text for the keyword
+    text = _extract_msg_text(msg)
+    if _re.search(r"@(all|todos|everyone)\b", text, _re.IGNORECASE):
+        return i18n.t("notif_mentioned_all")
+
+    # Direct @mention of the user
+    if my_jid and my_phone:
+        for m_jid in mentioned:
+            if m_jid == my_jid or m_jid.split("@")[0] == my_phone:
+                return i18n.t("notif_mentioned_you")
+
+    return ""
 
 
 def format_notification_body(msg: dict, i18n) -> str:
@@ -186,10 +267,13 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
 
 def format_notification_title(msg: dict, main_window, i18n) -> str:
     """
-    Build the notification title.
+    Build the notification title for a toast notification.
 
-    Private chat  → sender name
-    Group message → 'Participant em GroupName'
+    Private chat  → [prefix] sender name
+    Group message → [prefix] 'Participant em GroupName'
+
+    prefix is one of notif_replied_to_you / notif_mentioned_you /
+    notif_mentioned_all, or absent when none of those conditions apply.
     """
     from core.utils import format_number
 
@@ -198,7 +282,6 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
     push_name  = msg.get("pushName", "")
 
     if remote_jid.endswith("@g.us"):
-        # Resolve group name
         chat = main_window.chats.get(remote_jid, {})
         group_name = (
             main_window._resolve_contact_name(chat)
@@ -213,19 +296,19 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         participant_name = _resolve_participant_name(p_jid, push_name, main_window)
         if not participant_name:
             participant_name = remote_jid.split("@")[0]
-
-        return i18n.t("notif_in_group").format(
+        base = i18n.t("notif_in_group").format(
             participant=participant_name, group=group_name
         )
+    else:
+        chat = main_window.chats.get(remote_jid, {})
+        base = (
+            main_window._resolve_contact_name(chat)
+            or push_name
+            or format_number(remote_jid)
+        )
 
-    # Private chat — use contact name or pushName
-    chat = main_window.chats.get(remote_jid, {})
-    name = (
-        main_window._resolve_contact_name(chat)
-        or push_name
-        or format_number(remote_jid)
-    )
-    return name
+    prefix = _build_notif_prefix(msg, main_window, i18n)
+    return f"{prefix} {base}" if prefix else base
 
 
 class NotificationManager:
@@ -402,17 +485,12 @@ class NotificationManager:
         self.main_window.message_queue.enqueue(pm)
 
     def _do_open(self, jid: str):
-        import threading
         self.main_window.restore_window()
+        # navigate_to_conversation captures unreadCount BEFORE starting its own
+        # mark-as-read thread, so we must not start a competing thread here —
+        # that race condition would zero unreadCount before the snapshot is taken
+        # and suppress the unread separator.
         wx.CallAfter(self.main_window.navigate_to_conversation_jid, jid)
-        # Mark conversation as read in a background thread (navigate already does
-        # this, but we repeat it here so a standalone notification click also clears
-        # the unread count even if the conversation panel doesn't re-open).
-        threading.Thread(
-            target=self.main_window.mark_conversation_as_read,
-            args=(jid,),
-            daemon=True,
-        ).start()
 
     def refresh_language(self):
         self.i18n.get_language()

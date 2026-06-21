@@ -144,6 +144,26 @@ class ConversationsPanel(wx.Panel):
         # ── Link extraction state ────────────────────────────────────────────
         # URLs found in the currently focused message
         self._current_links: list = []
+        # @mention (display_name, jid) pairs for the currently focused message
+        self._current_mentions: list = []
+
+        # ── @mention input state ─────────────────────────────────────────────
+        # Whether a mention suggestion dropdown is currently active
+        self._mention_active: bool = False
+        # Character position in the message field where the @ was typed
+        self._mention_start_pos: int = -1
+        # Text typed after the @ (the current filter query)
+        self._mention_query: str = ""
+        # Filtered suggestion pairs [(display_name, jid), ...]
+        self._mention_suggestions: list = []
+        # Participants of the current group, cached on conversation open
+        self._group_participants_cache: list = []
+        # JIDs confirmed for @mention to be sent with the next message
+        self._pending_mentions: list = []
+        # Maps JID → display_name for each pending mention (used to replace
+        # @DisplayName with @phonenumber in the API payload — WhatsApp only
+        # renders a mention when the text contains the bare phone number after @).
+        self._pending_mention_display_names: dict = {}
 
         # ── Lazy-loading / pagination state ─────────────────────────────────
         # Full sorted+displayable list (never paginated)
@@ -169,6 +189,7 @@ class ConversationsPanel(wx.Panel):
 
         self.search_field = wx.TextCtrl(self, style=wx.TE_DONTWRAP)
         self.search_field.Bind(wx.EVT_TEXT, self.on_search_query_changed)
+        self.search_field.Bind(wx.EVT_KEY_DOWN, self._on_search_field_key_down)
         self.search_field.SetAccessible(AccessibleSearchConversations("Ctrl+F"))
         outer_sizer.Add(self.search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
@@ -292,6 +313,17 @@ class ConversationsPanel(wx.Panel):
         self._links_panel.Hide()
         conv_sizer.Add(self._links_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
+        # ── Mention controls (shown when focused message contains @mentions) ──
+        self._mentions_panel = wx.Panel(self.conversation_panel)
+        self._mentions_label = wx.StaticText(
+            self._mentions_panel, label=i18n.t("mentions_section_label")
+        )
+        self._mentions_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._mentions_sizer.Add(self._mentions_label, 0, wx.LEFT | wx.TOP, 3)
+        self._mentions_panel.SetSizer(self._mentions_sizer)
+        self._mentions_panel.Hide()
+        conv_sizer.Add(self._mentions_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+
         # ── Thumbnail (image / sticker / video) ─────────────────────────────
         self._media_bitmap = wx.StaticBitmap(
             self.conversation_panel, bitmap=wx.NullBitmap
@@ -362,6 +394,21 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self.audio_slider, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
         self.audio_slider.Hide()
 
+        # ── Mention suggestion list (hidden; shown when user types @ in group) ─
+        self._mention_panel = wx.Panel(self.conversation_panel)
+        _mention_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._mention_list_label = wx.StaticText(
+            self._mention_panel, label=i18n.t("mention_suggestions_label")
+        )
+        _mention_sizer.Add(self._mention_list_label, 0, wx.LEFT | wx.TOP, 3)
+        self._mention_list = wx.ListBox(self._mention_panel, style=wx.LB_SINGLE)
+        self._mention_list.Bind(wx.EVT_KEY_DOWN, self._on_mention_list_key_down)
+        self._mention_list.Bind(wx.EVT_CHAR,     self._on_mention_list_char)
+        _mention_sizer.Add(self._mention_list, 0, wx.EXPAND | wx.ALL, 3)
+        self._mention_panel.SetSizer(_mention_sizer)
+        self._mention_panel.Hide()
+        conv_sizer.Add(self._mention_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
+
         # ── Message input ───────────────────────────────────────────────────
         self.message_label = wx.StaticText(
             self.conversation_panel, label=i18n.t("type_message")
@@ -372,8 +419,9 @@ class ConversationsPanel(wx.Panel):
             self.conversation_panel,
             style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP,
         )
-        self.message_field.Bind(wx.EVT_TEXT, self.on_change_message_field)
+        self.message_field.Bind(wx.EVT_TEXT,       self.on_change_message_field)
         self.message_field.Bind(wx.EVT_TEXT_ENTER, self.on_send_message)
+        self.message_field.Bind(wx.EVT_KEY_DOWN,   self._on_message_field_key_down)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
         self._cancel_edit_btn = wx.Button(
@@ -389,6 +437,15 @@ class ConversationsPanel(wx.Panel):
         self._remove_quote_btn.Bind(wx.EVT_BUTTON, self._on_cancel_reply)
         conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._remove_quote_btn.Hide()
+
+        # ── Pending mention pills (one label + remove button per @mention) ──
+        self._pending_mentions_panel = wx.Panel(self.conversation_panel)
+        self._pending_mentions_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._pending_mentions_panel.SetSizer(self._pending_mentions_sizer)
+        self._pending_mentions_panel.Hide()
+        conv_sizer.Add(
+            self._pending_mentions_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5
+        )
 
         self.send_message_btn = wx.Button(
             self.conversation_panel, label=i18n.t("send_message")
@@ -545,6 +602,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_DELETE_MSG      = wx.NewIdRef()  # delete focused message  (Delete)
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
+        self.ID_ALT_E           = wx.NewIdRef()  # edit message            (Alt+E)
         # ── Conversation-level ───────────────────────────────────────────────
         self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+S)
         self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # toggle read / unread    (Ctrl+Shift+M)
@@ -561,6 +619,8 @@ class ConversationsPanel(wx.Panel):
         self.ID_ALT_SHIFT_V     = wx.NewIdRef()  # converse with           (Alt+Shift+V)
         self.ID_ALT_SHIFT_Q     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+Q)
         self.ID_ALT_SHIFT_S     = wx.NewIdRef()  # mute / unmute           (Alt+Shift+S)
+        # ── Message star ─────────────────────────────────────────────────────
+        self.ID_CTRL_SHIFT_O    = wx.NewIdRef()  # star message            (Ctrl+Shift+O)
         # ── Audio speed ──────────────────────────────────────────────────────
         self.ID_ALT_COMMA       = wx.NewIdRef()  # decrease audio speed    (Alt+,)
         self.ID_ALT_PERIOD      = wx.NewIdRef()  # increase audio speed    (Alt+.)
@@ -583,6 +643,7 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_NORMAL,  wx.WXK_DELETE,     self.ID_DELETE_MSG),
             (wx.ACCEL_CTRL,    ord("C"),          self.ID_CTRL_C),
             (wx.ACCEL_ALT,     ord("C"),          self.ID_ALT_C),
+            (wx.ACCEL_ALT,     ord("E"),          self.ID_ALT_E),
             (CS,               ord("S"),          self.ID_CTRL_SHIFT_S),
             (CS,               ord("M"),          self.ID_CTRL_SHIFT_M),
             (CS,               ord("L"),          self.ID_CTRL_SHIFT_L),
@@ -593,6 +654,7 @@ class ConversationsPanel(wx.Panel):
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
             (AS,               ord("Q"),          self.ID_ALT_SHIFT_Q),
             (AS,               ord("S"),          self.ID_ALT_SHIFT_S),
+            (CS,               ord("O"),           self.ID_CTRL_SHIFT_O),
             (wx.ACCEL_ALT,     ord(","),           self.ID_ALT_COMMA),
             (wx.ACCEL_ALT,     ord("."),           self.ID_ALT_PERIOD),
         ])
@@ -612,6 +674,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_delete_message,      id=self.ID_DELETE_MSG)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_message,        id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup,     id=self.ID_ALT_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_edit_message,        id=self.ID_ALT_E)
         self.Bind(wx.EVT_MENU, self._on_accel_block,               id=self.ID_CTRL_SHIFT_B)
         self.Bind(wx.EVT_MENU, self._on_accel_toggle_read,         id=self.ID_CTRL_SHIFT_M)
         self.Bind(wx.EVT_MENU, self._on_accel_clear,               id=self.ID_CTRL_SHIFT_L)
@@ -622,6 +685,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
         self.Bind(wx.EVT_MENU, self._on_accel_goto_quoted,         id=self.ID_ALT_SHIFT_Q)
         self.Bind(wx.EVT_MENU, self._on_accel_mute,                id=self.ID_ALT_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_accel_star,                 id=self.ID_CTRL_SHIFT_O)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_decrease,      id=self.ID_ALT_COMMA)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_increase,      id=self.ID_ALT_PERIOD)
 
@@ -659,6 +723,13 @@ class ConversationsPanel(wx.Panel):
         self._sep_from_open = False
         self._quoted_message = None
         self._reaction_map   = {}
+        # Reset mention state for the new conversation
+        self._pending_mentions.clear()
+        self._pending_mention_display_names.clear()
+        self._group_participants_cache = []
+        self._hide_mention_suggestions()
+        if hasattr(self, "_pending_mentions_panel"):
+            self._rebuild_mention_pills()
         # Reset search state
         self._search_results    = []
         self._search_result_idx = -1
@@ -712,35 +783,48 @@ class ConversationsPanel(wx.Panel):
             args=(conversation,),
             daemon=True,
         ).start()
+        # Background: cache group participants for @mention suggestions
+        if is_group:
+            threading.Thread(
+                target=self._fetch_group_participants,
+                args=(jid,),
+                daemon=True,
+            ).start()
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
 
-        # If audio was already playing for THIS conversation before we navigated
-        # away, re-show the controls so the user can see the progress/speed bar.
+        # Re-show audio controls only if the playing audio message is focused.
         if (self._current_audio_id is not None
                 and self._audio_conv_jid == jid
-                and self._audio_stream is not None):
+                and self._audio_stream is not None
+                and self._focused_msg_id() == self._current_audio_id):
             self._show_audio_controls()
             self.audio_speed_btn.SetLabel(
                 self._format_speed(self._audio_speed_steps[self._audio_speed_index])
             )
 
-        # Set focus based on user preference
+        # Always ensure the correct list item is selected/focused:
+        # the unread separator when it exists, otherwise the last message.
+        # (populate_messages already handles the separator case; handle the
+        # last-message case here so it applies regardless of focus_on_open.)
+        if self._unread_sep_idx < 0:
+            last = self.messages_list.GetItemCount() - 1
+            if last >= 0:
+                self.messages_list.Focus(last)
+                self.messages_list.Select(last, True)
+                self.messages_list.EnsureVisible(last)
+
+        # Move keyboard focus based on user preference.
+        # Deferred via wx.CallAfter so this is the last item in the event
+        # queue — prevents add_chats_to_ui (which may have been scheduled
+        # earlier by restore_window on a notification click) from scheduling
+        # its own lst.SetFocus and stealing focus away from the conversation.
         focus_setting = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_setting == "unread_or_last":
-            # Always move keyboard focus to the list first; then position it.
-            self.messages_list.SetFocus()
-            if self._unread_sep_idx < 0:
-                # No unread separator — select and scroll to last message
-                last = self.messages_list.GetItemCount() - 1
-                if last >= 0:
-                    self.messages_list.Focus(last)
-                    self.messages_list.Select(last, True)
-                    self.messages_list.EnsureVisible(last)
-            # else: populate_messages already scrolled to the unread separator
+            wx.CallAfter(self.messages_list.SetFocus)
         else:
-            self.message_field.SetFocus()
+            wx.CallAfter(self.message_field.SetFocus)
 
     def preselect_messages(self):
         self.messages_list.Focus(0)
@@ -761,6 +845,17 @@ class ConversationsPanel(wx.Panel):
     def on_ctrl_f(self, event):
         self.search_field.SetFocus()
 
+    def _on_search_field_key_down(self, event):
+        """Down arrow in the search field moves focus to the first conversation."""
+        if event.GetKeyCode() == wx.WXK_DOWN:
+            lst = self.conversations_list
+            if lst.GetItemCount() > 0:
+                lst.SetFocus()
+                lst.Focus(0)
+                lst.Select(0)
+            return
+        event.Skip()
+
     def on_change_message_field(self, event):
         # Don't touch button visibility while recording or staging attachments.
         if self._is_recording or self._attachment_panel.IsShown():
@@ -772,8 +867,25 @@ class ConversationsPanel(wx.Panel):
         else:
             self.send_message_btn.Hide()
             self.record_voice_message_btn.Show()
+        self._on_text_changed_mention_check()
 
     def _on_conversation_char_hook(self, event):
+        kc = event.GetKeyCode()
+        # Intercept Esc and Enter when the mention suggestion list has focus so
+        # they are handled here, before the accelerator table fires
+        # close_conversation for Esc or any other panel-level binding.
+        if (hasattr(self, "_mention_panel") and self._mention_panel.IsShown()
+                and wx.Window.FindFocus() is self._mention_list):
+            if kc == wx.WXK_ESCAPE:
+                self._hide_mention_suggestions()
+                wx.CallAfter(self.message_field.SetFocus)
+                return  # do NOT Skip — blocks the Esc → close_conversation accelerator
+            if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+                idx = self._mention_list.GetSelection()
+                if 0 <= idx < len(self._mention_suggestions):
+                    name, jid = self._mention_suggestions[idx]
+                    self._insert_mention(name, jid)
+                return  # do NOT Skip
         if not self._should_redirect_char_to_message(event):
             event.Skip()
             return
@@ -927,6 +1039,38 @@ class ConversationsPanel(wx.Panel):
         # ── Normal send ──────────────────────────────────────────────────────
         # Build a virtual message dict that renders identically to real messages.
         local_id = str(uuid.uuid4())
+        _raw_mentions = list(self._pending_mentions) if self._pending_mentions else []
+        _mentioned = _raw_mentions or None
+        if _mentioned and hasattr(self.main_window, "_canonical_mention_jids"):
+            _mentioned = self.main_window._canonical_mention_jids(_raw_mentions)
+
+        # Build the API text: WhatsApp only highlights a mention when the message
+        # body contains @{phonenumber} (not @{display_name}).  Replace each
+        # @DisplayName with @phone so the official client renders the mention.
+        api_text = text
+        if _raw_mentions:
+            _normalize = getattr(self.main_window, "_normalize_jid", lambda j: j)
+            _lid_map   = getattr(self.main_window, "_lid_to_phone", {})
+            for raw_jid in _raw_mentions:
+                display = self._pending_mention_display_names.get(raw_jid, "")
+                if not display:
+                    continue
+                if raw_jid.endswith("@lid"):
+                    phone = _lid_map.get(raw_jid, raw_jid).split("@")[0]
+                else:
+                    phone = _normalize(raw_jid).split("@")[0]
+                if phone and f"@{display}" in api_text:
+                    api_text = api_text.replace(f"@{display}", f"@{phone}", 1)
+
+        # When mentions are present, use extendedTextMessage so the rendering
+        # pipeline can convert @phone → @DisplayName for the local display.
+        if _mentioned:
+            _msg_type  = "extendedTextMessage"
+            _msg_body  = {"extendedTextMessage": {"text": api_text}}
+        else:
+            _msg_type  = "conversation"
+            _msg_body  = {"conversation": text}
+
         virtual_msg = {
             "_local_pending": True,
             "_local_id":      local_id,
@@ -935,8 +1079,8 @@ class ConversationsPanel(wx.Panel):
                 "fromMe":   True,
                 "remoteJid": remote_jid,
             },
-            "messageType":      "conversation",
-            "message":          {"conversation": text},
+            "messageType":      _msg_type,
+            "message":          _msg_body,
             "messageTimestamp": int(time.time()),
             "pushName":         "",
         }
@@ -947,6 +1091,8 @@ class ConversationsPanel(wx.Panel):
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": self._quoted_message.get("message") or {},
             }
+        if _mentioned:
+            virtual_msg.setdefault("contextInfo", {})["mentionedJid"] = _mentioned
 
         # Add to sorted list and UI list immediately.
         self._sorted_messages.append(virtual_msg)
@@ -956,12 +1102,22 @@ class ConversationsPanel(wx.Panel):
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
+        # Clear any pending @mentions before clearing the field.
+        self._pending_mentions.clear()
+        self._pending_mention_display_names.clear()
+        self._hide_mention_suggestions()
+        self._rebuild_mention_pills()
+
         # Clear the text field (this also hides send btn, shows record btn).
         self.message_field.SetValue("")
         self.message_field.SetFocus()
 
         # Enqueue for background sending (with retry on failure).
-        pm = PendingMessage(local_id, remote_jid, text=text, quoted=self._quoted_message)
+        pm = PendingMessage(
+            local_id, remote_jid, text=api_text,
+            quoted=self._quoted_message,
+            mentioned_jids=_mentioned,
+        )
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
 
@@ -1286,19 +1442,25 @@ class ConversationsPanel(wx.Panel):
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
-        self.conversations_list.SetFocus()
-        self._restore_conversation_selection()
+        # Defer focus restoration so it runs after the accelerator event is
+        # fully processed — calling SetFocus() synchronously inside an EVT_MENU
+        # handler can be overridden by wx's post-event focus management on Win32.
+        wx.CallAfter(self._restore_conversation_selection)
 
     def _restore_conversation_selection(self):
-        """Select and focus the last-opened conversation in the list."""
-        if not self._last_open_jid:
-            return
-        for i, chat in enumerate(self.chats_list):
-            if chat.get("remoteJid") == self._last_open_jid:
-                self.conversations_list.Focus(i)
-                self.conversations_list.Select(i)
-                self.conversations_list.EnsureVisible(i)
-                return
+        """Select, focus and give keyboard focus to the last-opened conversation."""
+        lst = self.conversations_list
+        target = 0
+        if self._last_open_jid:
+            for i, chat in enumerate(self.chats_list):
+                if chat.get("remoteJid") == self._last_open_jid:
+                    target = i
+                    break
+        if self.chats_list:
+            lst.Focus(target)
+            lst.Select(target)
+            lst.EnsureVisible(target)
+        lst.SetFocus()
 
     # ── Conversations context menu ──────────────────────────────────────────
 
@@ -1505,6 +1667,9 @@ class ConversationsPanel(wx.Panel):
         rendered = self.messages_list.GetItemText(index)
         self._update_links_panel(self._extract_links(rendered))
 
+        # ── Mention detection ─────────────────────────────────────────────
+        self._update_mentions_panel(self._extract_mentions(msg))
+
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
         self._do_activate_message(event.GetIndex())
@@ -1693,8 +1858,8 @@ class ConversationsPanel(wx.Panel):
             fwd_item,
         )
 
-        # Star
-        star_item = menu.Append(wx.ID_ANY, i18n.t("star_message"))
+        # Star (Ctrl+Shift+O)
+        star_item = menu.Append(wx.ID_ANY, f"{i18n.t('star_message')}\tCtrl+Shift+O")
         self.Bind(
             wx.EVT_MENU,
             lambda e, m=msg: self._on_menu_star(m),
@@ -1718,7 +1883,7 @@ class ConversationsPanel(wx.Panel):
         _msg_ts      = msg.get("messageTimestamp", 0)
         _within_3h   = (time.time() - _msg_ts) < 10800
         if _is_own and _is_text and _within_3h:
-            edit_item = menu.Append(wx.ID_ANY, i18n.t("edit_message"))
+            edit_item = menu.Append(wx.ID_ANY, f"{i18n.t('edit_message')}\tAlt+E")
             self.Bind(
                 wx.EVT_MENU,
                 lambda e, i=index, m=msg: self._on_menu_edit_message(i, m),
@@ -1757,6 +1922,7 @@ class ConversationsPanel(wx.Panel):
         self._contact_converse_btn.Hide()
         self._contact_msg_jid = None
         self._update_links_panel([])
+        self._update_mentions_panel([])
         if self.conversation_panel.IsShown():
             self.conversation_panel.Layout()
 
@@ -1833,17 +1999,403 @@ class ConversationsPanel(wx.Panel):
         else:
             event.Skip()
 
+    # ── @mention helpers ─────────────────────────────────────────────────────
+
+    def _extract_mentions(self, msg: dict) -> list:
+        """Return list of (display_name, jid) for @mentioned JIDs in msg."""
+        msg_obj = msg.get("message") or {}
+        ext     = (msg_obj.get("extendedTextMessage") or {}) if isinstance(msg_obj, dict) else {}
+        mentioned = (
+            (msg.get("contextInfo") or {}).get("mentionedJid")
+            or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+            or ext.get("contextInfo", {}).get("mentionedJid")
+            or []
+        )
+        if not mentioned:
+            return []
+        out = []
+        seen = set()
+        for jid in mentioned:
+            if not jid or jid in seen:
+                continue
+            seen.add(jid)
+            name = self._get_participant_name(jid)
+            out.append((name, jid))
+        return out
+
+    def _update_mentions_panel(self, mentions: list):
+        """Rebuild the @mention buttons below the messages list."""
+        for child in list(self._mentions_panel.GetChildren()):
+            if child is not self._mentions_label:
+                child.Destroy()
+        while self._mentions_sizer.GetItemCount() > 1:
+            self._mentions_sizer.Remove(1)
+
+        if not mentions:
+            self._mentions_panel.Hide()
+            self._current_mentions = []
+            if self.conversation_panel.IsShown():
+                self.conversation_panel.Layout()
+            return
+
+        self._current_mentions = mentions
+
+        for display_name, jid in mentions:
+            ctrl = wx.adv.HyperlinkCtrl(
+                self._mentions_panel,
+                id=wx.ID_ANY,
+                label=f"@{display_name}",
+                url=f"mention://{jid}",
+                style=wx.adv.HL_DEFAULT_STYLE,
+            )
+            ctrl.Bind(
+                wx.adv.EVT_HYPERLINK,
+                lambda e, j=jid: self._on_mention_hyperlink(e, j),
+            )
+            ctrl.Bind(wx.EVT_KEY_DOWN, self._on_mention_display_key_down)
+            self._mentions_sizer.Add(ctrl, 0, wx.LEFT | wx.BOTTOM, 3)
+
+        self._mentions_panel.Show()
+        self._mentions_panel.Layout()
+        if self.conversation_panel.IsShown():
+            self.conversation_panel.Layout()
+
+    def _on_mention_open(self, jid: str):
+        """Navigate to the conversation for the mentioned contact."""
+        mw = self.main_window
+        chat = mw.chats.get(jid)
+        if chat is None:
+            name = self._get_participant_name(jid)
+            chat = {"remoteJid": jid, "pushName": name}
+        self.navigate_to_conversation(chat)
+
+    def _on_mention_hyperlink(self, event, jid: str):
+        """Intercept EVT_HYPERLINK on a mention display link to navigate instead of open URL."""
+        event.Skip(False)
+        self._on_mention_open(jid)
+
+    def _on_mention_display_key_down(self, event):
+        """Space/Enter on a mention HyperlinkCtrl activates it (like click)."""
+        kc = event.GetKeyCode()
+        if kc in (wx.WXK_RETURN, wx.WXK_SPACE, wx.WXK_NUMPAD_ENTER):
+            ctrl = event.GetEventObject()
+            jid = ctrl.GetURL().replace("mention://", "")
+            self._on_mention_open(jid)
+        else:
+            event.Skip()
+
+    # ── @mention input system ────────────────────────────────────────────────
+
+    def _get_mention_query(self):
+        """Return (start_pos, query) when cursor is inside @word, else (None, None)."""
+        text = self.message_field.GetValue()
+        pos  = self.message_field.GetInsertionPoint()
+        i = pos - 1
+        while i >= 0:
+            ch = text[i]
+            if ch == "@":
+                return (i, text[i + 1:pos])
+            if ch in (" ", "\n", "\t"):
+                break
+            i -= 1
+        return (None, None)
+
+    def _hide_mention_suggestions(self):
+        """Hide the mention suggestion list without announcing anything."""
+        self._mention_active = False
+        if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
+            self._mention_panel.Hide()
+            if self.conversation_panel.IsShown():
+                self.conversation_panel.Layout()
+
+    def _update_mention_suggestions(self, query: str):
+        """Rebuild the suggestion list for the given query and show/hide the panel."""
+        i18n = self.main_window.i18n
+        q = query.lower()
+
+        # Individual participant matches
+        matches = [
+            (name, jid)
+            for name, jid in self._group_participants_cache
+            if not q or q in name.lower()
+        ]
+
+        # Sort: names that start with the query come first, then those that
+        # contain it but don't start with it — both groups sorted alphabetically.
+        if q:
+            matches.sort(key=lambda x: (0 if x[0].lower().startswith(q) else 1, x[0].lower()))
+
+        # @all/@todos special entry — always at the top when query is empty or matches
+        all_kw = i18n.t("mention_all_keyword")  # "todos" or "all"
+        if not q or q in all_kw or q in "all" or q in "todos":
+            matches = [("__ALL__", "@all")] + matches
+
+        self._mention_suggestions = matches
+
+        if not matches:
+            was_visible = self._mention_panel.IsShown()
+            self._hide_mention_suggestions()
+            if was_visible:
+                self.main_window.output(i18n.t("mention_no_suggestions"), interrupt=True)
+            return
+
+        self._mention_list.Clear()
+        all_label = i18n.t("mention_all_label")
+        for name, jid in matches:
+            if jid == "@all":
+                self._mention_list.Append(all_label)
+            else:
+                self._mention_list.Append(f"@{name}")
+
+        self._mention_panel.Show()
+        self._mention_panel.Layout()
+        if self.conversation_panel.IsShown():
+            self.conversation_panel.Layout()
+        self._mention_list.SetSelection(0)
+        self.main_window.output(i18n.t("mention_suggestions_available"), interrupt=False)
+
+    def _on_text_changed_mention_check(self):
+        """Called from on_change_message_field to detect and update @mention suggestions."""
+        if self.conversation is None:
+            return
+        jid = self.conversation.get("remoteJid", "")
+        if not jid.endswith("@g.us"):
+            if self._mention_panel.IsShown():
+                self._hide_mention_suggestions()
+            return
+        start, query = self._get_mention_query()
+        if start is None:
+            if self._mention_panel.IsShown():
+                self._hide_mention_suggestions()
+                self._mention_active = False
+            return
+        self._mention_active = True
+        self._mention_start_pos = start
+        self._mention_query = query
+        self._update_mention_suggestions(query)
+
+    def _insert_mention(self, display_name: str, jid: str):
+        """Replace the current @query in the field with @display_name and track the JID."""
+        # Use cached start/query so this works even when message_field doesn't
+        # have focus (e.g. when called from the mention list via EVT_CHAR_HOOK).
+        start = self._mention_start_pos
+        query = self._mention_query
+        if start < 0:
+            return
+        i18n = self.main_window.i18n
+
+        if jid == "@all":
+            # @todos/@all: use the localized keyword as the inserted text and add
+            # every group participant JID to the pending mentions list.
+            all_kw = i18n.t("mention_all_keyword")   # "todos" or "all"
+            replacement = f"@{all_kw} "
+            for _, p_jid in self._group_participants_cache:
+                if p_jid not in self._pending_mentions:
+                    self._pending_mentions.append(p_jid)
+        else:
+            replacement = f"@{display_name} "
+            if jid not in self._pending_mentions:
+                self._pending_mentions.append(jid)
+            self._pending_mention_display_names[jid] = display_name
+
+        text = self.message_field.GetValue()
+        new_text = text[:start] + replacement + text[start + 1 + len(query):]
+        # ChangeValue does NOT fire EVT_TEXT, preventing a mention-check loop.
+        self.message_field.ChangeValue(new_text)
+        self.message_field.SetInsertionPoint(start + len(replacement))
+        self._hide_mention_suggestions()
+        self._mention_active = False
+        self._rebuild_mention_pills()
+        self.message_field.SetFocus()
+
+    def _rebuild_mention_pills(self):
+        """Rebuild the pending-mention pill buttons panel (one row per @mention)."""
+        i18n = self.main_window.i18n
+        panel = self._pending_mentions_panel
+        sizer = self._pending_mentions_sizer
+
+        # Destroy existing pill widgets.
+        for child in list(panel.GetChildren()):
+            child.Destroy()
+        sizer.Clear(delete_windows=False)
+
+        if not self._pending_mentions:
+            panel.Hide()
+            if self.conversation_panel.IsShown():
+                self.conversation_panel.Layout()
+            return
+
+        for jid in list(self._pending_mentions):
+            display = self._pending_mention_display_names.get(jid) or jid.rsplit("@", 1)[0]
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            lbl = wx.StaticText(panel, label=f"@{display}")
+            btn_label = i18n.t("remove_mention").format(name=display)
+            btn = wx.Button(panel, label=btn_label)
+            # Capture jid/display in closure.
+            def _make_handler(j, d):
+                def _handler(evt):
+                    self._on_remove_mention(j, d)
+                return _handler
+            btn.Bind(wx.EVT_BUTTON, _make_handler(jid, display))
+            row.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+            row.Add(btn, 0, wx.ALIGN_CENTER_VERTICAL)
+            sizer.Add(row, 0, wx.LEFT | wx.BOTTOM, 3)
+
+        panel.Show()
+        panel.Layout()
+        if self.conversation_panel.IsShown():
+            self.conversation_panel.Layout()
+
+    def _on_remove_mention(self, jid: str, display: str):
+        """Remove a pending @mention pill and its text from the message field."""
+        # Remove @display from message text if present.
+        text = self.message_field.GetValue()
+        # Try removing "@display " (with trailing space) first, then "@display" alone.
+        if f"@{display} " in text:
+            new_text = text.replace(f"@{display} ", "", 1)
+        elif f"@{display}" in text:
+            new_text = text.replace(f"@{display}", "", 1)
+        else:
+            new_text = text
+        if new_text != text:
+            self.message_field.ChangeValue(new_text)
+
+        # Remove from pending state.
+        if jid in self._pending_mentions:
+            self._pending_mentions.remove(jid)
+        self._pending_mention_display_names.pop(jid, None)
+
+        self._rebuild_mention_pills()
+        self.message_field.SetFocus()
+
+    def _fetch_group_participants(self, jid: str):
+        """Background: fetch participants for the group and populate the cache."""
+        try:
+            data = self.main_window.get_group_info(jid)
+            participants = data.get("participants", [])
+            my_jid = getattr(self.main_window, "my_jid", "") or ""
+            cache = []
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                p_jid = p.get("id", "")
+                if not p_jid:
+                    continue
+                if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
+                    continue  # skip self
+                name = self._get_participant_name(p_jid)
+                cache.append((name, p_jid))
+            cache.sort(key=lambda x: x[0].lower())
+            wx.CallAfter(self._set_group_participants_cache, cache)
+        except Exception:
+            pass
+
+    def _set_group_participants_cache(self, cache: list):
+        """Main-thread callback: store cache and refresh suggestions if active."""
+        self._group_participants_cache = cache
+        if self._mention_active:
+            self._update_mention_suggestions(self._mention_query)
+
+    def _on_message_field_key_down(self, event):
+        """↓ moves focus to the mention list when suggestions are visible."""
+        kc = event.GetKeyCode()
+        if kc == wx.WXK_DOWN and self._mention_panel.IsShown():
+            if self._mention_list.GetCount() > 0:
+                self._mention_list.SetFocus()
+                self._mention_list.SetSelection(0)
+            return  # consume — don't let the field handle ↓
+        event.Skip()
+
+    def _on_mention_list_key_down(self, event):
+        """Keyboard navigation inside the mention suggestion list."""
+        kc = event.GetKeyCode()
+
+        if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            idx = self._mention_list.GetSelection()
+            if 0 <= idx < len(self._mention_suggestions):
+                name, jid = self._mention_suggestions[idx]
+                self._insert_mention(name, jid)
+            return
+
+        if kc == wx.WXK_ESCAPE:
+            self._hide_mention_suggestions()
+            self.message_field.SetFocus()
+            return
+
+        if kc == wx.WXK_BACK:
+            # Backspace: remove last char from message field and update filter
+            pos = self.message_field.GetInsertionPoint()
+            if pos > 0:
+                text = self.message_field.GetValue()
+                self.message_field.ChangeValue(text[:pos - 1] + text[pos:])
+                self.message_field.SetInsertionPoint(pos - 1)
+                wx.CallAfter(self._on_mention_list_after_char)
+            return
+
+        # ↑ / ↓ — let ListBox move the selection naturally; NVDA reads it
+        event.Skip()
+
+    def _on_mention_list_char(self, event):
+        """Printable chars typed in the list are redirected to the message field."""
+        uc = event.GetUnicodeKey()
+        if uc == wx.WXK_NONE or uc < 32:
+            event.Skip()
+            return
+        ch = chr(uc)
+        pos = self.message_field.GetInsertionPoint()
+        text = self.message_field.GetValue()
+        self.message_field.ChangeValue(text[:pos] + ch + text[pos:])
+        self.message_field.SetInsertionPoint(pos + 1)
+        wx.CallAfter(self._on_mention_list_after_char)
+
+    def _on_mention_list_after_char(self):
+        """Update mention suggestions after a char was injected from the list."""
+        i18n = self.main_window.i18n
+        start, query = self._get_mention_query()
+        if start is None:
+            self._hide_mention_suggestions()
+            self.main_window.output(i18n.t("mention_no_suggestions"), interrupt=True)
+            self.message_field.SetFocus()
+            return
+        self._mention_query = query
+        self._update_mention_suggestions(query)
+        # Return focus to the list so the user can keep typing or navigate
+        if self._mention_suggestions:
+            self._mention_list.SetFocus()
+            self._mention_list.SetSelection(0)
+
     # ── Lazy-loading: load older messages when the user focuses item 0 ─────────
 
+    def _focused_msg_id(self) -> str:
+        """Return the message ID of the currently focused list item, or ''."""
+        idx = self.messages_list.GetFocusedItem()
+        if idx < 0 or idx >= len(self._sorted_messages):
+            return ""
+        m = self._sorted_messages[idx]
+        if self._is_separator(m):
+            return ""
+        return m.get("key", {}).get("id", "")
+
     def _on_message_focused(self, event):
+        idx = event.GetIndex()
         if (
-            event.GetIndex() == 0
+            idx == 0
             and not self._is_loading_more
         ):
             if self._messages_offset > 0:
                 self._load_more_messages()
             else:
                 self._load_older_messages_from_server()
+
+        # Show audio controls only when the focused item IS the playing audio.
+        if self._current_audio_id is not None and self._audio_stream is not None:
+            if 0 <= idx < len(self._sorted_messages):
+                m = self._sorted_messages[idx]
+                if (not self._is_separator(m)
+                        and m.get("key", {}).get("id") == self._current_audio_id):
+                    self._show_audio_controls()
+                else:
+                    self._hide_audio_controls()
         event.Skip()
 
     def _load_older_messages_from_server(self):
@@ -2367,9 +2919,11 @@ class ConversationsPanel(wx.Panel):
 
         self._is_audio_playing = True
         self._audio_timer.Start(200)
-        self._show_audio_controls()
+        # Show controls only if the playing message is currently focused in the list.
         _speed = self._audio_speed_steps[self._audio_speed_index]
-        self.audio_speed_btn.SetLabel(self._format_speed(_speed))
+        if self._focused_msg_id() == msg_id:
+            self._show_audio_controls()
+            self.audio_speed_btn.SetLabel(self._format_speed(_speed))
 
     def _stop_audio(self):
         if self._audio_timer.IsRunning():
@@ -2607,8 +3161,37 @@ class ConversationsPanel(wx.Panel):
 
         if msg_type == "extendedTextMessage":
             # extendedTextMessage.text holds the body; .description is link preview
-            ext = msg_obj.get("extendedTextMessage") or {}
-            return ext.get("text", "") or ""
+            ext  = msg_obj.get("extendedTextMessage") or {}
+            text = ext.get("text", "") or ""
+            # Resolve @mentions: replace @{number} with @{display_name}.
+            # mentionedJid may live at the top-level contextInfo (Evolution API
+            # normalises it there) or inside extendedTextMessage.contextInfo.
+            mentioned = (
+                (msg.get("contextInfo") or {}).get("mentionedJid")
+                or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+                or ext.get("contextInfo", {}).get("mentionedJid")
+                or []
+            )
+            for jid in mentioned:
+                mw_ref = self.main_window
+                _lid_map = getattr(mw_ref, "_lid_to_phone", {})
+                if jid.endswith("@lid"):
+                    phone_jid = _lid_map.get(jid, "")
+                    if phone_jid:
+                        phone = phone_jid.split("@")[0]
+                    else:
+                        # No mapping: use the local part of the @lid JID — this is
+                        # what the send path writes into the message text as @{local}.
+                        phone = jid.rsplit("@", 1)[0]
+                else:
+                    phone = jid.split("@")[0]
+                if not phone or f"@{phone}" not in text:
+                    continue
+                name = self._get_participant_name(jid)
+                jid_local = jid.rsplit("@", 1)[0]
+                if name and name != phone and name != jid_local and name != jid:
+                    text = text.replace(f"@{phone}", f"@{name}", 1)
+            return text
 
         # ── Audio ────────────────────────────────────────────────────────────
         if msg_type == "audioMessage":
@@ -2775,6 +3358,7 @@ class ConversationsPanel(wx.Panel):
                 if lid:
                     candidates.append(lid)
 
+            ppm = getattr(mw, "_presence_pushname_map", {})
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
@@ -2794,6 +3378,11 @@ class ConversationsPanel(wx.Panel):
                             pass
                         else:
                             return cn
+            # Fallback: presence-learned pushName map
+            for cjid in candidates:
+                pname = (ppm.get(cjid) or "").strip()
+                if pname and not pname.isdigit() and not is_phone_like(pname):
+                    return pname
             return ""
 
         # Don't use the group JID (@g.us) itself as a sender lookup — when
@@ -3401,6 +3990,7 @@ class ConversationsPanel(wx.Panel):
         """Return a display name for a group participant."""
         mw = self.main_window
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
+        ppm = getattr(mw, "_presence_pushname_map", {})
 
         # Build candidates covering all three JID formats for the same person.
         # Address-book name (contact["name"]) always takes priority over pushName.
@@ -3434,12 +4024,19 @@ class ConversationsPanel(wx.Panel):
             push = msg.get("pushName", "")
             if push and not is_phone_like(push):
                 return push
+        # Fallback: presence-learned pushName map
+        for cjid in candidates:
+            pname = (ppm.get(cjid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid
         phone = lid_to_phone.get(participant_jid, "")
         if phone:
             return format_number(phone)
-        return participant_jid
+        # No phone mapping for this @lid — return just the local part (strip "@lid")
+        # so the display shows the raw identifier without the domain suffix.
+        return participant_jid.rsplit("@", 1)[0]
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
@@ -3567,46 +4164,59 @@ class ConversationsPanel(wx.Panel):
         if not target_jid:
             return
 
-        # ── Extract forwardable content from the message ──────────────────────
+        # ── Extract forwardable text from the message ─────────────────────────
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
+        text = ""
 
         if msg_type == "conversation":
             text = msg_obj.get("conversation") or ""
-            if text:
-                import uuid
-                local_id = str(uuid.uuid4())
-                from core.message_queue import PendingMessage
-                mw.message_queue.enqueue(
-                    PendingMessage(local_id=local_id, jid=target_jid, text=text)
-                )
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
-            if text:
-                import uuid
-                local_id = str(uuid.uuid4())
-                from core.message_queue import PendingMessage
-                mw.message_queue.enqueue(
-                    PendingMessage(local_id=local_id, jid=target_jid, text=text)
-                )
         else:
-            # For media types, try to forward caption or a type label
-            caption = ""
             for sub_key in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
                 sub = msg_obj.get(sub_key) or {}
                 if sub:
-                    caption = sub.get("caption", "")
+                    text = sub.get("caption", "")
                     break
-            if not caption:
-                # No text content to forward — nothing to do
-                pass
-            else:
-                import uuid
-                local_id = str(uuid.uuid4())
-                from core.message_queue import PendingMessage
-                mw.message_queue.enqueue(
-                    PendingMessage(local_id=local_id, jid=target_jid, text=caption)
-                )
+
+        if not text:
+            return
+
+        # ── Enqueue and add virtual message so the UI reflects the send ───────
+        from core.message_queue import PendingMessage
+        local_id = str(uuid.uuid4())
+        virtual_msg = {
+            "_local_pending":   True,
+            "_local_id":        local_id,
+            "key": {
+                "id":        local_id,
+                "fromMe":    True,
+                "remoteJid": target_jid,
+            },
+            "messageType":      "conversation",
+            "message":          {"conversation": text},
+            "messageTimestamp": int(time.time()),
+            "pushName":         "",
+        }
+
+        mw.message_queue.enqueue(
+            PendingMessage(local_id=local_id, jid=target_jid, text=text)
+        )
+
+        # Register in chat records so _last_msg_preview shows the forwarded text.
+        self._register_virtual_msg(virtual_msg)
+
+        # If the target conversation is currently open, add to the visible list.
+        current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if target_jid == current_jid:
+            self._sorted_messages.append(virtual_msg)
+            self.messages_list.Append((self._render_message_line(virtual_msg),))
+            last = self.messages_list.GetItemCount() - 1
+            if last >= 0:
+                self.messages_list.EnsureVisible(last)
+
+        mw.set_chats()
 
     def _on_menu_star(self, msg: dict):
         # Star not yet fully implemented — no-op for now
@@ -3680,9 +4290,23 @@ class ConversationsPanel(wx.Panel):
                 m for m in records
                 if m.get("key", {}).get("id") != msg_id
             ]
-            self.main_window.save_data(
-                self.main_window.chats, self.main_window.contacts
-            )
+            self.main_window._schedule_save()
+
+    def _on_accel_edit_message(self, event):
+        """Alt+E: enter edit mode for the focused own text message."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        if not msg.get("key", {}).get("fromMe", False):
+            return
+        if msg.get("messageType") not in ("conversation", "extendedTextMessage"):
+            return
+        if (time.time() - msg.get("messageTimestamp", 0)) >= 10800:
+            return
+        self._on_menu_edit_message(index, msg)
 
     def _on_menu_edit_message(self, index: int, msg: dict):
         """Enter edit mode: pre-fill message field with message text."""
@@ -3709,6 +4333,7 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetValue("")
         self._cancel_edit_btn.Hide()
         self.conversation_panel.Layout()
+        self.message_field.SetFocus()
 
     def _on_cancel_reply(self, event=None):
         """Leave reply mode without sending."""
@@ -3787,6 +4412,14 @@ class ConversationsPanel(wx.Panel):
         msg = self._sorted_messages[index]
         if not self._is_separator(msg):
             self._on_menu_react(msg)
+
+    def _on_accel_star(self, event):
+        """Ctrl+Shift+I: star/favourite the focused message."""
+        index = self.messages_list.GetFirstSelected()
+        if 0 <= index < len(self._sorted_messages):
+            msg = self._sorted_messages[index]
+            if not self._is_separator(msg):
+                self._on_menu_star(msg)
 
     def _on_accel_delete_conv(self, event):
         """Delete (in chat list): delete the focused conversation."""
@@ -4163,12 +4796,17 @@ class ConversationsPanel(wx.Panel):
         dlg_sizer = wx.BoxSizer(wx.VERTICAL)
         dlg_sizer.Add(panel, 1, wx.EXPAND)
         dlg.SetSizer(dlg_sizer)
-        # ESC also closes (wx.ID_CANCEL handles this automatically)
-        dlg.Bind(wx.EVT_BUTTON, lambda e: dlg.EndModal(wx.ID_CANCEL), close_btn)
+        # Non-modal: self-destroy on close/Esc/button so the main window stays
+        # fully interactive while the popup is open.
+        close_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Destroy())
+        dlg.Bind(wx.EVT_CLOSE, lambda e: dlg.Destroy())
+        dlg.Bind(
+            wx.EVT_CHAR_HOOK,
+            lambda e: dlg.Destroy() if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip(),
+        )
         text_ctrl.SetFocus()
         dlg.CentreOnParent()
-        dlg.ShowModal()
-        dlg.Destroy()
+        dlg.Show()
 
     def _on_menu_react(self, msg: dict):
         """Open the emoji picker dialog to react to a message."""
@@ -4256,7 +4894,63 @@ class ConversationsPanel(wx.Panel):
     def _do_send_reaction(self, msg_key: dict, emoji: str):
         """Background: send reaction via Evolution API."""
         jid = self.conversation.get("remoteJid", "") if self.conversation else ""
-        self.main_window.send_reaction(jid, msg_key, emoji)
+        ok = self.main_window.send_reaction(jid, msg_key, emoji)
+        if ok:
+            # Apply optimistically — the WebSocket echo for own reactions is
+            # suppressed in on_messages_upsert to avoid double-counting.
+            wx.CallAfter(self._on_own_reaction_sent, jid, msg_key, emoji)
+
+    def _on_own_reaction_sent(self, jid: str, msg_key: dict, emoji: str):
+        """Update reaction_map, re-render the original message, and refresh the list."""
+        orig_id = msg_key.get("id", "")
+        if not orig_id:
+            return
+
+        # Update in-memory reaction map
+        if orig_id not in self._reaction_map:
+            self._reaction_map[orig_id] = {}
+        if emoji:
+            self._reaction_map[orig_id][emoji] = (
+                self._reaction_map[orig_id].get(emoji, 0) + 1
+            )
+
+        # Re-render the original message row if currently visible
+        for i, m in enumerate(self._sorted_messages):
+            if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
+                self.messages_list.SetItemText(i, self._render_message_line(m))
+                break
+
+        # Persist reaction in chat records so _last_msg_preview and populate_messages
+        # can reflect it after a conversation close/reopen.
+        chat = self.main_window.chats.get(jid)
+        if chat:
+            reaction_record = {
+                "messageType": "reactionMessage",
+                "message": {
+                    "reactionMessage": {
+                        "key":  msg_key,
+                        "text": emoji,
+                    }
+                },
+                "key": {
+                    "remoteJid": jid,
+                    "fromMe":    True,
+                    "id":        f"_rxn_{orig_id}",
+                },
+                "messageTimestamp": int(time.time()),
+            }
+            records = (
+                chat.setdefault("messages", {})
+                    .setdefault("messages", {})
+                    .setdefault("records", [])
+            )
+            # Avoid duplicates for the same message+emoji pair
+            rxn_key = f"_rxn_{orig_id}"
+            if not any(r.get("key", {}).get("id") == rxn_key for r in records):
+                records.append(reaction_record)
+
+        self.main_window._schedule_save()
+        self.main_window.set_chats()
 
     # ── Attachment handling ──────────────────────────────────────────────────
 
@@ -4473,9 +5167,26 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
+        _MAX_MEDIA_BYTES = 99 * 1024 * 1024
+        i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
+
+            # Pre-check: reject files above the Evolution API 99 MB limit before
+            # creating any UI entry or queuing the send — this prevents silent failures.
+            try:
+                if os.path.getsize(path) > _MAX_MEDIA_BYTES:
+                    wx.MessageBox(
+                        i18n.t("media_too_large").format(max_mb=99),
+                        i18n.t("app_name"),
+                        wx.OK | wx.ICON_ERROR,
+                        self,
+                    )
+                    continue
+            except OSError:
+                pass
+
             vtype      = _VTYPE.get(media_type, "documentMessage")
             local_id   = str(uuid.uuid4())
             virtual_msg = {
@@ -4627,10 +5338,12 @@ class ConversationsPanel(wx.Panel):
         finally:
             self.messages_list.Thaw()
 
-        # Scroll to the new message after Thaw so the repaint is complete
-        last = self.messages_list.GetItemCount() - 1
-        if last >= 0:
-            self.messages_list.EnsureVisible(last)
+        # Only scroll while WinZapp is already active; incoming notifications
+        # must never move focus or alter the user's current foreground context.
+        if getattr(self.main_window, "_allow_ui_focus_changes", lambda: False)():
+            last = self.messages_list.GetItemCount() - 1
+            if last >= 0:
+                self.messages_list.EnsureVisible(last)
 
     def navigate_to_jid(self, jid: str):
         """Select and open the conversation matching jid, clearing any search."""

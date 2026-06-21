@@ -15,8 +15,12 @@ class WebSocketClient:
         self.i18n.get_language()
 
         self.sio = socketio.Client(
-            reconnection=True, reconnection_attempts=5,
-            logger=False, engineio_logger=False,
+            reconnection=True,
+            reconnection_attempts=0,      # 0 = unlimited
+            reconnection_delay=2,
+            reconnection_delay_max=60,
+            logger=False,
+            engineio_logger=False,
         )
         #Bind events
         self.sio.on("connect", self.on_connect)
@@ -51,6 +55,8 @@ class WebSocketClient:
 
     def on_disconnect(self):
         print("WebSocket disconnected.")
+        # Pause the message queue until the socket (and WhatsApp) reconnect.
+        wx.CallAfter(setattr, self.main_window, "_wa_connected", False)
 
     def on_connection_update(self, info):
         print(info)
@@ -65,6 +71,9 @@ class WebSocketClient:
                 self.main_window.my_jid = wuid
             # Mark WhatsApp as connected so the MessageQueue resumes sending.
             self.main_window._wa_connected = True
+            # Clear any "disconnected" status shown in the title bar / tray.
+            if self.main_window._tray_status == self.i18n.t("tray_wa_disconnected"):
+                self.main_window._set_status("")
             if hasattr(self.main_window, "message_queue"):
                 self.main_window.message_queue.flush()
             
@@ -93,33 +102,19 @@ class WebSocketClient:
             if is_logout:
                 # Permanent logout: clear credentials and redirect to pairing.
                 wx.CallAfter(self._handle_logout)
-            elif was_connected:
-                # Temporary disconnection (network glitch, API restart, etc.)
-                # Must run on the main thread — wx.MessageBox from a Socket.IO
-                # I/O thread triggers COM cross-thread errors and can freeze the app.
-                def _show_error():
-                    parent_dialog = None
-                    for name in ('pairing_dial', 'connection_dial'):
-                        dial = getattr(self.connect, name, None)
-                        if dial:
-                            try:
-                                if not wx.IsDestroyed(dial):
-                                    parent_dialog = dial
-                                    break
-                            except Exception:
-                                pass
-
-                    if parent_dialog:
-                        return  # Do not show error popup if connecting/pairing dialog is open
-
-                    self.main_window.error_sound.play()
-                    wx.MessageBox(
-                        self.i18n.t("instance_state_changed"),
-                        self.i18n.t("error").format(app_name=self.main_window.app_name),
-                        wx.OK | wx.ICON_ERROR,
-                        parent_dialog,
-                    )
-                wx.CallAfter(_show_error)
+            else:
+                # Temporary disconnection (network glitch, WhatsApp session interrupted).
+                # Mark WA as disconnected so the MessageQueue stops trying to send.
+                # Do NOT show a blocking dialog — Baileys reconnects automatically and
+                # fires connection.update(state=open) when it succeeds.  A blocking
+                # dialog would freeze the UI and prevent that recovery.
+                def _notify_disconnection():
+                    mw = self.main_window
+                    mw._wa_connected = False
+                    mw.error_sound.play()
+                    mw.output(self.i18n.t("wa_disconnected_temp"), interrupt=False)
+                    mw._set_status(self.i18n.t("tray_wa_disconnected"))
+                wx.CallAfter(_notify_disconnection)
 
     def _handle_logout(self):
         """Handle a permanent WhatsApp logout (device removed from account).
@@ -273,9 +268,18 @@ class WebSocketClient:
             # We distinguish the two cases via _own_sent_ids, which is populated
             # by MessageQueue immediately after the API returns the real message ID.
             if msg.get("key", {}).get("fromMe", False):
-                msg_id    = msg.get("key", {}).get("id", "")
-                own_ids   = getattr(self.main_window, "_own_sent_ids", set())
-                if msg_id and msg_id in own_ids:
+                # Own reactions are applied optimistically in _on_own_reaction_sent;
+                # suppress the WebSocket echo so the reaction count isn't doubled.
+                if msg.get("messageType") == "reactionMessage":
+                    return
+                msg_id = msg.get("key", {}).get("id", "")
+                _lock = getattr(self.main_window, "_own_sent_ids_lock", None)
+                if _lock is not None:
+                    with _lock:
+                        _is_own = msg_id and msg_id in self.main_window._own_sent_ids
+                else:
+                    _is_own = msg_id and msg_id in getattr(self.main_window, "_own_sent_ids", set())
+                if _is_own:
                     return  # echo of our own send — skip
                 # Otherwise: sent from another device — fall through to on_new_message
             wx.CallAfter(self.main_window.on_new_message, msg)

@@ -28,19 +28,22 @@ class PendingMessage:
                  media_type: str = None,
                  caption: str = None,
                  contact_info: dict = None,
-                 quoted: dict = None):
+                 quoted: dict = None,
+                 mentioned_jids: list = None):
         # local_id matches the "_local_id" field in the virtual message dict
         # that was already added to the UI.
-        self.local_id     = local_id
-        self.jid          = jid
-        self.text         = text          # plain-text body
-        self.audio_path   = audio_path    # path to recorded WAV
-        self.media_path   = media_path    # path to attached file (image/video/doc/audio)
-        self.media_type   = media_type    # "image"|"video"|"audio"|"document"
-        self.caption      = caption or "" # optional caption for media
-        self.contact_info = contact_info  # dict for contact attachment
-        self.quoted       = quoted        # quoted/replied-to message dict
-        self.fail_count   = 0            # consecutive send failures
+        self.local_id      = local_id
+        self.jid           = jid
+        self.text          = text           # plain-text body
+        self.audio_path    = audio_path     # path to recorded WAV
+        self.media_path    = media_path     # path to attached file (image/video/doc/audio)
+        self.media_type    = media_type     # "image"|"video"|"audio"|"document"
+        self.caption       = caption or ""  # optional caption for media
+        self.contact_info  = contact_info   # dict for contact attachment
+        self.quoted        = quoted         # quoted/replied-to message dict
+        self.mentioned_jids = mentioned_jids or []  # JIDs @mentioned in text
+        self.fail_count    = 0             # consecutive send failures
+        self.last_error    = ""            # last send error shown if retries exhaust
 
 
 class MessageQueue:
@@ -121,8 +124,18 @@ class MessageQueue:
                         )
                     else:
                         real_id = self.main_window.send_text_message(
-                            msg.jid, msg.text, quoted=msg.quoted
+                            msg.jid, msg.text, quoted=msg.quoted,
+                            mentioned_jids=msg.mentioned_jids or None,
                         )
+                    retryable_failure = False
+                    if isinstance(real_id, dict):
+                        if real_id.get("ok"):
+                            real_id = real_id.get("id") or True
+                        else:
+                            msg.last_error = real_id.get("error") or ""
+                            retryable_failure = bool(real_id.get("retry", True))
+                            real_id = False
+
                     if real_id:
                         msg.fail_count = 0
                         with self._lock:
@@ -131,11 +144,13 @@ class MessageQueue:
                         # (messages.upsert with fromMe=True) is recognised as
                         # "sent by this instance" and not shown as a new message.
                         if isinstance(real_id, str):
-                            own = self.main_window._own_sent_ids
-                            own.add(real_id)
-                            # Prevent unbounded growth — keep at most 500 IDs.
-                            if len(own) > 500:
-                                own.discard(next(iter(own)))
+                            with self.main_window._own_sent_ids_lock:
+                                self.main_window._own_sent_ids.add(real_id)
+                                # Prevent unbounded growth — keep at most 500 IDs.
+                                if len(self.main_window._own_sent_ids) > 500:
+                                    self.main_window._own_sent_ids.discard(
+                                        next(iter(self.main_window._own_sent_ids))
+                                    )
                         # Pass the real WhatsApp message ID so _mark_message_sent
                         # can update the virtual message's key.id for playback.
                         wx.CallAfter(
@@ -146,14 +161,18 @@ class MessageQueue:
                         )
                     else:
                         msg.fail_count += 1
+                        if not msg.last_error:
+                            msg.last_error = getattr(self.main_window, "_last_send_error", "") or ""
                         print(f"[MessageQueue] send failed for {msg.local_id} (attempt {msg.fail_count}/{self._MAX_RETRIES})")
-                        if msg.fail_count >= self._MAX_RETRIES:
+                        if (not retryable_failure) or msg.fail_count >= self._MAX_RETRIES:
                             print(f"[MessageQueue] giving up on {msg.local_id} after {self._MAX_RETRIES} attempts")
                             with self._lock:
                                 self._pending.pop(msg.local_id, None)
                             wx.CallAfter(
                                 self.main_window._on_message_failed,
                                 msg.local_id,
+                                msg.last_error,
+                                bool(msg.media_path),  # show dialog for media failures
                             )
                 except Exception as exc:
                     msg.fail_count += 1
@@ -165,4 +184,6 @@ class MessageQueue:
                         wx.CallAfter(
                             self.main_window._on_message_failed,
                             msg.local_id,
+                            str(exc),
+                            bool(msg.media_path),
                         )

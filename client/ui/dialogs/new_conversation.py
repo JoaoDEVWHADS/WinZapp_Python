@@ -162,13 +162,16 @@ class NewConversationDialog(wx.Dialog):
             chat = {"remoteJid": jid, "pushName": name}
         self.EndModal(wx.ID_OK)
         mw = self._mw
-        # Register the chat in mw.chats so it appears in the sidebar list.
-        # Without this, the sent-message echo is filtered by _own_sent_ids
-        # before reaching on_new_message(), so the chat would never be added
-        # automatically and the conversation stays invisible in the list.
-        if jid not in mw.chats:
-            mw.chats[jid] = chat
+        # Normalize the JID (@c.us → @s.whatsapp.net) then reuse the existing
+        # chat entry when one is present to avoid a duplicate sidebar entry.
+        norm_jid = mw._normalize_jid(jid)
+        existing = mw.chats.get(norm_jid)
+        if existing is None:
+            chat["remoteJid"] = norm_jid
+            mw.chats[norm_jid] = chat
             mw._schedule_set_chats()
+        else:
+            chat = existing
         # Navigate after the dialog is gone
         wx.CallAfter(mw.conversations_panel.navigate_to_conversation, chat)
         wx.CallAfter(mw.conversations_panel.message_field.SetFocus)

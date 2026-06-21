@@ -107,11 +107,19 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
 
     bat = (
         "@echo off\n"
-        f"taskkill /F /PID {pid} >NUL 2>&1\n"
+        ":WAIT\n"
+        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
+        "if not errorlevel 1 (\n"
+        "    timeout /t 1 /nobreak >NUL\n"
+        "    goto WAIT\n"
+        ")\n"
+        # Give any child processes a moment to exit, then kill any remaining processes listening on the API ports.
+        "timeout /t 2 /nobreak >NUL\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :6300 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
-        "timeout /t 2 /nobreak >NUL\n"
-        f'xcopy /E /Y /I "{source_dir}\\*" "{install_dir}\\"\n'
+        f'taskkill /F /FI "WINDOWTITLE eq WinZapp*" /IM node.exe >NUL 2>&1\n'
+        "timeout /t 1 /nobreak >NUL\n"
+        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
     )
@@ -133,8 +141,41 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,
             )
-    else:
         logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
+
+
+# ── WhatsNewDialog ────────────────────────────────────────────────────────────
+
+class WhatsNewDialog(wx.Dialog):
+    """Shows the changelog entries between the current and new version."""
+
+    def __init__(self, parent, changelog: str):
+        i18n = parent.main_window.i18n if hasattr(parent, "main_window") else parent.i18n
+        super().__init__(
+            parent,
+            title=i18n.t("whats_new_title"),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._build(parent, changelog, i18n)
+        self.SetMinSize((400, 300))
+        self.SetSize((520, 400))
+        self.Centre()
+
+    def _build(self, parent, changelog, i18n):
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        text_ctrl = wx.TextCtrl(
+            self,
+            value=changelog,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+        )
+        sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        close_btn = wx.Button(self, wx.ID_CLOSE, label=i18n.t("whats_new_close"))
+        sizer.Add(close_btn, 0, wx.ALIGN_CENTER | wx.BOTTOM, 8)
+        close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+
+        self.SetSizer(sizer)
 
 
 # ── UpdateProgressDialog ──────────────────────────────────────────────────────
@@ -223,6 +264,14 @@ class UpdateProgressDialog(wx.Dialog):
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(extract_dir)
             os.remove(zip_path)
+
+            # If the ZIP placed all files inside a single top-level folder,
+            # point extract_dir at that folder so xcopy copies the contents.
+            _entries = [e for e in os.listdir(extract_dir) if not e.startswith(".")]
+            if len(_entries) == 1 and os.path.isdir(
+                os.path.join(extract_dir, _entries[0])
+            ):
+                extract_dir = os.path.join(extract_dir, _entries[0])
 
             if self._cancelled:
                 logging.info("Auto-updater: Extraction cancelled by user.")
