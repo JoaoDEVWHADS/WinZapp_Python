@@ -67,7 +67,7 @@ async function convertWavToOgg(base64Input: string): Promise<string> {
         '-y',
         '-i', inFile,
         '-c:a', 'libopus',
-        '-ac', '1',
+        '-ac', '2',
         '-ar', '48000',
         '-b:a', '64k',
         '-f', 'ogg',

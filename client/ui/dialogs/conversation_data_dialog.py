@@ -261,18 +261,10 @@ class ConversationDataDialog(wx.Dialog):
                 continue
             p_jid   = p.get("id", "")
             p_phone = format_number(p_jid)
-            # Resolve name: prefer address-book 'name', fall back to 'pushName'.
-            # Also bridge @lid JIDs to phone-number JIDs via the reverse cache.
-            contact = self._mw.contacts.get(p_jid)
-            if not contact and p_jid.endswith("@lid"):
-                phone_jid = lid_to_phone.get(p_jid, "")
-                if phone_jid:
-                    contact  = self._mw.contacts.get(phone_jid)
-                    p_phone  = p_phone or format_number(phone_jid)
-            p_name = ""
-            if contact:
-                p_name = (contact.get("name") or contact.get("pushName") or "").strip()
-            if not p_name or p_name.isdigit():
+            # Resolve name: use the robust display name resolution method from MainWindow
+            # which checks contacts, chats, presence pushNames, and messages.
+            p_name = self._mw._resolve_jid_name(p_jid)
+            if not p_name or p_name == p_phone or p_name.isdigit() or p_name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 p_name = p_phone
             is_admin = "admin" if p.get("admin") else ""
             if is_admin and my_jid and (p_jid == my_jid or p_jid.split("@")[0] == my_jid.split("@")[0]):

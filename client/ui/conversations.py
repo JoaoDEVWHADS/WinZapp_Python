@@ -2172,11 +2172,8 @@ class ConversationsPanel(wx.Panel):
         matches = []
         for name, jid in self._group_participants_cache:
             norm_jid = self.main_window._normalize_jid(jid)
-            saved = is_saved(norm_jid)
-            sent = norm_jid in participants_who_sent_message
-            if saved or sent:
-                if not q or q in name.lower():
-                    matches.append((name, jid))
+            if not q or q in name.lower() or q in norm_jid:
+                matches.append((name, jid))
 
         # Sort: names that start with the query come first, then those that
         # contain it but don't start with it — both groups sorted alphabetically.
