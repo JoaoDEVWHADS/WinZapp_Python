@@ -3670,7 +3670,6 @@ class ConversationsPanel(wx.Panel):
         jid      = conversation.get("remoteJid", "")
         mw       = self.main_window
         i18n     = mw.i18n
-        # Default note: resolved contact name, falling back to formatted number
         note = (
             mw._resolve_contact_name(conversation)
             or mw.find_name_through_messages(conversation)
@@ -3678,7 +3677,6 @@ class ConversationsPanel(wx.Panel):
             or conversation.get("pushName", "")
             or format_number(jid)
         )
-
         try:
             if jid.endswith("@g.us"):
                 data = mw.get_group_info(jid)
@@ -3686,7 +3684,14 @@ class ConversationsPanel(wx.Panel):
                 # counting the participants list which is always present.
                 participants = data.get("participants", [])
                 size = data.get("size") or len(participants)
-                note = i18n.t("group_size").format(count=size)
+                group_name = (
+                    mw._resolve_contact_name(conversation)
+                    or mw.find_name_through_messages(conversation)
+                    or conversation.get("name", "")
+                    or conversation.get("pushName", "")
+                    or format_number(jid)
+                )
+                note = f"{group_name}, {i18n.t('group_size').format(count=size)}"
             else:
                 # Private chat: resolve the canonical JID for cache lookup
                 canonical = mw._normalize_jid(jid)

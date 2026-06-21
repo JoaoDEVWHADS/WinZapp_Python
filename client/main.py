@@ -376,6 +376,10 @@ class MainWindow(wx.Frame):
         #Get connection settings (no authentication_server - Evolution runs locally)
         self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "http://127.0.0.1")
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 6300)
+        if self.evolution_port == 3417:
+            self.evolution_port = 6300
+            self.settings.setdefault("connection", {})["evolution_port"] = 6300
+            self._schedule_save()
         self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
         self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
         logging.info("MainWindow: Evolution config - server=%s, port=%s, apikey=%s", 
@@ -4342,6 +4346,8 @@ class MainWindow(wx.Frame):
                     logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
             except Exception as e:
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
+            finally:
+                time.sleep(0.1)
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from Evolution API (runs on background thread)."""
