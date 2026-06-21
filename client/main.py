@@ -3636,7 +3636,6 @@ class MainWindow(wx.Frame):
 
     def _serialize_quoted_id(self, quoted: dict) -> str:
         """Serialize a quoted message key into the format expected by WPPConnect.
-        Resolves LID JIDs to phone JIDs and formats them as @c.us.
         For groups, this correctly appends the participant's JID."""
         if not quoted:
             return None
@@ -3645,30 +3644,23 @@ class MainWindow(wx.Frame):
             return None
         
         quoted_id = _cq.get("key", {}).get("id")
+        
+        # If the ID already has underscores, keep it but ensure standard domains are corrected
+        if "_" in quoted_id:
+            if "@s.whatsapp.net" in quoted_id:
+                quoted_id = quoted_id.replace("@s.whatsapp.net", "@c.us")
+            return quoted_id
+
         from_me = _cq.get("key", {}).get("fromMe", False)
         from_me_str = "true" if from_me else "false"
         quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
         
-        # If the quotedRemoteJid is a LID JID, resolve to phone JID if available
-        if quoted_remote_jid.endswith("@lid"):
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(quoted_remote_jid, "")
-            if phone_jid:
-                quoted_remote_jid = phone_jid
-        
         # Convert JIDs to the @c.us format expected by WhatsApp Web backend for quotes
+        # Note: Do NOT convert @lid to @c.us because the Puppeteer session indexes these chats by @lid.
         if quoted_remote_jid.endswith("@s.whatsapp.net"):
             quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
-        elif quoted_remote_jid.endswith("@lid"):
-            quoted_remote_jid = quoted_remote_jid.replace("@lid", "@c.us")
             
-        # Clean prefix parts from raw quoted_id to avoid duplicate serialization
-        clean_quoted_id = quoted_id
-        if "_" in clean_quoted_id:
-            parts = clean_quoted_id.split("_")
-            if len(parts) >= 3 and parts[0] in ("true", "false"):
-                clean_quoted_id = parts[2]
-                
-        serialized_id = f"{from_me_str}_{quoted_remote_jid}_{clean_quoted_id}"
+        serialized_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
         
         # For group chats, WPPConnect requires the participant JID at the end
         if quoted_remote_jid.endswith("@g.us"):
@@ -3677,11 +3669,7 @@ class MainWindow(wx.Frame):
                 if participant.endswith("@s.whatsapp.net"):
                     participant = participant.replace("@s.whatsapp.net", "@c.us")
                 elif participant.endswith("@lid"):
-                    phone_p = getattr(self, "_lid_to_phone", {}).get(participant, "")
-                    if phone_p:
-                        participant = phone_p.replace("@s.whatsapp.net", "@c.us")
-                    else:
-                        participant = participant.replace("@lid", "@c.us")
+                    participant = participant.replace("@lid", "@c.us")
                 serialized_id = f"{serialized_id}_{participant}"
                 
         return serialized_id
