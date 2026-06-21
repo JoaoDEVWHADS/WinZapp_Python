@@ -1525,9 +1525,10 @@ class MainWindow(wx.Frame):
 
     def _stop_evolution(self):
         """Terminate the Evolution API process and all its children."""
-        if self.evolution_process and self.evolution_process.poll() is None:
+        proc = getattr(self, "evolution_process", None)
+        if proc and proc.poll() is None:
             try:
-                pid = self.evolution_process.pid
+                pid = proc.pid
                 import sys
                 if sys.platform == "win32":
                     subprocess.run(
@@ -1537,10 +1538,10 @@ class MainWindow(wx.Frame):
                         creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
                     )
                 else:
-                    self.evolution_process.terminate()
+                    proc.terminate()
             except Exception:
                 try:
-                    self.evolution_process.terminate()
+                    proc.terminate()
                 except Exception:
                     pass
 
