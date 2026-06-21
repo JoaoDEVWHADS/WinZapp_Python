@@ -982,6 +982,9 @@ class MainWindow(wx.Frame):
                     ppm[sender_jid] = push
                     self._schedule_save()
 
+        # Extract mapping and mentions from incoming messages
+        self._extract_lid_mapping(msg)
+
         # Statuses (stories) arrive as messages on status@broadcast; they are
         # handled by the Status tab, not as a conversation.
         if remote_jid.endswith("@broadcast"):
@@ -3049,6 +3052,27 @@ class MainWindow(wx.Frame):
             self.save_data(self.chats, self.contacts)
             wx.CallAfter(self._schedule_set_chats)
 
+        # Extract mentions and resolve in background if they are not in _lid_to_phone mapping
+        msg_obj = msg.get("message") or {}
+        ext = msg_obj.get("extendedTextMessage") or {}
+        mentioned = (
+            (msg.get("contextInfo") or {}).get("mentionedJid")
+            or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+            or ext.get("contextInfo", {}).get("mentionedJid")
+            or []
+        )
+        if isinstance(mentioned, list):
+            lids_to_resolve = []
+            for jid in mentioned:
+                if isinstance(jid, str) and jid.endswith("@lid"):
+                    if jid not in getattr(self, "_lid_to_phone", {}):
+                        lids_to_resolve.append(jid)
+            if lids_to_resolve:
+                logging.info(f"[LID Mapping] Found unresolved mentioned LIDs in message: {lids_to_resolve}")
+                def resolve_in_bg():
+                    self.resolve_lid_jids_via_api(lids_to_resolve)
+                threading.Thread(target=resolve_in_bg, daemon=True).start()
+
     def _find_alt_jid_from_messages(self, chat):
         """
         Find the canonical @s.whatsapp.net phone JID for a chat by scanning its
@@ -4356,6 +4380,11 @@ class MainWindow(wx.Frame):
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
             finally:
                 time.sleep(0.1)
+
+        self.save_data(self.chats, self.contacts)
+        wx.CallAfter(self._schedule_set_chats)
+        if hasattr(self, "conversations_panel"):
+            wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from Evolution API (runs on background thread)."""
