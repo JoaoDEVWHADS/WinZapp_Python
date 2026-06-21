@@ -3573,7 +3573,7 @@ class ConversationsPanel(wx.Panel):
                     return ctx
         return None
 
-    def _get_quoted_sender(self, ctx: dict) -> str:
+    def _get_quoted_sender(self, ctx: dict, msg: dict) -> str:
         """Resolve the display name of the quoted message sender from contextInfo."""
         mw   = self.main_window
         i18n = mw.i18n
@@ -3605,7 +3605,20 @@ class ConversationsPanel(wx.Panel):
                             or conv.get("pushName", "")
                             or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
                         )
-            return ""
+            # Fallback when the quoted message is not in local _sorted_messages:
+            # In a 1:1 chat, if I sent this reply, I am replying to the other party.
+            # If the other party sent this reply, they are replying to me ("você").
+            from_me = msg.get("key", {}).get("fromMe", False)
+            if from_me:
+                conv = self.conversation or {}
+                remote = conv.get("remoteJid", "")
+                return (
+                    mw._resolve_contact_name(conv)
+                    or conv.get("pushName", "")
+                    or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
+                )
+            else:
+                return i18n.t("sender_you")
 
         # Strip Baileys device suffix before contact lookup
         clean_p = _strip_dev(participant)
@@ -3635,7 +3648,7 @@ class ConversationsPanel(wx.Panel):
 
         # Check for quoted/reply context
         ctx           = self._get_context_info(msg)
-        quoted_sender = self._get_quoted_sender(ctx) if ctx else ""
+        quoted_sender = self._get_quoted_sender(ctx, msg) if ctx else ""
 
         if quoted_sender:
             header = f"{sender}, {i18n.t('replying_to').format(name=quoted_sender)}"
