@@ -3497,10 +3497,10 @@ class MainWindow(wx.Frame):
 
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
-        if remote_jid.endswith("@lid"):
-            resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-            if resolved:
-                remote_jid = resolved
+        # Prefer the LID JID if mapped, as WPPConnect fails with 'Chat not found' for some phone JIDs that are indexed as LIDs
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -3576,10 +3576,10 @@ class MainWindow(wx.Frame):
         Base64-encode a WAV/audio file and send it as a PTT voice message via the
         WPPConnect Server API. Uses /api/{session}/send-voice-base64.
         """
-        if remote_jid.endswith("@lid"):
-            resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-            if resolved:
-                remote_jid = resolved
+        # Prefer the LID JID if mapped, as WPPConnect fails with 'Chat not found' for some phone JIDs that are indexed as LIDs
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
         try:
             with open(wav_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
@@ -4682,6 +4682,9 @@ class MainWindow(wx.Frame):
         Base64-encode a file and send it as a media message.
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
         import mimetypes
         try:
             with open(file_path, "rb") as fh:
@@ -4730,6 +4733,9 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
         name = contact_info.get("pushName") or ""
         jid = contact_info.get("remoteJid", "")
         phone_raw = jid.split("@")[0] if "@" in jid else jid
@@ -4762,6 +4768,9 @@ class MainWindow(wx.Frame):
 
     def edit_message(self, remote_jid: str, message_id: str, new_text: str):
         """Send an edited message via POST /api/session/edit-message."""
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/api/{self.token}/edit-message"
@@ -4786,6 +4795,9 @@ class MainWindow(wx.Frame):
 
     def delete_message_for_everyone(self, remote_jid: str, message_id: str, from_me: bool):
         """Delete a message for everyone via POST /api/session/delete-message."""
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/api/{self.token}/delete-message"
