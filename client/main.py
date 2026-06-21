@@ -3636,28 +3636,55 @@ class MainWindow(wx.Frame):
 
     def _serialize_quoted_id(self, quoted: dict) -> str:
         """Serialize a quoted message key into the format expected by WPPConnect.
+        Resolves LID JIDs to phone JIDs and formats them as @c.us.
         For groups, this correctly appends the participant's JID."""
         if not quoted:
             return None
         _cq = self._clean_quoted(quoted)
         if not _cq or not _cq.get("key", {}).get("id"):
             return None
+        
         quoted_id = _cq.get("key", {}).get("id")
-        if "_" in quoted_id:
-            return quoted_id
         from_me = _cq.get("key", {}).get("fromMe", False)
         from_me_str = "true" if from_me else "false"
         quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
+        
+        # If the quotedRemoteJid is a LID JID, resolve to phone JID if available
+        if quoted_remote_jid.endswith("@lid"):
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(quoted_remote_jid, "")
+            if phone_jid:
+                quoted_remote_jid = phone_jid
+        
+        # Convert JIDs to the @c.us format expected by WhatsApp Web backend for quotes
         if quoted_remote_jid.endswith("@s.whatsapp.net"):
             quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
-        quoted_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
+        elif quoted_remote_jid.endswith("@lid"):
+            quoted_remote_jid = quoted_remote_jid.replace("@lid", "@c.us")
+            
+        # Clean prefix parts from raw quoted_id to avoid duplicate serialization
+        clean_quoted_id = quoted_id
+        if "_" in clean_quoted_id:
+            parts = clean_quoted_id.split("_")
+            if len(parts) >= 3 and parts[0] in ("true", "false"):
+                clean_quoted_id = parts[2]
+                
+        serialized_id = f"{from_me_str}_{quoted_remote_jid}_{clean_quoted_id}"
+        
+        # For group chats, WPPConnect requires the participant JID at the end
         if quoted_remote_jid.endswith("@g.us"):
             participant = _cq.get("key", {}).get("participant", "")
             if participant:
                 if participant.endswith("@s.whatsapp.net"):
                     participant = participant.replace("@s.whatsapp.net", "@c.us")
-                quoted_id = f"{quoted_id}_{participant}"
-        return quoted_id
+                elif participant.endswith("@lid"):
+                    phone_p = getattr(self, "_lid_to_phone", {}).get(participant, "")
+                    if phone_p:
+                        participant = phone_p.replace("@s.whatsapp.net", "@c.us")
+                    else:
+                        participant = participant.replace("@lid", "@c.us")
+                serialized_id = f"{serialized_id}_{participant}"
+                
+        return serialized_id
 
     def _canonical_mention_jids(self, mentioned_jids):
         """Return mention JIDs in the phone-number format Baileys/WPPConnect can tag."""
