@@ -319,6 +319,11 @@ class MainWindow(wx.Frame):
             logging.getLogger(logger_name).setLevel(logging.DEBUG)
         logging.info("MainWindow: Initializing MainWindow...")
         super().__init__(None)
+        # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
+        self._save_lock = threading.Lock()
+        self._save_timer = None
+        self._save_timer_lock = threading.Lock()
+
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
 
@@ -379,7 +384,7 @@ class MainWindow(wx.Frame):
         if self.evolution_port == 3417:
             self.evolution_port = 6300
             self.settings.setdefault("connection", {})["evolution_port"] = 6300
-            self._schedule_save()
+            self.save_settings()
         self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
         self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
         logging.info("MainWindow: Evolution config - server=%s, port=%s, apikey=%s", 
@@ -424,10 +429,7 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
-        # Serialises concurrent writes to messages.dat (one lock, two helpers below).
-        self._save_lock = threading.Lock()
-        self._save_timer: "threading.Timer | None" = None
-        self._save_timer_lock = threading.Lock()
+        # (Locks initialized early at the top of __init__)
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
         self._tray_status = ""
 
