@@ -30,6 +30,7 @@ from version import __version__
 import json
 from traceback import format_exc, format_exception
 import pyperclip
+import logging
 
 # Tell Windows to use "WinZapp" as the App User Model ID so notifications
 # show the correct name instead of the executable filename.
