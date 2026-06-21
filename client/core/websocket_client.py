@@ -752,7 +752,13 @@ class WebSocketClient:
         if isinstance(quoted_msg, dict):
             has_quote = True
             if not quoted_body:
-                quoted_body = quoted_msg.get("body") or quoted_msg.get("caption") or ""
+                quoted_body = (
+                    quoted_msg.get("body")
+                    or quoted_msg.get("caption")
+                    or quoted_msg.get("conversation")
+                    or (quoted_msg.get("extendedTextMessage") or {}).get("text")
+                    or ""
+                )
             
             # Fallbacks if top-level fields were missing
             if not clean_quoted_id:
@@ -780,7 +786,13 @@ class WebSocketClient:
         if isinstance(quoted_msg_obj, dict):
             has_quote = True
             if not quoted_body:
-                quoted_body = quoted_msg_obj.get("body") or quoted_msg_obj.get("caption") or ""
+                quoted_body = (
+                    quoted_msg_obj.get("body")
+                    or quoted_msg_obj.get("caption")
+                    or quoted_msg_obj.get("conversation")
+                    or (quoted_msg_obj.get("extendedTextMessage") or {}).get("text")
+                    or ""
+                )
             
             if not clean_quoted_id:
                 quoted_id = quoted_msg_obj.get("id")
@@ -796,10 +808,13 @@ class WebSocketClient:
                     participant_jid = author.replace("@c.us", "@s.whatsapp.net")
 
         if has_quote:
+            # Preserve full Baileys-style dict format if available, otherwise fallback to plain conversation dict
+            quoted_msg_payload = quoted_msg if isinstance(quoted_msg, dict) else {"conversation": quoted_body}
+
             context_info = {
                 "stanzaId": clean_quoted_id,
                 "participant": participant_jid,
-                "quotedMessage": {"conversation": quoted_body}
+                "quotedMessage": quoted_msg_payload
             }
             
             # Put under extendedTextMessage (legacy format support)
