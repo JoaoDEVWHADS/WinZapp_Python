@@ -703,20 +703,82 @@ class WebSocketClient:
                 normalized["key"]["participant"] = participant.replace("@c.us", "@s.whatsapp.net")
 
         quoted_msg = wpp_msg.get("quotedMsg")
-        if quoted_msg:
+        quoted_msg_obj = wpp_msg.get("quotedMsgObj")
+        quoted_stanza_id = wpp_msg.get("quotedStanzaID") or wpp_msg.get("quotedStanzaId")
+        quoted_participant = wpp_msg.get("quotedParticipant")
+
+        # Determine if there is any quoted context
+        has_quote = False
+        clean_quoted_id = ""
+        participant_jid = ""
+        quoted_body = ""
+
+        if isinstance(quoted_msg, dict):
+            has_quote = True
             quoted_id = quoted_msg.get("id")
             if isinstance(quoted_id, dict):
                 quoted_id = quoted_id.get("_serialized", "")
             parts = quoted_id.split("_") if quoted_id else []
             clean_quoted_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else quoted_id)
+            
+            # Author JID
+            author = quoted_msg.get("author") or quoted_msg.get("sender", {}).get("id") or ""
+            if author:
+                participant_jid = author.replace("@c.us", "@s.whatsapp.net")
+            
+            quoted_body = quoted_msg.get("body") or quoted_msg.get("caption") or ""
 
+        # Fallback to quotedMsgObj / quotedStanzaID / quotedParticipant
+        if not has_quote and (quoted_stanza_id or quoted_msg_obj or quoted_participant):
+            has_quote = True
+            clean_quoted_id = quoted_stanza_id or ""
+            if isinstance(clean_quoted_id, str) and "_" in clean_quoted_id:
+                parts = clean_quoted_id.split("_")
+                clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
+            
+            if quoted_participant:
+                participant_jid = quoted_participant.replace("@c.us", "@s.whatsapp.net")
+            
+            if isinstance(quoted_msg_obj, dict):
+                quoted_body = quoted_msg_obj.get("body") or quoted_msg_obj.get("caption") or ""
+                if not clean_quoted_id:
+                    quoted_id = quoted_msg_obj.get("id")
+                    if isinstance(quoted_id, dict):
+                        quoted_id = quoted_id.get("_serialized", "")
+                    parts = quoted_id.split("_") if quoted_id else []
+                    clean_quoted_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else quoted_id)
+                if not participant_jid:
+                    author = quoted_msg_obj.get("author") or quoted_msg_obj.get("sender", {}).get("id") or ""
+                    if author:
+                        participant_jid = author.replace("@c.us", "@s.whatsapp.net")
+
+        # If it's a string, we might just have the ID
+        if not has_quote and isinstance(quoted_msg, str) and quoted_msg:
+            has_quote = True
+            clean_quoted_id = quoted_msg
+            if "_" in clean_quoted_id:
+                parts = clean_quoted_id.split("_")
+                clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
+
+        if has_quote:
+            context_info = {
+                "stanzaId": clean_quoted_id,
+                "participant": participant_jid,
+                "quotedMessage": {"conversation": quoted_body}
+            }
+            
+            # Put under extendedTextMessage (legacy format support)
             normalized["message"]["extendedTextMessage"] = {
                 "text": conversation,
-                "contextInfo": {
-                    "stanzaId": clean_quoted_id,
-                    "participant": quoted_msg.get("author", "").replace("@c.us", "@s.whatsapp.net"),
-                    "quotedMessage": {"conversation": quoted_msg.get("body", "")}
-                }
+                "contextInfo": context_info
             }
+            
+            # Also put under specific sub-keys (e.g. imageMessage, videoMessage) if they exist
+            for sub_key in (
+                "imageMessage", "videoMessage", "audioMessage", "documentMessage",
+                "stickerMessage", "locationMessage", "contactMessage"
+            ):
+                if sub_key in normalized["message"] and isinstance(normalized["message"][sub_key], dict):
+                    normalized["message"][sub_key]["contextInfo"] = context_info
 
         return normalized
