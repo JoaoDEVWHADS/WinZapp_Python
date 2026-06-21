@@ -3195,22 +3195,24 @@ class ConversationsPanel(wx.Panel):
                     name = "eu"
                 else:
                     name = self._get_participant_name(jid)
+                
+                # Check what pattern (LID local part or phone number) is used in the text
+                lid_local = jid.rsplit("@", 1)[0]
                 _lid_map = getattr(mw_ref, "_lid_to_phone", {})
-                if jid.endswith("@lid"):
-                    phone_jid = _lid_map.get(jid, "")
-                    if phone_jid:
-                        phone = phone_jid.split("@")[0]
-                    else:
-                        # No mapping: use the local part of the @lid JID — this is
-                        # what the send path writes into the message text as @{local}.
-                        phone = jid.rsplit("@", 1)[0]
-                else:
-                    phone = jid.split("@")[0]
-                if not phone or f"@{phone}" not in text:
+                phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
+                phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
+                
+                placeholder = None
+                if f"@{lid_local}" in text:
+                    placeholder = lid_local
+                elif phone and f"@{phone}" in text:
+                    placeholder = phone
+                    
+                if not placeholder:
                     continue
-                jid_local = jid.rsplit("@", 1)[0]
-                if name and name != phone and name != jid_local and name != jid:
-                    text = text.replace(f"@{phone}", f"@{name}", 1)
+                    
+                if name and name != placeholder and name != jid:
+                    text = text.replace(f"@{placeholder}", f"@{name}", 1)
             return text
 
         # ── Audio ────────────────────────────────────────────────────────────
