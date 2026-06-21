@@ -318,11 +318,18 @@ class ConversationDataDialog(wx.Dialog):
                       .get("messages", {})
                       .get("records", [])
         )
+        def _has_media(m):
+            mid = m.get('key',{}).get('id','')
+            if "_" in mid:
+                parts = mid.split("_")
+                mid = parts[2] if len(parts) > 2 else parts[-1]
+            return os.path.isfile(data_path("media", f"{mid}.wzmedia"))
+
         media_count = sum(
             1 for m in records
             if m.get("messageType", "") in
                {"imageMessage", "videoMessage", "documentMessage", "stickerMessage"}
-            and os.path.isfile(data_path("media", f"{m.get('key',{}).get('id','')}.wzmedia"))
+            and _has_media(m)
         )
         self._media_label.SetLabel(
             i18n.t("media_count").format(count=media_count)
