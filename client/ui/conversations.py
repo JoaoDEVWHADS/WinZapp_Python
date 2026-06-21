@@ -3302,9 +3302,16 @@ class ConversationsPanel(wx.Panel):
             mapped_ack = status_map.get(root_ack, root_ack)
             statuses.append(str(mapped_ack).upper())
 
+        from_me = msg.get("key", {}).get("fromMe", False)
+
         for s in statuses:
             if "PLAYED" in s or s == "5":
                 return i18n.t("status_played")
+
+        if not from_me:
+            # Received messages only show status if they were played
+            return ""
+
         for s in statuses:
             if "READ" in s or s == "4":
                 return i18n.t("status_read")

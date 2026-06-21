@@ -141,6 +141,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,
             )
+    else:
         logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
 
 

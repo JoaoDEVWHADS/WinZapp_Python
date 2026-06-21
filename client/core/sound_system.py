@@ -13,6 +13,11 @@ class SoundSystem:
     def start(self):
         self.enabled = True
         self.output = sound_lib.output.Output()
+        try:
+            import sound_lib.external.pybassopus
+            import sound_lib.external.pybass_aac
+        except Exception:
+            pass
 
 
 class Sound(stream.FileStream):
