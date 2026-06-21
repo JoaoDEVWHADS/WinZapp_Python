@@ -1737,9 +1737,9 @@ class ConversationsPanel(wx.Panel):
                 audio_ext=".mp4",
             )
 
-        elif msg_type == "imageMessage":
-            # Enter on an image → open in default app
-            self._on_action_open(None)
+        elif msg_type in ("imageMessage", "documentMessage"):
+            # Enter on an image or document → open in default app
+            self._on_action_open(None, index=index)
 
     def on_messages_context_menu(self, event):
         index = self.messages_list.GetFirstSelected()
@@ -2716,8 +2716,9 @@ class ConversationsPanel(wx.Panel):
 
     # ── Open / Save As ──────────────────────────────────────────────────────
 
-    def _on_action_open(self, event):
-        index = self.messages_list.GetFirstSelected()
+    def _on_action_open(self, event, index=None):
+        if index is None:
+            index = self.messages_list.GetFirstSelected()
         if index < 0 or index >= len(self._sorted_messages):
             return
         msg      = self._sorted_messages[index]

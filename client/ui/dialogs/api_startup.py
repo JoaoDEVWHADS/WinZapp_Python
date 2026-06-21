@@ -73,15 +73,17 @@ class ApiStartupDialog(wx.Dialog):
     # ── Timer ──────────────────────────────────────────────────────────────
 
     def _on_pulse(self, _event):
-        self._gauge.Pulse()
+        if self:
+            self._gauge.Pulse()
 
     # ── Cancel ────────────────────────────────────────────────────────────
 
     def _on_cancel(self, _event):
         """User clicked Cancel — stop polling and close with CANCEL."""
         self._done = True
-        self._timer.Stop()
-        self.EndModal(wx.ID_CANCEL)
+        if self:
+            self._timer.Stop()
+            self.EndModal(wx.ID_CANCEL)
 
     # ── Prevent accidental close (Alt-F4) ─────────────────────────────────
 
@@ -98,16 +100,18 @@ class ApiStartupDialog(wx.Dialog):
                 return
             try:
                 with socket.create_connection(("127.0.0.1", self._port), timeout=1):
-                    wx.CallAfter(self._finish_success)
+                    if self:
+                        wx.CallAfter(self._finish_success)
                     return
             except OSError:
                 time.sleep(self._POLL_INTERVAL_S)
-        wx.CallAfter(self._finish_timeout)
+        if self:
+            wx.CallAfter(self._finish_timeout)
 
     # ── Completion callbacks (called on main thread via wx.CallAfter) ──────
 
     def _finish_success(self):
-        if self._done:
+        if not self or self._done:
             return
         if not self.IsModal():
             wx.CallLater(50, self._finish_success)
@@ -118,11 +122,12 @@ class ApiStartupDialog(wx.Dialog):
             self.EndModal(wx.ID_OK)
         except Exception:
             self._done = False
-            self._timer.Start(self._PULSE_MS)
-            wx.CallLater(50, self._finish_success)
+            if self:
+                self._timer.Start(self._PULSE_MS)
+                wx.CallLater(50, self._finish_success)
 
     def _finish_timeout(self):
-        if self._done:
+        if not self or self._done:
             return
         if not self.IsModal():
             wx.CallLater(50, self._finish_timeout)
@@ -133,5 +138,6 @@ class ApiStartupDialog(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
         except Exception:
             self._done = False
-            self._timer.Start(self._PULSE_MS)
-            wx.CallLater(50, self._finish_timeout)
+            if self:
+                self._timer.Start(self._PULSE_MS)
+                wx.CallLater(50, self._finish_timeout)
