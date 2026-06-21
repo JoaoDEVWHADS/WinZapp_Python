@@ -2277,6 +2277,20 @@ class ConversationsPanel(wx.Panel):
             data = self.main_window.get_group_info(jid)
             participants = data.get("participants", [])
             my_jid = getattr(self.main_window, "my_jid", "") or ""
+            mw_ref = self.main_window
+            
+            # Resolve any unknown @lid participant JIDs using API
+            lid_jids_to_resolve = []
+            lid_to_phone = getattr(mw_ref, "_lid_to_phone", {})
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                p_jid = p.get("id", "")
+                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                    lid_jids_to_resolve.append(p_jid)
+            if lid_jids_to_resolve:
+                mw_ref.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                
             cache = []
             for p in participants:
                 if not isinstance(p, dict):
@@ -2286,7 +2300,7 @@ class ConversationsPanel(wx.Panel):
                     continue
                 if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
                     continue  # skip self
-                name = self._get_participant_name(p_jid)
+                name = self._get_participant_name(p_jid, p)
                 cache.append((name, p_jid))
             cache.sort(key=lambda x: x[0].lower())
             wx.CallAfter(self._set_group_participants_cache, cache)
@@ -3177,6 +3191,10 @@ class ConversationsPanel(wx.Panel):
             )
             for jid in mentioned:
                 mw_ref = self.main_window
+                if mw_ref._is_self_jid(jid):
+                    name = "eu"
+                else:
+                    name = self._get_participant_name(jid)
                 _lid_map = getattr(mw_ref, "_lid_to_phone", {})
                 if jid.endswith("@lid"):
                     phone_jid = _lid_map.get(jid, "")
@@ -3190,7 +3208,6 @@ class ConversationsPanel(wx.Panel):
                     phone = jid.split("@")[0]
                 if not phone or f"@{phone}" not in text:
                     continue
-                name = self._get_participant_name(jid)
                 jid_local = jid.rsplit("@", 1)[0]
                 if name and name != phone and name != jid_local and name != jid:
                     text = text.replace(f"@{phone}", f"@{name}", 1)
@@ -4031,9 +4048,10 @@ class ConversationsPanel(wx.Panel):
                 if cn and not cn.isdigit() and not is_phone_like(cn):
                     return cn
         if msg is not None:
-            push = msg.get("pushName", "")
-            if push and not is_phone_like(push):
-                return push
+            for key_candidate in ("pushName", "pushname", "name", "displayName"):
+                push = msg.get(key_candidate, "")
+                if push and not push.isdigit() and not is_phone_like(push):
+                    return push
         # Fallback: presence-learned pushName map
         for cjid in candidates:
             pname = (ppm.get(cjid) or "").strip()
