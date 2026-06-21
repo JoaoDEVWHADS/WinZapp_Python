@@ -4326,15 +4326,20 @@ class MainWindow(wx.Frame):
                 resp_profile = requests.get(url_profile, headers=headers, timeout=10)
                 if resp_profile.status_code in (200, 201):
                     res_prof = resp_profile.json() or {}
-                    res_data = res_prof.get("response", {})
+                    res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
                     if not isinstance(res_data, dict):
                         res_data = {}
-                    name = res_data.get("name") or res_data.get("pushname")
+                    name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
                     if name and name != "Contato sem nome" and not is_phone_like(name):
                         if lid_jid not in self.contacts:
                             self.contacts[lid_jid] = {}
                         self.contacts[lid_jid]["name"] = name
                         self.contacts[lid_jid]["pushName"] = name
+                        
+                        # Also save to presence pushname map to ensure UI functions find it
+                        if not hasattr(self, "_presence_pushname_map"):
+                            self._presence_pushname_map = {}
+                        self._presence_pushname_map[lid_jid] = name
                         
                         # Also copy to phone contact cache if mapped
                         if canonical_jid:
@@ -4342,6 +4347,7 @@ class MainWindow(wx.Frame):
                                 self.contacts[canonical_jid] = {}
                             self.contacts[canonical_jid]["name"] = name
                             self.contacts[canonical_jid]["pushName"] = name
+                            self._presence_pushname_map[canonical_jid] = name
                 else:
                     logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
             except Exception as e:
