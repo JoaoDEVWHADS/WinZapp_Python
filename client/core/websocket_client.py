@@ -708,10 +708,10 @@ class WebSocketClient:
         quoted_participant = wpp_msg.get("quotedParticipant")
 
         # Debug quotes
-        quoted_keys = [k for k in wpp_msg.keys() if "quoted" in k or "quote" in k.lower()]
-        if quoted_keys:
+        body_text = str(wpp_msg.get('body') or '').strip().lower()
+        if body_text in ('..', 'oi'):
             import logging
-            logging.info(f"[Quote Debug] Message {wpp_msg.get('id')} has quote keys: {quoted_keys}. Values: { {k: wpp_msg[k] for k in quoted_keys} }")
+            logging.info(f"[Raw Message Debug] Message {wpp_msg.get('id')} body: {body_text}. Full payload: {wpp_msg}")
 
         # Determine if there is any quoted context
         has_quote = False
