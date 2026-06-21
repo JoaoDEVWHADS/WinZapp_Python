@@ -1287,6 +1287,7 @@ class MainWindow(wx.Frame):
         # background if any are missing — no dialog needed.
         _REQUIRED_MARKERS = [
             os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
+            os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
