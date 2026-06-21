@@ -1591,7 +1591,8 @@ class MainWindow(wx.Frame):
         from ui.dialogs.api_startup import ApiStartupDialog
         dlg    = ApiStartupDialog(self, self.evolution_port)
         result = dlg.ShowModal()
-        dlg.Destroy()
+        if dlg:
+            dlg.Destroy()
 
         if result != wx.ID_OK:
             # Collect the last 40 lines of the evolution log for diagnosis
