@@ -1170,6 +1170,15 @@ class ConversationsPanel(wx.Panel):
                 # get_base64_from_media can find the message in the DB later.
                 if real_id and isinstance(real_id, str):
                     msg.setdefault("key", {})["id"] = real_id
+                    # Rename the local audio file so we don't have to download it!
+                    try:
+                        voice_messages_dir = data_path("voice_messages")
+                        old_file = os.path.join(voice_messages_dir, f"{local_id}.msv")
+                        new_file = os.path.join(voice_messages_dir, f"{real_id}.msv")
+                        if os.path.isfile(old_file) and not os.path.isfile(new_file):
+                            os.rename(old_file, new_file)
+                    except Exception as e:
+                        print(f"[_mark_message_sent] failed to rename local audio: {e}")
                     if getattr(self, "_current_audio_id", None) == local_id:
                         self._current_audio_id = real_id
                     if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
@@ -1625,7 +1634,11 @@ class ConversationsPanel(wx.Panel):
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
-        media_path = data_path("media", f"{msg_id}.wzmedia")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
         is_downloaded = os.path.isfile(media_path)
 
         if msg_type == "documentMessage":
@@ -1720,9 +1733,13 @@ class ConversationsPanel(wx.Panel):
 
         if msg_type == "audioMessage":
             duration = (msg_obj.get("audioMessage") or {}).get("seconds", 0) or 0
+            clean_msg_id = msg_id
+            if "_" in msg_id:
+                parts = msg_id.split("_")
+                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
             self._toggle_playback(
                 msg_id, duration, msg,
-                file_path=data_path("voice_messages", f"{msg_id}.msv"),
+                file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                 audio_ext=".ogg",
             )
 
@@ -1731,9 +1748,13 @@ class ConversationsPanel(wx.Panel):
             if video.get("gifPlayback"):
                 return  # GIFs have no audio track to play
             duration = video.get("seconds", 0) or 0
+            clean_msg_id = msg_id
+            if "_" in msg_id:
+                parts = msg_id.split("_")
+                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
             self._toggle_playback(
                 msg_id, duration, msg,
-                file_path=data_path("media", f"{msg_id}.wzmedia"),
+                file_path=data_path("media", f"{clean_msg_id}.wzmedia"),
                 audio_ext=".mp4",
             )
 
@@ -1890,8 +1911,12 @@ class ConversationsPanel(wx.Panel):
 
         # Save As (media only, only when the file is already cached locally)
         _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
         if msg_type in _SAVEABLE and os.path.isfile(
-            data_path("media", f"{msg_id}.wzmedia")
+            data_path("media", f"{clean_msg_id}.wzmedia")
         ):
             menu.AppendSeparator()
             save_item = menu.Append(
@@ -2740,7 +2765,11 @@ class ConversationsPanel(wx.Panel):
         else:
             return
 
-        media_path = data_path("media", f"{msg_id}.wzmedia")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
 
         def _run():
             if not os.path.isfile(media_path):
@@ -2804,7 +2833,11 @@ class ConversationsPanel(wx.Panel):
                 return
             save_path = dlg.GetPath()
 
-        media_path = data_path("media", f"{msg_id}.wzmedia")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
 
         def _run():
             if not os.path.isfile(media_path):
@@ -3107,9 +3140,13 @@ class ConversationsPanel(wx.Panel):
                 # Update list selection to the next audio
                 self.messages_list.Focus(next_idx)
                 self.messages_list.Select(next_idx, True)
+                clean_msg_id = msg_id
+                if "_" in msg_id:
+                    parts = msg_id.split("_")
+                    clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
                 self._toggle_playback(
                     msg_id, duration, next_msg,
-                    file_path=data_path("voice_messages", f"{msg_id}.msv"),
+                    file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                     audio_ext=".ogg",
                 )
             break  # stop regardless (either play next or not)

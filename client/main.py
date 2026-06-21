@@ -3574,6 +3574,9 @@ class MainWindow(wx.Frame):
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id:
             return
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            msg_id = parts[2] if len(parts) > 2 else parts[-1]
         media_path = data_path("media", f"{msg_id}.wzmedia")
         if os.path.isfile(media_path):
             return
@@ -4248,7 +4251,11 @@ class MainWindow(wx.Frame):
 
     def handle_audio_message(self, msg, timeout=60):
         voice_messages_dir = data_path("voice_messages")
-        audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
+        msg_id = msg.get('key', {}).get('id', '')
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        audio_file_path = os.path.join(voice_messages_dir, f"{msg_id}.msv")
         if os.path.isfile(audio_file_path):
             return
         base64_audio = self.get_base64_from_media(msg, timeout=timeout)
@@ -4409,7 +4416,11 @@ class MainWindow(wx.Frame):
 
     def save_audio_locally(self, msg, audio_content):
         voice_messages_dir = data_path("voice_messages")
-        audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
+        msg_id = msg.get('key', {}).get('id', '')
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        audio_file_path = os.path.join(voice_messages_dir, f"{msg_id}.msv")
         try:
             with open(audio_file_path, "wb") as audio_file:
                 encrypted_audio = encrypt(audio_content, self.key)
