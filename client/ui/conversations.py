@@ -4165,6 +4165,8 @@ class ConversationsPanel(wx.Panel):
     def _get_participant_name(self, participant_jid: str, msg: dict | None = None) -> str:
         """Return a display name for a group participant."""
         mw = self.main_window
+        if mw._is_self_jid(participant_jid):
+            return mw.i18n.t("sender_you")
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
         ppm = getattr(mw, "_presence_pushname_map", {})
 
