@@ -2075,6 +2075,7 @@ class MainWindow(wx.Frame):
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
+        self.scan_all_cached_messages_for_mentions()
         self.connected_sound.play()
         # Reset per-session sync guard so on_messages_set() can start a fresh
         # sync.  Without this, _sync_completed stays True from the previous
@@ -3116,6 +3117,100 @@ class MainWindow(wx.Frame):
                         if hasattr(self, "conversations_panel"):
                             wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
                 threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
+
+    def scan_all_cached_messages_for_mentions(self):
+        """Scan all cached messages in self.chats, find all unresolved LIDs/phones, and resolve them."""
+        def _scan():
+            time.sleep(3)  # Wait for startup to stabilize
+            logging.info("[Mentions Scan] Starting scan of all cached messages...")
+            
+            lids_to_resolve = set()
+            phones_to_resolve = set()
+            
+            # 1. Collect JID mappings and mentions
+            chats_snapshot = list(self.chats.values())
+            for chat in chats_snapshot:
+                records = chat.get("messages", {}).get("messages", {}).get("records", [])
+                for msg in list(records):
+                    if not isinstance(msg, dict):
+                        continue
+                    # First, see if we can extract immediate JID mappings from key/alt
+                    key = msg.get("key") or {}
+                    remote = key.get("remoteJid", "")
+                    alt = key.get("remoteJidAlt", "")
+                    participant = key.get("participant", "")
+                    
+                    if alt and alt.endswith("@s.whatsapp.net"):
+                        if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
+                            self.register_jid_mapping(remote, alt)
+                        if participant and participant.endswith("@lid") and self._lid_to_phone.get(participant) != alt:
+                            self.register_jid_mapping(participant, alt)
+                    elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                        if self._lid_to_phone.get(alt) != remote:
+                            self.register_jid_mapping(alt, remote)
+
+                    # Now collect mentions
+                    msg_obj = msg.get("message") or {}
+                    ext = msg_obj.get("extendedTextMessage") or {}
+                    mentioned = (
+                        (msg.get("contextInfo") or {}).get("mentionedJid")
+                        or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+                        or ext.get("contextInfo", {}).get("mentionedJid")
+                        or []
+                    )
+                    if isinstance(mentioned, list):
+                        for jid in mentioned:
+                            if not isinstance(jid, str):
+                                continue
+                            if jid.endswith("@lid"):
+                                if jid not in getattr(self, "_lid_to_phone", {}):
+                                    lids_to_resolve.add(jid)
+                            elif jid.endswith("@s.whatsapp.net") or jid.endswith("@c.us"):
+                                normalized = self._normalize_jid(jid)
+                                contact = self.contacts.get(normalized)
+                                name = ""
+                                if contact:
+                                    name = (contact.get("name") or contact.get("pushName") or "").strip()
+                                if not name or name == "Contato sem nome" or is_phone_like(name):
+                                    phones_to_resolve.add(jid)
+                                    
+            # 2. Resolve in controlled batches
+            if lids_to_resolve:
+                logging.info(f"[Mentions Scan] Found {len(lids_to_resolve)} unresolved mentioned LIDs.")
+                self.resolve_lid_jids_via_api(list(lids_to_resolve))
+                
+            if phones_to_resolve:
+                logging.info(f"[Mentions Scan] Found {len(phones_to_resolve)} unresolved mentioned phone JIDs.")
+                updated = False
+                for p_jid in list(phones_to_resolve):
+                    try:
+                        res = self.get_contact_profile(p_jid)
+                        if res:
+                            res_data = res.get("response", {})
+                            if isinstance(res_data, dict):
+                                name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
+                                if name and name != "Contato sem nome" and not is_phone_like(name):
+                                    normalized = self._normalize_jid(p_jid)
+                                    if normalized not in self.contacts:
+                                        self.contacts[normalized] = {}
+                                    self.contacts[normalized]["name"] = name
+                                    self.contacts[normalized]["pushName"] = name
+                                    if not hasattr(self, "_presence_pushname_map"):
+                                        self._presence_pushname_map = {}
+                                    self._presence_pushname_map[normalized] = name
+                                    updated = True
+                        time.sleep(0.1)  # Rate limiting
+                    except Exception as e:
+                        logging.error(f"[Mentions Scan] Error resolving phone {p_jid}: {e}")
+                if updated:
+                    self.save_data(self.chats, self.contacts)
+                    wx.CallAfter(self._schedule_set_chats)
+                    if hasattr(self, "conversations_panel"):
+                        wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+            
+            logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
+
+        threading.Thread(target=_scan, daemon=True).start()
 
     def _find_alt_jid_from_messages(self, chat):
         """
@@ -4209,6 +4304,7 @@ class MainWindow(wx.Frame):
                     if isinstance(wm, dict) and self.ws:
                         try:
                             normalized = self.ws._normalize_wpp_message(wm)
+                            self._extract_lid_mapping(normalized)
                             fetched_messages.append(normalized)
                         except Exception:
                             pass
