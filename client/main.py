@@ -5093,7 +5093,42 @@ class MainWindow(wx.Frame):
         if msg_type == "conversation":
             content = msg_obj.get("conversation") or ""
         elif msg_type == "extendedTextMessage":
-            content = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+            content = (msg_obj.get("extendedTextMessage") or {}).get("text", "") or ""
+            ext = msg_obj.get("extendedTextMessage") or {}
+            mentioned = (
+                (last.get("contextInfo") or {}).get("mentionedJid")
+                or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+                or ext.get("contextInfo", {}).get("mentionedJid")
+                or []
+            )
+            if isinstance(mentioned, list) and mentioned:
+                for jid in mentioned:
+                    if not isinstance(jid, str):
+                        continue
+                    if self._is_self_jid(jid):
+                        name = "eu"
+                    else:
+                        if hasattr(self, "conversations_panel"):
+                            name = self.conversations_panel._get_participant_name(jid)
+                        else:
+                            name = ""
+                    
+                    lid_local = jid.rsplit("@", 1)[0]
+                    _lid_map = getattr(self, "_lid_to_phone", {})
+                    phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
+                    phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
+                    
+                    placeholder = None
+                    if f"@{lid_local}" in content:
+                        placeholder = lid_local
+                    elif phone and f"@{phone}" in content:
+                        placeholder = phone
+                        
+                    if not placeholder:
+                        continue
+                        
+                    if name and name != placeholder and name != jid:
+                        content = content.replace(f"@{placeholder}", f"@{name}")
         elif msg_type == "audioMessage":
             dur     = _dur((msg_obj.get("audioMessage") or {}).get("seconds"))
             content = f"{i18n.t('message_type_audio')} {dur}"
