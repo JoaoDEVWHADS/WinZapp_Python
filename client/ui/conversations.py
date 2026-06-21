@@ -3619,15 +3619,7 @@ class ConversationsPanel(wx.Panel):
         if my_jid and _phone_part(clean_p) == _phone_part(my_jid):
             return i18n.t("sender_you")
 
-        contact = mw.contacts.get(clean_p) or mw.contacts.get(participant)
-        if contact:
-            name = (contact.get("name") or contact.get("pushName") or "").strip()
-            if name and not is_phone_like(name):
-                return name
-
-        if clean_p.endswith("@lid"):
-            return ""
-        return format_number(clean_p) or clean_p
+        return self._get_participant_name(clean_p)
 
     def _render_message_line(self, msg) -> str:
         """Produce the full display string for a single message row."""
