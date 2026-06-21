@@ -3653,12 +3653,28 @@ class MainWindow(wx.Frame):
 
         from_me = _cq.get("key", {}).get("fromMe", False)
         from_me_str = "true" if from_me else "false"
-        quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
         
-        # Convert JIDs to the @c.us format expected by WhatsApp Web backend for quotes
-        # Note: Do NOT convert @lid to @c.us because the Puppeteer session indexes these chats by @lid.
-        if quoted_remote_jid.endswith("@s.whatsapp.net"):
-            quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
+        # Determine the correct remoteJid for WPPConnect
+        raw_key = quoted.get("key", {}) if isinstance(quoted, dict) else {}
+        raw_remote_jid = raw_key.get("remoteJid", "")
+        
+        if raw_remote_jid:
+            phone_to_lid = getattr(self, "_phone_to_lid", {})
+            if raw_remote_jid.endswith("@lid"):
+                quoted_remote_jid = raw_remote_jid
+            else:
+                norm_remote_jid = self._normalize_jid(raw_remote_jid)
+                lid_jid = phone_to_lid.get(norm_remote_jid, "")
+                if lid_jid:
+                    quoted_remote_jid = lid_jid
+                elif norm_remote_jid.endswith("@s.whatsapp.net"):
+                    quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
+                else:
+                    quoted_remote_jid = norm_remote_jid
+        else:
+            quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
+            if quoted_remote_jid.endswith("@s.whatsapp.net"):
+                quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
             
         serialized_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
         
@@ -3791,11 +3807,14 @@ class MainWindow(wx.Frame):
         except Exception:
             return False
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-voice-base64"
+        quoted_id = self._serialize_quoted_id(quoted) if quoted else None
         payload = {
             "phone": remote_jid,
             "base64": f"data:audio/wav;base64,{audio_b64}",
             "isGroup": remote_jid.endswith("@g.us")
         }
+        if quoted_id:
+            payload["quotedMessageId"] = quoted_id
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
