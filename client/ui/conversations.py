@@ -2698,25 +2698,39 @@ class ConversationsPanel(wx.Panel):
         # Locally-queued messages have their own pending status.
         if msg.get("_local_pending"):
             return i18n.t("status_pending")
+        
+        statuses = []
         updates = msg.get("MessageUpdate")
         if isinstance(updates, list) and updates:
-            statuses = []
             for u in updates:
                 if isinstance(u, dict):
                     st = u.get("status") or ""
                     statuses.append(str(st).upper())
-            for s in statuses:
-                if "PLAYED" in s or s == "5":
-                    return i18n.t("status_played")
-            for s in statuses:
-                if "READ" in s or s == "4":
-                    return i18n.t("status_read")
-            for s in statuses:
-                if "DELIVERED" in s or "DELIVERY_ACK" in s or s == "3":
-                    return i18n.t("status_delivered")
-            for s in statuses:
-                if "SENT" in s or "ACK" in s or s == "2":
-                    return i18n.t("status_sent")
+        
+        # Fallback: check status directly on the message (2=sent, 3=delivered, 4=read, 5=played)
+        root_status = msg.get("status")
+        if root_status is not None:
+            statuses.append(str(root_status).upper())
+            
+        # Fallback: check ack directly on the message (WPPConnect format: 1=sent, 2=delivered, 3=read, 4=played)
+        root_ack = msg.get("ack")
+        if root_ack is not None:
+            status_map = {1: 2, 2: 3, 3: 4, 4: 5}
+            mapped_ack = status_map.get(root_ack, root_ack)
+            statuses.append(str(mapped_ack).upper())
+
+        for s in statuses:
+            if "PLAYED" in s or s == "5":
+                return i18n.t("status_played")
+        for s in statuses:
+            if "READ" in s or s == "4":
+                return i18n.t("status_read")
+        for s in statuses:
+            if "DELIVERED" in s or "DELIVERY_ACK" in s or s == "3":
+                return i18n.t("status_delivered")
+        for s in statuses:
+            if "SENT" in s or "ACK" in s or s == "2":
+                return i18n.t("status_sent")
         return ""
 
     def _sender_label(self, msg) -> str:
