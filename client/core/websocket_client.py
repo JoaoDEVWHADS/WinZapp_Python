@@ -707,6 +707,23 @@ class WebSocketClient:
         quoted_stanza_id = wpp_msg.get("quotedStanzaID") or wpp_msg.get("quotedStanzaId")
         quoted_participant = wpp_msg.get("quotedParticipant")
 
+        # Fallback to Evolution API/Baileys contextInfo if WPPConnect quote fields are missing
+        ctx_info = wpp_msg.get("contextInfo")
+        if not ctx_info and isinstance(wpp_msg.get("message"), dict):
+            sub_msg = wpp_msg.get("message")
+            for sub_key in ("extendedTextMessage", "imageMessage", "videoMessage", "audioMessage", "documentMessage"):
+                if isinstance(sub_msg.get(sub_key), dict):
+                    ctx_info = sub_msg[sub_key].get("contextInfo")
+                    if ctx_info:
+                        break
+        if isinstance(ctx_info, dict):
+            if not quoted_stanza_id:
+                quoted_stanza_id = ctx_info.get("stanzaId")
+            if not quoted_participant:
+                quoted_participant = ctx_info.get("participant")
+            if not quoted_msg:
+                quoted_msg = ctx_info.get("quotedMessage")
+
         # Debug quotes
         body_text = str(wpp_msg.get('body') or '').strip().lower()
         if body_text in ('..', 'oi'):
