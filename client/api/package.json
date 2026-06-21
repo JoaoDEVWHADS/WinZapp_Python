@@ -37,6 +37,7 @@
   "packageManager": "yarn@4.14.1",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
+    "@babel/runtime": "^7.29.2",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@wppconnect-team/wppconnect": "^2.1.0",
     "archiver": "^7.0.1",
@@ -71,7 +72,6 @@
     "@babel/plugin-transform-runtime": "^7.29.0",
     "@babel/preset-env": "^7.29.2",
     "@babel/preset-typescript": "^7.28.5",
-    "@babel/runtime": "^7.29.2",
     "@commitlint/cli": "^20.5.0",
     "@commitlint/config-conventional": "^20.5.0",
     "@commitlint/cz-commitlint": "^20.5.0",
