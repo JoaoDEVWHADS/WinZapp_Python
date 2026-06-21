@@ -3702,28 +3702,38 @@ class MainWindow(wx.Frame):
                 "mentioned": mentioned_clean
             }
         else:
-            url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
-            payload = {
-                "phone": remote_jid,
-                "message": text,
-                "isGroup": remote_jid.endswith("@g.us")
-            }
-            if quoted:
-                quoted_id = self._serialize_quoted_id(quoted)
-                if quoted_id:
-                    payload["options"] = {
-                        "quotedMsg": quoted_id
-                    }
-            if quoted and "options" in payload:
-                print(f"[send_text_message] sending quoted reply to {remote_jid}, quoted key.id={payload['options'].get('quotedMsg')}")
+            quoted_id = self._serialize_quoted_id(quoted) if quoted else None
+            if quoted_id:
+                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-reply"
+                phone_net = remote_jid
+                if phone_net.endswith("@s.whatsapp.net"):
+                    phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
+                payload = {
+                    "phone": [phone_net],
+                    "message": text,
+                    "messageId": quoted_id
+                }
+                print(f"[send_text_message] sending quoted reply via send-reply to {phone_net}, quoted key.id={quoted_id}")
+            else:
+                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
+                payload = {
+                    "phone": remote_jid,
+                    "message": text,
+                    "isGroup": remote_jid.endswith("@g.us")
+                }
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
                 # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
                 # try sending it as a plain message instead of leaving it pending forever.
-                if quoted and "options" in payload:
+                if quoted_id:
                     print(f"[send_text_message] Quoted send failed (HTTP {response.status_code}). Retrying without quote...")
-                    payload.pop("options", None)
+                    url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
+                    payload = {
+                        "phone": remote_jid,
+                        "message": text,
+                        "isGroup": remote_jid.endswith("@g.us")
+                    }
                     response = requests.post(url, json=payload, headers=headers, timeout=15)
                 
                 if response.status_code not in (200, 201):
