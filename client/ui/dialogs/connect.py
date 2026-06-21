@@ -247,6 +247,18 @@ class Connect:
                     )
                     self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
                     self.main_window.save_settings()
+                    # Best-effort delete of orphaned instance
+                    if token:
+                        def _delete():
+                            try:
+                                requests.delete(
+                                    f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/delete/{token}",
+                                    headers={"apikey": self.main_window.evolution_api_key},
+                                    timeout=5,
+                                )
+                            except Exception:
+                                pass
+                        threading.Thread(target=_delete, daemon=True).start()
                     return False
                 
                 # If the API returns status: false, check if the session is registered in the API's token store.
@@ -278,11 +290,25 @@ class Connect:
 
                 logging.warning(
                     "[check_connection_status] check-connection-session returned false and session not found in token store. "
-                    "Session is unlinked from mobile. Clearing WA_token."
+                    "Session is unlinked from mobile. Clearing WA_token and wiping local data."
                 )
                 self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
+                # Clear all cached chats/contacts/media to avoid cross-account data leakage
+                self.main_window.clear_local_data()
+                # Best-effort delete of orphaned instance
+                if token:
+                    def _delete():
+                        try:
+                            requests.delete(
+                                f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/delete/{token}",
+                                headers={"apikey": self.main_window.evolution_api_key},
+                                timeout=5,
+                            )
+                        except Exception:
+                            pass
+                    threading.Thread(target=_delete, daemon=True).start()
                 return False
 
             # Fallback/Safety Check: also check general status-session
@@ -307,13 +333,28 @@ class Connect:
                 # connection dialog is shown on this and future launches.
                 logging.warning(
                     "[check_connection_status] Token exists but session status is '%s' "
-                    "and paired=%s (pairing incomplete). Clearing stale WA_token.",
+                    "and paired=%s (pairing incomplete). Clearing stale WA_token and wiping local data.",
                     status,
                     is_paired,
                 )
                 self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
+                if is_paired:
+                    # Clear local cached data if it was previously paired
+                    self.main_window.clear_local_data()
+                # Best-effort delete of orphaned instance
+                if token:
+                    def _delete():
+                        try:
+                            requests.delete(
+                                f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/delete/{token}",
+                                headers={"apikey": self.main_window.evolution_api_key},
+                                timeout=5,
+                            )
+                        except Exception:
+                            pass
+                    threading.Thread(target=_delete, daemon=True).start()
                 return False
         except Exception as exc:
             # If the API is unreachable (still starting up), only assume the token is valid
