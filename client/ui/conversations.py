@@ -1707,7 +1707,9 @@ class ConversationsPanel(wx.Panel):
 
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
-        self._do_activate_message(event.GetIndex())
+        idx = self.messages_list.GetFocusedItem()
+        if idx >= 0:
+            self._do_activate_message(idx)
 
     def _do_activate_message(self, index: int):
         """Core activation logic shared by Enter, double-click, and Space."""
