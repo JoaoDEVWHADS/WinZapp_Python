@@ -37,9 +37,9 @@ def _sanitize_for_json(obj):
     if isinstance(obj, bytes):
         return base64.b64encode(obj).decode("ascii")
     if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+        return {k: _sanitize_for_json(v) for k, v in list(obj.items())}
     if isinstance(obj, list):
-        return [_sanitize_for_json(item) for item in obj]
+        return [_sanitize_for_json(item) for item in list(obj)]
     return obj
 
 def encrypt_json(data, key):
