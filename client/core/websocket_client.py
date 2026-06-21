@@ -244,21 +244,6 @@ class WebSocketClient:
             
             # Extract JID mapping from WebSocket message
             self.main_window._extract_lid_mapping(msg)
-            # Guard: ignore messages older than 60 seconds before the last
-            # WebSocket connection.  Using _connect_time as the reference point
-            # (rather than the ever-advancing time.time()) means that a message
-            # sent 45 s before the app started is still eligible even if the
-            # Evolution API burst arrives 30 s after the WebSocket connected —
-            # using time.time() in that case would make the message look 75 s
-            # old and block it incorrectly.
-            ts = msg.get("messageTimestamp")
-            if ts:
-                try:
-                    cutoff = getattr(self, "_connect_time", time.time()) - 60
-                    if int(ts) < cutoff:
-                        return
-                except (TypeError, ValueError):
-                    pass
             # fromMe=True can mean two things:
             #   (a) WinZapp sent this message via MessageQueue — already rendered
             #       in the UI; the WebSocket echo must be ignored.
@@ -509,9 +494,6 @@ class WebSocketClient:
         try:
             wpp_msg = data.get("response")
             if not wpp_msg:
-                return
-            # Ignore WPPConnect echo if it's fromMe
-            if wpp_msg.get("fromMe"):
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
             self.on_messages_upsert({"data": normalized})
