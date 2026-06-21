@@ -1070,6 +1070,18 @@ class MainWindow(wx.Frame):
         # ── Send notification ─────────────────────────────────────────────────
         if from_me:
             return
+
+        # Guard: do not play sound or show notification for messages older than 60 seconds
+        ts = msg.get("messageTimestamp")
+        if ts:
+            try:
+                conn_time = getattr(self.ws, "_connect_time", time.time()) if self.ws else time.time()
+                cutoff = conn_time - 60
+                if int(ts) < cutoff:
+                    return
+            except (TypeError, ValueError):
+                pass
+
         if self.is_chat_muted(remote_jid):
             return
         if self.is_chat_archived(remote_jid):
@@ -3223,7 +3235,11 @@ class MainWindow(wx.Frame):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
         # Formata o JID corretamente para o WPPConnect
-        if remote_jid.endswith("@s.whatsapp.net"):
+        # Se houver mapeamento phone -> LID, usamos o LID.
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid:
+            phone = lid
+        elif remote_jid.endswith("@s.whatsapp.net"):
             phone = remote_jid.split("@")[0] + "@c.us"
         else:
             phone = remote_jid
@@ -4033,7 +4049,11 @@ class MainWindow(wx.Frame):
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
-        if remote_jid.endswith("@s.whatsapp.net"):
+        # Se houver mapeamento phone -> LID, usamos o LID.
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid:
+            phone = lid
+        elif remote_jid.endswith("@s.whatsapp.net"):
             phone = remote_jid.split("@")[0] + "@c.us"
         else:
             phone = remote_jid
@@ -4147,9 +4167,12 @@ class MainWindow(wx.Frame):
             print(f"[mark_as_read] No incoming message found for {remote_jid}, skipping API call")
             return
 
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        target_jid = lid if lid else remote_jid
+
         key = latest.get("key", {})
         msg_key = {
-            "remoteJid": remote_jid,
+            "remoteJid": target_jid,
             "fromMe":    False,
             "id":        key.get("id", ""),
         }
@@ -4169,7 +4192,7 @@ class MainWindow(wx.Frame):
         try:
             resp = requests.post(
                 url,
-                json={"phone": [remote_jid]},
+                json={"phone": [target_jid]},
                 headers=headers,
                 timeout=10,
             )
