@@ -299,7 +299,12 @@ class ApiSetupDialog(wx.Dialog):
         # sub-processes (lifecycle scripts, node-gyp, etc.) use the portable
         # node.exe instead of whatever is (or isn't) on the system PATH.
         node_dir = resource_path("node")
-        npm_env  = {**os.environ, "PATH": node_dir + os.pathsep + os.environ.get("PATH", "")}
+        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        npm_env  = {
+            **os.environ,
+            "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+            "PUPPETEER_CACHE_DIR": puppeteer_cache
+        }
         # forced_tag (from update flow) takes precedence over the .env value
         tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION", self._read_env_value("EVOLUTION_TAG_VERSION"))
 
