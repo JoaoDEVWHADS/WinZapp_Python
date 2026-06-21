@@ -175,8 +175,27 @@ class ConversationDataDialog(wx.Dialog):
     def _fetch_data(self):
         if self._is_group:
             data = self._mw.get_group_info(self._jid)
+            participants = data.get("participants", [])
+            lid_jids_to_resolve = []
+            lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                p_jid = p.get("id", "")
+                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                    lid_jids_to_resolve.append(p_jid)
+            if lid_jids_to_resolve:
+                try:
+                    self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                except Exception:
+                    pass
             wx.CallAfter(self._populate_group, data)
         else:
+            if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
+                try:
+                    self._mw.resolve_lid_jids_via_api([self._jid])
+                except Exception:
+                    pass
             data = self._mw.get_contact_profile(self._jid)
             wx.CallAfter(self._populate_personal, data)
 
@@ -260,7 +279,15 @@ class ConversationDataDialog(wx.Dialog):
             if not isinstance(p, dict):
                 continue
             p_jid   = p.get("id", "")
-            p_phone = format_number(p_jid)
+            
+            # Bridge @lid JIDs to phone-number JIDs via the reverse cache for correct phone display
+            display_phone_jid = p_jid
+            if p_jid.endswith("@lid"):
+                phone_jid = lid_to_phone.get(p_jid, "")
+                if phone_jid:
+                    display_phone_jid = phone_jid
+            
+            p_phone = format_number(display_phone_jid) if not display_phone_jid.endswith("@lid") else display_phone_jid.rsplit("@", 1)[0]
             # Resolve name: use the robust display name resolution method from MainWindow
             # which checks contacts, chats, presence pushNames, and messages.
             p_name = self._mw._resolve_jid_name(p_jid)
