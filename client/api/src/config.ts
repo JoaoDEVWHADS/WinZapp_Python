@@ -52,7 +52,6 @@ export default {
       '--disable-renderer-accessibility',
       '--disable-web-security',
       '--no-sandbox',
-      '--disable-web-security',
       '--aggressive-cache-discard',
       '--disable-cache',
       '--disable-application-cache',
@@ -73,7 +72,13 @@ export default {
       '--ignore-certificate-errors',
       '--ignore-ssl-errors',
       '--ignore-certificate-errors-spki-list',
+      '--js-flags="--max-old-space-size=256"', // Limits V8 heap size to 256MB
+      '--no-zygote',
+      '--single-process', // Reduces multi-process overhead, saving memory/CPU
+      '--disable-shared-workers',
     ],
+    disableSpins: true,  // Disables command line spinners (saves CPU)
+    updatesLog: false,   // Disables checking for updates on startup
     /**
      * Example of configuring the linkPreview generator
      * If you set this to 'null', it will use global servers; however, you have the option to define your own server
