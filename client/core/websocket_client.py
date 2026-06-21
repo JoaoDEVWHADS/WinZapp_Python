@@ -707,6 +707,12 @@ class WebSocketClient:
         quoted_stanza_id = wpp_msg.get("quotedStanzaID") or wpp_msg.get("quotedStanzaId")
         quoted_participant = wpp_msg.get("quotedParticipant")
 
+        # Debug quotes
+        quoted_keys = [k for k in wpp_msg.keys() if "quoted" in k or "quote" in k.lower()]
+        if quoted_keys:
+            import logging
+            logging.info(f"[Quote Debug] Message {wpp_msg.get('id')} has quote keys: {quoted_keys}. Values: { {k: wpp_msg[k] for k in quoted_keys} }")
+
         # Determine if there is any quoted context
         has_quote = False
         clean_quoted_id = ""
