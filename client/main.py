@@ -965,6 +965,17 @@ class MainWindow(wx.Frame):
         if not remote_jid:
             return
 
+        # Learn/update presence pushName map from incoming message
+        if not from_me:
+            sender_jid = key.get("participant") or key.get("remoteJid", "")
+            push = msg.get("pushName", "")
+            if sender_jid and push and not is_phone_like(push):
+                sender_jid = self._normalize_jid(sender_jid)
+                ppm = getattr(self, "_presence_pushname_map", {})
+                if ppm.get(sender_jid) != push:
+                    ppm[sender_jid] = push
+                    self._schedule_save()
+
         # Statuses (stories) arrive as messages on status@broadcast; they are
         # handled by the Status tab, not as a conversation.
         if remote_jid.endswith("@broadcast"):
