@@ -889,6 +889,7 @@ class MainWindow(wx.Frame):
             self.message_queue.stop()
         if self._update_checker is not None:
             self._update_checker.stop()
+        self._stop_evolution()
         wx.GetApp().ExitMainLoop()
 
     # ── Navigate to conversation by JID ──────────────────────────────────────
@@ -1466,12 +1467,25 @@ class MainWindow(wx.Frame):
             pass
 
     def _stop_evolution(self):
-        """Terminate the Evolution API process."""
+        """Terminate the Evolution API process and all its children."""
         if self.evolution_process and self.evolution_process.poll() is None:
             try:
-                self.evolution_process.terminate()
+                pid = self.evolution_process.pid
+                import sys
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                    )
+                else:
+                    self.evolution_process.terminate()
             except Exception:
-                pass
+                try:
+                    self.evolution_process.terminate()
+                except Exception:
+                    pass
 
     def ensure_evolution_running(self):
         """
