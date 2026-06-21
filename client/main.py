@@ -2130,6 +2130,7 @@ class MainWindow(wx.Frame):
                                 wuid = phoneNumberObj
                             if wuid:
                                 self.my_jid = wuid
+                                self.resolve_self_lid()
                                 # Mark as paired on successful HTTP host check too
                                 pi = self.settings.setdefault("privateinfo", {})
                                 if not pi.get("paired"):
@@ -2810,7 +2811,12 @@ class MainWindow(wx.Frame):
             compare = getattr(self, "_lid_to_phone", {}).get(jid, jid)
         def _phone_part(j: str) -> str:
             return j.rsplit("@", 1)[0].split(":")[0]
-        return _phone_part(compare) == _phone_part(my_jid)
+        if _phone_part(compare) == _phone_part(my_jid):
+            return True
+        my_lid = getattr(self, "my_lid", "")
+        if my_lid and _phone_part(compare) == _phone_part(my_lid):
+            return True
+        return False
 
     def _compute_chat_lists(self):
         """Compute sorted/filtered chat lists. Safe to run on a background thread."""
@@ -4512,6 +4518,49 @@ class MainWindow(wx.Frame):
 
     # ── Evolution API — profile / group info ─────────────────────────────────
     
+    def resolve_self_lid(self):
+        """Query Evolution/WPPConnect API for own PN-LID mapping so self-mentions resolve correctly."""
+        my_jid = getattr(self, "my_jid", "")
+        if not my_jid:
+            return
+
+        # Avoid redundant calls if already resolved and present in cache
+        my_lid = getattr(self, "my_lid", "")
+        if my_lid and my_lid in getattr(self, "_lid_to_phone", {}):
+            return
+
+        def _resolve():
+            try:
+                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/pn-lid/{my_jid}"
+                headers = {
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json"
+                }
+                logging.info(f"[Self LID Resolution] Querying pn-lid mapping for own JID {my_jid}...")
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code in (200, 201):
+                    res = response.json() or {}
+                    logging.info(f"[Self LID Resolution] Response: {res}")
+                    res_data = res.get("response") if isinstance(res.get("response"), dict) else res
+                    lid_obj = res_data.get("lid") or {}
+                    lid_jid = None
+                    if isinstance(lid_obj, dict):
+                        lid_jid = lid_obj.get("_serialized") or lid_obj.get("id")
+                    elif isinstance(lid_obj, str):
+                        lid_jid = lid_obj
+                    if not lid_jid:
+                        lid_jid = res_data.get("lidJid")
+
+                    if lid_jid:
+                        normalized_lid = self._normalize_jid(lid_jid)
+                        self.my_lid = normalized_lid
+                        self.register_jid_mapping(normalized_lid, my_jid)
+                        logging.info(f"[Self LID Resolution] Successfully resolved and registered own LID JID: {normalized_lid}")
+            except Exception as e:
+                logging.error(f"[Self LID Resolution] Error resolving self LID: {e}")
+
+        threading.Thread(target=_resolve, daemon=True).start()
+
     def register_jid_mapping(self, lid_jid, phone_jid):
         """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it."""
         if not lid_jid or not phone_jid:

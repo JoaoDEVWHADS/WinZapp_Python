@@ -69,6 +69,7 @@ class WebSocketClient:
             wuid = data.get("wuid", "")
             if wuid:
                 self.main_window.my_jid = wuid
+                self.main_window.resolve_self_lid()
             # Mark WhatsApp as connected so the MessageQueue resumes sending.
             self.main_window._wa_connected = True
             # Clear any "disconnected" status shown in the title bar / tray.
@@ -448,6 +449,7 @@ class WebSocketClient:
                             wuid = phoneNumberObj
                         if wuid:
                             self.main_window.my_jid = wuid
+                            self.main_window.resolve_self_lid()
                 except Exception as ex:
                     print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
 
