@@ -874,13 +874,12 @@ class ConversationsPanel(wx.Panel):
         # Intercept Esc and Enter when the mention suggestion list has focus so
         # they are handled here, before the accelerator table fires
         # close_conversation for Esc or any other panel-level binding.
-        if (hasattr(self, "_mention_panel") and self._mention_panel.IsShown()
-                and wx.Window.FindFocus() is self._mention_list):
+        if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
             if kc == wx.WXK_ESCAPE:
                 self._hide_mention_suggestions()
                 wx.CallAfter(self.message_field.SetFocus)
                 return  # do NOT Skip — blocks the Esc → close_conversation accelerator
-            if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if wx.Window.FindFocus() is self._mention_list and kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
                 idx = self._mention_list.GetSelection()
                 if 0 <= idx < len(self._mention_suggestions):
                     name, jid = self._mention_suggestions[idx]
@@ -1420,6 +1419,10 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetFocus()
 
     def close_conversation(self, event=None):
+        if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
+            self._hide_mention_suggestions()
+            self.message_field.SetFocus()
+            return
         if self._is_recording:
             self._stop_recording_stream()
             self._is_recording     = False
@@ -4127,6 +4130,11 @@ class ConversationsPanel(wx.Panel):
                     push = m.get("pushName", "")
                     if push and not push.isdigit() and not is_phone_like(push):
                         return push
+        # Fallback 3: check self._group_participants_cache
+        for pname, p_jid in getattr(self, "_group_participants_cache", []):
+            if p_jid in candidates:
+                if pname and not pname.isdigit() and not is_phone_like(pname):
+                    return pname
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid
         phone = lid_to_phone.get(participant_jid, "")
@@ -4135,6 +4143,14 @@ class ConversationsPanel(wx.Panel):
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]
+
+    def refresh_active_conversation_messages(self):
+        """Re-render all messages in the active message list (useful after background name/LID resolution)."""
+        if not self.conversation or not hasattr(self, "messages_list"):
+            return
+        for i, msg in enumerate(self._sorted_messages):
+            if not self._is_separator(msg):
+                self.messages_list.SetItemText(i, self._render_message_line(msg))
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
