@@ -4,6 +4,12 @@ import os
 import sound_lib, sound_lib.output
 from sound_lib import stream
 
+try:
+    import sound_lib.external.pybassopus
+    import sound_lib.external.pybass_aac
+except Exception:
+    pass
+
 class SoundSystem:
     def __init__(self, main_window, sound_dir):
         self.enabled = False
@@ -13,11 +19,6 @@ class SoundSystem:
     def start(self):
         self.enabled = True
         self.output = sound_lib.output.Output()
-        try:
-            import sound_lib.external.pybassopus
-            import sound_lib.external.pybass_aac
-        except Exception:
-            pass
 
 
 class Sound(stream.FileStream):
