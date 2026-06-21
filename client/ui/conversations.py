@@ -28,7 +28,7 @@ from ui.accessible import (
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -1170,6 +1170,10 @@ class ConversationsPanel(wx.Panel):
                 # get_base64_from_media can find the message in the DB later.
                 if real_id and isinstance(real_id, str):
                     msg.setdefault("key", {})["id"] = real_id
+                    if getattr(self, "_current_audio_id", None) == local_id:
+                        self._current_audio_id = real_id
+                    if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
+                        self._audio_positions[real_id] = self._audio_positions.pop(local_id)
                     # For audio messages, kick off background download now that
                     # we have the real ID the Evolution API can look up.
                     if msg.get("messageType") == "audioMessage":
@@ -1405,6 +1409,18 @@ class ConversationsPanel(wx.Panel):
         last = self.messages_list.GetItemCount() - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
+
+        # Immediately save a local copy of this voice message as local_id.msv
+        try:
+            voice_messages_dir = data_path("voice_messages")
+            os.makedirs(voice_messages_dir, exist_ok=True)
+            local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
+            with open(wav_path, "rb") as f_in:
+                wav_data = f_in.read()
+            with open(local_audio_path, "wb") as f_out:
+                f_out.write(encrypt(wav_data, self.main_window.key))
+        except Exception as e:
+            print(f"[_send_voice_message] failed to save local audio copy: {e}")
 
         # Enqueue for background upload.
         pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=self._quoted_message)
@@ -2902,21 +2918,32 @@ class ConversationsPanel(wx.Panel):
         if os.path.isfile(file_path):
             self._play_audio(msg_id, duration_seconds, file_path, audio_ext)
         else:
+            if not hasattr(self, "_downloading_audio_ids"):
+                self._downloading_audio_ids = set()
+            
+            if msg_id in self._downloading_audio_ids:
+                self.main_window.output(self.main_window.i18n.t("downloading"))
+                return
+
             self.main_window.output(self.main_window.i18n.t("downloading"))
+            self._downloading_audio_ids.add(msg_id)
 
             def _download_and_play():
-                msg_type = msg.get("messageType", "") if msg else ""
-                if msg_type == "audioMessage":
-                    if msg is not None:
-                        self.main_window.handle_audio_message(msg)
-                else:
-                    if msg is not None:
-                        self.main_window.handle_media_message(msg)
-                # Only play if the file was actually downloaded (non-empty)
-                if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
-                    wx.CallAfter(
-                        self._play_audio, msg_id, duration_seconds, file_path, audio_ext
-                    )
+                try:
+                    msg_type = msg.get("messageType", "") if msg else ""
+                    if msg_type == "audioMessage":
+                        if msg is not None:
+                            self.main_window.handle_audio_message(msg)
+                    else:
+                        if msg is not None:
+                            self.main_window.handle_media_message(msg)
+                    # Only play if the file was actually downloaded (non-empty)
+                    if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
+                        wx.CallAfter(
+                            self._play_audio, msg_id, duration_seconds, file_path, audio_ext
+                        )
+                finally:
+                    self._downloading_audio_ids.discard(msg_id)
 
             threading.Thread(target=_download_and_play, daemon=True).start()
 

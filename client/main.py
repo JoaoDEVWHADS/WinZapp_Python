@@ -3888,25 +3888,33 @@ class MainWindow(wx.Frame):
         real_id is the WhatsApp message ID returned by the API; it replaces the
         local UUID in the virtual message so playback can find the message in the DB.
         """
-        if hasattr(self, "conversations_panel"):
-            self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
-        # Clean up temp WAV for voice messages (media attachments keep their file).
+        # Save or copy the local audio copy under the real ID *before* calling _mark_message_sent
+        # to prevent background media sync from downloading a file we already have.
         if audio_path and os.path.isfile(audio_path):
             if real_id and isinstance(real_id, str):
                 try:
-                    with open(audio_path, "rb") as f:
-                        wav_data = f.read()
                     voice_messages_dir = data_path("voice_messages")
                     os.makedirs(voice_messages_dir, exist_ok=True)
-                    audio_file_path = os.path.join(voice_messages_dir, f"{real_id}.msv")
-                    with open(audio_file_path, "wb") as f_out:
-                        f_out.write(encrypt(wav_data, self.key))
+                    local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
+                    real_audio_path = os.path.join(voice_messages_dir, f"{real_id}.msv")
+                    
+                    if os.path.isfile(local_audio_path):
+                        import shutil
+                        shutil.copy2(local_audio_path, real_audio_path)
+                    else:
+                        with open(audio_path, "rb") as f:
+                            wav_data = f.read()
+                        with open(real_audio_path, "wb") as f_out:
+                            f_out.write(encrypt(wav_data, self.key))
                 except Exception as e:
                     print(f"[_on_message_sent] error saving sent audio locally: {e}")
             try:
                 os.unlink(audio_path)
             except Exception:
                 pass
+
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
 
     def _on_message_failed(self, local_id: str, error: str = "", show_dialog: bool = False):
         """
@@ -4328,19 +4336,21 @@ class MainWindow(wx.Frame):
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
-        if msg_id and "_" not in msg_id:
+        # If msg_id already has underscores, extract the actual clean message ID (the last part)
+        if msg_id and "_" in msg_id:
+            parts = msg_id.split("_")
+            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+
+        if msg_id:
             from_me = _key.get("fromMe", False)
             from_me_str = "true" if from_me else "false"
-            if remote_jid.endswith("@s.whatsapp.net"):
-                remote_jid_formatted = remote_jid.replace("@s.whatsapp.net", "@c.us")
-            else:
-                remote_jid_formatted = remote_jid
-            msg_id = f"{from_me_str}_{remote_jid_formatted}_{msg_id}"
-            if remote_jid.endswith("@g.us"):
+            # Always reconstruct the ID using phone (mapped LID or @c.us JID) to match WPPConnect's expectation
+            msg_id = f"{from_me_str}_{phone}_{msg_id}"
+            if phone.endswith("@g.us"):
                 participant = _key.get("participant", "")
                 if participant:
-                    if participant.endswith("@s.whatsapp.net"):
-                        participant = participant.replace("@s.whatsapp.net", "@c.us")
+                    if participant.endswith("@s.whatsapp.net") or participant.endswith("@c.us"):
+                        participant = participant.split("@")[0] + "@c.us"
                     msg_id = f"{msg_id}_{participant}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
