@@ -1500,6 +1500,7 @@ class MainWindow(wx.Frame):
             os.environ["AUTHENTICATION_API_KEY"] = self.evolution_api_key
             os.environ["WPP_LID_MODE"] = "false"
             os.environ["PORT"] = str(self.evolution_port)
+            os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache", "puppeteer")
 
             spawned = False
             if _is_elevated():

@@ -91,7 +91,12 @@ class ModuleInstallDialog(wx.Dialog):
         # Prepend bundled node/ to PATH so npm's internal sub-processes use
         # the portable node.exe rather than whatever is on the system PATH.
         node_dir = resource_path("node")
-        npm_env  = {**os.environ, "PATH": node_dir + os.pathsep + os.environ.get("PATH", "")}
+        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        npm_env  = {
+            **os.environ,
+            "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+            "PUPPETEER_CACHE_DIR": puppeteer_cache
+        }
 
         try:
             # ── Step 1: npm install ──────────────────────────────────────
