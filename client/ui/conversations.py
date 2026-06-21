@@ -3627,6 +3627,26 @@ class ConversationsPanel(wx.Panel):
         if clean_p.endswith("@lid"):
             clean_p = getattr(mw, "_lid_to_phone", {}).get(clean_p, clean_p)
 
+        # Private (1:1) chat fallback: resolve to the other participant or "me"
+        # without contact lookup to handle unresolved @lid JIDs and digit-only pushNames.
+        conv = self.conversation or {}
+        remote = conv.get("remoteJid", "")
+        if remote and not remote.endswith("@g.us"):
+            p_phone = _phone_part(clean_p)
+            r_phone = _phone_part(remote)
+            my_jid = getattr(mw, "my_jid", "")
+            my_phone = _phone_part(my_jid) if my_jid else ""
+            if my_phone and p_phone == my_phone:
+                return i18n.t("sender_you")
+            elif p_phone == r_phone:
+                return (
+                    mw._resolve_contact_name(conv)
+                    or conv.get("pushName", "")
+                    or (format_number(remote) if not remote.endswith("@lid") else "")
+                )
+            else:
+                return i18n.t("sender_you")
+
         # Check if the quoted sender is "me" — strip device suffix from both sides
         my_jid = getattr(mw, "my_jid", "")
         if my_jid and _phone_part(clean_p) == _phone_part(my_jid):
