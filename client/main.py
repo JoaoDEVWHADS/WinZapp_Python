@@ -4266,21 +4266,31 @@ class MainWindow(wx.Frame):
         """
         _key = media.get("key", {})
         msg_id = _key.get("id", "")
-        if msg_id and "_" not in msg_id:
-            # Reconstruct the full serialized WPPConnect message ID: {fromMe}_{remoteJid}_{cleanId}
+        # Extract clean ID if it already has underscores
+        if msg_id and "_" in msg_id:
+            parts = msg_id.split("_")
+            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+
+        if msg_id:
             from_me = _key.get("fromMe", False)
             from_me_str = "true" if from_me else "false"
             remote_jid = _key.get("remoteJid", "")
-            if remote_jid.endswith("@s.whatsapp.net"):
+            
+            # Resolve phone JID to LID JID if a mapping exists
+            lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+            if lid:
+                remote_jid = lid
+            elif remote_jid.endswith("@s.whatsapp.net"):
                 remote_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
+            
             msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
             
             # For group messages, append the participant JID if present
             if remote_jid.endswith("@g.us"):
                 participant = _key.get("participant", "")
                 if participant:
-                    if participant.endswith("@s.whatsapp.net"):
-                        participant = participant.replace("@s.whatsapp.net", "@c.us")
+                    if participant.endswith("@s.whatsapp.net") or participant.endswith("@c.us"):
+                        participant = participant.split("@")[0] + "@c.us"
                     msg_id = f"{msg_id}_{participant}"
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
