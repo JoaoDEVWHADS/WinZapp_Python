@@ -2116,12 +2116,64 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
         q = query.lower()
 
-        # Individual participant matches
-        matches = [
-            (name, jid)
-            for name, jid in self._group_participants_cache
-            if not q or q in name.lower()
-        ]
+        # Collect JIDs of everyone who has sent at least one message in the current conversation
+        participants_who_sent_message = set()
+        for msg in getattr(self, "_sorted_messages", []):
+            if not isinstance(msg, dict):
+                continue
+            key = msg.get("key") or {}
+            p_jid = key.get("participant") or msg.get("participant")
+            if not p_jid and not msg.get("isGroupMsg", False):
+                p_jid = key.get("remoteJid")
+            if p_jid:
+                p_jid = self.main_window._normalize_jid(p_jid)
+                participants_who_sent_message.add(p_jid)
+                # Map alternate formats
+                phone_jid = getattr(self.main_window, "_lid_to_phone", {}).get(p_jid, "")
+                if phone_jid:
+                    participants_who_sent_message.add(phone_jid)
+                lid_jid = getattr(self.main_window, "_phone_to_lid", {}).get(p_jid, "")
+                if lid_jid:
+                    participants_who_sent_message.add(lid_jid)
+
+        def is_saved(jid):
+            local = jid.rsplit("@", 1)[0]
+            candidates = [jid]
+            if jid.endswith("@lid"):
+                phone = getattr(self.main_window, "_lid_to_phone", {}).get(jid, "")
+                if phone:
+                    candidates.append(phone)
+                    candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
+            elif jid.endswith("@s.whatsapp.net"):
+                candidates.append(local + "@c.us")
+                lid = getattr(self.main_window, "_phone_to_lid", {}).get(jid, "")
+                if lid:
+                    candidates.append(lid)
+            elif jid.endswith("@c.us"):
+                candidates.append(local + "@s.whatsapp.net")
+
+            for cjid in candidates:
+                c = self.main_window.contacts.get(cjid)
+                if c:
+                    if c.get("isMyContact") or c.get("isSaved") or c.get("syncToAddressbook"):
+                        return True
+                    name = (c.get("name") or "").strip()
+                    if name and not name.isdigit() and not is_phone_like(name):
+                        name_lower = name.lower()
+                        if "sem nome" not in name_lower and "unnamed" not in name_lower and name_lower not in ("no name", "unknown", "desconhecido"):
+                            return True
+            return False
+
+        # Individual participant matches filtered by rules:
+        # Show if contact is saved in contacts OR has sent a message in the group
+        matches = []
+        for name, jid in self._group_participants_cache:
+            norm_jid = self.main_window._normalize_jid(jid)
+            saved = is_saved(norm_jid)
+            sent = norm_jid in participants_who_sent_message
+            if saved or sent:
+                if not q or q in name.lower():
+                    matches.append((name, jid))
 
         # Sort: names that start with the query come first, then those that
         # contain it but don't start with it — both groups sorted alphabetically.
@@ -4064,6 +4116,17 @@ class ConversationsPanel(wx.Panel):
             pname = (ppm.get(cjid) or "").strip()
             if pname and not pname.isdigit() and not is_phone_like(pname):
                 return pname
+        # Fallback 2: scan sorted messages in the current conversation
+        for m in getattr(self, "_sorted_messages", []):
+            if not isinstance(m, dict):
+                continue
+            m_part = m.get("key", {}).get("participant") or m.get("participant")
+            if m_part:
+                m_part = mw._normalize_jid(m_part)
+                if m_part in candidates:
+                    push = m.get("pushName", "")
+                    if push and not push.isdigit() and not is_phone_like(push):
+                        return push
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid
         phone = lid_to_phone.get(participant_jid, "")

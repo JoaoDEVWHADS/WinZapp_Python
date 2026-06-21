@@ -87,7 +87,7 @@ export default {
      * Configure the attribute as follows:
      * linkPreviewApiServers: [ 'https://www.yourserver.com/wa-js-api-server' ]
      */
-    linkPreviewApiServers: null,
+    linkPreviewApiServers: [],
 
     /**
      * Set specific whatsapp version
