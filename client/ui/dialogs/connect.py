@@ -272,8 +272,9 @@ class Connect:
                     if show_resp.status_code in (200, 201):
                         sessions = show_resp.json().get("response", [])
                         clean_token = lambda t: "".join(c for c in t if c not in ['/', '\\', '?', '<', '>', ':', '*', '|', '"'])
-                        target = clean_token(token)
-                        if any(clean_token(s) == target or target in clean_token(s) for s in sessions):
+                        session_name = token.split(":")[0]
+                        target_session = clean_token(session_name)
+                        if any(clean_token(s) == target_session for s in sessions):
                             if is_paired:
                                 logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
                                 return True
