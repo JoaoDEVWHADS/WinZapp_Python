@@ -719,52 +719,64 @@ class WebSocketClient:
         participant_jid = ""
         quoted_body = ""
 
-        if isinstance(quoted_msg, dict):
+        # 1. Start with the top-level keys which are the most reliable in WPPConnect
+        if quoted_stanza_id:
             has_quote = True
-            quoted_id = quoted_msg.get("id")
-            if isinstance(quoted_id, dict):
-                quoted_id = quoted_id.get("_serialized", "")
-            parts = quoted_id.split("_") if quoted_id else []
-            clean_quoted_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else quoted_id)
-            
-            # Author JID
-            author = quoted_msg.get("author") or quoted_msg.get("sender", {}).get("id") or ""
-            if author:
-                participant_jid = author.replace("@c.us", "@s.whatsapp.net")
-            
-            quoted_body = quoted_msg.get("body") or quoted_msg.get("caption") or ""
-
-        # Fallback to quotedMsgObj / quotedStanzaID / quotedParticipant
-        if not has_quote and (quoted_stanza_id or quoted_msg_obj or quoted_participant):
-            has_quote = True
-            clean_quoted_id = quoted_stanza_id or ""
+            clean_quoted_id = quoted_stanza_id
             if isinstance(clean_quoted_id, str) and "_" in clean_quoted_id:
                 parts = clean_quoted_id.split("_")
                 clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
-            
-            if quoted_participant:
-                participant_jid = quoted_participant.replace("@c.us", "@s.whatsapp.net")
-            
-            if isinstance(quoted_msg_obj, dict):
-                quoted_body = quoted_msg_obj.get("body") or quoted_msg_obj.get("caption") or ""
-                if not clean_quoted_id:
-                    quoted_id = quoted_msg_obj.get("id")
-                    if isinstance(quoted_id, dict):
-                        quoted_id = quoted_id.get("_serialized", "")
-                    parts = quoted_id.split("_") if quoted_id else []
-                    clean_quoted_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else quoted_id)
-                if not participant_jid:
-                    author = quoted_msg_obj.get("author") or quoted_msg_obj.get("sender", {}).get("id") or ""
-                    if author:
-                        participant_jid = author.replace("@c.us", "@s.whatsapp.net")
 
-        # If it's a string, we might just have the ID
-        if not has_quote and isinstance(quoted_msg, str) and quoted_msg:
+        if quoted_participant:
             has_quote = True
-            clean_quoted_id = quoted_msg
-            if "_" in clean_quoted_id:
-                parts = clean_quoted_id.split("_")
-                clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
+            participant_jid = quoted_participant.replace("@c.us", "@s.whatsapp.net")
+
+        # 2. Extract content from quotedMsg (dictionary or string)
+        if isinstance(quoted_msg, dict):
+            has_quote = True
+            if not quoted_body:
+                quoted_body = quoted_msg.get("body") or quoted_msg.get("caption") or ""
+            
+            # Fallbacks if top-level fields were missing
+            if not clean_quoted_id:
+                quoted_id = quoted_msg.get("id")
+                if isinstance(quoted_id, dict):
+                    quoted_id = quoted_id.get("_serialized", "")
+                if quoted_id:
+                    parts = quoted_id.split("_")
+                    clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
+            
+            if not participant_jid:
+                author = quoted_msg.get("author") or quoted_msg.get("sender", {}).get("id") or ""
+                if author:
+                    participant_jid = author.replace("@c.us", "@s.whatsapp.net")
+
+        elif isinstance(quoted_msg, str) and quoted_msg:
+            has_quote = True
+            if not clean_quoted_id:
+                clean_quoted_id = quoted_msg
+                if "_" in clean_quoted_id:
+                    parts = clean_quoted_id.split("_")
+                    clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
+
+        # 3. Extract content from quotedMsgObj (alternative dictionary)
+        if isinstance(quoted_msg_obj, dict):
+            has_quote = True
+            if not quoted_body:
+                quoted_body = quoted_msg_obj.get("body") or quoted_msg_obj.get("caption") or ""
+            
+            if not clean_quoted_id:
+                quoted_id = quoted_msg_obj.get("id")
+                if isinstance(quoted_id, dict):
+                    quoted_id = quoted_id.get("_serialized", "")
+                if quoted_id:
+                    parts = quoted_id.split("_")
+                    clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
+            
+            if not participant_jid:
+                author = quoted_msg_obj.get("author") or quoted_msg_obj.get("sender", {}).get("id") or ""
+                if author:
+                    participant_jid = author.replace("@c.us", "@s.whatsapp.net")
 
         if has_quote:
             context_info = {
