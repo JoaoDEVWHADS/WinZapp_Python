@@ -4486,19 +4486,22 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_resolve_lids, daemon=True).start()
 
     def get_group_info(self, jid: str) -> dict:
-        """Fetch group metadata via GET /group/findGroupInfos?groupJid=...
-        (runs on background thread)."""
+        """Fetch group metadata via GET /api/{session}/group-info/{groupId}"""
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/group/findGroupInfos/{self.token}"
+            f"/api/{self.token}/group-info/{jid}"
         )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
         try:
-            r = requests.get(url, params={"groupJid": jid}, headers=headers, timeout=10)
+            r = requests.get(url, headers=headers, timeout=10)
             if r.status_code in (200, 201):
-                return r.json() or {}
-        except Exception:
-            pass
+                res_data = r.json() or {}
+                return res_data.get("response", {})
+        except Exception as e:
+            logging.error(f"[get_group_info] error: {e}")
         return {}
 
     # ── Block ─────────────────────────────────────────────────────────────────
