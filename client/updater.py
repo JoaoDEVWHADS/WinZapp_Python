@@ -86,11 +86,11 @@ def _needs_admin() -> bool:
         return True
 
 
-def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int):
+def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 3417):
     """
     Write a batch script that:
       1. Forcefully terminates the WinZapp client process and its children.
-      2. Finds and terminates any leftover Evolution API (port 6300) and PostgreSQL (port 5433) processes to release file locks.
+      2. Finds and terminates any leftover Evolution API (port 3417/api_port) and PostgreSQL (port 5433) processes to release file locks.
       3. Copies all extracted files to install_dir.
       4. Restarts the client executable.
     Then launches it (elevated if the directory needs admin).
@@ -115,7 +115,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         ")\n"
         # Give any child processes a moment to exit, then kill any remaining processes listening on the API ports.
         "timeout /t 2 /nobreak >NUL\n"
-        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :6300 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         f'taskkill /F /FI "WINDOWTITLE eq WinZapp*" /IM node.exe >NUL 2>&1\n'
         "timeout /t 1 /nobreak >NUL\n"
@@ -297,7 +297,7 @@ class UpdateProgressDialog(wx.Dialog):
             pid         = os.getpid()
 
             logging.info("Auto-updater: Launching batch installer from %s (PID %d)", install_dir, pid)
-            _run_batch_installer(extract_dir, install_dir, exe_name, pid)
+            _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "evolution_port", 3417))
             self._install_ok = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
 

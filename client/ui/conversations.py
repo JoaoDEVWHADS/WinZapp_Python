@@ -1163,6 +1163,8 @@ class ConversationsPanel(wx.Panel):
         """
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
+                if not msg.get("_local_pending", True):
+                    return  # Already marked sent, ignore to prevent duplicate sound and actions
                 msg["_local_pending"] = False
                 # Replace the local UUID with the real WhatsApp message ID so
                 # get_base64_from_media can find the message in the DB later.
