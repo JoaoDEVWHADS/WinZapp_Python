@@ -670,25 +670,17 @@ class Connect:
 
                 threading.Thread(target=_close_and_signal, daemon=True).start()
 
-                # Set websocket client and connect BEFORE calling /start-session so
-                # the 'phoneCode' Socket.IO event can be received.
+                # Wait for close to finish (max 3s) so Node has time to release the session
+                # and unlock userDataDir before we call /start-session.
+                close_done.wait(timeout=3)
+
+                # Set up the websocket client (but do not connect yet)
                 self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
-                try:
-                    self.main_window.connect_websocket()
-                except Exception:
-                    pass
-
-                # Wait for close to finish (max 1s) so Node has time to release the session
-                # before we call /start-session. Using event instead of unconditional sleep.
-                close_done.wait(timeout=1)
-
-                # Reset the phoneCode event in case a previous pairing attempt set it.
                 if self.main_window.ws:
                     self.main_window.ws._phone_code_event.clear()
                     self.main_window.ws._phone_code_value = ""
 
-                # Call /start-session in a background thread — WPPConnect can take
-                # 60-90 s to initialise the browser and generate the pairing code.
+                # Call /start-session in a background thread. This immediately registers the namespace on Node side.
                 url = (
                     f"{self.main_window.evolution_server}"
                     f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
@@ -709,6 +701,15 @@ class Connect:
                         ws_ref._phone_code_event.set()
 
                 threading.Thread(target=_call_start_session, daemon=True).start()
+
+                # Sleep briefly (e.g. 1 second) to let the start-session route register the namespace
+                time.sleep(1)
+
+                # Connect the WebSocket — the namespace is guaranteed to exist now
+                try:
+                    self.main_window.connect_websocket()
+                except Exception:
+                    pass
 
                 # Wait up to 90 s for WPPConnect to emit the phoneCode via Socket.IO.
                 got_code = self.main_window.ws._phone_code_event.wait(timeout=90)
