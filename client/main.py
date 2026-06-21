@@ -2216,11 +2216,11 @@ class MainWindow(wx.Frame):
                     decrypted_data = decrypt_json(encrypted_data, self.key)
                     return decrypted_data.get("chats", {})
                 else:
-                    return []
+                    return {}
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
-            return []
+            return {}
 
     def get_remote_chats(self, chats):
         url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/all-chats"
