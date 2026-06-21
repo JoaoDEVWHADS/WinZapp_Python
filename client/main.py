@@ -1018,12 +1018,37 @@ class MainWindow(wx.Frame):
 
         chat = self.chats[remote_jid]
 
-        # ── Avoid duplicate insertions ────────────────────────────────────────
+        # ── Avoid duplicate insertions or resolve pending ones ────────────────
         records = (
             chat.setdefault("messages", {})
                 .setdefault("messages", {})
                 .setdefault("records", [])
         )
+        if from_me:
+            pending_msg = None
+            for r in records:
+                if r.get("_local_pending"):
+                    pending_msg = r
+                    break
+            if pending_msg:
+                # Found the corresponding pending message: update it and skip appending a duplicate
+                pending_msg["_local_pending"] = False
+                local_id = pending_msg.get("_local_id")
+                pending_msg["key"]["id"] = msg_id
+                pending_msg["messageTimestamp"] = msg.get("messageTimestamp", pending_msg["messageTimestamp"])
+                
+                with self._own_sent_ids_lock:
+                    self._own_sent_ids.add(msg_id)
+                    if len(self._own_sent_ids) > 500:
+                        self._own_sent_ids.discard(next(iter(self._own_sent_ids)))
+                
+                if hasattr(self, "conversations_panel"):
+                    wx.CallAfter(self.conversations_panel._mark_message_sent, local_id, real_id=msg_id)
+                
+                self._schedule_save()
+                self._schedule_set_chats()
+                return
+
         if msg_id:
             for existing in records:
                 if existing.get("key", {}).get("id") == msg_id:
@@ -3673,6 +3698,10 @@ class MainWindow(wx.Frame):
         if not msg_id or not status:
             return
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+        if remote_jid.endswith("@lid"):
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+            if phone_jid:
+                remote_jid = phone_jid
         if remote_jid not in self.chats:
             return
         records = (
