@@ -4396,11 +4396,7 @@ class MainWindow(wx.Frame):
             def _needs_resolve(jid):
                 mapped = lid_to_phone.get(jid)
                 if mapped:
-                    c = self.contacts.get(mapped)
-                    if c:
-                        name = c.get("name")
-                        if name and name != "Contato sem nome" and name != c.get("pushName"):
-                            return False
+                    return False
                 return True
 
             # First: Add active chat LIDs that need resolution
