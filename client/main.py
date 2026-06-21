@@ -897,7 +897,12 @@ class MainWindow(wx.Frame):
         if self._update_checker is not None:
             self._update_checker.stop()
         self._stop_evolution()
-        wx.GetApp().ExitMainLoop()
+        try:
+            wx.GetApp().ExitMainLoop()
+        except Exception:
+            pass
+        import os
+        os._exit(0)
 
     # ── Navigate to conversation by JID ──────────────────────────────────────
 
