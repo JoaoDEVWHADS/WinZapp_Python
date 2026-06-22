@@ -112,9 +112,9 @@ class ConversationDataDialog(wx.Dialog):
         )
         outer.Add(self._info_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # "Add contact" — only shown when this JID is not already in contacts.
+        # "Add contact" — always shown for non-group chats.
         jid = self._jid
-        if not jid.endswith("@g.us") and jid not in self._mw.contacts:
+        if not jid.endswith("@g.us"):
             add_contact_btn = wx.Button(panel, label=self._i18n.t("add_contact"))
             add_contact_btn.Bind(wx.EVT_BUTTON, self._on_add_contact)
             outer.Add(add_contact_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
@@ -345,13 +345,27 @@ class ConversationDataDialog(wx.Dialog):
         dlg.Destroy()
 
     def _on_add_contact(self, event):
-        """Open NewContactDialog with the phone pre-filled from this chat's JID."""
+        """Open NewContactDialog pre-filled with phone and name from this chat."""
         from ui.dialogs.new_contact import NewContactDialog
-        dlg = NewContactDialog(self._mw, self, prefill_phone=format_number(self._jid))
+        # Split the display name into first / surname for the dialog fields.
+        parts   = self._name.split(None, 1) if self._name else []
+        p_name  = parts[0] if parts else ""
+        p_sur   = parts[1] if len(parts) > 1 else ""
+        # Resolve phone: use the phone JID even if this chat is indexed by LID.
+        jid = self._jid
+        lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+        if jid.endswith("@lid") and jid in lid_to_phone:
+            jid = lid_to_phone[jid]
+        dlg = NewContactDialog(
+            self._mw, self,
+            prefill_phone=format_number(jid),
+            prefill_name=p_name,
+            prefill_surname=p_sur,
+        )
         result = dlg.ShowModal()
         dlg.Destroy()
         if result == wx.ID_OK:
-            # Refresh the info panel so the new name is visible
+            # Refresh the info panel so the new name is visible.
             threading.Thread(target=self._fetch_data, daemon=True).start()
 
     def _on_add_to_group(self, event):

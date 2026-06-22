@@ -2141,7 +2141,7 @@ class ConversationsPanel(wx.Panel):
         """Return (start_pos, query) when cursor is inside @word, else (None, None)."""
         text = self.message_field.GetValue()
         pos  = self.message_field.GetInsertionPoint()
-        i = pos - 1
+        i = min(pos - 1, len(text) - 1)
         while i >= 0:
             ch = text[i]
             if ch == "@":
@@ -3304,10 +3304,13 @@ class ConversationsPanel(wx.Panel):
             # Resolve @mentions: replace @{number} with @{display_name}.
             # mentionedJid may live at the top-level contextInfo (Evolution API
             # normalises it there) or inside extendedTextMessage.contextInfo.
+            ctx_top = msg.get("contextInfo") or {}
+            ctx_msg = msg_obj.get("contextInfo") or {}
+            ctx_ext = ext.get("contextInfo") or {}
             mentioned = (
-                (msg.get("contextInfo") or {}).get("mentionedJid")
-                or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
-                or ext.get("contextInfo", {}).get("mentionedJid")
+                ctx_top.get("mentionedJid") or ctx_top.get("mentionedJidList")
+                or ctx_msg.get("mentionedJid") or ctx_msg.get("mentionedJidList")
+                or ctx_ext.get("mentionedJid") or ctx_ext.get("mentionedJidList")
                 or []
             )
             for jid in mentioned:
@@ -3424,7 +3427,9 @@ class ConversationsPanel(wx.Panel):
         # Locally-queued messages have their own pending status.
         if msg.get("_local_pending"):
             return i18n.t("status_pending")
-        
+        if msg.get("_send_failed"):
+            return i18n.t("status_failed")
+
         statuses = []
         updates = msg.get("MessageUpdate")
         if isinstance(updates, list) and updates:

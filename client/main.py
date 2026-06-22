@@ -315,9 +315,6 @@ class MediaExpiredError(Exception):
 class MainWindow(wx.Frame):
     def __init__(self):
         import logging
-        # Re-verify and update all imported library loggers to DEBUG
-        for logger_name in list(logging.Logger.manager.loggerDict.keys()):
-            logging.getLogger(logger_name).setLevel(logging.DEBUG)
         logging.info("MainWindow: Initializing MainWindow...")
         super().__init__(None)
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
@@ -1172,7 +1169,7 @@ class MainWindow(wx.Frame):
                 # Mark the active conversation as read immediately
                 threading.Thread(
                     target=self.mark_conversation_as_read,
-                    args=(remote_jid,),
+                    args=(remote_jid, True),
                     daemon=True,
                 ).start()
             else:
@@ -3816,11 +3813,14 @@ class MainWindow(wx.Frame):
                 }
                 print(f"[send_text_message] sending quoted reply via send-reply to {phone_net}, quoted key.id={quoted_id}")
             else:
+                phone_net = remote_jid
+                if phone_net.endswith("@s.whatsapp.net"):
+                    phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                 payload = {
-                    "phone": remote_jid,
+                    "phone": [phone_net],
                     "message": text,
-                    "isGroup": remote_jid.endswith("@g.us")
+                    "isGroup": phone_net.endswith("@g.us")
                 }
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -3830,10 +3830,13 @@ class MainWindow(wx.Frame):
                 if quoted_id:
                     print(f"[send_text_message] Quoted send failed (HTTP {response.status_code}). Retrying without quote...")
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
+                    fb_phone = remote_jid
+                    if fb_phone.endswith("@s.whatsapp.net"):
+                        fb_phone = fb_phone.replace("@s.whatsapp.net", "@c.us")
                     payload = {
-                        "phone": remote_jid,
+                        "phone": [fb_phone],
                         "message": text,
-                        "isGroup": remote_jid.endswith("@g.us")
+                        "isGroup": fb_phone.endswith("@g.us")
                     }
                     response = requests.post(url, json=payload, headers=headers, timeout=15)
                 
@@ -3862,25 +3865,71 @@ class MainWindow(wx.Frame):
             print(f"[send_text_message] exception: {exc}")
             return None
 
+    @staticmethod
+    def _find_api_ffmpeg() -> str:
+        """Locate ffmpeg.exe from the @ffmpeg-installer/ffmpeg npm package."""
+        import glob as _glob
+        api_nm = resource_path("api", "node_modules", "@ffmpeg-installer", "ffmpeg", "bin")
+        hits   = _glob.glob(os.path.join(api_nm, "**", "ffmpeg.exe"), recursive=True)
+        return hits[0] if hits else None
+
+    def _convert_wav_to_ogg(self, wav_path: str) -> str | None:
+        """
+        Convert a WAV file to OGG/Opus using the bundled ffmpeg binary.
+        Returns the path to the new .ogg file, or None on failure.
+        """
+        ffmpeg = self._find_api_ffmpeg()
+        if not ffmpeg or not os.path.isfile(ffmpeg):
+            return None
+        ogg_path = wav_path + ".ogg"
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-y", "-i", wav_path,
+                 "-c:a", "libopus", "-b:a", "64k",
+                 "-vbr", "on", "-compression_level", "10",
+                 ogg_path],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0 and os.path.isfile(ogg_path) and os.path.getsize(ogg_path) > 0:
+                return ogg_path
+        except Exception:
+            pass
+        return None
+
     def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
         """
         Base64-encode a WAV/audio file and send it as a PTT voice message via the
         WPPConnect Server API. Uses /api/{session}/send-voice-base64.
+        WAV is converted to OGG/Opus first (WhatsApp PTT requirement).
         """
         # Prefer the LID JID if mapped, as WPPConnect fails with 'Chat not found' for some phone JIDs that are indexed as LIDs
         lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid_jid:
             remote_jid = lid_jid
+
+        # Convert WAV to OGG/Opus — WhatsApp only accepts OGG Opus for PTT.
+        ogg_path  = self._convert_wav_to_ogg(wav_path)
+        send_path = ogg_path if ogg_path else wav_path
+        mime      = "data:audio/ogg;codecs=opus;base64," if ogg_path else "data:audio/wav;base64,"
+
         try:
-            with open(wav_path, "rb") as fh:
+            with open(send_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
         except Exception:
             return False
+        finally:
+            if ogg_path and os.path.isfile(ogg_path):
+                try:
+                    os.unlink(ogg_path)
+                except Exception:
+                    pass
+
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-voice-base64"
         quoted_id = self._serialize_quoted_id(quoted) if quoted else None
         payload = {
             "phone": [remote_jid],
-            "base64Ptt": f"data:audio/ogg;base64,{audio_b64}",
+            "base64Ptt": f"{mime}{audio_b64}",
             "isGroup": remote_jid.endswith("@g.us"),
         }
         if quoted_id:
@@ -4489,7 +4538,7 @@ class MainWindow(wx.Frame):
             #Ignore audios that couldn't be saved for now
             pass
 
-    def mark_conversation_as_read(self, remote_jid: str):
+    def mark_conversation_as_read(self, remote_jid: str, force: bool = False):
         """Mark conversation as read locally and notify WPPConnect.
 
         WPPConnect's sendSeen only needs the chat JID — no message key required.
@@ -4502,9 +4551,9 @@ class MainWindow(wx.Frame):
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
         self._schedule_save()
-        wx.CallAfter(self.set_chats)
+        wx.CallAfter(self._schedule_set_chats)
 
-        if unread == 0:
+        if unread == 0 and not force:
             return
 
         def _do_api():
@@ -5638,11 +5687,12 @@ class MainWindow(wx.Frame):
             if _lst_had_focus:
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
-            # Only select if we already have focus or we have an open conversation we are tracking
-            if _lst_had_focus or panel.conversation is not None:
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
+            elif panel.conversation is not None:
+                if not panel.conversations_list.IsSelected(target_idx):
+                    panel.conversations_list.Select(target_idx)
         elif getattr(self, "_initial_sync_running", False):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass
@@ -5845,29 +5895,39 @@ class LoggerWriter:
 
 def setup_logging():
     import logging
+    import logging.handlers
     from app_paths import log_path
     try:
         os.makedirs(log_path(), exist_ok=True)
         log_file = log_path("log.log")
-        logging.basicConfig(
-            filename=log_file,
-            level=logging.DEBUG,
-            format="%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s",
+
+        handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10 MB per file
+            backupCount=3,
             encoding="utf-8",
         )
-        # Force all existing library loggers to DEBUG
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger("urllib3").setLevel(logging.DEBUG)
-        logging.getLogger("requests").setLevel(logging.DEBUG)
-        logging.getLogger("socketio").setLevel(logging.DEBUG)
-        logging.getLogger("engineio").setLevel(logging.DEBUG)
-        for logger_name in list(logging.Logger.manager.loggerDict.keys()):
-            logging.getLogger(logger_name).setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s"
+        ))
 
-        logging.info("WinZapp client starting up...")
-        
-        # Redirect stdout and stderr globally to logger
-        sys.stdout = LoggerWriter(sys.stdout, logging.DEBUG)
+        root = logging.getLogger()
+        # Remove any handler added by a prior basicConfig call
+        for h in root.handlers[:]:
+            root.removeHandler(h)
+            h.close()
+        root.addHandler(handler)
+        root.setLevel(logging.WARNING)
+
+        # Silence very noisy third-party libraries
+        for _lib in ("urllib3", "requests", "socketio", "engineio",
+                     "charset_normalizer", "websocket", "PIL"):
+            logging.getLogger(_lib).setLevel(logging.ERROR)
+
+        logging.warning("WinZapp client starting up...")
+
+        # Only redirect stderr (uncaught exceptions / tracebacks) to the log.
+        # Redirecting stdout would write every print() call to the file.
         sys.stderr = LoggerWriter(sys.stderr, logging.ERROR)
     except Exception as e:
         sys.stderr.write(f"Failed to setup logging: {e}\n")
