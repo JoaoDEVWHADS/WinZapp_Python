@@ -2386,6 +2386,7 @@ class MainWindow(wx.Frame):
         if msg_id and any(m.get("key", {}).get("id") == msg_id for m in bucket):
             return  # deduplicate
         bucket.append(msg)
+        self._schedule_save()
         # Refresh the Status tab if it is currently visible
         try:
             if hasattr(self, "navigation_panel"):
@@ -2783,12 +2784,12 @@ class MainWindow(wx.Frame):
                 lid_to_phone = getattr(self, "_lid_to_phone", {})
                 unresolvable_lids = list(getattr(self, "_unresolvable_lids", set()))
                 unresolvable_names = list(getattr(self, "_unresolvable_names", set()))
-                encrypted_data = encrypt_json({
                     "chats": chats,
                     "contacts": contacts,
                     "lid_to_phone": lid_to_phone,
                     "unresolvable_lids": unresolvable_lids,
-                    "unresolvable_names": unresolvable_names
+                    "unresolvable_names": unresolvable_names,
+                    "status_updates": getattr(self, "_status_updates", {})
                 }, self.key)
                 with open(messages_file, "wb") as f:
                     f.write(encrypted_data)
@@ -2833,7 +2834,8 @@ class MainWindow(wx.Frame):
                         self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
                         self._unresolvable_lids = set(decrypted_data.get("unresolvable_lids", []))
                         self._unresolvable_names = set(decrypted_data.get("unresolvable_names", []))
-                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} unresolvable LIDs, and {len(self._unresolvable_names)} unresolvable names from local cache.")
+                        self._status_updates = decrypted_data.get("status_updates", {})
+                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} LIDs, {len(self._unresolvable_names)} names, and status updates for {len(self._status_updates)} participants.")
                         return
         except Exception as e:
             logging.error(f"[LID Cache] Error loading JID mappings from cache: {e}")
@@ -3591,7 +3593,43 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
-        for chat in self.chats.values():
+        # Sort chats by last activity timestamp descending
+        def _chat_sort_time(c):
+            ts = int(c.get("t", 0) or 0)
+            for m in c.get("messages", {}).get("messages", {}).get("records", []):
+                t = int(m.get("messageTimestamp", 0) or 0)
+                if t > ts:
+                    ts = t
+            return ts
+
+        sorted_chats = sorted(self.chats.values(), key=_chat_sort_time, reverse=True)
+
+        # Sync all chats that have unread messages + the top 20 most active chats
+        sync_limit = 20
+        synced_jids = set()
+        chats_to_sync = []
+
+        # 1. Add chats with unread messages
+        for chat in sorted_chats:
+            unread = int(chat.get("unreadCount") or 0)
+            if unread > 0:
+                chats_to_sync.append(chat)
+                synced_jids.add(chat.get("remoteJid"))
+
+        # 2. Add top N active chats that aren't already included
+        added_recent = 0
+        for chat in sorted_chats:
+            jid = chat.get("remoteJid")
+            if jid not in synced_jids:
+                chats_to_sync.append(chat)
+                synced_jids.add(jid)
+                added_recent += 1
+                if added_recent >= sync_limit:
+                    break
+
+        print(f"[sync_remote_chats] Sincronizando {len(chats_to_sync)} de {len(self.chats)} conversas.")
+
+        for chat in chats_to_sync:
             try:
                 self.sync_chat_messages(chat.copy())
             except Exception:

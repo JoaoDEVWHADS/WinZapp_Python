@@ -369,6 +369,20 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
+            # ── Step 4.5: download chrome if using modern puppeteer ───────
+            self._set_status("Baixando executável do Chrome (puppeteer)...")
+            ok, err = self._run_subprocess(
+                [node_exe, npm_cli, "exec", "puppeteer", "browsers", "install", "chrome"],
+                cwd=api_dir,
+                env=npm_env,
+            )
+            # Do not fail hard if this step fails (e.g. offline setup where Chrome was pre-copied)
+            if not ok:
+                logging.warning(f"Failed to install Chrome browser via Puppeteer CLI: {err}")
+
+            if self._cancelled:
+                return
+
             # ── Step 5: npm run build ─────────────────────────────────────
             self._set_status(
                 "Compilando o WPPConnect Server (npm run build) — "

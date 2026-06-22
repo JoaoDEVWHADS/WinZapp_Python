@@ -805,6 +805,17 @@ class ConversationsPanel(wx.Panel):
                 args=(jid,),
                 daemon=True,
             ).start()
+        # Background: Fetch/Sync latest messages for this chat on-demand
+        def _fetch_messages_bg():
+            try:
+                self.main_window.sync_chat_messages(conversation)
+                if self.conversation and self.conversation.get("remoteJid") == jid:
+                    wx.CallAfter(self.populate_messages)
+            except Exception as e:
+                print(f"[navigate_to_conversation] background sync failed: {e}")
+
+        threading.Thread(target=_fetch_messages_bg, daemon=True).start()
+
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
