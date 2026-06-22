@@ -498,9 +498,10 @@ class WebSocketClient:
             })
 
             if status:
-                # Fetch host-device JID on a background thread so we don't
-                # block the Socket.IO event loop during the HTTP call.
+                # Fetch host-device JID and raise WA file limits on a background
+                # thread so we don't block the Socket.IO event loop.
                 threading.Thread(target=self._fetch_host_device_jid, daemon=True).start()
+                threading.Thread(target=self._set_wpp_limits, daemon=True).start()
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
 
@@ -529,6 +530,26 @@ class WebSocketClient:
                     wx.CallAfter(self.main_window.resolve_self_lid)
         except Exception as ex:
             print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
+
+    def _set_wpp_limits(self):
+        """Push raised file-size limits into WhatsApp Web via the setLimit API."""
+        mw = self.main_window
+        url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
+        headers = {
+            "Authorization": f"Bearer {mw.token}",
+            "Content-Type": "application/json",
+        }
+        _100MB = 100 * 1024 * 1024
+        for limit_type in ("maxMediaSize", "maxFileSize"):
+            try:
+                requests.post(
+                    url,
+                    json={"type": limit_type, "value": _100MB},
+                    headers=headers,
+                    timeout=10,
+                )
+            except Exception:
+                pass
 
     def on_wpp_status_find(self, data):
         try:

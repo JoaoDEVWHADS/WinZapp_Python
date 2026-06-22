@@ -5378,18 +5378,18 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        _MAX_MEDIA_BYTES = 99 * 1024 * 1024
+        _MAX_MEDIA_BYTES = 100 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
 
-            # Pre-check: reject files above the Evolution API 99 MB limit before
+            # Pre-check: reject files above WhatsApp's 100 MB limit before
             # creating any UI entry or queuing the send — this prevents silent failures.
             try:
                 if os.path.getsize(path) > _MAX_MEDIA_BYTES:
                     wx.MessageBox(
-                        i18n.t("media_too_large").format(max_mb=99),
+                        i18n.t("media_too_large").format(max_mb=100),
                         i18n.t("app_name"),
                         wx.OK | wx.ICON_ERROR,
                         self,
