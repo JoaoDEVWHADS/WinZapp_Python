@@ -818,9 +818,11 @@ class StatusPanel(wx.Panel):
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/send-text-storie"
         headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {
-            "text":            text,
-            "backgroundColor": "#25D366",
-            "font":            "SANS_SERIF",
+            "text": text,
+            "options": {
+                "backgroundColor": "#25D366",
+                "font": 2,
+            }
         }
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)

@@ -33,6 +33,7 @@ class WebSocketClient:
         self.sio.on("phoneCode", self.on_wpp_phone_code)
         self.sio.on("status-find", self.on_wpp_status_find)
         self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
+        self.sio.on("chats-update", self.on_chats_update)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -695,10 +696,17 @@ class WebSocketClient:
         if msg_type == "chat":
             message_content = {"conversation": conversation}
         elif msg_type in ("audio", "ptt"):
+            dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
+            if not dur and isinstance(wpp_msg.get("mediaData"), dict):
+                dur = wpp_msg.get("mediaData", {}).get("duration")
+            try:
+                seconds_val = int(float(dur)) if dur else 0
+            except Exception:
+                seconds_val = 0
             message_content = {
                 "audioMessage": {
                     "url": wpp_msg.get("clientUrl", ""),
-                    "seconds": wpp_msg.get("duration") or wpp_msg.get("seconds") or 0
+                    "seconds": seconds_val
                 }
             }
         elif msg_type == "image":
@@ -710,10 +718,17 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "video":
+            dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
+            if not dur and isinstance(wpp_msg.get("mediaData"), dict):
+                dur = wpp_msg.get("mediaData", {}).get("duration")
+            try:
+                seconds_val = int(float(dur)) if dur else 0
+            except Exception:
+                seconds_val = 0
             message_content = {
                 "videoMessage": {
                     "caption": wpp_msg.get("caption", ""),
-                    "seconds": wpp_msg.get("duration") or wpp_msg.get("seconds") or 0,
+                    "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
                     "url": wpp_msg.get("clientUrl", ""),
                     "mimetype": wpp_msg.get("mimetype", "video/mp4")

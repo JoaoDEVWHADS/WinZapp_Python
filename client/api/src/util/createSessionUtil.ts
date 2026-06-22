@@ -267,6 +267,56 @@ export default class CreateSessionUtil {
     if (req.serverOptions.webhook.onPresenceChanged) {
       await this.onPresenceChanged(client, req);
     }
+
+    try {
+      await client.onInterfaceChange((event: any) => {
+        req.io.emit('chats-update', { data: [event] });
+      });
+
+      if ((client as any).page) {
+        try {
+          await (client as any).page.exposeFunction('onChatsUpdateNode', (jid: string, unreadCount: number, archive: boolean) => {
+            req.io.emit('chats-update', {
+              data: [{
+                remoteJid: jid.replace('@c.us', '@s.whatsapp.net'),
+                unreadCount: unreadCount,
+                archive: archive
+              }]
+            });
+          });
+        } catch (exposeErr) {
+          // ignore if already exposed
+        }
+
+        await (client as any).page.evaluate(() => {
+          try {
+            if (typeof (window as any).WPP !== 'undefined') {
+              (window as any).WPP.on('chat.unread_count_changed', (data: any) => {
+                if (data && data.chat && (window as any).onChatsUpdateNode) {
+                  (window as any).onChatsUpdateNode(data.chat.id._serialized, data.unreadCount, !!data.chat.archive);
+                }
+              });
+            }
+            if (typeof (window as any).Store !== 'undefined' && (window as any).Store.Chat) {
+              (window as any).Store.Chat.on('change:archive', (chat: any) => {
+                if (chat && chat.id && (window as any).onChatsUpdateNode) {
+                  (window as any).onChatsUpdateNode(chat.id._serialized, chat.unreadCount, !!chat.archive);
+                }
+              });
+              (window as any).Store.Chat.on('change:unreadCount', (chat: any) => {
+                if (chat && chat.id && (window as any).onChatsUpdateNode) {
+                  (window as any).onChatsUpdateNode(chat.id._serialized, chat.unreadCount, !!chat.archive);
+                }
+              });
+            }
+          } catch (evalErr) {
+            console.error('Failed to setup chats update listener:', evalErr);
+          }
+        });
+      }
+    } catch (e) {
+      req.logger.error('Failed to register onInterfaceChange listener:', e);
+    }
   }
 
   async checkStateSession(client: WhatsAppServer, req: Request) {

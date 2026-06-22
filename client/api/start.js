@@ -1,6 +1,35 @@
 const path = require('path');
 const fs = require('fs');
 
+// Auto-instala o Chrome do Puppeteer caso não exista
+const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+let hasChrome = false;
+if (fs.existsSync(puppeteerCacheDir)) {
+  try {
+    const files = fs.readdirSync(puppeteerCacheDir);
+    if (files.length > 0) {
+      hasChrome = true;
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+if (!hasChrome) {
+  console.log('Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente...');
+  try {
+    const { execSync } = require('child_process');
+    execSync('npx puppeteer browsers install chrome', {
+      cwd: __dirname,
+      stdio: 'inherit',
+      env: { ...process.env, PUPPETEER_CACHE_DIR: puppeteerCacheDir }
+    });
+    console.log('Navegador Chrome do Puppeteer instalado com sucesso!');
+  } catch (err) {
+    console.error('Falha ao instalar o Chrome automaticamente:', err);
+  }
+}
+
 // Carrega a configuração padrão compilada
 const distPath = path.join(__dirname, 'dist');
 const configDefault = require(path.join(distPath, 'config')).default;
