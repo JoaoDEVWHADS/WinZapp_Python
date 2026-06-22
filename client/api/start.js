@@ -19,10 +19,20 @@ if (!hasChrome) {
   console.log('Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente...');
   try {
     const { execSync } = require('child_process');
+    const nodeDir = path.dirname(process.execPath);
+    const env = { 
+      ...process.env, 
+      PUPPETEER_CACHE_DIR: puppeteerCacheDir 
+    };
+    if (process.platform === 'win32') {
+      env.Path = `${nodeDir};${env.Path || ''};${env.PATH || ''}`;
+    } else {
+      env.PATH = `${nodeDir}:${env.PATH || ''}`;
+    }
     execSync('npx puppeteer browsers install chrome', {
       cwd: __dirname,
       stdio: 'inherit',
-      env: { ...process.env, PUPPETEER_CACHE_DIR: puppeteerCacheDir }
+      env: env
     });
     console.log('Navegador Chrome do Puppeteer instalado com sucesso!');
   } catch (err) {
