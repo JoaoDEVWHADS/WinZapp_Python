@@ -52,60 +52,28 @@ export function contactToArray(
   const localArr: any = [];
   if (Array.isArray(number)) {
     for (let contact of number) {
-      if (!contact) continue;
-      const originalJid = String(contact);
-      const hasGroupSuffix = originalJid.includes('@g.us');
-      const hasNewsletterSuffix = originalJid.includes('@newsletter');
-      const hasLidSuffix = originalJid.includes('@lid');
-      const hasCusSuffix =
-        originalJid.includes('@c.us') ||
-        originalJid.includes('@s.whatsapp.net');
-
       isGroup || isNewsletter
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
-      if (contact !== '') {
-        if (isGroup || hasGroupSuffix)
-          (localArr as any).push(`${contact}@g.us`);
-        else if (isNewsletter || hasNewsletterSuffix)
-          (localArr as any).push(`${contact}@newsletter`);
-        else if (
-          isLid ||
-          hasLidSuffix ||
-          (!hasCusSuffix && contact.length > 14)
-        )
+      if (contact !== '')
+        if (isGroup) (localArr as any).push(`${contact}@g.us`);
+        else if (isNewsletter) (localArr as any).push(`${contact}@newsletter`);
+        else if (isLid || contact.length > 14)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
-      }
     }
   } else {
-    const arrContacts = String(number).split(/\s*[,;]\s*/g);
+    const arrContacts = number.split(/\s*[,;]\s*/g);
     for (let contact of arrContacts) {
-      if (!contact) continue;
-      const originalJid = String(contact);
-      const hasGroupSuffix = originalJid.includes('@g.us');
-      const hasNewsletterSuffix = originalJid.includes('@newsletter');
-      const hasLidSuffix = originalJid.includes('@lid');
-      const hasCusSuffix =
-        originalJid.includes('@c.us') ||
-        originalJid.includes('@s.whatsapp.net');
-
       isGroup || isNewsletter
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
-      if (contact !== '') {
-        if (isGroup || hasGroupSuffix)
-          (localArr as any).push(`${contact}@g.us`);
-        else if (isNewsletter || hasNewsletterSuffix)
-          (localArr as any).push(`${contact}@newsletter`);
-        else if (
-          isLid ||
-          hasLidSuffix ||
-          (!hasCusSuffix && contact.length > 14)
-        )
+      if (contact !== '')
+        if (isGroup) (localArr as any).push(`${contact}@g.us`);
+        else if (isNewsletter) (localArr as any).push(`${contact}@newsletter`);
+        else if (isLid || contact.length > 14)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
-      }
     }
   }
 

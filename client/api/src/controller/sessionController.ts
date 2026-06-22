@@ -241,24 +241,29 @@ export async function startSession(req: Request, res: Response): Promise<any> {
 }
 
 export async function closeSession(req: Request, res: Response): Promise<any> {
+  /**
+   * #swagger.tags = ["Auth"]
+     #swagger.operationId = 'closeSession'
+     #swagger.autoBody=true
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+   */
   const session = req.session;
   try {
-    const client = (clientsArray as any)[session];
-    if (!client || client.status === null) {
+    if ((clientsArray as any)[session].status === null) {
       return await res
         .status(200)
         .json({ status: true, message: 'Session successfully closed' });
     } else {
       (clientsArray as any)[session] = { status: null };
 
-      if (req.client && typeof req.client.close === 'function') {
-        await req.client.close();
-      } else if (client && typeof client.close === 'function') {
-        await client.close();
-      }
-
+      await req.client.close();
       req.io.emit('whatsapp-status', false);
-      callWebHook(client, req, 'closesession', {
+      callWebHook(req.client, req, 'closesession', {
         message: `Session: ${session} disconnected`,
         connected: false,
       });
