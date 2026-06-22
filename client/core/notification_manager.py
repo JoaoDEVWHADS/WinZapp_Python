@@ -227,17 +227,45 @@ def _resolve_participant_name(p_jid: str, push_name: str, main_window) -> str:
     """
     from core.utils import format_number, is_phone_like
     if p_jid:
-        # Use _resolve_contact_name with the participant's own chat object so
-        # step 4 (chat.name) is also available.
-        p_chat = main_window.chats.get(p_jid) or {"remoteJid": p_jid}
-        saved = main_window._resolve_contact_name(p_chat)
-        if saved:
-            return saved
+        candidates = [p_jid]
+        local = p_jid.rsplit("@", 1)[0]
+        lid_to_phone = getattr(main_window, "_lid_to_phone", {})
+        if p_jid.endswith("@lid"):
+            phone = lid_to_phone.get(p_jid, "")
+            if phone:
+                candidates.append(phone)
+                candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
+        elif p_jid.endswith("@s.whatsapp.net"):
+            candidates.append(local + "@c.us")
+            lid = getattr(main_window, "_phone_to_lid", {}).get(p_jid, "")
+            if lid:
+                candidates.append(lid)
+        elif p_jid.endswith("@c.us"):
+            candidates.append(local + "@s.whatsapp.net")
+
+        for cjid in candidates:
+            p_chat = main_window.chats.get(cjid) or main_window.contacts.get(cjid) or {"remoteJid": cjid}
+            saved = main_window._resolve_contact_name(p_chat)
+            if saved:
+                return saved
+
     if push_name and not is_phone_like(push_name):
         return push_name
-    if p_jid and not p_jid.endswith("@lid"):
-        return format_number(p_jid)
-    return p_jid or ""
+
+    ppm = getattr(main_window, "_presence_pushname_map", {})
+    if p_jid:
+        for cjid in candidates:
+            pname = (ppm.get(cjid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
+
+    if p_jid:
+        if not p_jid.endswith("@lid"):
+            return format_number(p_jid)
+        phone = lid_to_phone.get(p_jid, "")
+        if phone:
+            return format_number(phone)
+    return ""
 
 
 def format_foreground_sender(msg: dict, main_window, i18n) -> str:
@@ -255,7 +283,7 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
         p_jid = key.get("participant") or msg.get("participant") or ""
         if (not p_jid or p_jid.endswith("@g.us")) and push_name and push_name.isdigit():
             p_jid = f"{push_name}@s.whatsapp.net"
-        return _resolve_participant_name(p_jid, push_name, main_window) or remote_jid.split("@")[0]
+        return _resolve_participant_name(p_jid, push_name, main_window) or i18n.t("unnamed_participant") or "Participante sem nome"
 
     chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
     return (
@@ -287,15 +315,17 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
             main_window._resolve_contact_name(chat)
             or chat.get("name", "")
             or chat.get("pushName", "")
-            or remote_jid.split("@")[0]
         )
+        if not group_name or not group_name.strip():
+            group_name = i18n.t("unknown_group") or "Grupo sem nome"
+
         # Resolve participant name — saved name takes priority over pushName
         p_jid = key.get("participant") or msg.get("participant") or ""
         if (not p_jid or p_jid.endswith("@g.us")) and push_name and push_name.isdigit():
             p_jid = f"{push_name}@s.whatsapp.net"
         participant_name = _resolve_participant_name(p_jid, push_name, main_window)
         if not participant_name:
-            participant_name = remote_jid.split("@")[0]
+            participant_name = i18n.t("unnamed_participant") or "Participante sem nome"
         base = i18n.t("notif_in_group").format(
             participant=participant_name, group=group_name
         )
