@@ -693,16 +693,15 @@ class WebSocketClient:
             "MessageUpdate": message_updates
         }
 
-        if remote_jid.endswith("@g.us"):
-            participant = (
-                wpp_msg.get("author")
-                or wpp_msg.get("participant")
-                or (wpp_msg.get("key") or {}).get("participant")
-                or (wpp_msg.get("sender") or {}).get("id")
-                or ""
-            )
-            if participant:
-                normalized["key"]["participant"] = participant.replace("@c.us", "@s.whatsapp.net")
+        participant = (
+            wpp_msg.get("author")
+            or wpp_msg.get("participant")
+            or (wpp_msg.get("key") or {}).get("participant")
+            or (wpp_msg.get("sender") or {}).get("id")
+            or ""
+        )
+        if participant:
+            normalized["key"]["participant"] = participant.replace("@c.us", "@s.whatsapp.net")
 
         quoted_msg = wpp_msg.get("quotedMsg")
         quoted_msg_obj = wpp_msg.get("quotedMsgObj")

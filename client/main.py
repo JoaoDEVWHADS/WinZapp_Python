@@ -3056,6 +3056,20 @@ class MainWindow(wx.Frame):
                 self._phone_to_lid[remote] = alt
                 updated = True
                 logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
+                
+        # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
+        if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
+            if self._lid_to_phone.get(remote) != participant:
+                self._lid_to_phone[remote] = participant
+                self._phone_to_lid[participant] = remote
+                updated = True
+                logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
+        elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
+            if self._lid_to_phone.get(participant) != remote:
+                self._lid_to_phone[participant] = remote
+                self._phone_to_lid[remote] = participant
+                updated = True
+                logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
 
         if updated:
             # Propagate contact details from phone contact to LID contact to make it immediately available
@@ -4643,6 +4657,31 @@ class MainWindow(wx.Frame):
                     res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
                     if not isinstance(res_data, dict):
                         res_data = {}
+                        
+                    # Resolve JID mapping from contact details
+                    profile_pn_jid = None
+                    id_obj = res_data.get("id") or {}
+                    if isinstance(id_obj, dict):
+                        ser_id = id_obj.get("_serialized") or ""
+                        if ser_id.endswith(("@c.us", "@s.whatsapp.net")):
+                            profile_pn_jid = ser_id
+                    if not profile_pn_jid:
+                        pn_obj = res_data.get("phoneNumber") or {}
+                        if isinstance(pn_obj, dict):
+                            profile_pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
+                        elif isinstance(pn_obj, str):
+                            profile_pn_jid = pn_obj
+                    if not profile_pn_jid:
+                        profile_pn_jid = res_data.get("pnJid")
+                    if not profile_pn_jid:
+                        profile_pn_jid = res_data.get("phone")
+                        
+                    if profile_pn_jid:
+                        profile_canonical = self._normalize_jid(profile_pn_jid)
+                        if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
+                            self.register_jid_mapping(lid_jid, profile_canonical)
+                            if not canonical_jid:
+                                canonical_jid = profile_canonical
                     name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
                     if name and name != "Contato sem nome" and not is_phone_like(name):
                         if lid_jid not in self.contacts:
