@@ -703,6 +703,8 @@ class ConversationsPanel(wx.Panel):
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
+            # Conversation already open — just focus the message input field.
+            wx.CallAfter(self.message_field.SetFocus)
             return
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
@@ -2152,7 +2154,7 @@ class ConversationsPanel(wx.Panel):
         """Return (start_pos, query) when cursor is inside @word, else (None, None)."""
         text = self.message_field.GetValue()
         pos  = self.message_field.GetInsertionPoint()
-        i = pos - 1
+        i = min(pos - 1, len(text) - 1)
         while i >= 0:
             ch = text[i]
             if ch == "@":
@@ -3346,10 +3348,13 @@ class ConversationsPanel(wx.Panel):
             # Resolve @mentions: replace @{number} with @{display_name}.
             # mentionedJid may live at the top-level contextInfo (Evolution API
             # normalises it there) or inside extendedTextMessage.contextInfo.
+            ctx_top = msg.get("contextInfo") or {}
+            ctx_msg = msg_obj.get("contextInfo") or {}
+            ctx_ext = ext.get("contextInfo") or {}
             mentioned = (
-                (msg.get("contextInfo") or {}).get("mentionedJid")
-                or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
-                or ext.get("contextInfo", {}).get("mentionedJid")
+                ctx_top.get("mentionedJid") or ctx_top.get("mentionedJidList")
+                or ctx_msg.get("mentionedJid") or ctx_msg.get("mentionedJidList")
+                or ctx_ext.get("mentionedJid") or ctx_ext.get("mentionedJidList")
                 or []
             )
             for jid in mentioned:
@@ -3525,7 +3530,9 @@ class ConversationsPanel(wx.Panel):
         # Locally-queued messages have their own pending status.
         if msg.get("_local_pending"):
             return i18n.t("status_pending")
-        
+        if msg.get("_send_failed"):
+            return i18n.t("status_failed")
+
         statuses = []
         updates = msg.get("MessageUpdate")
         if isinstance(updates, list) and updates:
@@ -3948,6 +3955,10 @@ class ConversationsPanel(wx.Panel):
         jid      = conversation.get("remoteJid", "")
         mw       = self.main_window
         i18n     = mw.i18n
+        
+        # Subscribe to presence updates for this conversation to receive typing/online events
+        mw.subscribe_presence(jid)
+
         note = (
             mw._resolve_contact_name(conversation)
             or mw.find_name_through_messages(conversation)
@@ -5515,18 +5526,22 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        _MAX_MEDIA_BYTES = 99 * 1024 * 1024
+        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
+        _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
+        _MAX_DOC_BYTES      = 1   * 1024 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
 
-            # Pre-check: reject files above the Evolution API 99 MB limit before
-            # creating any UI entry or queuing the send — this prevents silent failures.
+            is_doc    = media_type == "document"
+            max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
+            max_mb    = 1024 if is_doc else 70
+
             try:
-                if os.path.getsize(path) > _MAX_MEDIA_BYTES:
+                if os.path.getsize(path) > max_bytes:
                     wx.MessageBox(
-                        i18n.t("media_too_large").format(max_mb=99),
+                        i18n.t("media_too_large").format(max_mb=max_mb),
                         i18n.t("app_name"),
                         wx.OK | wx.ICON_ERROR,
                         self,

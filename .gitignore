@@ -26,6 +26,7 @@ client/logs/
 !/client/api/.env
 !/client/api/package.json
 !/client/api/config.json
+!/client/api/.puppeteerrc.cjs
 
 # Evolution API runtime state (redundant with /api/* but explicit for clarity)
 /client/api/pgdata/

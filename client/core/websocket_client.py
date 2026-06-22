@@ -22,25 +22,17 @@ class WebSocketClient:
             logger=False,
             engineio_logger=False,
         )
-        #Bind events
+        # WPPConnect Server emits all events on root "/" namespace via req.io.emit().
+        # Registering handlers without namespace defaults them to "/" (root).
         self.sio.on("connect", self.on_connect)
         self.sio.on("disconnect", self.on_disconnect)
-        self.sio.on("connection.update", self.on_connection_update, namespace=f"/{self.instance_name}")
-        self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
-        self.sio.on("messages.set", self.on_messages_set, namespace=f"/{self.instance_name}")
-        self.sio.on("messages.upsert",  self.on_messages_upsert,  namespace=f"/{self.instance_name}")
-        self.sio.on("messages.update",  self.on_messages_update,  namespace=f"/{self.instance_name}")
-        self.sio.on("chats.update",     self.on_chats_update,     namespace=f"/{self.instance_name}")
-        self.sio.on("contacts.update",  self.on_contacts_update,  namespace=f"/{self.instance_name}")
-        self.sio.on("presence.update",  self.on_presence_update,  namespace=f"/{self.instance_name}")
-
-        # WPPConnect Server Events
         self.sio.on("qrCode", self.on_wpp_qrcode)
         self.sio.on("session-logged", self.on_wpp_session_logged)
         self.sio.on("received-message", self.on_wpp_message_received)
         self.sio.on("onack", self.on_wpp_ack)
         self.sio.on("phoneCode", self.on_wpp_phone_code)
         self.sio.on("status-find", self.on_wpp_status_find)
+        self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -89,8 +81,7 @@ class WebSocketClient:
             was_connected = self.main_window._wa_connected
             self.main_window._wa_connected = False
 
-            # Detect permanent WhatsApp logout (Baileys DisconnectReason.loggedOut = 401).
-            # Evolution API may surface this in different fields depending on the version.
+            # Detect permanent WhatsApp logout (status 401 = loggedOut).
             status_code  = (
                 data.get("statusCode")
                 or data.get("status")
@@ -146,18 +137,18 @@ class WebSocketClient:
         # Wipe all cached chats/contacts/media to avoid cross-account data leakage
         mw.clear_local_data()
 
-        # Best-effort: delete the orphaned instance from the local Evolution API.
+        # Best-effort: close the WPPConnect session so Chrome is released.
         if old_token:
-            def _delete():
+            def _close():
                 try:
-                    requests.delete(
-                        f"{mw.evolution_server}:{mw.evolution_port}/instance/delete/{old_token}",
-                        headers={"apikey": mw.evolution_api_key},
+                    requests.post(
+                        f"{mw.wpp_server}:{mw.wpp_port}/api/{old_token}/close-session",
+                        headers={"Authorization": f"Bearer {old_token}", "Content-Type": "application/json"},
                         timeout=5,
                     )
                 except Exception:
                     pass
-            threading.Thread(target=_delete, daemon=True).start()
+            threading.Thread(target=_close, daemon=True).start()
 
         # Disconnect the socket (may already be disconnecting).
         try:
@@ -221,7 +212,7 @@ class WebSocketClient:
         if existing and existing.is_alive():
             return
         # Guard 2: don't restart sync after it already completed this session.
-        # Evolution API sends messages.set in multiple batches during initial
+        # WPPConnect sends messages.set in multiple batches during initial
         # WhatsApp sync; without this guard the second batch would trigger a
         # full re-sync immediately after the first one finished.
         if getattr(self.main_window, "_sync_completed", False):
@@ -231,9 +222,9 @@ class WebSocketClient:
 
     def on_messages_upsert(self, info):
         """
-        Handle real-time incoming messages from the Evolution API.
+        Handle real-time incoming messages from the WPPConnect.
 
-        In Evolution API v2 the websocket envelope is
+        In WPPConnect v2 the websocket envelope is
           {"event": "messages.upsert", "instance": ..., "data": {<message>}, ...}
         where "data" is a single message object (key, pushName, message,
         messageType, messageTimestamp, ...).
@@ -277,7 +268,7 @@ class WebSocketClient:
         """
         Handle messages.update — delivery/read status changes for sent messages.
 
-        Evolution API v2 sends:
+        WPPConnect v2 sends:
           {"data": [{"key": {"id": ..., "remoteJid": ..., "fromMe": true},
                      "status": "READ"|"DELIVERY_ACK"|"SERVER_ACK",
                      "update": {"status": 4}}]}
@@ -302,7 +293,7 @@ class WebSocketClient:
         Handle chats.update — partial chat state changes (e.g. unreadCount reset
         when the user reads messages on another device via app-state sync).
 
-        Evolution API emits:
+        WPPConnect emits:
           {"data": [{"remoteJid": ..., "unreadCount": 0, ...}]}
         """
         try:
@@ -331,7 +322,7 @@ class WebSocketClient:
         """
         Handle presence.update — online/typing/last-seen changes for contacts.
 
-        Evolution API wraps the Baileys payload as:
+        WPPConnect wraps the Baileys payload as:
           {"data": {"id": "55XXX@s.whatsapp.net",
                     "presences": {"55XXX@s.whatsapp.net": {
                         "lastKnownPresence": "available"|"unavailable"|"composing"|...,
@@ -347,11 +338,77 @@ class WebSocketClient:
         except Exception as e:
             print(f"[WebSocketClient] on_presence_update error: {e}")
 
+    def on_wpp_presence_changed(self, info):
+        """
+        Handle WPPConnect onpresencechanged event.
+        Payload format matches PresenceChangeEvent from WPPConnect.
+        """
+        if not info or not isinstance(info, dict):
+            return
+        try:
+            # The id can be a string or a dict/object (Wid)
+            raw_id = info.get("id")
+            if isinstance(raw_id, dict):
+                chat_jid = raw_id.get("_serialized", "")
+            else:
+                chat_jid = str(raw_id or "")
+
+            if not chat_jid:
+                return
+
+            is_group = bool(info.get("isGroup", False))
+            
+            # We want to format this into the presences dict that main.py expects:
+            # presences: {participant_jid: {"lastKnownPresence": state, "lastSeen": timestamp}}
+            presences = {}
+            
+            # Map state to expected values (available, unavailable, composing, recording)
+            def map_state(s):
+                if not s:
+                    return "unavailable"
+                s = s.lower()
+                if s == "online":
+                    return "available"
+                if s == "offline":
+                    return "unavailable"
+                return s
+
+            timestamp = info.get("t")
+
+            if is_group:
+                participants = info.get("participants", [])
+                if isinstance(participants, list):
+                    for p in participants:
+                        if not isinstance(p, dict):
+                            continue
+                        p_raw_id = p.get("id")
+                        if isinstance(p_raw_id, dict):
+                            p_jid = p_raw_id.get("_serialized", "")
+                        else:
+                            p_jid = str(p_raw_id or "")
+                        if p_jid:
+                            p_state = map_state(p.get("state"))
+                            presences[p_jid] = {
+                                "lastKnownPresence": p_state,
+                                "lastSeen": timestamp
+                            }
+            else:
+                state = map_state(info.get("state"))
+                presences[chat_jid] = {
+                    "lastKnownPresence": state,
+                    "lastSeen": timestamp
+                }
+
+            if presences:
+                wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
+
     def on_contacts_update(self, info):
         """
         Handle contacts.update to keep contact names and pictures fresh.
 
-        Evolution API v2 emits this event with "data" being either a single
+        WPPConnect v2 emits this event with "data" being either a single
         contact dict or a list of contact dicts:
           {"remoteJid": ..., "pushName": ..., "profilePicUrl": ..., "instanceId": ...}
         New messages (1:1 and group) arrive via messages.upsert.
@@ -414,7 +471,8 @@ class WebSocketClient:
         try:
             if not isinstance(data, dict):
                 return
-            qrcode_base64 = data.get("qrCode")
+            # WPPConnect emits: {"data": "data:image/png;base64,...", "session": "..."}
+            qrcode_base64 = data.get("data")
             if qrcode_base64:
                 self.on_qrcode_update({
                     "data": {
@@ -431,35 +489,83 @@ class WebSocketClient:
             if not isinstance(data, dict):
                 return
             status = data.get("status", False)
-            if status:
-                try:
-                    url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{self.main_window.token}/host-device"
-                    headers = {
-                        "Authorization": f"Bearer {self.main_window.token}",
-                        "Content-Type": "application/json"
-                    }
-                    res = requests.get(url, headers=headers, timeout=5)
-                    if res.status_code in (200, 201):
-                        res_data = res.json()
-                        phoneNumberObj = res_data.get("response", {}).get("phoneNumber", {})
-                        wuid = ""
-                        if isinstance(phoneNumberObj, dict):
-                            wuid = phoneNumberObj.get("_serialized", "")
-                        elif isinstance(phoneNumberObj, str):
-                            wuid = phoneNumberObj
-                        if wuid:
-                            self.main_window.my_jid = wuid
-                            self.main_window.resolve_self_lid()
-                except Exception as ex:
-                    print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
+            session = data.get("session", "")
 
+            # Ignore events for other sessions (multi-session server scenario)
+            if session and session != self.instance_name:
+                return
+
+            # Notify the connection state immediately (non-blocking).
             self.on_connection_update({
                 "data": {
                     "state": "open" if status else "close"
                 }
             })
+
+            if status:
+                # Fetch host-device JID and raise WA file limits on a background
+                # thread so we don't block the Socket.IO event loop.
+                threading.Thread(target=self._fetch_host_device_jid, daemon=True).start()
+                threading.Thread(target=self._set_wpp_limits, daemon=True).start()
+                # WPPConnect does not emit messages.set; trigger sync here instead,
+                # using the same guards as on_messages_set to prevent double-sync.
+                self.on_messages_set({})
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+
+    def _fetch_host_device_jid(self):
+        try:
+            url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{self.main_window.token}/host-device"
+            headers = {
+                "Authorization": f"Bearer {self.main_window.token}",
+                "Content-Type": "application/json",
+            }
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code in (200, 201):
+                res_data = res.json()
+                resp = res_data.get("response", res_data)
+                phone_obj = resp.get("phoneNumber", {}) if isinstance(resp, dict) else {}
+                wuid = ""
+                if isinstance(phone_obj, dict):
+                    wuid = phone_obj.get("_serialized", "")
+                elif isinstance(phone_obj, str):
+                    wuid = phone_obj
+                if not wuid and isinstance(resp, dict):
+                    wid = resp.get("wid")
+                    wuid = wid.get("_serialized", "") if isinstance(wid, dict) else ""
+                if wuid:
+                    self.main_window.my_jid = wuid
+                    wx.CallAfter(self.main_window.resolve_self_lid)
+        except Exception as ex:
+            print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
+
+    def _set_wpp_limits(self):
+        """Push raised file-size limits into WhatsApp Web via the setLimit API.
+
+        WPPConnect documented maximums:
+          maxMediaSize — 70 MB  (images, videos, audio)
+          maxFileSize  — 1 GB   (documents)
+        """
+        mw = self.main_window
+        url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
+        headers = {
+            "Authorization": f"Bearer {mw.token}",
+            "Content-Type": "application/json",
+        }
+        limits = [
+            ("maxMediaSize", 70 * 1024 * 1024),    # 70 MB
+            ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
+        ]
+        for limit_type, value in limits:
+            try:
+                requests.post(
+                    url,
+                    json={"type": limit_type, "value": value},
+                    headers=headers,
+                    timeout=10,
+                )
+            except Exception:
+                pass
 
     def on_wpp_status_find(self, data):
         try:
@@ -557,7 +663,7 @@ class WebSocketClient:
 
         from_jid = wpp_msg.get("from", "")
         to_jid = wpp_msg.get("to", "")
-        
+
         # Safely parse fromMe supporting boolean, string representation, or ID prefix fallback
         from_me_val = wpp_msg.get("fromMe")
         if from_me_val is not None:
@@ -568,8 +674,17 @@ class WebSocketClient:
         else:
             from_me = (parts[0] == "true") if parts else False
 
-        remote_jid = to_jid if from_me else from_jid
-        remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+        # Detect status/story messages: WPPConnect sends them with to="status@broadcast"
+        # or sets isStatus=True.  The real sender is in the "from" field.
+        is_status = "broadcast" in (to_jid or "") or wpp_msg.get("isStatus", False)
+
+        if is_status:
+            remote_jid = "status@broadcast"
+            status_participant = from_jid.replace("@c.us", "@s.whatsapp.net") if from_jid else ""
+        else:
+            remote_jid = to_jid if from_me else from_jid
+            remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+            status_participant = ""
 
         ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
 
@@ -693,6 +808,10 @@ class WebSocketClient:
             "MessageUpdate": message_updates
         }
 
+        # Status messages: include the real sender as participant
+        if status_participant:
+            normalized["key"]["participant"] = status_participant
+
         participant = (
             wpp_msg.get("author")
             or wpp_msg.get("participant")
@@ -708,7 +827,7 @@ class WebSocketClient:
         quoted_stanza_id = wpp_msg.get("quotedStanzaID") or wpp_msg.get("quotedStanzaId")
         quoted_participant = wpp_msg.get("quotedParticipant")
 
-        # Fallback to Evolution API/Baileys contextInfo if WPPConnect quote fields are missing
+        # Fallback to WPPConnect/Baileys contextInfo if WPPConnect quote fields are missing
         ctx_info = wpp_msg.get("contextInfo")
         if not ctx_info and isinstance(wpp_msg.get("message"), dict):
             sub_msg = wpp_msg.get("message")

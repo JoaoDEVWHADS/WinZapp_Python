@@ -220,10 +220,6 @@ export async function listChats(req: Request, res: Response) {
       withLabels,
     } = req.body;
 
-    if (!req.client || typeof req.client.listChats !== 'function') {
-      return res.status(200).json([]);
-    }
-
     const response = await req.client.listChats({
       id: id,
       count: count,
@@ -257,9 +253,6 @@ export async function getAllChatsWithMessages(req: Request, res: Response) {
      }
    */
   try {
-    if (!req.client || typeof req.client.listChats !== 'function') {
-      return res.status(200).json({ status: 'success', response: [] });
-    }
     const response = await req.client.listChats();
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
@@ -1447,9 +1440,7 @@ export async function getMessages(req: Request, res: Response) {
   const { phone } = req.params;
   const { count = 20, direction = 'before', id = null } = req.query;
   try {
-    const formattedPhone =
-      contactToArray(phone, phone.includes('@g.us'))[0] || phone;
-    const response = await req.client.getMessages(formattedPhone, {
+    const response = await req.client.getMessages(`${phone}`, {
       count: parseInt(count as string),
       direction: direction.toString() as any,
       id: id as string,

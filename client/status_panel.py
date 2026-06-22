@@ -316,14 +316,21 @@ class StatusPanel(wx.Panel):
 
     def _load_statuses(self):
         """
-        Fetch WhatsApp statuses (stories).
+        Build the status list from status updates received via WebSocket.
+
+        WPPConnect does not expose a REST endpoint to query other users' statuses,
+        so we rely on the in-memory _status_updates dict that is populated by
+        MainWindow._store_status_update() whenever a status@broadcast message
+        arrives over the Socket.IO connection.
         """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
-        # WPPConnect Server does not support retrieving other users' status updates
-        # via the HTTP API. We gracefully initialize empty status lists.
+        status_updates = getattr(mw, "_status_updates", {})
         records = []
+        for participant, msgs in list(status_updates.items()):
+            for msg in msgs:
+                records.append(msg)
         my_statuses, contacts = self._parse_statuses(records, i18n)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 
@@ -806,23 +813,14 @@ class StatusPanel(wx.Panel):
         ).start()
 
     def _send_text_status_bg(self, text: str):
-        """POST /message/sendStatus (Evolution API v2).
-
-        Text statuses require backgroundColor and font (1-5); the status is
-        broadcast to all saved contacts (allContacts=True).
-        """
+        """POST /api/{session}/send-text-storie (WPPConnect Server)."""
         mw  = self.main_window
-        url = (
-            f"{mw.evolution_server}:{mw.evolution_port}"
-            f"/message/sendStatus/{mw.token}"
-        )
-        headers = {"apikey": mw.token, "Content-Type": "application/json"}
+        url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/send-text-storie"
+        headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {
-            "type":            "text",
-            "content":         text,
+            "text":            text,
             "backgroundColor": "#25D366",
-            "font":            1,
-            "allContacts":     True,
+            "font":            "SANS_SERIF",
         }
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -937,7 +935,6 @@ class StatusPanel(wx.Panel):
         elif ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
             media_type = "image"
         else:
-            # Evolution API v2 statuses only support text/image/audio/video
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_error"),
@@ -946,16 +943,12 @@ class StatusPanel(wx.Panel):
             )
             return
 
-        url = (
-            f"{mw.evolution_server}:{mw.evolution_port}"
-            f"/message/sendStatus/{mw.token}"
-        )
-        headers = {"apikey": mw.token, "Content-Type": "application/json"}
+        endpoint = "send-image-storie" if media_type == "image" else "send-video-storie"
+        url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/{endpoint}"
+        headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
         payload = {
-            "type":        media_type,
-            "content":     f"data:{mimetype};base64,{data_b64}",
-            "caption":     caption,
-            "allContacts": True,
+            "base64": f"data:{mimetype};base64,{data_b64}",
+            "caption": caption,
         }
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)

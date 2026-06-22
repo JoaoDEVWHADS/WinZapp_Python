@@ -101,7 +101,7 @@ class ModuleInstallDialog(wx.Dialog):
         try:
             # ── Step 1: npm install ──────────────────────────────────────
             self._proc = subprocess.Popen(
-                [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
+                [node_exe, npm_cli, "install", "--no-audit", "--no-fund", "--include=optional"],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=subprocess.CREATE_NO_WINDOW,
