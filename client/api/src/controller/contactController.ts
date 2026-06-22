@@ -25,8 +25,32 @@ export default class ContactController {
     }
 
     try {
-      const response = await req.client.getPnLidEntry(pnLid) as any;
-      const pnJid = response?.contact?.id?._serialized || response?.contact?.id || null;
+      let response = await req.client.getPnLidEntry(pnLid) as any;
+      let pnJid = response?.contact?.id?._serialized || response?.contact?.id || null;
+
+      if (!pnJid) {
+        try {
+          if (typeof (req.client as any).requestPhoneNumber === 'function') {
+            req.logger.info(`Requesting phone number for ${pnLid} via client.requestPhoneNumber`);
+            await (req.client as any).requestPhoneNumber(pnLid);
+            response = await req.client.getPnLidEntry(pnLid) as any;
+            pnJid = response?.contact?.id?._serialized || response?.contact?.id || null;
+          } else if (req.client.page) {
+            req.logger.info(`Requesting phone number for ${pnLid} via browser WPP.chat.requestPhoneNumber`);
+            await req.client.page.evaluate(async (id: string) => {
+              const w = window as any;
+              if (w.WPP && w.WPP.chat && typeof w.WPP.chat.requestPhoneNumber === 'function') {
+                await w.WPP.chat.requestPhoneNumber(id);
+              }
+            }, pnLid);
+            response = await req.client.getPnLidEntry(pnLid) as any;
+            pnJid = response?.contact?.id?._serialized || response?.contact?.id || null;
+          }
+        } catch (reqError) {
+          req.logger.error('Error requesting phone number for LID: ' + pnLid, reqError);
+        }
+      }
+
       res.status(200).json({
         ...response,
         pnJid: pnJid,
