@@ -3474,8 +3474,32 @@ class ConversationsPanel(wx.Panel):
         if not isinstance(m, dict):
             return False
         msg_type = m.get("messageType", "")
-        if msg_type in ("reactionMessage", "senderKeyDistributionMessage"):
+
+        # Whitelist of user-visible/displayable message types
+        allowed_types = (
+            "conversation",
+            "extendedTextMessage",
+            "imageMessage",
+            "videoMessage",
+            "audioMessage",
+            "documentMessage",
+            "stickerMessage",
+            "contactMessage",
+            "locationMessage",
+            "liveLocationMessage",
+            "pollCreationMessage",
+            "buttonsMessage",
+            "listMessage",
+            "templateMessage",
+            "interactiveMessage",
+            "buttonsResponseMessage",
+            "listResponseMessage",
+            "protocolMessage",
+        )
+
+        if msg_type not in allowed_types:
             return False
+
         if msg_type == "protocolMessage":
             # Only display if it's a revoke/delete message
             protocol = (m.get("message") or {}).get("protocolMessage") or {}
