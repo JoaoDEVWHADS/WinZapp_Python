@@ -41,6 +41,7 @@ class WebSocketClient:
         self.sio.on("onack", self.on_wpp_ack)
         self.sio.on("phoneCode", self.on_wpp_phone_code)
         self.sio.on("status-find", self.on_wpp_status_find)
+        self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -346,6 +347,72 @@ class WebSocketClient:
             wx.CallAfter(self.main_window.on_presence_update, jid, presences)
         except Exception as e:
             print(f"[WebSocketClient] on_presence_update error: {e}")
+
+    def on_wpp_presence_changed(self, info):
+        """
+        Handle WPPConnect onpresencechanged event.
+        Payload format matches PresenceChangeEvent from WPPConnect.
+        """
+        if not info or not isinstance(info, dict):
+            return
+        try:
+            # The id can be a string or a dict/object (Wid)
+            raw_id = info.get("id")
+            if isinstance(raw_id, dict):
+                chat_jid = raw_id.get("_serialized", "")
+            else:
+                chat_jid = str(raw_id or "")
+
+            if not chat_jid:
+                return
+
+            is_group = bool(info.get("isGroup", False))
+            
+            # We want to format this into the presences dict that main.py expects:
+            # presences: {participant_jid: {"lastKnownPresence": state, "lastSeen": timestamp}}
+            presences = {}
+            
+            # Map state to expected values (available, unavailable, composing, recording)
+            def map_state(s):
+                if not s:
+                    return "unavailable"
+                s = s.lower()
+                if s == "online":
+                    return "available"
+                if s == "offline":
+                    return "unavailable"
+                return s
+
+            timestamp = info.get("t")
+
+            if is_group:
+                participants = info.get("participants", [])
+                if isinstance(participants, list):
+                    for p in participants:
+                        if not isinstance(p, dict):
+                            continue
+                        p_raw_id = p.get("id")
+                        if isinstance(p_raw_id, dict):
+                            p_jid = p_raw_id.get("_serialized", "")
+                        else:
+                            p_jid = str(p_raw_id or "")
+                        if p_jid:
+                            p_state = map_state(p.get("state"))
+                            presences[p_jid] = {
+                                "lastKnownPresence": p_state,
+                                "lastSeen": timestamp
+                            }
+            else:
+                state = map_state(info.get("state"))
+                presences[chat_jid] = {
+                    "lastKnownPresence": state,
+                    "lastSeen": timestamp
+                }
+
+            if presences:
+                wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
 
     def on_contacts_update(self, info):
         """
