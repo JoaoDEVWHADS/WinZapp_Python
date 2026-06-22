@@ -2846,21 +2846,43 @@ class MainWindow(wx.Frame):
             if not records and not last_msg and unread == 0 and not is_pinned:
                 continue
                 
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+            def get_valid_name(val):
+                if not val or not isinstance(val, str):
+                    return ""
+                val = val.strip()
+                if not val or val.isdigit() or is_phone_like(val):
+                    return ""
+                val_lower = val.lower()
+                if "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido"):
+                    return ""
+                return val
+
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid) or self._find_alt_jid_from_messages(chat)
+            
+            resolved_name = self._resolve_contact_name(chat)
+            chat_push = get_valid_name(chat.get("pushName", ""))
+            msg_push = self.find_name_through_messages(chat)
+            chat_name_field = get_valid_name(chat.get("name", ""))
+            
             name = (
-                self._resolve_contact_name(chat)
-                or self.find_name_through_messages(chat)
-                or chat.get("name", "")
-                or chat.get("pushName", "")
-                or self.find_jid_through_messages(chat)
-                or (format_number(phone_jid) if phone_jid else "")
-                or (format_number(jid) if not jid.endswith("@g.us") else "")
+                resolved_name
+                or chat_push
+                or msg_push
+                or chat_name_field
             )
+            
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
                     name = self.i18n.t("unknown_group")
                 else:
-                    name = format_number(jid)
+                    if phone_jid:
+                        name = format_number(phone_jid)
+                    else:
+                        msg_jid_num = self.find_jid_through_messages(chat)
+                        if msg_jid_num:
+                            name = msg_jid_num
+                        else:
+                            name = format_number(jid)
             
             # Detailed logging for name resolution debugging
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
@@ -5270,25 +5292,44 @@ class MainWindow(wx.Frame):
 
         # Prefer supported user-facing message types for a cleaner preview
         supported_types = {
-            "conversation", "extendedTextMessage", "audioMessage", 
-            "videoMessage", "imageMessage", "documentMessage", 
-            "stickerMessage", "contactMessage", "locationMessage", 
-            "reactionMessage", "pollCreationMessage", "buttonsMessage",
-            "listMessage", "templateMessage", "protocolMessage"
+            "conversation",
+            "extendedTextMessage",
+            "imageMessage",
+            "videoMessage",
+            "audioMessage",
+            "documentMessage",
+            "stickerMessage",
+            "contactMessage",
+            "locationMessage",
+            "liveLocationMessage",
+            "pollCreationMessage",
+            "buttonsMessage",
+            "listMessage",
+            "templateMessage",
+            "interactiveMessage",
+            "buttonsResponseMessage",
+            "listResponseMessage",
+            "protocolMessage",
+            "reactionMessage",
         }
+        def is_displayable(m):
+            if not isinstance(m, dict):
+                return False
+            m_type = m.get("messageType", "")
+            if m_type not in supported_types:
+                return False
+            if m_type == "protocolMessage":
+                protocol = (m.get("message") or {}).get("protocolMessage") or {}
+                p_type = protocol.get("type")
+                return p_type in (3, "REVOKE", "revoke")
+            return True
+
         try:
             last = max(
-                (m for m in records if isinstance(m, dict) and m.get("messageType") in supported_types),
+                (m for m in records if is_displayable(m)),
                 key=lambda m: int(m.get("messageTimestamp", 0) or 0),
                 default=None,
             )
-            if last is None:
-                # Fallback to absolute latest message if no supported types found
-                last = max(
-                    (m for m in records if isinstance(m, dict)),
-                    key=lambda m: int(m.get("messageTimestamp", 0) or 0),
-                    default=None,
-                )
         except Exception:
             return ""
         if last is None:
