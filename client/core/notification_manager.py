@@ -288,7 +288,7 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
     chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
     return (
         main_window._resolve_contact_name(chat)
-        or push_name
+        or _resolve_participant_name(remote_jid, push_name, main_window)
         or format_number(remote_jid)
     )
 
@@ -333,7 +333,7 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
         base = (
             main_window._resolve_contact_name(chat)
-            or push_name
+            or _resolve_participant_name(remote_jid, push_name, main_window)
             or format_number(remote_jid)
         )
 

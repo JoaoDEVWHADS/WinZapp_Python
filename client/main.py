@@ -4034,6 +4034,10 @@ class MainWindow(wx.Frame):
             pname = (ppm.get(cjid) or "").strip()
             if pname and not pname.isdigit() and not is_phone_like(pname):
                 return pname
+        if jid_norm.endswith("@lid"):
+            phone = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
+            if phone:
+                return format_number(phone)
         if not jid_norm.endswith(("@g.us", "@lid")):
             return format_number(jid_norm)
         return local
