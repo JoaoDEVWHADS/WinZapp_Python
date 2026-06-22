@@ -4885,6 +4885,7 @@ class MainWindow(wx.Frame):
                     continue
                 self._resolving_lids.add(lid_jid)
                 
+            try:
                 canonical_jid = getattr(self, "_lid_to_phone", {}).get(lid_jid)
                 headers = {
                     "Authorization": f"Bearer {self.token}",
