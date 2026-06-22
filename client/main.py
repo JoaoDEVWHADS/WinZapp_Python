@@ -3775,10 +3775,9 @@ class MainWindow(wx.Frame):
 
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
-        # Prefer the LID JID if mapped, as WPPConnect fails with 'Chat not found' for some phone JIDs that are indexed as LIDs
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
+        # Always send using the phone JID (@s.whatsapp.net / @g.us).
+        # WPPConnect's contactToArray normalises to @c.us internally; passing
+        # @lid JIDs breaks the server with HTTP 500 (confirmed in production logs).
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -3811,7 +3810,7 @@ class MainWindow(wx.Frame):
                     "message": text,
                     "messageId": quoted_id
                 }
-                print(f"[send_text_message] sending quoted reply via send-reply to {phone_net}, quoted key.id={quoted_id}")
+                logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
             else:
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
@@ -3828,7 +3827,7 @@ class MainWindow(wx.Frame):
                 # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
                 # try sending it as a plain message instead of leaving it pending forever.
                 if quoted_id:
-                    print(f"[send_text_message] Quoted send failed (HTTP {response.status_code}). Retrying without quote...")
+                    logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote...", response.status_code)
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     fb_phone = remote_jid
                     if fb_phone.endswith("@s.whatsapp.net"):
@@ -3841,9 +3840,10 @@ class MainWindow(wx.Frame):
                     response = requests.post(url, json=payload, headers=headers, timeout=15)
                 
                 if response.status_code not in (200, 201):
-                    print(f"[send_text_message] HTTP {response.status_code}: {response.text[:500]}")
+                    err = f"HTTP {response.status_code}: {response.text[:300]}"
+                    logging.error("[send_text_message] %s for %s", err, remote_jid)
                     self._check_wa_connection_closed(response)
-                    return False
+                    return {"ok": False, "error": err, "retry": False}
             self._wa_connected = True
             try:
                 body = response.json()
@@ -3862,16 +3862,25 @@ class MainWindow(wx.Frame):
             except Exception:
                 return True
         except Exception as exc:
-            print(f"[send_text_message] exception: {exc}")
-            return None
+            err = str(exc)[:200]
+            logging.error("[send_text_message] exception for %s: %s", remote_jid, err)
+            return {"ok": False, "error": err, "retry": True}
 
     @staticmethod
     def _find_api_ffmpeg() -> str:
-        """Locate ffmpeg.exe from the @ffmpeg-installer/ffmpeg npm package."""
+        """Locate ffmpeg binary: bundled npm package first, then system PATH."""
         import glob as _glob
+        import shutil
+        # 1. npm-bundled @ffmpeg-installer/ffmpeg (installed alongside the API server)
         api_nm = resource_path("api", "node_modules", "@ffmpeg-installer", "ffmpeg", "bin")
         hits   = _glob.glob(os.path.join(api_nm, "**", "ffmpeg.exe"), recursive=True)
-        return hits[0] if hits else None
+        if hits:
+            return hits[0]
+        # 2. ffmpeg on the system PATH (user-installed)
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            return system_ffmpeg
+        return None
 
     def _convert_wav_to_ogg(self, wav_path: str) -> str | None:
         """
@@ -3880,6 +3889,8 @@ class MainWindow(wx.Frame):
         """
         ffmpeg = self._find_api_ffmpeg()
         if not ffmpeg or not os.path.isfile(ffmpeg):
+            logging.warning("[audio] ffmpeg not found — sending WAV (may fail). Searched: %s",
+                            resource_path("api", "node_modules", "@ffmpeg-installer", "ffmpeg", "bin"))
             return None
         ogg_path = wav_path + ".ogg"
         try:
@@ -3892,9 +3903,13 @@ class MainWindow(wx.Frame):
                 timeout=60,
             )
             if result.returncode == 0 and os.path.isfile(ogg_path) and os.path.getsize(ogg_path) > 0:
+                logging.debug("[audio] WAV→OGG conversion succeeded: %s", ogg_path)
                 return ogg_path
-        except Exception:
-            pass
+            logging.error("[audio] ffmpeg WAV→OGG failed (rc=%s): %s",
+                          result.returncode,
+                          (result.stderr or b"").decode("utf-8", errors="replace")[-800:])
+        except Exception as exc:
+            logging.error("[audio] ffmpeg conversion exception: %s", exc)
         return None
 
     def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
@@ -3903,11 +3918,6 @@ class MainWindow(wx.Frame):
         WPPConnect Server API. Uses /api/{session}/send-voice-base64.
         WAV is converted to OGG/Opus first (WhatsApp PTT requirement).
         """
-        # Prefer the LID JID if mapped, as WPPConnect fails with 'Chat not found' for some phone JIDs that are indexed as LIDs
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
-
         # Convert WAV to OGG/Opus — WhatsApp only accepts OGG Opus for PTT.
         ogg_path  = self._convert_wav_to_ogg(wav_path)
         send_path = ogg_path if ogg_path else wav_path
@@ -3916,8 +3926,9 @@ class MainWindow(wx.Frame):
         try:
             with open(send_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
-        except Exception:
-            return False
+        except Exception as exc:
+            logging.error("[send_audio_message] failed to read audio file %s: %s", send_path, exc)
+            return {"ok": False, "error": str(exc)[:200], "retry": False}
         finally:
             if ogg_path and os.path.isfile(ogg_path):
                 try:
@@ -3957,12 +3968,14 @@ class MainWindow(wx.Frame):
                     return True
                 except Exception:
                     return True
-            print(f"[send_audio_message] HTTP {response.status_code}: {response.text[:500]}")
+            err = f"HTTP {response.status_code}: {response.text[:300]}"
+            logging.error("[send_audio_message] %s for %s", err, remote_jid)
             self._check_wa_connection_closed(response)
-            return None
+            return {"ok": False, "error": err, "retry": False}
         except Exception as e:
-            print(f"[send_audio_message] Request failed with exception: {e}")
-            return None
+            err = str(e)[:200]
+            logging.error("[send_audio_message] exception for %s: %s", remote_jid, err)
+            return {"ok": False, "error": err, "retry": True}
 
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
         """Send a reaction to a message via the WPPConnect Server API."""
@@ -5139,14 +5152,13 @@ class MainWindow(wx.Frame):
         Base64-encode a file and send it as a media message.
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
         import mimetypes
         try:
+            file_size = os.path.getsize(file_path)
             with open(file_path, "rb") as fh:
                 media_b64 = base64.b64encode(fh.read()).decode("utf-8")
-        except Exception:
+        except Exception as exc:
+            logging.error("[send_media] failed to read file %s: %s", file_path, exc)
             return False
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         filename = os.path.basename(file_path)
@@ -5166,8 +5178,12 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+        # Scale timeout with file size: allow at least 1 second per 100 KB,
+        # minimum 120 s, maximum 30 minutes. Keeps large uploads from timing out.
+        timeout = max(120, file_size // (100 * 1024))
+        timeout = min(timeout, 1800)
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=60)
+            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
             if r.status_code in (200, 201):
                 try:
                     body = r.json()
@@ -5187,14 +5203,17 @@ class MainWindow(wx.Frame):
             err = f"HTTP {r.status_code}"
             try:
                 body = r.json()
-                msg = (body.get("message") or body.get("error") or "")
-                if msg:
-                    err = f"{err}: {msg}"
+                detail = (body.get("message") or body.get("error") or "")
+                if detail:
+                    err = f"{err}: {detail}"
             except Exception:
                 if r.text:
                     err = f"{err}: {r.text[:200]}"
+            logging.error("[send_media] %s for %s (%s, %.1f MB): %s",
+                          err, remote_jid, filename, file_size / (1024*1024), r.text[:300])
             return {"ok": False, "error": err, "retry": False}
         except Exception as exc:
+            logging.error("[send_media] request exception for %s (%s): %s", remote_jid, filename, exc)
             return {"ok": False, "error": str(exc)[:200], "retry": False}
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
