@@ -316,14 +316,21 @@ class StatusPanel(wx.Panel):
 
     def _load_statuses(self):
         """
-        Fetch WhatsApp statuses (stories).
+        Build the status list from status updates received via WebSocket.
+
+        WPPConnect does not expose a REST endpoint to query other users' statuses,
+        so we rely on the in-memory _status_updates dict that is populated by
+        MainWindow._store_status_update() whenever a status@broadcast message
+        arrives over the Socket.IO connection.
         """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
-        # WPPConnect Server does not support retrieving other users' status updates
-        # via the HTTP API. We gracefully initialize empty status lists.
+        status_updates = getattr(mw, "_status_updates", {})
         records = []
+        for participant, msgs in list(status_updates.items()):
+            for msg in msgs:
+                records.append(msg)
         my_statuses, contacts = self._parse_statuses(records, i18n)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 

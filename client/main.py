@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import time
 import shutil
@@ -987,8 +987,9 @@ class MainWindow(wx.Frame):
         self._extract_lid_mapping(msg)
 
         # Statuses (stories) arrive as messages on status@broadcast; they are
-        # handled by the Status tab, not as a conversation.
+        # stored in _status_updates for the Status tab, not in a conversation.
         if remote_jid.endswith("@broadcast"):
+            self._store_status_update(msg)
             return
 
         # Reaction messages only update the live display of an existing message;
@@ -1227,7 +1228,7 @@ class MainWindow(wx.Frame):
 
     def ensure_api_modules_installed(self):
         """
-        Ensure the Evolution API is cloned, compiled, and has its node_modules.
+        Ensure the WPPConnect is cloned, compiled, and has its node_modules.
 
         node/node.exe is mandatory in all scenarios — it is the portable Node.js
         runtime bundled with WinZapp that drives both npm and the API itself.
@@ -1264,7 +1265,7 @@ class MainWindow(wx.Frame):
             )
             sys.exit(1)
 
-        # Detect and clean legacy node_modules from Evolution API to force a clean install of WPPConnect
+        # Detect and clean legacy node_modules from WPPConnect to force a clean install of WPPConnect
         wpp_marker = os.path.join(node_modules, "@wppconnect-team")
         if os.path.isdir(node_modules) and not os.path.isdir(wpp_marker):
             logging.info("[ensure_api_modules_installed] Legacy node_modules detected. Cleaning for WPPConnect...")
@@ -1394,7 +1395,7 @@ class MainWindow(wx.Frame):
 
     def ensure_evolution_version(self):
         """
-        Compare the installed Evolution API version against the minimum required
+        Compare the installed WPPConnect version against the minimum required
         by this WinZapp build (EVOLUTION_API_MINIMUM_VERSION in client/.env).
 
         If the installed version is older the user is prompted to:
@@ -1459,7 +1460,7 @@ class MainWindow(wx.Frame):
     # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
     def _is_evolution_running(self):
-        """Return True if the Evolution API is already listening on the configured port."""
+        """Return True if the WPPConnect is already listening on the configured port."""
         try:
             with _socket.create_connection(("127.0.0.1", self.wpp_port), timeout=1):
                 return True
@@ -1498,18 +1499,18 @@ class MainWindow(wx.Frame):
             os.environ["PORT"] = str(self.wpp_port)
             os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache", "puppeteer")
 
-            spawned = False
-            if _is_elevated():
-                spawned = _spawn_delevated([node_exe, start_js], cwd, log_fh, self)
-
-            if not spawned:
-                self.evolution_process = subprocess.Popen(
-                    [node_exe, start_js],
-                    cwd=cwd,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    stdout=log_fh,
-                    stderr=log_fh,
-                )
+            # WPPConnect uses Puppeteer/Chrome which already includes --no-sandbox
+            # in its config (see api/src/config.ts), so Chrome runs correctly even
+            # when the parent process is elevated.  De-elevation via the Safer API
+            # is therefore not needed and would prevent Node.js from writing session
+            # tokens/cache to the installation directory, breaking admin users.
+            self.evolution_process = subprocess.Popen(
+                [node_exe, start_js],
+                cwd=cwd,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=log_fh,
+                stderr=log_fh,
+            )
             # Release Python's file handle now that node.exe has inherited it.
             # This avoids a double-lock on evolution.log so an update extraction
             # can overwrite the file once WinZapp exits (only node.exe holds a
@@ -2099,9 +2100,12 @@ class MainWindow(wx.Frame):
         # sync.  Without this, _sync_completed stays True from the previous
         # session and messages.set never triggers start_sync() again.
         self._sync_completed = False
+        # In-memory store for status/story updates received via WebSocket.
+        # Keys are sender JIDs; values are lists of normalized message dicts.
+        self._status_updates: dict = {}
         # Reset so the 60-s fallback and on_messages_set() can fire.
         # The flag persisted as True across restarts, blocking re-sync on
-        # reconnection when the Evolution API doesn't re-send messages.set.
+        # reconnection when the WPPConnect doesn't re-send messages.set.
         self.settings.setdefault("status", {})["messages_set_completed"] = False
         self.save_settings()
         self.wait_messages_set()
@@ -2215,7 +2219,7 @@ class MainWindow(wx.Frame):
         self.chats = self.normalize_chats(self.chats)
 
         # Quick initial contacts fetch — may be incomplete on first QR pairing
-        # because WhatsApp delivers contacts to the Evolution API concurrently
+        # because WhatsApp delivers contacts to the WPPConnect concurrently
         # with messages.  We'll do a second, definitive fetch after messages are
         # synced (by then the API has received all contacts from WhatsApp).
         self.get_remote_contacts()
@@ -2238,7 +2242,7 @@ class MainWindow(wx.Frame):
         self.chats = self.deduplicate_chats(self.chats)
 
         # Re-fetch contacts now that sync_remote_chats() has finished.  The
-        # message sync takes long enough that by this point the Evolution API
+        # message sync takes long enough that by this point the WPPConnect
         # has received all contacts from WhatsApp — solving the first-pairing
         # issue where names were missing because the initial fetch was too early.
         self.get_remote_contacts()
@@ -2266,7 +2270,7 @@ class MainWindow(wx.Frame):
         self.start_periodic_contacts_sync()
 
         # Mark sync as done for this session so late-arriving messages.set
-        # events (Evolution API sends them in batches) don't restart the full
+        # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
         self._sync_completed = True
         self._initial_sync_running = False
@@ -2274,22 +2278,23 @@ class MainWindow(wx.Frame):
     def wait_messages_set(self):
         if not self.background_mode:
             self._set_status(self.i18n.t("preparing_to_sync"))
-        # Fallback: if messages.set never arrives (the API was already fully synced
-        # before our WebSocket connected so Baileys won't re-fire the event), poll
-        # the API every 5 s for up to 60 s and start sync as soon as it responds.
-        # This means a ready API triggers sync in ≤5 s instead of always waiting 60 s.
+        # Fallback: WPPConnect does not emit a messages.set WebSocket event.
+        # Poll the API every 5 s for up to 60 s and start sync as soon as it
+        # responds.  If the API never responds within the window, start sync
+        # unconditionally so the program never stays stuck on "preparing to sync".
         def _fallback():
-            for _ in range(12):   # 12 × 5 s = 60 s maximum
-                time.sleep(5)
-                # messages.set WebSocket event already triggered sync — nothing to do
+            def _already_syncing() -> bool:
                 if self.settings.get("status", {}).get("messages_set_completed"):
-                    return
+                    return True
                 existing = getattr(self, "sync_thread", None)
                 if existing and existing.is_alive():
-                    return
-                if getattr(self, "_sync_completed", False):
-                    return
-                # Probe the API: if it already has chats, start sync immediately
+                    return True
+                return getattr(self, "_sync_completed", False)
+
+            def _probe_and_start() -> bool:
+                """Probe the API for existing chats; start sync and return True if found."""
+                if _already_syncing():
+                    return True
                 try:
                     url = (
                         f"{self.wpp_server}:{self.wpp_port}"
@@ -2297,13 +2302,9 @@ class MainWindow(wx.Frame):
                     )
                     headers = {
                         "Authorization": f"Bearer {self.token}",
-                        "Content-Type": "application/json"
+                        "Content-Type": "application/json",
                     }
-                    r = requests.post(
-                        url,
-                        headers=headers,
-                        timeout=5,
-                    )
+                    r = requests.post(url, headers=headers, timeout=5)
                     if r.ok and isinstance(r.json(), list):
                         self.settings.setdefault("status", {})["messages_set_completed"] = True
                         self.save_settings()
@@ -2311,16 +2312,65 @@ class MainWindow(wx.Frame):
                             target=self.start_sync, daemon=True
                         )
                         self.sync_thread.start()
-                        return
+                        return True
                 except Exception:
                     pass
+                return False
+
+            # Probe immediately — when the server is already connected (no
+            # session-logged event fires), this avoids an unnecessary 5-second wait.
+            if _probe_and_start():
+                return
+
+            for _ in range(12):   # 12 × 5 s = 60 s maximum
+                time.sleep(5)
+                if _probe_and_start():
+                    return
+
+            # 60 s elapsed and sync still hasn't started — start it unconditionally
+            # so the program never stays stuck on "preparando para sincronizar".
+            if not _already_syncing():
+                self.settings.setdefault("status", {})["messages_set_completed"] = True
+                self.save_settings()
+                self.sync_thread = threading.Thread(
+                    target=self.start_sync, daemon=True
+                )
+                self.sync_thread.start()
         threading.Thread(target=_fallback, daemon=True).start()
+
+    def _store_status_update(self, msg: dict):
+        """Store an incoming status/story message in _status_updates and refresh the Status tab."""
+        key = msg.get("key", {})
+        participant = (
+            key.get("participant")
+            or msg.get("participant")
+            or (key.get("fromMe") and getattr(self, "my_jid", ""))
+            or ""
+        )
+        if not participant:
+            return
+        if not hasattr(self, "_status_updates"):
+            self._status_updates = {}
+        bucket = self._status_updates.setdefault(participant, [])
+        msg_id = key.get("id", "")
+        if msg_id and any(m.get("key", {}).get("id") == msg_id for m in bucket):
+            return  # deduplicate
+        bucket.append(msg)
+        # Refresh the Status tab if it is currently visible
+        try:
+            if hasattr(self, "navigation_panel"):
+                sp = getattr(self.navigation_panel, "status_panel", None)
+                if sp and sp.IsShown():
+                    wx.CallAfter(lambda: threading.Thread(target=sp._load_statuses, daemon=True).start())
+        except Exception:
+            pass
 
     def clear_local_data(self):
         """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
         logging.info("[clear_local_data] Clearing all local caches, media, and messages.dat...")
         self.chats = {}
         self.contacts = {}
+        self._status_updates = {}
         if hasattr(self, "_lid_to_phone"):
             self._lid_to_phone.clear()
         else:
@@ -3003,7 +3053,7 @@ class MainWindow(wx.Frame):
         Build self._lid_to_phone: a dict mapping @lid JIDs to @s.whatsapp.net
         JIDs by scanning remoteJidAlt fields across all loaded chat messages.
 
-        Evolution API v2 normalises the key before emitting the WebSocket event:
+        WPPConnect v2 normalises the key before emitting the WebSocket event:
           OLD format: remoteJid=@lid,          remoteJidAlt=@s.whatsapp.net
           NEW format: remoteJid=@s.whatsapp.net, remoteJidAlt=@lid  (after swap)
         Both formats are handled here so the cache is populated regardless of
@@ -3265,7 +3315,7 @@ class MainWindow(wx.Frame):
     def _find_alt_jid_from_messages(self, chat):
         """
         Find the canonical @s.whatsapp.net phone JID for a chat by scanning its
-        message keys.  Handles both Evolution API v2 key formats and normalises
+        message keys.  Handles both WPPConnect v2 key formats and normalises
         any @c.us JIDs encountered to @s.whatsapp.net on the fly:
 
           OLD: remoteJid=@lid,   remoteJidAlt=@s.whatsapp.net|@c.us → return alt (normalised)
@@ -3558,7 +3608,7 @@ class MainWindow(wx.Frame):
             self.save_data(self.chats, self.contacts)
 
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
-    # to download older media causes the Evolution API to enter a 5-second retry
+    # to download older media causes the WPPConnect to enter a 5-second retry
     # loop for every expired URL, which starves the API thread pool and eventually
     # breaks sends.  Never request media older than this threshold.
     _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
@@ -3637,9 +3687,9 @@ class MainWindow(wx.Frame):
             f.write(encrypted)
 
     def _clean_quoted(self, quoted: dict) -> dict:
-        """Return a minimal quoted dict the Evolution API DTO accepts.
+        """Return a minimal quoted dict the WPPConnect DTO accepts.
 
-        Only ``key`` is sent.  The Evolution API will fetch the full message
+        Only ``key`` is sent.  The WPPConnect will fetch the full message
         content from its internal Baileys message store using
         ``getMessage(key, true)``.  This avoids serialising binary fields
         (``jpegThumbnail``, ``mediaKey``, ``fileEncSha256``, …) that arrive
@@ -3675,7 +3725,7 @@ class MainWindow(wx.Frame):
         return {"key": clean_key}
 
     def _check_wa_connection_closed(self, response):
-        """If the Evolution API returned a 'Connection Closed' error, mark the
+        """If the WPPConnect returned a 'Connection Closed' error, mark the
         WhatsApp connection as down so the MessageQueue pauses retrying until
         Baileys reconnects and fires connection.update with state='open'."""
         try:
@@ -4389,7 +4439,7 @@ class MainWindow(wx.Frame):
 
     def get_base64_from_media(self, media, progress_callback=None, timeout=60):
         """
-        Fetch encrypted media from Evolution API and return its base64 string.
+        Fetch encrypted media from WPPConnect and return its base64 string.
 
         Raises MediaExpiredError when the WhatsApp CDN URL has expired (HTTP 403/410).
         When *progress_callback* is provided the request is streamed and the
@@ -4598,7 +4648,7 @@ class MainWindow(wx.Frame):
             self._schedule_save()
             wx.CallAfter(self.set_chats)
 
-    # ── Evolution API — profile / group info ─────────────────────────────────
+    # ── WPPConnect — profile / group info ─────────────────────────────────
     
     def resolve_self_lid(self):
         """Query Evolution/WPPConnect API for own PN-LID mapping so self-mentions resolve correctly."""
@@ -4750,7 +4800,7 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
 
     def get_contact_profile(self, jid: str) -> dict:
-        """Fetch contact profile from Evolution API (runs on background thread)."""
+        """Fetch contact profile from WPPConnect (runs on background thread)."""
         original_jid = jid
         if jid.endswith("@lid"):
             resolved = getattr(self, "_lid_to_phone", {}).get(jid, "")
@@ -5150,41 +5200,44 @@ class MainWindow(wx.Frame):
         media_type: str, caption: str = "", quoted: dict = None
     ) -> bool:
         """
-        Base64-encode a file and send it as a media message.
+        Upload a file as a media message via multipart/form-data.
+        Avoids base64 encoding so payloads stay at true file size
+        (no 33 % overhead, no JSON body-size limit).
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
         import mimetypes
         try:
             file_size = os.path.getsize(file_path)
-            with open(file_path, "rb") as fh:
-                media_b64 = base64.b64encode(fh.read()).decode("utf-8")
         except Exception as exc:
-            logging.error("[send_media] failed to read file %s: %s", file_path, exc)
+            logging.error("[send_media] failed to stat file %s: %s", file_path, exc)
             return False
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         filename = os.path.basename(file_path)
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file-base64"
-        payload = {
-            "phone":    [remote_jid],
-            "base64":   f"data:{mime};base64,{media_b64}",
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
+        # Authorization only — Content-Type is set automatically by requests
+        # when using files= (multipart/form-data with correct boundary).
+        headers = {"Authorization": f"Bearer {self.token}"}
+        data = {
+            "phone":    remote_jid,
             "filename": filename,
             "caption":  caption,
-            "isGroup":  remote_jid.endswith("@g.us"),
         }
         if quoted:
             quoted_id = self._serialize_quoted_id(quoted)
             if quoted_id:
-                payload["quotedMessageId"] = quoted_id
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        # Scale timeout with file size: allow at least 1 second per 100 KB,
-        # minimum 120 s, maximum 30 minutes. Keeps large uploads from timing out.
+                data["quotedMessageId"] = quoted_id
+        # Scale timeout with file size: at least 1 s per 100 KB, min 120 s, max 30 min.
         timeout = max(120, file_size // (100 * 1024))
         timeout = min(timeout, 1800)
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            with open(file_path, "rb") as fh:
+                r = requests.post(
+                    url,
+                    headers=headers,
+                    data=data,
+                    files={"file": (filename, fh, mime)},
+                    timeout=timeout,
+                )
             if r.status_code in (200, 201):
                 try:
                     body = r.json()

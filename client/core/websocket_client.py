@@ -1,4 +1,4 @@
-import threading
+﻿import threading
 import time
 import socketio
 import wx
@@ -212,7 +212,7 @@ class WebSocketClient:
         if existing and existing.is_alive():
             return
         # Guard 2: don't restart sync after it already completed this session.
-        # Evolution API sends messages.set in multiple batches during initial
+        # WPPConnect sends messages.set in multiple batches during initial
         # WhatsApp sync; without this guard the second batch would trigger a
         # full re-sync immediately after the first one finished.
         if getattr(self.main_window, "_sync_completed", False):
@@ -222,9 +222,9 @@ class WebSocketClient:
 
     def on_messages_upsert(self, info):
         """
-        Handle real-time incoming messages from the Evolution API.
+        Handle real-time incoming messages from the WPPConnect.
 
-        In Evolution API v2 the websocket envelope is
+        In WPPConnect v2 the websocket envelope is
           {"event": "messages.upsert", "instance": ..., "data": {<message>}, ...}
         where "data" is a single message object (key, pushName, message,
         messageType, messageTimestamp, ...).
@@ -268,7 +268,7 @@ class WebSocketClient:
         """
         Handle messages.update — delivery/read status changes for sent messages.
 
-        Evolution API v2 sends:
+        WPPConnect v2 sends:
           {"data": [{"key": {"id": ..., "remoteJid": ..., "fromMe": true},
                      "status": "READ"|"DELIVERY_ACK"|"SERVER_ACK",
                      "update": {"status": 4}}]}
@@ -293,7 +293,7 @@ class WebSocketClient:
         Handle chats.update — partial chat state changes (e.g. unreadCount reset
         when the user reads messages on another device via app-state sync).
 
-        Evolution API emits:
+        WPPConnect emits:
           {"data": [{"remoteJid": ..., "unreadCount": 0, ...}]}
         """
         try:
@@ -322,7 +322,7 @@ class WebSocketClient:
         """
         Handle presence.update — online/typing/last-seen changes for contacts.
 
-        Evolution API wraps the Baileys payload as:
+        WPPConnect wraps the Baileys payload as:
           {"data": {"id": "55XXX@s.whatsapp.net",
                     "presences": {"55XXX@s.whatsapp.net": {
                         "lastKnownPresence": "available"|"unavailable"|"composing"|...,
@@ -408,7 +408,7 @@ class WebSocketClient:
         """
         Handle contacts.update to keep contact names and pictures fresh.
 
-        Evolution API v2 emits this event with "data" being either a single
+        WPPConnect v2 emits this event with "data" being either a single
         contact dict or a list of contact dicts:
           {"remoteJid": ..., "pushName": ..., "profilePicUrl": ..., "instanceId": ...}
         New messages (1:1 and group) arrive via messages.upsert.
@@ -489,6 +489,11 @@ class WebSocketClient:
             if not isinstance(data, dict):
                 return
             status = data.get("status", False)
+            session = data.get("session", "")
+
+            # Ignore events for other sessions (multi-session server scenario)
+            if session and session != self.instance_name:
+                return
 
             # Notify the connection state immediately (non-blocking).
             self.on_connection_update({
@@ -502,6 +507,9 @@ class WebSocketClient:
                 # thread so we don't block the Socket.IO event loop.
                 threading.Thread(target=self._fetch_host_device_jid, daemon=True).start()
                 threading.Thread(target=self._set_wpp_limits, daemon=True).start()
+                # WPPConnect does not emit messages.set; trigger sync here instead,
+                # using the same guards as on_messages_set to prevent double-sync.
+                self.on_messages_set({})
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
 
@@ -655,7 +663,7 @@ class WebSocketClient:
 
         from_jid = wpp_msg.get("from", "")
         to_jid = wpp_msg.get("to", "")
-        
+
         # Safely parse fromMe supporting boolean, string representation, or ID prefix fallback
         from_me_val = wpp_msg.get("fromMe")
         if from_me_val is not None:
@@ -666,8 +674,17 @@ class WebSocketClient:
         else:
             from_me = (parts[0] == "true") if parts else False
 
-        remote_jid = to_jid if from_me else from_jid
-        remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+        # Detect status/story messages: WPPConnect sends them with to="status@broadcast"
+        # or sets isStatus=True.  The real sender is in the "from" field.
+        is_status = "broadcast" in (to_jid or "") or wpp_msg.get("isStatus", False)
+
+        if is_status:
+            remote_jid = "status@broadcast"
+            status_participant = from_jid.replace("@c.us", "@s.whatsapp.net") if from_jid else ""
+        else:
+            remote_jid = to_jid if from_me else from_jid
+            remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+            status_participant = ""
 
         ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
 
@@ -791,6 +808,10 @@ class WebSocketClient:
             "MessageUpdate": message_updates
         }
 
+        # Status messages: include the real sender as participant
+        if status_participant:
+            normalized["key"]["participant"] = status_participant
+
         if remote_jid.endswith("@g.us"):
             participant = (
                 wpp_msg.get("author")
@@ -807,7 +828,7 @@ class WebSocketClient:
         quoted_stanza_id = wpp_msg.get("quotedStanzaID") or wpp_msg.get("quotedStanzaId")
         quoted_participant = wpp_msg.get("quotedParticipant")
 
-        # Fallback to Evolution API/Baileys contextInfo if WPPConnect quote fields are missing
+        # Fallback to WPPConnect/Baileys contextInfo if WPPConnect quote fields are missing
         ctx_info = wpp_msg.get("contextInfo")
         if not ctx_info and isinstance(wpp_msg.get("message"), dict):
             sub_msg = wpp_msg.get("message")

@@ -415,7 +415,34 @@ class Connect:
             existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
             _instance_exists = bool(existing_token)
 
+            server_base = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}"
+            api_key = self.main_window.wpp_api_key
+
+            def _generate_hash(raw: str) -> str:
+                """Call generate-token and return 'raw:hash'. Raises on failure."""
+                url = f"{server_base}/api/{raw}/{api_key}/generate-token"
+                res = requests.post(url, timeout=10)
+                if res.status_code in (200, 201):
+                    hash_token = res.json().get("token") or ""
+                    if hash_token:
+                        return f"{raw}:{hash_token}"
+                    raise RuntimeError(
+                        f"generate-token returned empty hash (HTTP {res.status_code})"
+                    )
+                raise RuntimeError(
+                    f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
+                )
+
             if _instance_exists:
+                # Re-generate hash if the stored token has no colon (legacy or corrupt).
+                # Without a hash the auth middleware returns 401 on every API call.
+                if ":" not in existing_token:
+                    try:
+                        existing_token = _generate_hash(existing_token)
+                    except Exception as exc:
+                        logging.warning(
+                            "[start_qrcode_connection] Could not refresh token hash: %s", exc
+                        )
                 self.main_window.token = existing_token
             else:
                 # New pairing: reset sync flag so we wait for messages.set
@@ -423,16 +450,9 @@ class Connect:
                 self.main_window.save_settings()
                 self.main_window.clear_local_data()
                 raw_token = self.generate_random_token()
-                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{raw_token}/{self.main_window.wpp_api_key}/generate-token"
-                try:
-                    res = requests.post(url, timeout=10)
-                    if res.status_code in (200, 201):
-                        hash_token = res.json().get("token")
-                        self.main_window.token = f"{raw_token}:{hash_token}"
-                    else:
-                        self.main_window.token = raw_token
-                except Exception:
-                    self.main_window.token = raw_token
+                # Raise on failure so the outer except shows a meaningful message
+                # instead of an opaque 401 from _create_instance.
+                self.main_window.token = _generate_hash(raw_token)
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
@@ -622,10 +642,7 @@ class Connect:
 
                 threading.Thread(target=_call_start_session, daemon=True).start()
 
-                # Sleep briefly (e.g. 1 second) to let the start-session route register the namespace
-                time.sleep(1)
-
-                # Connect the WebSocket — the namespace is guaranteed to exist now
+                # Connect the WebSocket
                 try:
                     self.main_window.connect_websocket()
                 except Exception:

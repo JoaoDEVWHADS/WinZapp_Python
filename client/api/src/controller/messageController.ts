@@ -199,7 +199,6 @@ export async function sendFile(req: Request, res: Response) {
     }
    */
   const {
-    phone,
     path,
     base64,
     filename = 'file',
@@ -207,6 +206,15 @@ export async function sendFile(req: Request, res: Response) {
     caption,
     quotedMessageId,
   } = req.body;
+
+  // phone can be a JSON array (application/json) or a plain string
+  // (multipart/form-data). Normalise to an array in both cases.
+  const phoneRaw = req.body.phone;
+  const phone: string[] = Array.isArray(phoneRaw)
+    ? phoneRaw
+    : phoneRaw
+      ? [phoneRaw]
+      : [];
 
   const options = req.body.options || {};
 
