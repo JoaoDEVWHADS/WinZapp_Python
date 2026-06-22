@@ -3698,7 +3698,10 @@ class MainWindow(wx.Frame):
         
         # For group chats, WPPConnect requires the participant JID at the end
         if quoted_remote_jid.endswith("@g.us"):
-            raw_participant = raw_key.get("participant", "")
+            raw_participant = raw_key.get("participant", "") or _cq.get("key", {}).get("participant", "")
+            if not raw_participant and from_me:
+                raw_participant = getattr(self, "my_jid", "")
+            
             if raw_participant:
                 phone_to_lid = getattr(self, "_phone_to_lid", {})
                 if raw_participant.endswith("@lid"):
@@ -3713,12 +3716,6 @@ class MainWindow(wx.Frame):
                     else:
                         participant = norm_participant
                 serialized_id = f"{serialized_id}_{participant}"
-            else:
-                participant = _cq.get("key", {}).get("participant", "")
-                if participant:
-                    if participant.endswith("@s.whatsapp.net"):
-                        participant = participant.replace("@s.whatsapp.net", "@c.us")
-                    serialized_id = f"{serialized_id}_{participant}"
                 
         return serialized_id
 
