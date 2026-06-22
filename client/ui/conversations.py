@@ -3628,6 +3628,35 @@ class ConversationsPanel(wx.Panel):
             return (quoted_msg.get("conversation") or "")
         if "extendedTextMessage" in quoted_msg:
             return ((quoted_msg.get("extendedTextMessage") or {}).get("text") or "")
+
+        # Support raw WPPConnect types and body/text keys
+        msg_type_raw = quoted_msg.get("type")
+        if msg_type_raw:
+            _wpp_type_map = {
+                "audio": "message_type_audio",
+                "ptt": "message_type_audio",
+                "image": "photo",
+                "video": "video",
+                "document": "document",
+                "sticker": "sticker",
+                "contact": "contact_label",
+            }
+            if msg_type_raw in _wpp_type_map:
+                cap = quoted_msg.get("caption") or quoted_msg.get("body") or ""
+                # Avoid displaying base64 thumbnails
+                if cap and not cap.startswith("data:") and not cap.startswith("/9j/"):
+                    label = i18n.t(_wpp_type_map[msg_type_raw])
+                    return f"{label[0].upper() + label[1:] if label else ''}: {cap}"
+                label = i18n.t(_wpp_type_map[msg_type_raw])
+                return label[0].upper() + label[1:] if label else ""
+
+        if "body" in quoted_msg:
+            body_val = quoted_msg.get("body") or ""
+            if not body_val.startswith("data:") and not body_val.startswith("/9j/"):
+                return body_val
+        if "text" in quoted_msg:
+            return (quoted_msg.get("text") or "")
+
         # Non-text types: return the localized type label (first letter upper)
         _type_map = [
             ("audioMessage",    "message_type_audio"),
