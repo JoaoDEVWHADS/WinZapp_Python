@@ -3430,7 +3430,8 @@ class MainWindow(wx.Frame):
     def find_name_through_messages(self, chat):
         if chat.get("remoteJid", "").endswith("@g.us"):
             return None
-        for message in chat["messages"].get("messages", {}).get("records", []):
+        messages_obj = chat.get("messages") or {}
+        for message in messages_obj.get("messages", {}).get("records", []):
             if message.get("key", {}).get("fromMe"):
                 continue
             push = message.get("pushName", "")
@@ -3439,7 +3440,8 @@ class MainWindow(wx.Frame):
         return None
 
     def find_jid_through_messages(self, chat):
-        for message in chat["messages"].get("messages", {}).get("records", []):
+        messages_obj = chat.get("messages") or {}
+        for message in messages_obj.get("messages", {}).get("records", []):
             if not message.get("key", {}).get("fromMe"):
                 key = message.get("key", {})
                 alt = key.get("remoteJidAlt", "")
