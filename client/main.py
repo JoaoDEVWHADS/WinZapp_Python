@@ -6,6 +6,9 @@ import socket as _socket
 import subprocess
 import threading
 import textwrap
+import gzip
+import io
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import base64
@@ -354,7 +357,11 @@ class MainWindow(wx.Frame):
         #Get connection settings (no authentication_server - Evolution runs locally)
         self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "http://127.0.0.1")
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 3414)
-        self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
+        self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "http://127.0.0.1")
+        # Migrate old ws:// settings left by previous versions — python-socketio
+        # requires an http:// URL for its initial HTTP handshake.
+        if self.evolution_ws_server.startswith("ws://"):
+            self.evolution_ws_server = "http://" + self.evolution_ws_server[5:]
         self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
 
         #Set basic variables
@@ -393,10 +400,15 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
+        self._settings_lock = threading.Lock()
         # Serialises concurrent writes to messages.dat (one lock, two helpers below).
-        self._save_lock = threading.Lock()
+        self._save_lock = threading.RLock()
         self._save_timer: "threading.Timer | None" = None
         self._save_timer_lock = threading.Lock()
+        # Thread pool for background media downloads (bounds concurrent API calls).
+        self._media_pool = ThreadPoolExecutor(max_workers=6)
+        # Guards TOCTOU race in sync_thread creation (on_messages_set / wait_messages_set).
+        self._sync_thread_lock = threading.Lock()
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
         self._tray_status = ""
 
@@ -411,7 +423,8 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             if not self.connect.check_connection_status():
                 self.connect.show_connection_dial()
-                self.ws.sio.disconnect()
+                if self.ws is not None:
+                    self.ws.sio.disconnect()
                 self._just_paired = True
         self.retrieve_token()
         #Initialize websocket
@@ -865,10 +878,7 @@ class MainWindow(wx.Frame):
 
     # ── Incoming real-time messages ───────────────────────────────────────────
 
-    @staticmethod
-    def _normalize_jid(jid: str) -> str:
-        """Normalize WhatsApp JID: replace the legacy @c.us suffix with @s.whatsapp.net.
-        @g.us (groups) and @lid (linked-device IDs) are left unchanged."""
+    def _normalize_jid(self, jid: str) -> str:
         if jid and jid.endswith("@c.us"):
             return jid[:-5] + "@s.whatsapp.net"
         return jid
@@ -1014,13 +1024,11 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.on_incoming_message(remote_jid, msg)
 
-        # ── Download media in background ──────────────────────────────────────
+        # ── Download media in background (bounded thread pool) ────────────────
         media_types = {"audioMessage", "imageMessage", "videoMessage",
                        "documentMessage", "stickerMessage"}
         if msg.get("messageType") in media_types:
-            threading.Thread(
-                target=self.sync_if_media, args=(msg,), daemon=True
-            ).start()
+            self._media_pool.submit(self.sync_if_media, msg)
 
         # ── Send notification ─────────────────────────────────────────────────
         if from_me:
@@ -1093,6 +1101,9 @@ class MainWindow(wx.Frame):
         socket.io server (race condition that causes 'namespace failed' errors).
         """
         last_exc = None
+        if self.ws is None:
+            print("[connect_websocket] ws is None, cannot connect")
+            return
         for attempt in range(3):
             try:
                 if self.ws.sio.connected:
@@ -1288,7 +1299,8 @@ class MainWindow(wx.Frame):
     def _is_evolution_running(self):
         """Return True if the Evolution API is already listening on the configured port."""
         try:
-            with _socket.create_connection(("127.0.0.1", self.evolution_port), timeout=1):
+            host = urllib.parse.urlparse(self.evolution_server).hostname or "127.0.0.1"
+            with _socket.create_connection((host, self.evolution_port), timeout=1):
                 return True
         except OSError:
             return False
@@ -1308,6 +1320,7 @@ class MainWindow(wx.Frame):
         start_js  = resource_path("api",  "start.js")
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs Evolution separately
+        log_fh = None
         try:
             self._evolution_log_path = resource_path("api", "evolution.log")
             log_fh = open(self._evolution_log_path, "w",
@@ -1333,9 +1346,14 @@ class MainWindow(wx.Frame):
             # This avoids a double-lock on evolution.log so an update extraction
             # can overwrite the file once WinZapp exits (only node.exe holds a
             # lock while it is running — we don't need it on the Python side).
-            log_fh.close()
+            if log_fh is not None:
+                log_fh.close()
+                log_fh = None
             self._evolution_log_fh = None
             atexit.register(self._stop_evolution)
+        except Exception:
+            if log_fh is not None:
+                log_fh.close()
         except Exception:
             pass
 
@@ -1751,8 +1769,10 @@ class MainWindow(wx.Frame):
 
     def save_settings(self):
         try:
+            with self._settings_lock:
+                settings_copy = dict(self.settings)
             with open(data_path("settings.json"), "w") as f:
-                json.dump(self.settings, f, indent=4)
+                json.dump(settings_copy, f, indent=4)
         except Exception:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
@@ -1942,32 +1962,33 @@ class MainWindow(wx.Frame):
                 # messages.set WebSocket event already triggered sync — nothing to do
                 if self.settings.get("status", {}).get("messages_set_completed"):
                     return
-                existing = getattr(self, "sync_thread", None)
-                if existing and existing.is_alive():
-                    return
                 if getattr(self, "_sync_completed", False):
                     return
-                # Probe the API: if it already has chats, start sync immediately
-                try:
-                    url = (
-                        f"{self.evolution_server}:{self.evolution_port}"
-                        f"/chat/findChats/{self.token}"
-                    )
-                    r = requests.post(
-                        url,
-                        headers={"apikey": self.token, "Content-Type": "application/json"},
-                        timeout=5,
-                    )
-                    if r.ok and isinstance(r.json(), list) and r.json():
-                        self.settings.setdefault("status", {})["messages_set_completed"] = True
-                        self.save_settings()
-                        self.sync_thread = threading.Thread(
-                            target=self.start_sync, daemon=True
-                        )
-                        self.sync_thread.start()
+                with self._sync_thread_lock:
+                    existing = getattr(self, "sync_thread", None)
+                    if existing and existing.is_alive():
                         return
-                except Exception:
-                    pass
+                    # Probe the API: if it already has chats, start sync immediately
+                    try:
+                        url = (
+                            f"{self.evolution_server}:{self.evolution_port}"
+                            f"/chat/findChats/{self.token}"
+                        )
+                        r = requests.post(
+                            url,
+                            headers={"apikey": self.token, "Content-Type": "application/json"},
+                            timeout=5,
+                        )
+                        if r.ok and isinstance(r.json(), list) and r.json():
+                            self.settings.setdefault("status", {})["messages_set_completed"] = True
+                            self.save_settings()
+                            self.sync_thread = threading.Thread(
+                                target=self.start_sync, daemon=True
+                            )
+                            self.sync_thread.start()
+                            return
+                    except Exception:
+                        pass
         threading.Thread(target=_fallback, daemon=True).start()
 
     def create_basic_files(self):
@@ -2006,11 +2027,11 @@ class MainWindow(wx.Frame):
                     decrypted_data = decrypt_json(encrypted_data, self.key)
                     return decrypted_data.get("chats", {})
                 else:
-                    return []
+                    return {}
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
-            return []
+            return {}
 
     def get_remote_chats(self, chats):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findChats/{self.token}"
@@ -2182,7 +2203,10 @@ class MainWindow(wx.Frame):
 
     def _do_save(self):
         """Timer callback: persist current self.chats / self.contacts."""
-        self.save_data(self.chats, self.contacts)
+        with self._save_lock:
+            chats_copy = dict(self.chats)
+            contacts_copy = dict(self.contacts)
+        self.save_data(chats_copy, contacts_copy)
 
     def _schedule_save(self):
         """Debounce save_data: coalesce rapid calls into one write after 150 ms.
@@ -2619,7 +2643,7 @@ class MainWindow(wx.Frame):
 
             # Update total_pages based on response
             if response_data.get("messages", {}):
-                total_pages = response_data.get("messages", {}).get("pages", 1)
+                total_pages = max(total_pages, response_data.get("messages", {}).get("pages", 1))
                 records = response_data.get("messages", {}).get("records", [])
                 all_messages.extend(records)
 
@@ -2700,7 +2724,10 @@ class MainWindow(wx.Frame):
 
         try:
             if message_type == "audioMessage":
-                self.handle_audio_message(msg, timeout=timeout)
+                conv = self.conversations_panel
+                def _prog(p, mid=msg_id):
+                    wx.CallAfter(conv.update_message_download_progress, mid, p)
+                self.handle_audio_message(msg, progress_callback=_prog, timeout=timeout)
             else:
                 conv = self.conversations_panel
                 def _prog(p, mid=msg_id):
@@ -2829,7 +2856,7 @@ class MainWindow(wx.Frame):
             print(f"[send_text_message] exception: {exc}")
             return None
 
-    def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
+    def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> str | bool | None:
         """
         Base64-encode a WAV/audio file and send it as a PTT voice message via the
         Evolution API.  Uses /message/sendWhatsAppAudio which handles OGG conversion
@@ -3173,7 +3200,8 @@ class MainWindow(wx.Frame):
 
         # Persist the updated pushName map to settings (debounced via _schedule_save).
         if _ppm_updated:
-            self.settings["presence_pushname_map"] = dict(self._presence_pushname_map)
+            with self._settings_lock:
+                self.settings["presence_pushname_map"] = dict(self._presence_pushname_map)
             self._schedule_save_settings()
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
@@ -3201,12 +3229,12 @@ class MainWindow(wx.Frame):
         self._schedule_save()
         self._schedule_set_chats()
 
-    def handle_audio_message(self, msg, timeout=60):
+    def handle_audio_message(self, msg, progress_callback=None, timeout=60):
         voice_messages_dir = data_path("voice_messages")
         audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
         if os.path.isfile(audio_file_path):
             return
-        base64_audio = self.get_base64_from_media(msg, timeout=timeout)
+        base64_audio = self.get_base64_from_media(msg, progress_callback=progress_callback, timeout=timeout)
         if not base64_audio:
             return
         audio_content = base64.b64decode(base64_audio)
@@ -3225,9 +3253,10 @@ class MainWindow(wx.Frame):
         payload = {
             "message": {
                 "key": {
-                    "id":        _key.get("id", ""),
-                    "fromMe":    _key.get("fromMe", False),
-                    "remoteJid": _key.get("remoteJid", ""),
+                    "id":           _key.get("id", ""),
+                    "fromMe":       _key.get("fromMe", False),
+                    "remoteJid":    _key.get("remoteJid", ""),
+                    "remoteJidAlt": _key.get("remoteJidAlt", ""),
                 }
             },
             "convertToMp4": False,
@@ -3259,7 +3288,10 @@ class MainWindow(wx.Frame):
                     downloaded += len(chunk)
                     if total > 0:
                         progress_callback(downloaded / total)
-            body = b"".join(chunks).decode("utf-8", errors="replace")
+            body = b"".join(chunks)
+            content_encoding = response.headers.get("Content-Encoding", "")
+            if "gzip" in content_encoding.lower():
+                body = gzip.decompress(body)
             return json.loads(body).get("base64", "")
         except MediaExpiredError:
             raise
@@ -3274,8 +3306,7 @@ class MainWindow(wx.Frame):
                 encrypted_audio = encrypt(audio_content, self.key)
                 audio_file.write(encrypted_audio)
         except Exception as e:
-            #Ignore audios that couldn't be saved for now
-            pass
+            print(f"[save_audio_locally] Failed to save {audio_file_path}: {e}")
 
     def mark_conversation_as_read(self, remote_jid: str):
         """Mark conversation as read locally and notify the API.

@@ -2668,6 +2668,7 @@ class ConversationsPanel(wx.Panel):
         mw       = self.main_window
         i18n     = mw.i18n
         media_path = data_path("media", f"{msg_id}.wzmedia")
+        audio_path = data_path("voice_messages", f"{msg_id}.msv")
 
         mw.output(i18n.t("downloading"))
         self._action_download_btn.Disable()
@@ -2683,7 +2684,8 @@ class ConversationsPanel(wx.Panel):
 
             def _done():
                 self._action_download_btn.Enable()
-                if os.path.isfile(media_path) and os.path.getsize(media_path) > 0:
+                success_path = audio_path if msg_type == "audioMessage" else media_path
+                if os.path.isfile(success_path) and os.path.getsize(success_path) > 0:
                     # File ready — swap Download for Open + Save As
                     self._action_download_btn.Hide()
                     self._action_open_btn.SetLabel(i18n.t("open"))

@@ -343,7 +343,7 @@ class StatusPanel(wx.Panel):
                 if resp.status_code not in (200, 201):
                     break
                 messages    = resp.json().get("messages", {})
-                total_pages = messages.get("pages", 1)
+                total_pages = max(total_pages, messages.get("pages", 1))
                 records.extend(messages.get("records", []))
                 current_page += 1
         except Exception:

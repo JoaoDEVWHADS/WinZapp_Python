@@ -146,11 +146,6 @@ class MessageQueue:
                         if isinstance(real_id, str):
                             with self.main_window._own_sent_ids_lock:
                                 self.main_window._own_sent_ids.add(real_id)
-                                # Prevent unbounded growth — keep at most 500 IDs.
-                                if len(self.main_window._own_sent_ids) > 500:
-                                    self.main_window._own_sent_ids.discard(
-                                        next(iter(self.main_window._own_sent_ids))
-                                    )
                         # Pass the real WhatsApp message ID so _mark_message_sent
                         # can update the virtual message's key.id for playback.
                         wx.CallAfter(

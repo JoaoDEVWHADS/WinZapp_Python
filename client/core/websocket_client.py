@@ -34,9 +34,15 @@ class WebSocketClient:
 
     def on_connect(self):
         print("WebSocket connected.")
-        # Record when we connected so on_messages_upsert can use a stable
+        # Record when we first connected so on_messages_upsert can use a stable
         # cutoff time rather than the ever-advancing time.time().
-        self._connect_time = time.time()
+        # NOTE: Only set on first connect; socketio.Client automatic reconnection
+        # calls on_connect again on reconnect, but we must keep the original
+        # connect time to avoid dropping messages queued during the outage
+        # (messages between first_connect and reconnect would appear older than
+        # the new cutoff and be incorrectly discarded).
+        if not hasattr(self, "_connect_time"):
+            self._connect_time = time.time()
 
     def on_disconnect(self):
         print("WebSocket disconnected.")
@@ -176,18 +182,20 @@ class WebSocketClient:
     def on_messages_set(self, info):
         self.main_window.settings.setdefault("status", {})["messages_set_completed"] = True
         self.main_window.save_settings()
-        # Guard 1: don't start a second sync while one is already running.
-        existing = getattr(self.main_window, "sync_thread", None)
-        if existing and existing.is_alive():
-            return
-        # Guard 2: don't restart sync after it already completed this session.
+        # Guard: don't restart sync after it already completed this session.
         # Evolution API sends messages.set in multiple batches during initial
         # WhatsApp sync; without this guard the second batch would trigger a
         # full re-sync immediately after the first one finished.
         if getattr(self.main_window, "_sync_completed", False):
             return
-        self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
-        self.main_window.sync_thread.start()
+        # TOCTOU-safe: check + create under lock.
+        lock = getattr(self.main_window, "_sync_thread_lock", threading.Lock())
+        with lock:
+            existing = getattr(self.main_window, "sync_thread", None)
+            if existing and existing.is_alive():
+                return
+            self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
+            self.main_window.sync_thread.start()
 
     def on_messages_upsert(self, info):
         """
@@ -231,12 +239,8 @@ class WebSocketClient:
                 if msg.get("messageType") == "reactionMessage":
                     return
                 msg_id = msg.get("key", {}).get("id", "")
-                _lock = getattr(self.main_window, "_own_sent_ids_lock", None)
-                if _lock is not None:
-                    with _lock:
-                        _is_own = msg_id and msg_id in self.main_window._own_sent_ids
-                else:
-                    _is_own = msg_id and msg_id in getattr(self.main_window, "_own_sent_ids", set())
+                with self.main_window._own_sent_ids_lock:
+                    _is_own = msg_id and msg_id in self.main_window._own_sent_ids
                 if _is_own:
                     return  # echo of our own send — skip
                 # Otherwise: sent from another device — fall through to on_new_message

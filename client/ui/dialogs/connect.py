@@ -242,10 +242,20 @@ class Connect:
 
     def check_connection_status(self):
         private_info = self.main_window.settings.get("privateinfo", {})
-        if private_info.get("WA_token", "").strip():
-            return True
-        # Legacy fallback: accept token.tk so migrate path in retrieve_token() runs
-        return os.path.exists(data_path("token.tk"))
+        token = private_info.get("WA_token", "").strip()
+        if not token:
+            # Legacy fallback: accept token.tk so migrate path in retrieve_token() runs
+            if os.path.exists(data_path("token.tk")):
+                return True
+            return False
+        # Lightweight health check: verify the API actually responds.
+        try:
+            mw = self.main_window
+            url = f"{mw.evolution_server}:{mw.evolution_port}/instance/connectionState/{token}"
+            r = requests.get(url, headers={"apikey": token}, timeout=5)
+            return r.ok
+        except Exception:
+            return False
 
     # ── Connection dialog ──────────────────────────────────────────────────
 
