@@ -532,19 +532,27 @@ class WebSocketClient:
             print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
 
     def _set_wpp_limits(self):
-        """Push raised file-size limits into WhatsApp Web via the setLimit API."""
+        """Push raised file-size limits into WhatsApp Web via the setLimit API.
+
+        WPPConnect documented maximums:
+          maxMediaSize — 70 MB  (images, videos, audio)
+          maxFileSize  — 1 GB   (documents)
+        """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
         headers = {
             "Authorization": f"Bearer {mw.token}",
             "Content-Type": "application/json",
         }
-        _100MB = 100 * 1024 * 1024
-        for limit_type in ("maxMediaSize", "maxFileSize"):
+        limits = [
+            ("maxMediaSize", 70 * 1024 * 1024),    # 70 MB
+            ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
+        ]
+        for limit_type, value in limits:
             try:
                 requests.post(
                     url,
-                    json={"type": limit_type, "value": _100MB},
+                    json={"type": limit_type, "value": value},
                     headers=headers,
                     timeout=10,
                 )

@@ -5378,18 +5378,22 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        _MAX_MEDIA_BYTES = 100 * 1024 * 1024
+        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
+        _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
+        _MAX_DOC_BYTES      = 1   * 1024 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
 
-            # Pre-check: reject files above WhatsApp's 100 MB limit before
-            # creating any UI entry or queuing the send — this prevents silent failures.
+            is_doc    = media_type == "document"
+            max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
+            max_mb    = 1024 if is_doc else 70
+
             try:
-                if os.path.getsize(path) > _MAX_MEDIA_BYTES:
+                if os.path.getsize(path) > max_bytes:
                     wx.MessageBox(
-                        i18n.t("media_too_large").format(max_mb=100),
+                        i18n.t("media_too_large").format(max_mb=max_mb),
                         i18n.t("app_name"),
                         wx.OK | wx.ICON_ERROR,
                         self,
