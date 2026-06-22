@@ -36,13 +36,7 @@ export default async function statusConnection(
       );
       let index = 0;
       for (const contact of localArr) {
-        if (
-          req.body.isGroup ||
-          req.body.isNewsletter ||
-          contact.endsWith('@g.us') ||
-          contact.endsWith('@newsletter') ||
-          contact.endsWith('@lid')
-        ) {
+        if (req.body.isGroup || req.body.isNewsletter) {
           localArr[index] = contact;
         } else if (numbers.indexOf(contact) < 0) {
           console.log(contact);
@@ -56,7 +50,6 @@ export default async function statusConnection(
               status: 'Connected',
               message: `O número ${num} não existe.`,
             });
-            return;
           } else {
             if ((numbers as any).indexOf(profile.id._serialized) < 0) {
               (numbers as any).push(profile.id._serialized);
@@ -73,17 +66,14 @@ export default async function statusConnection(
         status: 'Disconnected',
         message: 'A sessão do WhatsApp não está ativa.',
       });
-      return;
     }
     next();
   } catch (error) {
     req.logger.error(error);
-    if (!res.headersSent) {
-      res.status(404).json({
-        response: null,
-        status: 'Disconnected',
-        message: 'A sessão do WhatsApp não está ativa.',
-      });
-    }
+    res.status(404).json({
+      response: null,
+      status: 'Disconnected',
+      message: 'A sessão do WhatsApp não está ativa.',
+    });
   }
 }

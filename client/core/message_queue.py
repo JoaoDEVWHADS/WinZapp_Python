@@ -13,6 +13,7 @@ Behaviour
 * On success the UI is notified via ``wx.CallAfter`` so status labels update.
 """
 
+import logging
 import threading
 import time
 import wx
@@ -163,9 +164,11 @@ class MessageQueue:
                         msg.fail_count += 1
                         if not msg.last_error:
                             msg.last_error = getattr(self.main_window, "_last_send_error", "") or ""
-                        print(f"[MessageQueue] send failed for {msg.local_id} (attempt {msg.fail_count}/{self._MAX_RETRIES})")
+                        logging.warning("[MessageQueue] send failed for %s jid=%s attempt=%s/%s",
+                                        msg.local_id, msg.jid, msg.fail_count, self._MAX_RETRIES)
                         if (not retryable_failure) or msg.fail_count >= self._MAX_RETRIES:
-                            print(f"[MessageQueue] giving up on {msg.local_id} after {self._MAX_RETRIES} attempts")
+                            logging.error("[MessageQueue] giving up on %s jid=%s after %s attempt(s). last_error=%s",
+                                          msg.local_id, msg.jid, msg.fail_count, msg.last_error)
                             with self._lock:
                                 self._pending.pop(msg.local_id, None)
                             wx.CallAfter(
@@ -176,9 +179,11 @@ class MessageQueue:
                             )
                 except Exception as exc:
                     msg.fail_count += 1
-                    print(f"[MessageQueue] exception for {msg.local_id} (attempt {msg.fail_count}/{self._MAX_RETRIES}): {exc}")
+                    logging.error("[MessageQueue] exception for %s jid=%s attempt=%s/%s: %s",
+                                  msg.local_id, msg.jid, msg.fail_count, self._MAX_RETRIES, exc)
                     if msg.fail_count >= self._MAX_RETRIES:
-                        print(f"[MessageQueue] giving up on {msg.local_id} after {self._MAX_RETRIES} attempts")
+                        logging.error("[MessageQueue] giving up on %s jid=%s after %s attempt(s)",
+                                      msg.local_id, msg.jid, msg.fail_count)
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
                         wx.CallAfter(

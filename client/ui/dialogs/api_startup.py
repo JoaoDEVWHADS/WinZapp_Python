@@ -1,7 +1,7 @@
 """
-api_startup.py — WinZapp Evolution API startup dialog.
+api_startup.py — WinZapp WPPConnect Server startup dialog.
 
-Displayed while the bundled Node / Evolution API process is starting.
+Displayed while the bundled Node / WPPConnect Server process is starting.
 A background thread polls the configured port every 500 ms for up to
 2 minutes.  The dialog has no Cancel button — starting the API is
 mandatory — but it closes itself automatically once the port is open
@@ -20,7 +20,7 @@ import wx
 
 
 class ApiStartupDialog(wx.Dialog):
-    """Indeterminate-progress dialog shown while Evolution API starts."""
+    """Indeterminate-progress dialog shown while WPPConnect Server starts."""
 
     _PULSE_MS        = 80     # gauge pulse interval
     _POLL_INTERVAL_S = 0.5    # how often to probe the port

@@ -15,7 +15,7 @@
     "readMessage": true,
     "allUnreadOnStart": false,
     "listenAcks": true,
-    "onPresenceChanged": false,
+    "onPresenceChanged": true,
     "onParticipantsChanged": false,
     "onReactionMessage": false,
     "onPollResponse": false,

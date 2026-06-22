@@ -1,16 +1,12 @@
 import { ServerOptions } from './types/ServerOptions';
 
 export default {
-  secretKey:
-    process.env.AUTHENTICATION_API_KEY ||
-    process.env.SECRET_KEY ||
-    process.env.secretKey ||
-    'wz-local-api-key',
+  secretKey: 'THISISMYSECURETOKEN',
   host: 'http://localhost',
-  port: '6300',
+  port: '21465',
   deviceName: 'WppConnect',
   poweredBy: 'WPPConnect-Server',
-  startAllSession: false,
+  startAllSession: true,
   tokenStoreType: 'file',
   maxListeners: 15,
   customUserDataDir: './userDataDir/',
@@ -48,10 +44,15 @@ export default {
     logger: ['console', 'file'],
   },
   createOptions: {
+    // Always use Puppeteer's own bundled Chrome instead of searching for a
+    // system Chrome installation. This makes the app self-contained: users
+    // do not need to install Chrome separately, and behaviour is consistent
+    // across machines.
+    useChrome: false,
     browserArgs: [
-      '--disable-renderer-accessibility',
       '--disable-web-security',
       '--no-sandbox',
+      '--disable-web-security',
       '--aggressive-cache-discard',
       '--disable-cache',
       '--disable-application-cache',
@@ -72,13 +73,7 @@ export default {
       '--ignore-certificate-errors',
       '--ignore-ssl-errors',
       '--ignore-certificate-errors-spki-list',
-      '--js-flags="--max-old-space-size=256"', // Limits V8 heap size to 256MB
-      '--no-zygote',
-      '--single-process', // Reduces multi-process overhead, saving memory/CPU
-      '--disable-shared-workers',
     ],
-    disableSpins: true,  // Disables command line spinners (saves CPU)
-    updatesLog: false,   // Disables checking for updates on startup
     /**
      * Example of configuring the linkPreview generator
      * If you set this to 'null', it will use global servers; however, you have the option to define your own server
@@ -87,7 +82,7 @@ export default {
      * Configure the attribute as follows:
      * linkPreviewApiServers: [ 'https://www.yourserver.com/wa-js-api-server' ]
      */
-    linkPreviewApiServers: [],
+    linkPreviewApiServers: null,
 
     /**
      * Set specific whatsapp version
