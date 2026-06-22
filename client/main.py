@@ -325,6 +325,7 @@ class MainWindow(wx.Frame):
         self._save_timer = None
         self._save_timer_lock = threading.Lock()
         self._unresolvable_lids = set()
+        self._unresolvable_names = set()
         self._resolving_lids = set()
         self._lid_resolution_lock = threading.Lock()
 
@@ -2327,6 +2328,14 @@ class MainWindow(wx.Frame):
             self._unresolvable_lids.clear()
         else:
             self._unresolvable_lids = set()
+        if hasattr(self, "_unresolvable_names"):
+            self._unresolvable_names.clear()
+        else:
+            self._unresolvable_names = set()
+        if hasattr(self, "_unresolvable_names"):
+            self._unresolvable_names.clear()
+        else:
+            self._unresolvable_names = set()
         if hasattr(self, "_resolving_lids"):
             self._resolving_lids.clear()
         else:
@@ -2663,11 +2672,13 @@ class MainWindow(wx.Frame):
             try:
                 lid_to_phone = getattr(self, "_lid_to_phone", {})
                 unresolvable_lids = list(getattr(self, "_unresolvable_lids", set()))
+                unresolvable_names = list(getattr(self, "_unresolvable_names", set()))
                 encrypted_data = encrypt_json({
                     "chats": chats,
                     "contacts": contacts,
                     "lid_to_phone": lid_to_phone,
-                    "unresolvable_lids": unresolvable_lids
+                    "unresolvable_lids": unresolvable_lids,
+                    "unresolvable_names": unresolvable_names
                 }, self.key)
                 with open(messages_file, "wb") as f:
                     f.write(encrypted_data)
@@ -2711,13 +2722,15 @@ class MainWindow(wx.Frame):
                         self._lid_to_phone = decrypted_data.get("lid_to_phone", {})
                         self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
                         self._unresolvable_lids = set(decrypted_data.get("unresolvable_lids", []))
-                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings and {len(self._unresolvable_lids)} unresolvable LIDs from local cache.")
+                        self._unresolvable_names = set(decrypted_data.get("unresolvable_names", []))
+                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} unresolvable LIDs, and {len(self._unresolvable_names)} unresolvable names from local cache.")
                         return
         except Exception as e:
             logging.error(f"[LID Cache] Error loading JID mappings from cache: {e}")
         self._lid_to_phone = {}
         self._phone_to_lid = {}
         self._unresolvable_lids = set()
+        self._unresolvable_names = set()
 
     def get_contacts(self):
         messages_file = data_path("messages.dat")
@@ -4671,41 +4684,51 @@ class MainWindow(wx.Frame):
             if not hasattr(self, "_resolving_lids"):
                 self._resolving_lids = set()
                 
+            if not hasattr(self, "_unresolvable_names"):
+                self._unresolvable_names = set()
+                
+            query_pn = lid_jid not in getattr(self, "_lid_to_phone", {}) and lid_jid not in self._unresolvable_lids
+            
+            contact = self.contacts.get(lid_jid, {})
+            has_name = contact.get("name") or contact.get("pushName")
+            query_name = not has_name and lid_jid not in self._unresolvable_names
+            
+            if not query_pn and not query_name:
+                continue
+                
             with self._lid_resolution_lock:
-                if lid_jid in getattr(self, "_lid_to_phone", {}):
-                    continue
-                if lid_jid in self._unresolvable_lids:
-                    continue
                 if lid_jid in self._resolving_lids:
                     continue
                 self._resolving_lids.add(lid_jid)
                 
             try:
-                # First, resolve pn-lid mapping
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
+                canonical_jid = getattr(self, "_lid_to_phone", {}).get(lid_jid)
                 headers = {
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
                 }
-                logging.info(f"[LID Resolution] Querying WPPConnect pn-lid mapping for {lid_jid}...")
-                response = requests.get(url, headers=headers, timeout=10)
-                canonical_jid = None
-                if response.status_code in (200, 201):
-                    res = response.json() or {}
-                    logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
-                    res_data = res.get("response") if isinstance(res.get("response"), dict) else res
-                    pn_obj = res_data.get("phoneNumber") or {}
-                    pn_jid = None
-                    if isinstance(pn_obj, dict):
-                        pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
-                    elif isinstance(pn_obj, str):
-                        pn_jid = pn_obj
-                    if not pn_jid:
-                        pn_jid = res_data.get("pnJid")
-                    if pn_jid:
-                        canonical_jid = self._normalize_jid(pn_jid)
-                        if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
-                            self.register_jid_mapping(lid_jid, canonical_jid)
+                
+                if query_pn:
+                    # First, resolve pn-lid mapping
+                    url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
+                    logging.info(f"[LID Resolution] Querying WPPConnect pn-lid mapping for {lid_jid}...")
+                    response = requests.get(url, headers=headers, timeout=10)
+                    if response.status_code in (200, 201):
+                        res = response.json() or {}
+                        logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
+                        res_data = res.get("response") if isinstance(res.get("response"), dict) else res
+                        pn_obj = res_data.get("phoneNumber") or {}
+                        pn_jid = None
+                        if isinstance(pn_obj, dict):
+                            pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
+                        elif isinstance(pn_obj, str):
+                            pn_jid = pn_obj
+                        if not pn_jid:
+                            pn_jid = res_data.get("pnJid")
+                        if pn_jid:
+                            canonical_jid = self._normalize_jid(pn_jid)
+                            if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
+                                self.register_jid_mapping(lid_jid, canonical_jid)
                 
                 # Fetch profile info for name caching
                 # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
@@ -4713,7 +4736,8 @@ class MainWindow(wx.Frame):
                 url_profile = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{target_jid}"
                 logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
                 resp_profile = requests.get(url_profile, headers=headers, timeout=10)
-                if resp_profile.status_code in (200, 201):
+                # Check profile response
+                if (query_name or (query_pn and canonical_jid)) and resp_profile.status_code in (200, 201):
                     res_prof = resp_profile.json() or {}
                     res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
                     if not isinstance(res_data, dict):
@@ -4769,8 +4793,13 @@ class MainWindow(wx.Frame):
             finally:
                 with self._lid_resolution_lock:
                     self._resolving_lids.discard(lid_jid)
-                    if lid_jid not in getattr(self, "_lid_to_phone", {}):
+                    if query_pn and lid_jid not in getattr(self, "_lid_to_phone", {}):
                         self._unresolvable_lids.add(lid_jid)
+                    if query_name:
+                        contact_now = self.contacts.get(lid_jid, {})
+                        has_name_now = contact_now.get("name") or contact_now.get("pushName")
+                        if not has_name_now:
+                            self._unresolvable_names.add(lid_jid)
                 time.sleep(0.1)
 
         self.save_data(self.chats, self.contacts)
@@ -4851,15 +4880,6 @@ class MainWindow(wx.Frame):
             for jid in list(self.contacts.keys()):
                 if jid.endswith("@lid"):
                     raw_lids.add(jid)
-            # 3. Collect JIDs from message participants and keys
-            for chat in self.chats.values():
-                for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
-                    part = msg.get("key", {}).get("participant") or msg.get("participant")
-                    if part and part.endswith("@lid"):
-                        raw_lids.add(part)
-                    rem = msg.get("key", {}).get("remoteJid")
-                    if rem and rem.endswith("@lid"):
-                        raw_lids.add(rem)
 
             active_chat_lids = set()
             for jid in list(self.chats.keys()):
@@ -4869,14 +4889,17 @@ class MainWindow(wx.Frame):
             lids_to_resolve = []
             lid_to_phone = getattr(self, "_lid_to_phone", {})
             unresolvable = getattr(self, "_unresolvable_lids", set())
+            unresolvable_names = getattr(self, "_unresolvable_names", set())
             
             # Helper to filter whether a LID needs resolution
             def _needs_resolve(jid):
-                if jid in lid_to_phone:
-                    return False
-                if jid in unresolvable:
-                    return False
-                return True
+                if jid not in lid_to_phone and jid not in unresolvable:
+                    return True
+                contact = self.contacts.get(jid, {})
+                has_name = contact.get("name") or contact.get("pushName")
+                if not has_name and jid not in unresolvable_names:
+                    return True
+                return False
 
             # First: Add active chat LIDs that need resolution
             for jid in sorted(active_chat_lids):
