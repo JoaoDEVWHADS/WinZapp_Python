@@ -1306,7 +1306,7 @@ class MainWindow(wx.Frame):
 
                 try:
                     proc = subprocess.Popen(
-                        [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
+                        [node_exe, npm_cli, "install", "--no-audit", "--no-fund", "--include=optional"],
                         cwd=api_dir,
                         env=npm_env,
                         creationflags=creation_flags,
@@ -3921,12 +3921,15 @@ class MainWindow(wx.Frame):
         """Locate ffmpeg binary: bundled npm package first, then system PATH."""
         import glob as _glob
         import shutil
-        # 1. npm-bundled @ffmpeg-installer/ffmpeg (installed alongside the API server)
-        api_nm = resource_path("api", "node_modules", "@ffmpeg-installer", "ffmpeg", "bin")
-        hits   = _glob.glob(os.path.join(api_nm, "**", "ffmpeg.exe"), recursive=True)
+        # @ffmpeg-installer/ffmpeg places the actual binary inside a platform-
+        # specific sub-package (e.g. @ffmpeg-installer/win32-x64/bin/ffmpeg.exe),
+        # NOT in @ffmpeg-installer/ffmpeg/bin/. Glob the entire scope so we find
+        # it regardless of which platform sub-package npm installed.
+        installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
+        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
         if hits:
             return hits[0]
-        # 2. ffmpeg on the system PATH (user-installed)
+        # Fallback: ffmpeg on the system PATH (user-installed)
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
             return system_ffmpeg
