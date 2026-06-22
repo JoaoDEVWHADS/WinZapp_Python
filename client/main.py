@@ -4786,6 +4786,8 @@ class MainWindow(wx.Frame):
                             self.contacts[canonical_jid]["name"] = name
                             self.contacts[canonical_jid]["pushName"] = name
                             self._presence_pushname_map[canonical_jid] = name
+                    else:
+                        logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
                 else:
                     logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
             except Exception as e:
