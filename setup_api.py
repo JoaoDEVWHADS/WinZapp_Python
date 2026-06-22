@@ -51,8 +51,7 @@ def _run(cmd: list, cwd: str = None):
 
 def main():
     env = _load_env()
-    # Backwards compatibility fallback to EVOLUTION_TAG_VERSION if WPPCONNECT_TAG_VERSION isn't set yet
-    tag = env.get("WPPCONNECT_TAG_VERSION", env.get("EVOLUTION_TAG_VERSION", "")).strip()
+    tag = env.get("WPPCONNECT_TAG_VERSION", "").strip()
 
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
     already_cloned = os.path.isdir(git_dir)
