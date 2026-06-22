@@ -3901,6 +3901,7 @@ class MainWindow(wx.Frame):
                  ogg_path],
                 capture_output=True,
                 timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if result.returncode == 0 and os.path.isfile(ogg_path) and os.path.getsize(ogg_path) > 0:
                 logging.debug("[audio] WAV→OGG conversion succeeded: %s", ogg_path)
