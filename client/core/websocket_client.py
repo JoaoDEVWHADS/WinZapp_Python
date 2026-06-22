@@ -839,8 +839,8 @@ class WebSocketClient:
             else:
                 # Put under specific sub-keys (e.g. imageMessage, videoMessage) if they exist
                 for sub_key in (
-                    "imageMessage", "videoMessage", "audioMessage", "documentMessage",
-                    "stickerMessage", "locationMessage", "contactMessage"
+                    "extendedTextMessage", "imageMessage", "videoMessage", "audioMessage",
+                    "documentMessage", "stickerMessage", "locationMessage", "contactMessage"
                 ):
                     if sub_key in normalized["message"] and isinstance(normalized["message"][sub_key], dict):
                         normalized["message"][sub_key]["contextInfo"] = context_info
