@@ -305,8 +305,7 @@ class ApiSetupDialog(wx.Dialog):
             "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
             "PUPPETEER_CACHE_DIR": puppeteer_cache
         }
-        # forced_tag (from update flow) takes precedence over the .env value
-        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION", self._read_env_value("EVOLUTION_TAG_VERSION"))
+        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
 
         try:
             # ── Step 1: download source ZIP ───────────────────────────────
