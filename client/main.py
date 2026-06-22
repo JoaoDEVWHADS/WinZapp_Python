@@ -2395,7 +2395,14 @@ class MainWindow(wx.Frame):
         }
         try:
             response = requests.get(url, headers=headers)
-            body = response.json()
+            if response.status_code not in (200, 201):
+                logging.error(f"[get_remote_chats] API error {response.status_code}: {response.text[:200]}")
+                return chats
+            try:
+                body = response.json()
+            except Exception as json_err:
+                logging.error(f"[get_remote_chats] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
+                return chats
             response_data = body.get("response", []) if isinstance(body, dict) else []
             if not isinstance(response_data, list):
                 response_data = []
@@ -2728,10 +2735,14 @@ class MainWindow(wx.Frame):
         try:
             response = requests.get(url, headers=headers)
             if response.status_code not in (200, 201):
-                logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text}")
+                logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
                 response_data = []
             else:
-                body = response.json()
+                try:
+                    body = response.json()
+                except Exception as json_err:
+                    logging.error(f"[get_remote_contacts] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
+                    body = {}
                 response_data = body.get("response", []) if isinstance(body, dict) else []
             if not isinstance(response_data, list):
                 response_data = []
@@ -4196,20 +4207,30 @@ class MainWindow(wx.Frame):
                         pass
 
             # Speak via AO2 when a new composing/recording event starts in the open conversation
-            if chat_jid_norm == conv_jid and new_lkp != old_lkp:
-                name = self._resolve_jid_name(canonical)
-                if name:
-                    try:
-                        if new_lkp == "composing":
-                            self.speak_output.output(
-                                self.i18n.t("typing_text").format(name=name)
-                            )
-                        elif new_lkp == "recording":
-                            self.speak_output.output(
-                                self.i18n.t("recording_text").format(name=name)
-                            )
-                    except Exception:
-                        pass
+            if new_lkp != old_lkp and new_lkp in ("composing", "recording"):
+                if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
+                    name = self._resolve_jid_name(canonical)
+                    if name:
+                        try:
+                            # Check language format key
+                            i18n_key = "typing_text" if new_lkp == "composing" else "recording_text"
+                            msg_text = self.i18n.t(i18n_key).format(name=name)
+                            
+                            if chat_jid_norm == conv_jid:
+                                self.speak_output.output(msg_text)
+                            else:
+                                if self.settings.get("general", {}).get("notifications_enabled", True):
+                                    window_active = (
+                                        not getattr(self, "_window_hidden", False)
+                                        and self.IsShown()
+                                        and not self.IsIconized()
+                                        and self.IsActive()
+                                    )
+                                    if window_active:
+                                        self.message_foreground_sound.play()
+                                        self.output(msg_text)
+                        except Exception:
+                            pass
 
         # Persist the updated pushName map to settings (debounced via _schedule_save).
         if _ppm_updated:
@@ -4720,6 +4741,26 @@ class MainWindow(wx.Frame):
         except Exception as e:
             logging.exception(f"[get_contact_profile] Error querying for {original_jid}: {e}")
         return {}
+
+    def subscribe_presence(self, jid: str):
+        """Subscribe to the presence of a contact or group to receive real-time presence updates."""
+        if not jid:
+            return
+        is_group = jid.endswith("@g.us")
+        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/subscribe-presence"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "phone": jid,
+            "isGroup": is_group
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=10)
+            logging.info(f"[subscribe_presence] Subscribed to presence for {jid}. Status: {r.status_code}")
+        except Exception as e:
+            logging.error(f"[subscribe_presence] Error subscribing to presence for {jid}: {e}")
 
     def start_background_lid_resolution(self):
         def _resolve_lids():

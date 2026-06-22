@@ -3816,6 +3816,10 @@ class ConversationsPanel(wx.Panel):
         jid      = conversation.get("remoteJid", "")
         mw       = self.main_window
         i18n     = mw.i18n
+        
+        # Subscribe to presence updates for this conversation to receive typing/online events
+        mw.subscribe_presence(jid)
+
         note = (
             mw._resolve_contact_name(conversation)
             or mw.find_name_through_messages(conversation)
