@@ -2299,7 +2299,7 @@ class MainWindow(wx.Frame):
                         headers=headers,
                         timeout=5,
                     )
-                    if r.ok and isinstance(r.json(), list) and r.json():
+                    if r.ok and isinstance(r.json(), list):
                         self.settings.setdefault("status", {})["messages_set_completed"] = True
                         self.save_settings()
                         self.sync_thread = threading.Thread(
