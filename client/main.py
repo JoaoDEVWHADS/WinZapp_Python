@@ -997,7 +997,8 @@ class MainWindow(wx.Frame):
 
         # Statuses (stories) arrive as messages on status@broadcast; they are
         # handled by the Status tab, not as a conversation.
-        if remote_jid.endswith("@broadcast"):
+        # Newsletter (channels) are read-only and also ignored.
+        if remote_jid.endswith(("@broadcast", "@newsletter")):
             return
 
         # Reaction messages only update the live display of an existing message;
@@ -2534,7 +2535,10 @@ class MainWindow(wx.Frame):
     def normalize_chats(self, chats):
         settings_changed = False
         archived = self.settings.setdefault("archived_chats", [])
+        normalized = {}
         for key, chat in chats.items():
+            if key.endswith("@newsletter") or chat.get("remoteJid", "").endswith("@newsletter"):
+                continue
             if chat.get("unreadCount") is None:
                 chat["unreadCount"] = 0
             is_arch = (
@@ -2547,10 +2551,10 @@ class MainWindow(wx.Frame):
                 if key not in archived:
                     archived.append(key)
                     settings_changed = True
-            chats[key] = chat
+            normalized[key] = chat
         if settings_changed:
             self.save_settings()
-        return chats
+        return normalized
 
     def deduplicate_chats(self, chats: dict) -> dict:
         """

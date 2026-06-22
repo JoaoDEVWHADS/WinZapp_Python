@@ -410,5 +410,6 @@
     "mention_suggestions_available": "Sugerencias de mención disponibles",
     "mention_no_suggestions": "Sin sugerencias de mención",
     "mention_all_keyword": "todos",
-    "mention_all_label": "@todos — Mencionar a todos"
+    "mention_all_label": "@todos — Mencionar a todos",
+    "channel_read_only": "Este canal es de solo lectura"
 }

@@ -762,9 +762,22 @@ class ConversationsPanel(wx.Panel):
             display_note = f"{i18n.t('phone_label')}: {display_note}"
         self._conv_data_btn.SetNote(display_note)
 
-        self.message_label.SetLabel(
-            f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
-        )
+        is_channel = jid.endswith("@newsletter")
+        if is_channel:
+            self.message_field.Disable()
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self.message_label.SetLabel(i18n.t("channel_read_only"))
+        else:
+            self.message_field.Enable()
+            self.send_message_btn.Enable()
+            self.record_voice_message_btn.Enable()
+            self._add_attachment_btn.Enable()
+            self.message_label.SetLabel(
+                f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
+            )
+            
         if hasattr(self, "_remove_quote_btn"):
             self._remove_quote_btn.Hide()
         self.conversation_panel.Show()
