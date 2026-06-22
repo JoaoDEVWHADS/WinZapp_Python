@@ -3823,11 +3823,36 @@ class MainWindow(wx.Frame):
                 out.append(jid)
         return out
 
+    def _resolve_jid_for_send(self, jid: str) -> str:
+        """
+        Translate a @lid JID to its @s.whatsapp.net equivalent before sending.
+        Returns the original jid unchanged for @g.us / @s.whatsapp.net / @c.us.
+        """
+        if not jid.endswith("@lid"):
+            return jid
+        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
+        if phone_jid:
+            return phone_jid
+        # Not in cache — attempt a live resolution (blocks briefly, happens at
+        # most once per unknown LID since resolve_lid_jids_via_api stores the result).
+        logging.info("[_resolve_jid_for_send] @lid %s not in cache — resolving via API", jid)
+        try:
+            self.resolve_lid_jids_via_api([jid])
+        except Exception as exc:
+            logging.warning("[_resolve_jid_for_send] resolve_lid_jids_via_api failed for %s: %s", jid, exc)
+        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
+        if phone_jid:
+            logging.info("[_resolve_jid_for_send] Resolved %s → %s", jid, phone_jid)
+            return phone_jid
+        logging.warning("[_resolve_jid_for_send] Could not resolve @lid %s — sending as-is (will likely fail)", jid)
+        return jid
+
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
         # Always send using the phone JID (@s.whatsapp.net / @g.us).
         # WPPConnect's contactToArray normalises to @c.us internally; passing
         # @lid JIDs breaks the server with HTTP 500 (confirmed in production logs).
+        remote_jid = self._resolve_jid_for_send(remote_jid)
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -3972,6 +3997,7 @@ class MainWindow(wx.Frame):
         WPPConnect Server API. Uses /api/{session}/send-voice-base64.
         WAV is converted to OGG/Opus first (WhatsApp PTT requirement).
         """
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         # Convert WAV to OGG/Opus — WhatsApp only accepts OGG Opus for PTT.
         ogg_path  = self._convert_wav_to_ogg(wav_path)
         send_path = ogg_path if ogg_path else wav_path
@@ -5208,6 +5234,7 @@ class MainWindow(wx.Frame):
         (no 33 % overhead, no JSON body-size limit).
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         import mimetypes
         try:
             file_size = os.path.getsize(file_path)
@@ -5276,6 +5303,7 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid_jid:
             remote_jid = lid_jid
