@@ -2784,6 +2784,7 @@ class MainWindow(wx.Frame):
                 lid_to_phone = getattr(self, "_lid_to_phone", {})
                 unresolvable_lids = list(getattr(self, "_unresolvable_lids", set()))
                 unresolvable_names = list(getattr(self, "_unresolvable_names", set()))
+                encrypted_data = encrypt_json({
                     "chats": chats,
                     "contacts": contacts,
                     "lid_to_phone": lid_to_phone,
