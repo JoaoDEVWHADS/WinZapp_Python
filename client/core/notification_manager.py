@@ -142,7 +142,7 @@ def _build_notif_prefix(msg: dict, main_window, i18n) -> str:
     return ""
 
 
-def format_notification_body(msg: dict, i18n) -> str:
+def format_notification_body(msg: dict, main_window, i18n) -> str:
     """
     Build a compact notification body for any supported message type.
     Mirrors the display logic in ConversationsPanel._get_message_content
@@ -160,8 +160,37 @@ def format_notification_body(msg: dict, i18n) -> str:
         return msg_obj.get("conversation") or ""
 
     if msg_type == "extendedTextMessage":
-        ext = msg_obj.get("extendedTextMessage") or {}
-        return ext.get("text") or ""
+        ext  = msg_obj.get("extendedTextMessage") or {}
+        text = ext.get("text") or ""
+        mentioned = (
+            (msg.get("contextInfo") or {}).get("mentionedJid")
+            or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+            or ext.get("contextInfo", {}).get("mentionedJid")
+            or []
+        )
+        for jid in mentioned:
+            if main_window and main_window._is_self_jid(jid):
+                name = "eu"
+            else:
+                name = _resolve_participant_name(jid, "", main_window)
+            
+            lid_local = jid.rsplit("@", 1)[0]
+            _lid_map = getattr(main_window, "_lid_to_phone", {})
+            phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
+            phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
+            
+            placeholder = None
+            if f"@{lid_local}" in text:
+                placeholder = lid_local
+            elif phone and f"@{phone}" in text:
+                placeholder = phone
+                
+            if not placeholder:
+                continue
+                
+            if name and name != placeholder and name != jid:
+                text = text.replace(f"@{placeholder}", f"@{name}", 1)
+        return text
 
     # ── Audio ─────────────────────────────────────────────────────────────────
     if msg_type == "audioMessage":

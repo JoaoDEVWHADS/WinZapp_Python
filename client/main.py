@@ -1145,7 +1145,7 @@ class MainWindow(wx.Frame):
             format_foreground_sender,
         )
 
-        body  = format_notification_body(msg, self.i18n)
+        body  = format_notification_body(msg, self, self.i18n)
 
         # Check if the WinZapp window is currently active/focused
         window_active = (
