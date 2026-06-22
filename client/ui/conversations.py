@@ -4264,11 +4264,22 @@ class ConversationsPanel(wx.Panel):
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid
         phone = lid_to_phone.get(participant_jid, "")
+        if not phone and isinstance(msg, dict):
+            pn = msg.get("phoneNumber") or msg.get("pnJid")
+            if pn:
+                if isinstance(pn, dict):
+                    phone = pn.get("_serialized") or pn.get("id") or ""
+                else:
+                    phone = str(pn)
+                if phone:
+                    phone = mw._normalize_jid(phone)
+                    mw.register_jid_mapping(participant_jid, phone)
         if phone:
             return format_number(phone)
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]
+
 
     def refresh_active_conversation_messages(self):
         """Re-render all messages in the active message list (useful after background name/LID resolution)."""
