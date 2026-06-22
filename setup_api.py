@@ -82,12 +82,12 @@ def main():
         has_package_json = os.path.isfile(package_json_src)
         has_config_json = os.path.isfile(config_json_src)
         
-        # Additional custom files to backup and restore
         custom_files = [
             "src/config.ts",
             "src/util/createSessionUtil.ts",
             "src/util/functions.ts",
             "src/middleware/statusConnection.ts",
+            "src/controller/contactController.ts",
             "src/controller/deviceController.ts",
             "src/controller/messageController.ts",
             "src/controller/sessionController.ts"
