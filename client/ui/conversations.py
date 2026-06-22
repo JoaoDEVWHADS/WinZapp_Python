@@ -2547,7 +2547,7 @@ class ConversationsPanel(wx.Panel):
             return
             
         displayable = [
-            m for m in fetched_messages if m.get("messageType", "") != "reactionMessage"
+            m for m in fetched_messages if self._is_displayable_message(m)
         ]
         if not displayable:
             return
@@ -3412,10 +3412,45 @@ class ConversationsPanel(wx.Panel):
             name    = contact.get("displayName") or ""
             return i18n.t("contact_message").format(name=name)
 
+        # ── Poll ─────────────────────────────────────────────────────────────
+        if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
+            poll = msg_obj.get("pollCreationMessage") or msg_obj.get("pollCreationMessageV2") or msg_obj.get("pollCreationMessageV3") or {}
+            name = poll.get("name") or ""
+            return f"📊 Enquete: {name}" if name else "📊 Enquete"
+
+        # ── Location ─────────────────────────────────────────────────────────
+        if msg_type in ("locationMessage", "liveLocationMessage"):
+            return "📍 Localização"
+
+        # ── Template ─────────────────────────────────────────────────────────
+        if msg_type == "templateMessage":
+            return "📝 Modelo"
+
+        # ── Revoked / Protocol Message ───────────────────────────────────────
+        if msg_type == "protocolMessage":
+            protocol = msg_obj.get("protocolMessage") or {}
+            p_type = protocol.get("type")
+            if p_type in (3, "REVOKE", "revoke"):
+                return "🚫 Mensagem apagada"
+            return "⚙️ Mensagem do sistema"
+
         # ── Fallback ─────────────────────────────────────────────────────────
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
         )
+
+    def _is_displayable_message(self, m) -> bool:
+        if not isinstance(m, dict):
+            return False
+        msg_type = m.get("messageType", "")
+        if msg_type in ("reactionMessage", "senderKeyDistributionMessage"):
+            return False
+        if msg_type == "protocolMessage":
+            # Only display if it's a revoke/delete message
+            protocol = (m.get("message") or {}).get("protocolMessage") or {}
+            p_type = protocol.get("type")
+            return p_type in (3, "REVOKE", "revoke")
+        return True
 
     def _map_status(self, msg) -> str:
         i18n = self.main_window.i18n
@@ -5621,7 +5656,7 @@ class ConversationsPanel(wx.Panel):
 
         # Exclude reaction messages — they must not affect index mapping
         displayable = [
-            m for m in messages_sorted if m.get("messageType", "") != "reactionMessage"
+            m for m in messages_sorted if self._is_displayable_message(m)
         ]
 
         # Insert unread separator before the first unread message.
