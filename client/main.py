@@ -1298,6 +1298,7 @@ class MainWindow(wx.Frame):
                 npm_env  = {
                     **os.environ,
                     "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+                    "PUPPETEER_CACHE_DIR": resource_path("api", ".cache", "puppeteer"),
                 }
                 api_dir  = resource_path("api")
                 creation_flags = 0
@@ -1498,6 +1499,27 @@ class MainWindow(wx.Frame):
             os.environ["WPP_LID_MODE"] = "false"
             os.environ["PORT"] = str(self.wpp_port)
             os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache", "puppeteer")
+
+            # Ensure dist/config.js has useChrome:false so WPPConnect always uses
+            # Puppeteer's own bundled Chrome/Chromium instead of searching for a
+            # system Chrome installation. Patched here at runtime so existing users
+            # with a pre-built dist/ benefit immediately without a full rebuild.
+            try:
+                _dist_cfg = resource_path("api", "dist", "config.js")
+                if os.path.isfile(_dist_cfg):
+                    with open(_dist_cfg, "r", encoding="utf-8") as _f:
+                        _cfg_src = _f.read()
+                    if "useChrome" not in _cfg_src:
+                        _cfg_src = _cfg_src.replace(
+                            "createOptions: {",
+                            "createOptions: { useChrome: false,",
+                            1,
+                        )
+                        with open(_dist_cfg, "w", encoding="utf-8") as _f:
+                            _f.write(_cfg_src)
+                        logging.info("[startup] Patched dist/config.js: useChrome → false")
+            except Exception as _e:
+                logging.warning("[startup] Could not patch dist/config.js: %s", _e)
 
             # WPPConnect uses Puppeteer/Chrome which already includes --no-sandbox
             # in its config (see api/src/config.ts), so Chrome runs correctly even

@@ -44,6 +44,11 @@ export default {
     logger: ['console', 'file'],
   },
   createOptions: {
+    // Always use Puppeteer's own bundled Chrome instead of searching for a
+    // system Chrome installation. This makes the app self-contained: users
+    // do not need to install Chrome separately, and behaviour is consistent
+    // across machines.
+    useChrome: false,
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',
