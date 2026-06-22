@@ -17,14 +17,14 @@ import time
 import zipfile
 import tempfile
 import threading
-import logging
 import ctypes
 import subprocess
 import requests
 import wx
+import logging
 
 from app_paths import _outer_exe_dir, _is_frozen
-from config import UPDATE_VERSION_URL, UPDATE_CHANGELOG_URL, UPDATE_ZIP_URL
+from config import GITHUB_RELEASE_URL, UPDATE_ZIP_URL
 from version import __version__
 
 
@@ -32,19 +32,30 @@ from version import __version__
 
 _PRE_ORDER = {"dev": 0, "alpha": 1, "beta": 2, "": 3}
 
-_VER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)(dev|alpha|beta)?$", re.IGNORECASE)
-
 
 def parse_version(v: str):
-    """Parse "1.2.3.4suffix" -> ((1,2,3,4), suffix) or None on failure."""
+    """Parse version string -> (nums_tuple, suffix) or None on failure."""
     if not v:
         return None
-    m = _VER_RE.match(v.strip())
-    if not m:
+    v = v.strip()
+    
+    # Extract dev/alpha/beta suffix
+    suffix = ""
+    m_suf = re.search(r'(dev|alpha|beta)', v, re.IGNORECASE)
+    if m_suf:
+        suffix = m_suf.group(1).lower()
+        v = re.sub(r'(dev|alpha|beta)', '', v, flags=re.IGNORECASE)
+        
+    # Extract all digits
+    parts = [int(x) for x in re.findall(r'\d+', v)]
+    if not parts:
         return None
-    nums   = tuple(int(m.group(i)) for i in range(1, 5))
-    suffix = (m.group(5) or "").lower()
-    return (nums, suffix)
+        
+    # Pad to length 4 for standard comparison
+    while len(parts) < 4:
+        parts.append(0)
+        
+    return (tuple(parts[:4]), suffix)
 
 
 def is_newer(remote: str, local: str) -> bool:
@@ -58,55 +69,6 @@ def is_newer(remote: str, local: str) -> bool:
     r_key = (r_nums, _PRE_ORDER.get(r_suf, 0))
     l_key = (l_nums, _PRE_ORDER.get(l_suf, 0))
     return r_key > l_key
-
-
-# ── Changelog parser ──────────────────────────────────────────────────────────
-
-_HDR_RE = re.compile(r"^V(\d+\.\d+\.\d+\.(?:\d+)(?:dev|alpha|beta)?)\s*$", re.IGNORECASE)
-
-
-def get_changelog_for_update(changelog_text: str, current: str, new: str) -> str:
-    """
-    Extract changelog entries for all versions > current and <= new.
-    Returns empty string if no relevant entries found.
-    """
-    c_parsed = parse_version(current)
-    n_parsed = parse_version(new)
-    if c_parsed is None or n_parsed is None:
-        return ""
-
-    c_key = (c_parsed[0], _PRE_ORDER.get(c_parsed[1], 0))
-    n_key = (n_parsed[0], _PRE_ORDER.get(n_parsed[1], 0))
-
-    # Split into sections by "V1.2.3.4" header lines
-    sections = []
-    cur_ver   = None
-    cur_lines = []
-    for line in changelog_text.splitlines():
-        m = _HDR_RE.match(line.strip())
-        if m:
-            if cur_ver is not None:
-                sections.append((cur_ver, cur_lines))
-            cur_ver   = m.group(1)
-            cur_lines = []
-        else:
-            if cur_ver is not None:
-                cur_lines.append(line)
-    if cur_ver is not None:
-        sections.append((cur_ver, cur_lines))
-
-    result_parts = []
-    for ver_str, lines in sections:
-        parsed = parse_version(ver_str)
-        if parsed is None:
-            continue
-        key = (parsed[0], _PRE_ORDER.get(parsed[1], 0))
-        if c_key < key <= n_key:
-            body = "\n".join(lines).strip()
-            if body:
-                result_parts.append(f"V{ver_str}\n{body}")
-
-    return "\n\n".join(result_parts)
 
 
 # ── Install helpers ───────────────────────────────────────────────────────────
@@ -127,8 +89,8 @@ def _needs_admin() -> bool:
 def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300):
     """
     Write a batch script that:
-      1. Waits for PID to exit.
-      2. Kills any leftover WPPConnect Server (api_port) and PostgreSQL (5433) processes.
+      1. Forcefully terminates the WinZapp client process and its children.
+      2. Finds and terminates any leftover Evolution API (port 6300/api_port) and PostgreSQL (port 5433) processes to release file locks.
       3. Copies all extracted files to install_dir.
       4. Restarts the client executable.
     Then launches it (elevated if the directory needs admin).
@@ -151,7 +113,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         "    timeout /t 1 /nobreak >NUL\n"
         "    goto WAIT\n"
         ")\n"
-        # Give child processes a moment to exit, then kill stragglers holding file locks.
+        # Give any child processes a moment to exit, then kill any remaining processes listening on the API ports.
         "timeout /t 2 /nobreak >NUL\n"
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
@@ -169,6 +131,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     if sys.platform == "win32":
         needs_admin = _needs_admin()
         if needs_admin:
+            import ctypes
             ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
             )
@@ -334,7 +297,7 @@ class UpdateProgressDialog(wx.Dialog):
             pid         = os.getpid()
 
             logging.info("Auto-updater: Launching batch installer from %s (PID %d)", install_dir, pid)
-            _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "wpp_port", 6300))
+            _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "evolution_port", 6300))
             self._install_ok = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
 
@@ -349,10 +312,10 @@ class UpdateProgressDialog(wx.Dialog):
 class UpdateDialog(wx.Dialog):
     """
     Prompts the user to install an available update.
-    Buttons: Sim | Nao | Quais as novidades? (hidden when no changelog)
+    Buttons: Sim | Nao
     """
 
-    def __init__(self, parent, new_version: str, changelog: str):
+    def __init__(self, parent, new_version: str):
         self._main_window = parent
         i18n = parent.i18n
         super().__init__(
@@ -361,7 +324,6 @@ class UpdateDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE,
         )
         self._new_version = new_version
-        self._changelog   = changelog
         self._build(i18n)
         self.Fit()
         self.SetMinSize((360, -1))
@@ -382,13 +344,6 @@ class UpdateDialog(wx.Dialog):
         btn_sizer.Add(self._yes_btn, 0, wx.RIGHT, 4)
         btn_sizer.Add(self._no_btn,  0, wx.RIGHT, 4)
 
-        if self._changelog:
-            self._news_btn = wx.Button(self, wx.ID_MORE, label=i18n.t("whats_new_btn"))
-            btn_sizer.Add(self._news_btn, 0)
-            self._news_btn.Bind(wx.EVT_BUTTON, self._on_whats_new)
-        else:
-            self._news_btn = None
-
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         self.SetSizer(sizer)
 
@@ -401,11 +356,6 @@ class UpdateDialog(wx.Dialog):
 
     def _on_no(self, event):
         self.EndModal(wx.ID_NO)
-
-    def _on_whats_new(self, event):
-        dlg = WhatsNewDialog(self, self._changelog)
-        dlg.ShowModal()
-        dlg.Destroy()
 
 
 # ── UpdateChecker ─────────────────────────────────────────────────────────────
@@ -443,18 +393,23 @@ class UpdateChecker:
     def _check_once(self):
         logging.info("Auto-updater: Starting update check...")
         try:
-            resp = requests.get(UPDATE_VERSION_URL, timeout=15)
+            headers = {"User-Agent": "WinZapp-Updater"}
+            logging.info("Auto-updater: Querying GITHUB_RELEASE_URL: %s", GITHUB_RELEASE_URL)
+            resp = requests.get(GITHUB_RELEASE_URL, headers=headers, timeout=15)
             resp.raise_for_status()
             data           = resp.json()
-            remote_version = data.get("version", "")
-            logging.info("Auto-updater: Remote version is %s", remote_version)
-        except Exception:
+            remote_version = data.get("tag_name", "").lstrip("vV")
+            logging.info("Auto-updater: Latest remote version from GitHub is v%s", remote_version)
+        except Exception as e:
             logging.exception("Auto-updater: Exception checking for updates")
+            if self._force:
+                self._force = False
+                wx.CallAfter(self._show_error_message, str(e))
             self._schedule_retry()
             return
 
         local_version = __version__
-        logging.info("Auto-updater: Local version is %s", local_version)
+        logging.info("Auto-updater: Local version is v%s", local_version)
 
         if not is_newer(remote_version, local_version):
             logging.info("Auto-updater: WinZapp is already up-to-date.")
@@ -465,21 +420,18 @@ class UpdateChecker:
                 self._schedule_retry()
             return
 
-        logging.info("Auto-updater: Newer version %s is available!", remote_version)
+        logging.info("Auto-updater: Newer version v%s is available!", remote_version)
         self._force = False
+        wx.CallAfter(self._show_update_dialog, remote_version)
 
-        # Fetch changelog (optional)
-        changelog = ""
-        try:
-            resp2 = requests.get(UPDATE_CHANGELOG_URL, timeout=15)
-            resp2.raise_for_status()
-            changelog = get_changelog_for_update(
-                resp2.text, local_version, remote_version
-            )
-        except Exception:
-            pass
-
-        wx.CallAfter(self._show_update_dialog, remote_version, changelog)
+    def _show_error_message(self, err_msg: str):
+        i18n = self._mw.i18n
+        wx.MessageBox(
+            i18n.t("update_error_msg").format(error=err_msg),
+            i18n.t("update_error_title"),
+            wx.OK | wx.ICON_ERROR,
+            self._mw,
+        )
 
     def _show_no_update(self):
         i18n = self._mw.i18n
@@ -490,8 +442,8 @@ class UpdateChecker:
             self._mw,
         )
 
-    def _show_update_dialog(self, remote_version: str, changelog: str):
-        dlg    = UpdateDialog(self._mw, remote_version, changelog)
+    def _show_update_dialog(self, remote_version: str):
+        dlg    = UpdateDialog(self._mw, remote_version)
         result = dlg.ShowModal()
         dlg.Destroy()
 
