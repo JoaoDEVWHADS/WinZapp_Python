@@ -40,32 +40,10 @@ class Connect:
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
-    def _licensing_email(self) -> str:
-        """Return the LICENSING_USER_EMAIL from .env, or the hardcoded default."""
-        default = "test@email.com"
-        for env_path in [
-            resource_path(".env"),
-            os.path.join(os.path.dirname(resource_path()), ".env"),
-        ]:
-            if os.path.isfile(env_path):
-                try:
-                    with open(env_path, encoding="utf-8") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if not line or line.startswith("#") or "=" not in line:
-                                continue
-                            k, _, v = line.partition("=")
-                            if k.strip() == "EVOLUTION_LICENSING_USER_EMAIL":
-                                val = v.strip()
-                                return val if val else default
-                except Exception:
-                    pass
-        return default
-
     def _evolution_headers(self, use_global_key=False):
         """Return headers for WPPConnect Server API requests."""
         apikey = (
-            self.main_window.evolution_api_key
+            self.main_window.wpp_api_key
             if use_global_key
             else self.main_window.token
         )
@@ -76,8 +54,8 @@ class Connect:
         Start/Create a WhatsApp session in the local WPPConnect Server.
         """
         url = (
-            f"{self.main_window.evolution_server}"
-            f":{self.main_window.evolution_port}/api/{token}/start-session"
+            f"{self.main_window.wpp_server}"
+            f":{self.main_window.wpp_port}/api/{token}/start-session"
         )
         payload = {
             "waitQrCode": False
@@ -138,17 +116,17 @@ class Connect:
             def _clean_single(sid):
                 try:
                     gen_url = (
-                        f"{self.main_window.evolution_server}"
-                        f":{self.main_window.evolution_port}/api/{sid}"
-                        f"/{self.main_window.evolution_api_key}/generate-token"
+                        f"{self.main_window.wpp_server}"
+                        f":{self.main_window.wpp_port}/api/{sid}"
+                        f"/{self.main_window.wpp_api_key}/generate-token"
                     )
                     res = requests.post(gen_url, timeout=5)
                     if res.status_code in (200, 201):
                         hash_token = res.json().get("token")
                         token = f"{sid}:{hash_token}"
                         url = (
-                            f"{self.main_window.evolution_server}"
-                            f":{self.main_window.evolution_port}/api/{token}/close-session"
+                            f"{self.main_window.wpp_server}"
+                            f":{self.main_window.wpp_port}/api/{token}/close-session"
                         )
                         requests.post(
                             url,
@@ -162,46 +140,6 @@ class Connect:
             threading.Thread(target=_clean_single, args=(session_id,), daemon=True).start()
 
 
-
-    def _activate_instance(self, instance_id: str) -> str | None:
-        """
-        Register this Evolution API installation with the licensing server
-        (required since v2.4.0) using the auto-activation endpoint.
-
-        Returns the api_key that the licensing server issued, which must be
-        used as the ``apikey`` header for all subsequent local Evolution API
-        calls in this session.  The caller is responsible for persisting the
-        key to settings so future sessions skip this step.
-
-        Raises RuntimeError on any non-2xx response from the licensing server.
-        """
-        url = "https://license.evolutionfoundation.com.br/v1/register/auto"
-        payload = {
-            "email":       self._licensing_email(),
-            "tier":        "community",
-            "version":     "2.4.0",
-            "instance_id": instance_id,
-        }
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code not in (200, 201):
-            try:
-                detail = response.json()
-            except Exception:
-                detail = response.text
-            raise RuntimeError(
-                f"Licensing activation failed — HTTP {response.status_code}: {detail}"
-            )
-        data = response.json()
-        # Extract the api_key returned by the licensing server.
-        # Evolution API uses this key as the bearer for all requests once
-        # the installation is activated.
-        return (
-            data.get("api_key")
-            or data.get("apikey")
-            or data.get("token")
-            or (data.get("hash") or {}).get("apikey")
-            or (data.get("instance") or {}).get("apikey")
-        )
 
     # ── Connection status ──────────────────────────────────────────────────
 
@@ -226,8 +164,8 @@ class Connect:
         # account is genuinely authenticated/linked.
         try:
             check_url = (
-                f"{self.main_window.evolution_server}"
-                f":{self.main_window.evolution_port}/api/{token}/check-connection-session"
+                f"{self.main_window.wpp_server}"
+                f":{self.main_window.wpp_port}/api/{token}/check-connection-session"
             )
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             check_resp = requests.get(check_url, headers=headers, timeout=5)
@@ -247,51 +185,28 @@ class Connect:
                     )
                     self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
                     self.main_window.save_settings()
-                    # Best-effort delete of orphaned instance
                     if token:
-                        def _delete():
+                        def _close(t=token):
                             try:
-                                requests.delete(
-                                    f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/delete/{token}",
-                                    headers={"apikey": self.main_window.evolution_api_key},
+                                requests.post(
+                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
+                                    headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
                                     timeout=5,
                                 )
                             except Exception:
                                 pass
-                        threading.Thread(target=_delete, daemon=True).start()
+                        threading.Thread(target=_close, daemon=True).start()
                     return False
-                
-                # If the API returns status: false, check if the session is registered in the API's token store.
-                # If it is, the session is paired but currently offline (headless browser closed).
-                show_url = (
-                    f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{self.main_window.evolution_api_key}/show-all-sessions"
-                )
-                try:
-                    show_resp = requests.get(show_url, headers={"Authorization": f"Bearer {self.main_window.evolution_api_key}"}, timeout=5)
-                    if show_resp.status_code in (200, 201):
-                        sessions = show_resp.json().get("response", [])
-                        clean_token = lambda t: "".join(c for c in t if c not in ['/', '\\', '?', '<', '>', ':', '*', '|', '"'])
-                        session_name = token.split(":")[0]
-                        target_session = clean_token(session_name)
-                        if any(clean_token(s) == target_session for s in sessions):
-                            if is_paired:
-                                logging.info("[check_connection_status] Session is paired but currently offline. Retaining token.")
-                                return True
-                            else:
-                                logging.warning(
-                                    "[check_connection_status] Session found in token store but paired=False — "
-                                    "pairing was never completed. Clearing stale WA_token."
-                                )
-                                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
-                                self.main_window.save_settings()
-                                return False
-                except Exception as show_exc:
-                    logging.warning("[check_connection_status] Failed to fetch session list: %s", show_exc)
+
+                # status:false — session offline but may have valid token in store.
+                # If paired=True, trust the local flag and let the app reconnect.
+                if is_paired:
+                    logging.info("[check_connection_status] Session offline but paired=True. Retaining token.")
+                    return True
 
                 logging.warning(
-                    "[check_connection_status] check-connection-session returned false and session not found in token store. "
-                    "Session is unlinked from mobile. Clearing WA_token and wiping local data."
+                    "[check_connection_status] check-connection-session returned false and paired=False. "
+                    "Session is unlinked or incomplete. Clearing WA_token and wiping local data."
                 )
                 self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
@@ -300,22 +215,22 @@ class Connect:
                 self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
-                    def _delete():
+                    def _close(t=token):
                         try:
-                            requests.delete(
-                                f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/delete/{token}",
-                                headers={"apikey": self.main_window.evolution_api_key},
+                            requests.post(
+                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
+                                headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
                                 timeout=5,
                             )
                         except Exception:
                             pass
-                    threading.Thread(target=_delete, daemon=True).start()
+                    threading.Thread(target=_close, daemon=True).start()
                 return False
 
             # Fallback/Safety Check: also check general status-session
             url = (
-                f"{self.main_window.evolution_server}"
-                f":{self.main_window.evolution_port}/api/{token}/status-session"
+                f"{self.main_window.wpp_server}"
+                f":{self.main_window.wpp_port}/api/{token}/status-session"
             )
             resp = requests.get(url, headers=headers, timeout=5)
             if resp.status_code in (200, 201):
@@ -346,16 +261,16 @@ class Connect:
                     self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
-                    def _delete():
+                    def _close(t=token):
                         try:
-                            requests.delete(
-                                f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/delete/{token}",
-                                headers={"apikey": self.main_window.evolution_api_key},
+                            requests.post(
+                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
+                                headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
                                 timeout=5,
                             )
                         except Exception:
                             pass
-                    threading.Thread(target=_delete, daemon=True).start()
+                    threading.Thread(target=_close, daemon=True).start()
                 return False
         except Exception as exc:
             # If the API is unreachable (still starting up), only assume the token is valid
@@ -494,10 +409,9 @@ class Connect:
         """Initiates QR-CODE connection without user interaction."""
         self.qrcode_connection_started = True
         try:
-            # Determine whether an instance already exists for this token.
-            # If WA_token is already saved the Evolution API instance was created
-            # in a previous session — skip create + websocket-setup and go
-            # straight to /instance/connect.
+            # Determine whether a token has been saved from a previous session.
+            # We still always call _create_instance to (re)start the WPPConnect
+            # session in case the API was restarted since the last connection.
             existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
             _instance_exists = bool(existing_token)
 
@@ -509,7 +423,7 @@ class Connect:
                 self.main_window.save_settings()
                 self.main_window.clear_local_data()
                 raw_token = self.generate_random_token()
-                url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
+                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{raw_token}/{self.main_window.wpp_api_key}/generate-token"
                 try:
                     res = requests.post(url, timeout=10)
                     if res.status_code in (200, 201):
@@ -523,14 +437,17 @@ class Connect:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
-            if not _instance_exists:
-                # Step 1 – Create WPPConnect session (first time only).
-                self._create_instance(self.main_window.token)
+            # Always (re)start the session so WPPConnect launches Chrome and
+            # emits qrCode. WPPConnect tolerates a start-session when a session
+            # already exists — it will simply resume it (or show a new QR if
+            # the session was invalidated).
+            self._create_instance(self.main_window.token)
 
             # Save settings
             self.main_window.save_settings()
 
-            # Set websocket client
+            # Set websocket client and connect BEFORE querying status so we
+            # don't miss the qrCode Socket.IO event that comes asynchronously.
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
 
             try:
@@ -541,19 +458,22 @@ class Connect:
                 self.show_connection_dial()
                 return
 
-            # Step 3 – Check status of session (to see if QR code is already available)
+            # Poll status-session to pick up a QR code that may already be ready.
             url = (
-                f"{self.main_window.evolution_server}"
-                f":{self.main_window.evolution_port}/api/{self.main_window.token}/status-session"
+                f"{self.main_window.wpp_server}"
+                f":{self.main_window.wpp_port}/api/{self.main_window.token}/status-session"
             )
             try:
                 response = requests.get(url, headers=self._evolution_headers())
                 response_data = response.json()
-                qrcode_base64 = response_data.get("qrcode") or response_data.get("urlcode")
+                qrcode_base64 = (
+                    response_data.get("qrcode")
+                    or response_data.get("urlcode")
+                    or (response_data.get("response") or {}).get("qrcode")
+                )
                 if qrcode_base64:
-                    self.display_qrcode_image(qrcode_base64)
+                    wx.CallAfter(self.display_qrcode_image, qrcode_base64)
             except Exception:
-                # If status query fails temporarily, we will rely on the WebSocket qrCode event
                 pass
 
         except Exception:
@@ -636,7 +556,7 @@ class Connect:
                     # so only ONE browser runs at a time (prevents Auto Close race).
                     self._cleanup_orphan_sessions(keep_token="")
                     raw_token = self.generate_random_token()
-                    url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{raw_token}/{self.main_window.evolution_api_key}/generate-token"
+                    url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{raw_token}/{self.main_window.wpp_api_key}/generate-token"
                     try:
                         res = requests.post(url, timeout=10)
                         if res.status_code in (200, 201):
@@ -658,8 +578,8 @@ class Connect:
                 def _close_and_signal():
                     try:
                         close_url = (
-                            f"{self.main_window.evolution_server}"
-                            f":{self.main_window.evolution_port}/api/{self.main_window.token}/close-session"
+                            f"{self.main_window.wpp_server}"
+                            f":{self.main_window.wpp_port}/api/{self.main_window.token}/close-session"
                         )
                         requests.post(close_url, headers=headers, timeout=10)
                         logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
@@ -682,8 +602,8 @@ class Connect:
 
                 # Call /start-session in a background thread. This immediately registers the namespace on Node side.
                 url = (
-                    f"{self.main_window.evolution_server}"
-                    f":{self.main_window.evolution_port}/api/{self.main_window.token}/start-session"
+                    f"{self.main_window.wpp_server}"
+                    f":{self.main_window.wpp_port}/api/{self.main_window.token}/start-session"
                 )
                 payload = {"phone": self.phone_number, "waitQrCode": True}
                 ws_ref = self.main_window.ws  # capture before thread starts
@@ -924,8 +844,8 @@ class Connect:
             def _close_api_session():
                 try:
                     close_url = (
-                        f"{self.main_window.evolution_server}"
-                        f":{self.main_window.evolution_port}/api/{token}/close-session"
+                        f"{self.main_window.wpp_server}"
+                        f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
                     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
                     requests.post(close_url, headers=headers, timeout=5)
@@ -944,8 +864,8 @@ class Connect:
             def _close_api_session():
                 try:
                     close_url = (
-                        f"{self.main_window.evolution_server}"
-                        f":{self.main_window.evolution_port}/api/{token}/close-session"
+                        f"{self.main_window.wpp_server}"
+                        f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
                     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
                     requests.post(close_url, headers=headers, timeout=5)

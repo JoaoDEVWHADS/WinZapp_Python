@@ -22,19 +22,10 @@ class WebSocketClient:
             logger=False,
             engineio_logger=False,
         )
-        #Bind events
+        # WPPConnect Server emits all events on root "/" namespace via req.io.emit().
+        # Registering handlers without namespace defaults them to "/" (root).
         self.sio.on("connect", self.on_connect)
         self.sio.on("disconnect", self.on_disconnect)
-        self.sio.on("connection.update", self.on_connection_update, namespace=f"/{self.instance_name}")
-        self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
-        self.sio.on("messages.set", self.on_messages_set, namespace=f"/{self.instance_name}")
-        self.sio.on("messages.upsert",  self.on_messages_upsert,  namespace=f"/{self.instance_name}")
-        self.sio.on("messages.update",  self.on_messages_update,  namespace=f"/{self.instance_name}")
-        self.sio.on("chats.update",     self.on_chats_update,     namespace=f"/{self.instance_name}")
-        self.sio.on("contacts.update",  self.on_contacts_update,  namespace=f"/{self.instance_name}")
-        self.sio.on("presence.update",  self.on_presence_update,  namespace=f"/{self.instance_name}")
-
-        # WPPConnect Server Events
         self.sio.on("qrCode", self.on_wpp_qrcode)
         self.sio.on("session-logged", self.on_wpp_session_logged)
         self.sio.on("received-message", self.on_wpp_message_received)
@@ -90,8 +81,7 @@ class WebSocketClient:
             was_connected = self.main_window._wa_connected
             self.main_window._wa_connected = False
 
-            # Detect permanent WhatsApp logout (Baileys DisconnectReason.loggedOut = 401).
-            # Evolution API may surface this in different fields depending on the version.
+            # Detect permanent WhatsApp logout (status 401 = loggedOut).
             status_code  = (
                 data.get("statusCode")
                 or data.get("status")
@@ -147,18 +137,18 @@ class WebSocketClient:
         # Wipe all cached chats/contacts/media to avoid cross-account data leakage
         mw.clear_local_data()
 
-        # Best-effort: delete the orphaned instance from the local Evolution API.
+        # Best-effort: close the WPPConnect session so Chrome is released.
         if old_token:
-            def _delete():
+            def _close():
                 try:
-                    requests.delete(
-                        f"{mw.evolution_server}:{mw.evolution_port}/instance/delete/{old_token}",
-                        headers={"apikey": mw.evolution_api_key},
+                    requests.post(
+                        f"{mw.wpp_server}:{mw.wpp_port}/api/{old_token}/close-session",
+                        headers={"Authorization": f"Bearer {old_token}", "Content-Type": "application/json"},
                         timeout=5,
                     )
                 except Exception:
                     pass
-            threading.Thread(target=_delete, daemon=True).start()
+            threading.Thread(target=_close, daemon=True).start()
 
         # Disconnect the socket (may already be disconnecting).
         try:
@@ -481,7 +471,8 @@ class WebSocketClient:
         try:
             if not isinstance(data, dict):
                 return
-            qrcode_base64 = data.get("qrCode")
+            # WPPConnect emits: {"data": "data:image/png;base64,...", "session": "..."}
+            qrcode_base64 = data.get("data")
             if qrcode_base64:
                 self.on_qrcode_update({
                     "data": {
@@ -498,35 +489,46 @@ class WebSocketClient:
             if not isinstance(data, dict):
                 return
             status = data.get("status", False)
-            if status:
-                try:
-                    url = f"{self.main_window.evolution_server}:{self.main_window.evolution_port}/api/{self.main_window.token}/host-device"
-                    headers = {
-                        "Authorization": f"Bearer {self.main_window.token}",
-                        "Content-Type": "application/json"
-                    }
-                    res = requests.get(url, headers=headers, timeout=5)
-                    if res.status_code in (200, 201):
-                        res_data = res.json()
-                        phoneNumberObj = res_data.get("response", {}).get("phoneNumber", {})
-                        wuid = ""
-                        if isinstance(phoneNumberObj, dict):
-                            wuid = phoneNumberObj.get("_serialized", "")
-                        elif isinstance(phoneNumberObj, str):
-                            wuid = phoneNumberObj
-                        if wuid:
-                            self.main_window.my_jid = wuid
-                            self.main_window.resolve_self_lid()
-                except Exception as ex:
-                    print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
 
+            # Notify the connection state immediately (non-blocking).
             self.on_connection_update({
                 "data": {
                     "state": "open" if status else "close"
                 }
             })
+
+            if status:
+                # Fetch host-device JID on a background thread so we don't
+                # block the Socket.IO event loop during the HTTP call.
+                threading.Thread(target=self._fetch_host_device_jid, daemon=True).start()
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+
+    def _fetch_host_device_jid(self):
+        try:
+            url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{self.main_window.token}/host-device"
+            headers = {
+                "Authorization": f"Bearer {self.main_window.token}",
+                "Content-Type": "application/json",
+            }
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code in (200, 201):
+                res_data = res.json()
+                resp = res_data.get("response", res_data)
+                phone_obj = resp.get("phoneNumber", {}) if isinstance(resp, dict) else {}
+                wuid = ""
+                if isinstance(phone_obj, dict):
+                    wuid = phone_obj.get("_serialized", "")
+                elif isinstance(phone_obj, str):
+                    wuid = phone_obj
+                if not wuid and isinstance(resp, dict):
+                    wid = resp.get("wid")
+                    wuid = wid.get("_serialized", "") if isinstance(wid, dict) else ""
+                if wuid:
+                    self.main_window.my_jid = wuid
+                    wx.CallAfter(self.main_window.resolve_self_lid)
+        except Exception as ex:
+            print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
 
     def on_wpp_status_find(self, data):
         try:

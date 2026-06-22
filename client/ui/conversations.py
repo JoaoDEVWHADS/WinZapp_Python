@@ -703,6 +703,8 @@ class ConversationsPanel(wx.Panel):
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
+            # Conversation already open — just focus the message input field.
+            wx.CallAfter(self.message_field.SetFocus)
             return
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again

@@ -1,10 +1,10 @@
 """
-api_setup.py — WinZapp first-run Evolution API setup dialog.
+api_setup.py — WinZapp first-run WPPConnect Server setup dialog.
 
-Shown when api/dist/main.js is absent, meaning the Evolution API has not yet
+Shown when api/dist/main.js is absent, meaning the WPPConnect Server has not yet
 been downloaded and compiled.  Performs the full setup in a background thread:
 
-  1. Download the Evolution API source ZIP from GitHub (no git required)
+  1. Download the WPPConnect Server source ZIP from GitHub (no git required)
        • No tag  → branch main  archive
        • With tag → specific tag archive
   2. Extract into client/api/, preserving our pre-included files (start.js, .env)
@@ -17,8 +17,8 @@ Note: db:deploy / db:deploy:win are NOT run here.  Prisma migrations require
 a live PostgreSQL connection, which is only available at runtime.  The
 migrations are applied automatically by start.js every time the API starts.
 
-The EVOLUTION_TAG_VERSION variable in the root .env optionally pins a specific
-tag (e.g. "2.4.0-rc2").  When unset the latest main branch is downloaded.
+The WPPCONNECT_TAG_VERSION variable in the root .env optionally pins a specific
+tag.  When unset the latest main branch is downloaded.
 
 Uses only the standard library (zipfile, io, tempfile) plus the already-present
 requests package for the HTTP download — no git installation required.
@@ -60,18 +60,17 @@ _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
 
 class ApiSetupDialog(wx.Dialog):
-    """Progress dialog for the full Evolution API download + build setup.
+    """Progress dialog for the WPPConnect Server download + build setup.
 
     Parameters
     ----------
     parent        : wx.Window
     title_override: str | None
         When provided, overrides the default hardcoded dialog title.
-        Used by the update flow to show a different title (e.g.
-        "WinZapp | Atualizando a Evolution API").
+        Used by the update flow to show a different title.
     forced_tag    : str | None
         When provided, this tag is used for the GitHub download instead
-        of reading EVOLUTION_TAG_VERSION from the .env file.  Used by
+        of reading WPPCONNECT_TAG_VERSION from the .env file.  Used by
         the update flow to pin the exact minimum-version tag.
     """
 
@@ -85,7 +84,7 @@ class ApiSetupDialog(wx.Dialog):
 
         self._proc        = None   # active npm subprocess (for kill on cancel)
         self._cancelled   = False
-        self._forced_tag  = forced_tag   # overrides .env EVOLUTION_TAG_VERSION
+        self._forced_tag  = forced_tag   # overrides .env WPPCONNECT_TAG_VERSION
 
         self._build_ui()
 
@@ -187,12 +186,12 @@ class ApiSetupDialog(wx.Dialog):
                     if total:
                         mb_total = total / (1024 * 1024)
                         self._set_status(
-                            f"Baixando Evolution API... "
+                            f"Baixando WPPConnect Server... "
                             f"{mb_down:.1f} MB / {mb_total:.1f} MB"
                         )
                     else:
                         self._set_status(
-                            f"Baixando Evolution API... {mb_down:.1f} MB"
+                            f"Baixando WPPConnect Server... {mb_down:.1f} MB"
                         )
         except Exception as exc:
             if not self._cancelled:

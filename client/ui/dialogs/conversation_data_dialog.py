@@ -9,7 +9,7 @@ Opens a modal dialog showing WhatsApp-style information about a chat.
     – Participants    (wx.ListCtrl with name / phone / admin flag)
     – Media           (count of locally-stored media files)
 
-Profile / group data is fetched from the Evolution API in a background
+Profile / group data is fetched from the WPPConnect Server in a background
 thread after the dialog opens; the controls are updated via wx.CallAfter.
 Screen-reader accessibility is achieved through standard wxPython controls
 and proper label association — no visual-only information is presented.

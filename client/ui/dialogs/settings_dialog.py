@@ -252,7 +252,7 @@ class SettingsDialog(wx.Dialog):
         conn_sizer = wx.BoxSizer(wx.VERTICAL)
 
         conn_sizer.Add(
-            wx.StaticText(self._conn_page, label=i18n.t("evolution_port_label")),
+            wx.StaticText(self._conn_page, label=i18n.t("wpp_port_label")),
             0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
         )
         self._port_field = wx.TextCtrl(self._conn_page, style=wx.TE_DONTWRAP)
@@ -351,7 +351,7 @@ class SettingsDialog(wx.Dialog):
         else:
             self._voice_focus_send_rb.SetValue(True)
 
-        self._port_field.SetValue(str(self.main_window.evolution_port))
+        self._port_field.SetValue(str(self.main_window.wpp_port))
 
         saved_speed = self.main_window.settings.get("audio_playback", {}).get("audio_default_speed", 1.0)
         try:
@@ -425,8 +425,8 @@ class SettingsDialog(wx.Dialog):
 
         # Port
         port = int(self._port_field.GetValue().strip())
-        self.main_window.settings.setdefault("connection", {})["evolution_port"] = port
-        self.main_window.evolution_port = port
+        self.main_window.settings.setdefault("connection", {})["wpp_port"] = port
+        self.main_window.wpp_port = port
 
         # Sounds
         self.main_window.settings.setdefault("general", {})["sounds_enabled"] = (

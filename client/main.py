@@ -379,17 +379,14 @@ class MainWindow(wx.Frame):
 
         self.ws = None
 
-        #Get connection settings (no authentication_server - Evolution runs locally)
-        self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "http://127.0.0.1")
-        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 6300)
-        if self.evolution_port == 3417:
-            self.evolution_port = 6300
-            self.settings.setdefault("connection", {})["evolution_port"] = 6300
-            self.save_settings()
-        self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
-        self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
-        logging.info("MainWindow: Evolution config - server=%s, port=%s, apikey=%s", 
-                     self.evolution_server, self.evolution_port, self.evolution_api_key)
+        conn = self.settings.get("connection", {})
+        self.wpp_server = conn.get("wpp_server") or conn.get("evolution_server", "http://127.0.0.1")
+        self.wpp_port = conn.get("wpp_port") or conn.get("evolution_port", 6300)
+        if self.wpp_port == 3417:
+            self.wpp_port = 6300
+        self.wpp_ws_server = conn.get("wpp_ws_server") or conn.get("evolution_ws_server", "ws://127.0.0.1")
+        self.wpp_api_key = conn.get("wpp_api_key") or conn.get("evolution_api_key", "wz-local-api-key")
+        logging.info("MainWindow: WPPConnect config - server=%s, port=%s", self.wpp_server, self.wpp_port)
 
         #Set basic variables
         self.chats = {}
@@ -404,13 +401,13 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Checking/installing API modules...")
         self.ensure_api_modules_installed()
 
-        # Check that the installed Evolution API meets the minimum required version
-        logging.info("MainWindow: Checking Evolution API version...")
+        # Check that the installed WPPConnect Server meets the minimum required version
+        logging.info("MainWindow: Checking WPPConnect Server version...")
         self.ensure_evolution_version()
 
-        #Start local Evolution API (if bundled)
+        # Start local WPPConnect Server (if bundled)
         self.evolution_process = None
-        logging.info("MainWindow: Ensuring Evolution process is running...")
+        logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
         self.ensure_evolution_running()
 
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
@@ -813,21 +810,22 @@ class MainWindow(wx.Frame):
 
     def _send_presence(self, presence: str):
         """
-        POST /instance/setPresence/{token}  (Evolution API v2)
-        Body: {"presence": "available" | "unavailable"}
+        POST /api/{session}/set-online-presence
+        Body: {"isOnline": true | false}
 
         Always runs on a background thread — never blocks the UI.
         """
         token = getattr(self, "token", None)
         if not token:
             return
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/instance/setPresence/{token}"
-        )
-        headers = {"apikey": token, "Content-Type": "application/json"}
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/set-online-presence"
+        is_online = presence == "available"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
         try:
-            requests.post(url, json={"presence": presence}, headers=headers, timeout=5)
+            requests.post(url, json={"isOnline": is_online}, headers=headers, timeout=5)
         except Exception:
             pass
 
@@ -1194,11 +1192,12 @@ class MainWindow(wx.Frame):
             self.notification_manager.send(title, body, remote_jid)
 
     def connect_websocket(self):
-        """Connect to the Evolution API WebSocket namespace.
+        """Connect to the WPPConnect Server WebSocket.
 
-        Retries up to 6 times with a 2-second delay to handle the brief window
-        after instance creation where the namespace isn't registered yet on the
-        socket.io server (race condition that causes 'namespace failed' errors).
+        Connects to both the session namespace and root namespace so that
+        global events (qrCode, phoneCode, session-logged) are received.
+        Retries up to 6 times with a 2-second delay to handle the brief
+        window after session creation where the namespace isn't ready yet.
         """
         import time
         max_attempts = 6
@@ -1209,22 +1208,15 @@ class MainWindow(wx.Frame):
                 logging.info("connect_websocket: Attempting connection %d/%d...", attempt, max_attempts)
                 if self.ws.sio.connected:
                     self.ws.sio.disconnect()
-                raw_token = self.token.split(":")[0]
-                try:
-                    self.ws.sio.connect(
-                        f"{self.evolution_ws_server}:{self.evolution_port}/",
-                        socketio_path="socket.io",
-                        headers={"apikey": self.token},
-                        namespaces=[f"/{raw_token}"],
-                    )
-                except socketio.exceptions.ConnectionError as exc:
-                    logging.warning("connect_websocket: Namespace connection failed, trying root namespace fallback: %s", exc)
-                    self.ws.sio.connect(
-                        f"{self.evolution_ws_server}:{self.evolution_port}/",
-                        socketio_path="socket.io",
-                        headers={"apikey": self.token},
-                        namespaces=["/"],
-                    )
+                # WPPConnect Server only uses the root Socket.IO namespace.
+                # All events (qrCode, phoneCode, received-message, etc.) are
+                # emitted via req.io.emit() on root "/".
+                self.ws.sio.connect(
+                    f"{self.wpp_ws_server}:{self.wpp_port}/",
+                    socketio_path="socket.io",
+                    headers={"apikey": self.token},
+                    namespaces=["/"],
+                )
                 logging.info("connect_websocket: Connected successfully on attempt %d.", attempt)
                 return
             except Exception as exc:
@@ -1358,7 +1350,7 @@ class MainWindow(wx.Frame):
         if result != wx.ID_OK:
             sys.exit(0)
 
-    # ── Evolution API version gate ────────────────────────────────────────────
+    # ── WPPConnect version gate ───────────────────────────────────────────────
 
     def _read_env_value(self, key: str, default: str = "") -> str:
         """Read a value from the bundled client .env file."""
@@ -1377,7 +1369,7 @@ class MainWindow(wx.Frame):
         return default
 
     def _get_installed_evolution_version(self) -> str:
-        """Read the Evolution API version from api/package.json."""
+        """Read the WPPConnect Server version from api/package.json."""
         pkg_path = resource_path("api", "package.json")
         try:
             with open(pkg_path, encoding="utf-8") as fh:
@@ -1467,20 +1459,20 @@ class MainWindow(wx.Frame):
             # incompatible API version
             sys.exit(0)
 
-    # ── Evolution API lifecycle ─────────────────────────────────────────────
+    # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
     def _is_evolution_running(self):
         """Return True if the Evolution API is already listening on the configured port."""
         try:
-            with _socket.create_connection(("127.0.0.1", self.evolution_port), timeout=1):
+            with _socket.create_connection(("127.0.0.1", self.wpp_port), timeout=1):
                 return True
         except OSError:
             return False
 
     def _start_evolution_background(self):
         """
-        Launch the bundled Evolution API node process in the background.
-        stdout and stderr are redirected to api/evolution.log so that startup
+        Launch the bundled WPPConnect Server node process in the background.
+        stdout and stderr are redirected to api/wppconnect.log so that startup
         errors can be shown to the user if the port never opens.
         Does nothing if the node or start.js files are not present (dev mode).
 
@@ -1504,9 +1496,9 @@ class MainWindow(wx.Frame):
 
             # Guarantee that the child Node process inherits the correct API key
             # regardless of whether the local start.js or .env has been preserved.
-            os.environ["AUTHENTICATION_API_KEY"] = self.evolution_api_key
+            os.environ["AUTHENTICATION_API_KEY"] = self.wpp_api_key
             os.environ["WPP_LID_MODE"] = "false"
-            os.environ["PORT"] = str(self.evolution_port)
+            os.environ["PORT"] = str(self.wpp_port)
             os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache", "puppeteer")
 
             spawned = False
@@ -1532,7 +1524,27 @@ class MainWindow(wx.Frame):
             pass
 
     def _stop_evolution(self):
-        """Terminate the Evolution API process and all its children."""
+        """Terminate the WPPConnect Server process and all its children.
+
+        Calls /close-session first so WPPConnect asks Puppeteer to
+        browser.close() Chrome gracefully, preventing stale Chrome windows.
+        """
+        token = getattr(self, "token", "")
+        if token:
+            try:
+                url = (
+                    f"{self.wpp_server}:{self.wpp_port}"
+                    f"/api/{token}/close-session"
+                )
+                requests.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=5,
+                )
+                time.sleep(2)
+            except Exception:
+                pass
+
         proc = getattr(self, "evolution_process", None)
         if proc and proc.poll() is None:
             try:
@@ -1555,7 +1567,7 @@ class MainWindow(wx.Frame):
 
     def ensure_evolution_running(self):
         """
-        Start the local Evolution API if it is not already listening.
+        Start the local WPPConnect Server if it is not already listening.
 
         Normal mode   — shows a progress dialog while waiting (up to 3 min).
         Background mode — polls silently; exits with code 1 on timeout.
@@ -1595,7 +1607,7 @@ class MainWindow(wx.Frame):
             sys.exit(1)
 
         from ui.dialogs.api_startup import ApiStartupDialog
-        dlg    = ApiStartupDialog(self, self.evolution_port)
+        dlg    = ApiStartupDialog(self, self.wpp_port)
         result = dlg.ShowModal()
         if dlg:
             dlg.Destroy()
@@ -2045,7 +2057,7 @@ class MainWindow(wx.Frame):
                 pass
         if token and ":" not in token:
             try:
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{token}/{self.evolution_api_key}/generate-token"
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/{self.wpp_api_key}/generate-token"
                 import requests
                 response = requests.post(url, timeout=10)
                 if response.status_code in (200, 201):
@@ -2099,7 +2111,7 @@ class MainWindow(wx.Frame):
 
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/status-session"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -2124,7 +2136,7 @@ class MainWindow(wx.Frame):
                 if status in ("CONNECTED", "open"):
                     self._wa_connected = True
                     try:
-                        dev_url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/host-device"
+                        dev_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/host-device"
                         dev_resp = requests.get(dev_url, headers=headers, timeout=5)
                         if dev_resp.status_code in (200, 201):
                             dev_data = dev_resp.json()
@@ -2156,7 +2168,7 @@ class MainWindow(wx.Frame):
                 else:
                     # Status is CLOSED or unknown: safe to start a new session.
                     try:
-                        start_url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/start-session"
+                        start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
                         requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
                         logging.info("[check_wa_connection_http] Sent auto-start session command")
                     except Exception as e:
@@ -2283,7 +2295,7 @@ class MainWindow(wx.Frame):
                 # Probe the API: if it already has chats, start sync immediately
                 try:
                     url = (
-                        f"{self.evolution_server}:{self.evolution_port}"
+                        f"{self.wpp_server}:{self.wpp_port}"
                         f"/api/{self.token}/list-chats"
                     )
                     headers = {
@@ -2388,13 +2400,13 @@ class MainWindow(wx.Frame):
             return {}
 
     def get_remote_chats(self, chats):
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/all-chats"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/all-chats"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=30)
             if response.status_code not in (200, 201):
                 logging.error(f"[get_remote_chats] API error {response.status_code}: {response.text[:200]}")
                 return chats
@@ -2512,6 +2524,21 @@ class MainWindow(wx.Frame):
                         if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
                             continue
                         chats[jid][k] = v
+            # Sync mute state from server into local settings (server is source of truth).
+            muted_chats = self.settings.setdefault("muted_chats", {})
+            now = int(time.time())
+            for chat in response_data:
+                if not isinstance(chat, dict):
+                    continue
+                jid = chat.get("remoteJid", "")
+                if not jid:
+                    continue
+                mute_expiry = chat.get("muteExpiration", 0)
+                if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
+                    muted_chats[jid] = int(mute_expiry)
+                elif jid in muted_chats:
+                    del muted_chats[jid]
+
             self.save_data(chats, self.contacts)
             return chats
         except Exception as e:
@@ -2727,13 +2754,13 @@ class MainWindow(wx.Frame):
             return {}
 
     def get_remote_contacts(self):
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/all-contacts"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/all-contacts"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=30)
             if response.status_code not in (200, 201):
                 logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
                 response_data = []
@@ -3476,7 +3503,7 @@ class MainWindow(wx.Frame):
             phone = remote_jid
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-messages/{phone}?count={limit}"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -3762,7 +3789,7 @@ class MainWindow(wx.Frame):
         }
 
         if mentioned_jids:
-            url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-mentioned"
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
             phone_net = remote_jid
             if phone_net.endswith("@s.whatsapp.net"):
                 phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
@@ -3778,7 +3805,7 @@ class MainWindow(wx.Frame):
         else:
             quoted_id = self._serialize_quoted_id(quoted) if quoted else None
             if quoted_id:
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-reply"
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
                     phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
@@ -3789,7 +3816,7 @@ class MainWindow(wx.Frame):
                 }
                 print(f"[send_text_message] sending quoted reply via send-reply to {phone_net}, quoted key.id={quoted_id}")
             else:
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                 payload = {
                     "phone": remote_jid,
                     "message": text,
@@ -3802,7 +3829,7 @@ class MainWindow(wx.Frame):
                 # try sending it as a plain message instead of leaving it pending forever.
                 if quoted_id:
                     print(f"[send_text_message] Quoted send failed (HTTP {response.status_code}). Retrying without quote...")
-                    url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-message"
+                    url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     payload = {
                         "phone": remote_jid,
                         "message": text,
@@ -3849,12 +3876,12 @@ class MainWindow(wx.Frame):
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
         except Exception:
             return False
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/send-voice-base64"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-voice-base64"
         quoted_id = self._serialize_quoted_id(quoted) if quoted else None
         payload = {
-            "phone": remote_jid,
-            "base64": f"data:audio/wav;base64,{audio_b64}",
-            "isGroup": remote_jid.endswith("@g.us")
+            "phone": [remote_jid],
+            "base64Ptt": f"data:audio/ogg;base64,{audio_b64}",
+            "isGroup": remote_jid.endswith("@g.us"),
         }
         if quoted_id:
             payload["quotedMessageId"] = quoted_id
@@ -3890,13 +3917,13 @@ class MainWindow(wx.Frame):
 
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
         """Send a reaction to a message via the WPPConnect Server API."""
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/react-message"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/react-message"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
         payload = {
-            "messageId": msg_key.get("id", ""),
+            "msgId": msg_key.get("id", ""),
             "reaction": emoji
         }
         try:
@@ -4333,7 +4360,7 @@ class MainWindow(wx.Frame):
                     if participant.endswith("@s.whatsapp.net") or participant.endswith("@c.us"):
                         participant = participant.split("@")[0] + "@c.us"
                     msg_id = f"{msg_id}_{participant}"
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-media-by-message/{msg_id}"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -4406,7 +4433,7 @@ class MainWindow(wx.Frame):
                     msg_id = f"{msg_id}_{participant}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={msg_id}"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -4463,13 +4490,10 @@ class MainWindow(wx.Frame):
             pass
 
     def mark_conversation_as_read(self, remote_jid: str):
-        """Mark conversation as read locally and notify the API.
+        """Mark conversation as read locally and notify WPPConnect.
 
-        Evolution API v2 expects POST /chat/markMessageAsRead with
-        {"readMessages": [{"remoteJid", "fromMe", "id"}]} where "id" must be
-        a real message ID; we send the key of the newest incoming message.
-        The Evolution API then calls both Baileys readMessages (sends individual
-        read receipts) and chatModify(markRead=true) for proper multi-device sync.
+        WPPConnect's sendSeen only needs the chat JID — no message key required.
+        The HTTP call runs in a background thread to avoid blocking the UI.
         """
         chat = self.chats.get(remote_jid)
         if chat is None:
@@ -4481,60 +4505,28 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
 
         if unread == 0:
-            return  # nothing to mark as read on the server
-
-        records = chat.get("messages", {}).get("messages", {}).get("records", [])
-        latest = max(
-            (m for m in records
-             if not m.get("key", {}).get("fromMe") and m.get("key", {}).get("id")),
-            key=lambda m: int(m.get("messageTimestamp", 0) or 0),
-            default=None,
-        )
-        if latest is None:
-            # Fallback: use the chat-level lastMessage stored by findChats
-            lm = chat.get("lastMessage", {})
-            if (lm and isinstance(lm, dict)
-                    and lm.get("key", {}).get("id")
-                    and not lm.get("key", {}).get("fromMe")):
-                latest = lm
-
-        if latest is None:
-            print(f"[mark_as_read] No incoming message found for {remote_jid}, skipping API call")
             return
 
-        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        target_jid = lid if lid else remote_jid
+        def _do_api():
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            }
+            try:
+                resp = requests.post(
+                    url,
+                    json={"phone": [remote_jid]},
+                    headers=headers,
+                    timeout=10,
+                )
+                if not resp.ok:
+                    logging.warning("[mark_as_read] API error %s for %s: %s",
+                                    resp.status_code, remote_jid, resp.text[:200])
+            except Exception as exc:
+                logging.warning("[mark_as_read] Request failed for %s: %s", remote_jid, exc)
 
-        key = latest.get("key", {})
-        msg_key = {
-            "remoteJid": target_jid,
-            "fromMe":    False,
-            "id":        key.get("id", ""),
-        }
-        # Include participant for group chats so Evolution API can forward it
-        # to Baileys readMessages/chatModify with the correct sender context.
-        if key.get("participant"):
-            msg_key["participant"] = key["participant"]
-
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/api/{self.token}/send-seen"
-        )
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        }
-        try:
-            resp = requests.post(
-                url,
-                json={"phone": [target_jid]},
-                headers=headers,
-                timeout=10,
-            )
-            if not resp.ok:
-                print(f"[mark_as_read] API error {resp.status_code} for {remote_jid}: {resp.text[:200]}")
-        except Exception as exc:
-            print(f"[mark_as_read] Request failed for {remote_jid}: {exc}")
+        threading.Thread(target=_do_api, daemon=True).start()
 
     def mark_conversation_as_unread(self, remote_jid: str):
         chat = self.chats.get(remote_jid)
@@ -4558,7 +4550,7 @@ class MainWindow(wx.Frame):
 
         def _resolve():
             try:
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/pn-lid/{my_jid}"
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{my_jid}"
                 headers = {
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -4627,7 +4619,7 @@ class MainWindow(wx.Frame):
                 continue
             try:
                 # First, resolve pn-lid mapping
-                url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
                 headers = {
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -4655,7 +4647,7 @@ class MainWindow(wx.Frame):
                 # Fetch profile info for name caching
                 # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
                 target_jid = canonical_jid if canonical_jid else lid_jid
-                url_profile = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{target_jid}"
+                url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
                 logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
                 resp_profile = requests.get(url_profile, headers=headers, timeout=10)
                 if resp_profile.status_code in (200, 201):
@@ -4707,7 +4699,7 @@ class MainWindow(wx.Frame):
                 resolved = getattr(self, "_lid_to_phone", {}).get(original_jid, "")
                 if resolved:
                     jid = resolved
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/contact/{jid}"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{jid}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -4747,7 +4739,7 @@ class MainWindow(wx.Frame):
         if not jid:
             return
         is_group = jid.endswith("@g.us")
-        url = f"{self.evolution_server}:{self.evolution_port}/api/{self.token}/subscribe-presence"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -4845,7 +4837,7 @@ class MainWindow(wx.Frame):
     def get_group_info(self, jid: str) -> dict:
         """Fetch group metadata via GET /api/{session}/group-info/{groupId}"""
         url = (
-            f"{self.evolution_server}:{self.evolution_port}"
+            f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/group-info/{jid}"
         )
         headers = {
@@ -4867,7 +4859,7 @@ class MainWindow(wx.Frame):
         """action: 'block' or 'unblock'"""
         endpoint = "block-contact" if action == "block" else "unblock-contact"
         url = (
-            f"{self.evolution_server}:{self.evolution_port}"
+            f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/{endpoint}"
         )
         headers = {
@@ -4901,11 +4893,41 @@ class MainWindow(wx.Frame):
         else:
             self.settings["muted_chats"][jid] = int(time.time()) + duration_secs
         self.save_settings()
+        self._sync_mute_to_server(jid, duration_secs)
 
     def unmute_chat(self, jid: str):
         self.settings.setdefault("muted_chats", {})
         self.settings["muted_chats"].pop(jid, None)
         self.save_settings()
+        self._sync_mute_to_server(jid, 0)
+
+    def _sync_mute_to_server(self, jid: str, duration_secs: int):
+        """Send mute/unmute to WPPConnect in a background thread. duration_secs=0 = unmute."""
+        def _do():
+            try:
+                if duration_secs == 0:
+                    wpp_time, wpp_type = 0, "hours"
+                elif duration_secs == -1:
+                    wpp_time, wpp_type = 8766, "hours"  # ~1 year (closest to permanent)
+                else:
+                    wpp_time = max(1, duration_secs // 3600)
+                    wpp_type = "hours"
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mute"
+                payload = {
+                    "phone": jid,
+                    "time": wpp_time,
+                    "type": wpp_type,
+                    "isGroup": jid.endswith("@g.us"),
+                }
+                requests.post(
+                    url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── Archive ───────────────────────────────────────────────────────────────
 
@@ -4935,7 +4957,7 @@ class MainWindow(wx.Frame):
         self._api_archive_chat(jid, archive=False)
 
     def _api_archive_chat(self, jid: str, archive: bool):
-        url = (f"{self.evolution_server}:{self.evolution_port}"
+        url = (f"{self.wpp_server}:{self.wpp_port}"
                f"/api/{self.token}/archive-chat")
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -4997,13 +5019,13 @@ class MainWindow(wx.Frame):
     # ── Group ─────────────────────────────────────────────────────────────────
 
     def leave_group(self, jid: str):
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/group/leaveGroup/{self.token}"
-        )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/leave-group"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
         try:
-            requests.delete(url, params={"groupJid": jid}, headers=headers, timeout=10)
+            requests.post(url, json={"groupId": jid}, headers=headers, timeout=10)
         except Exception:
             pass
         # Archive instead of delete so the message history is preserved locally.
@@ -5015,20 +5037,23 @@ class MainWindow(wx.Frame):
         participants: list of phone number strings (e.g. ["5511999999999"])
         Returns (True, group_jid) on success, (False, error_message) on failure.
         """
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/group/create/{self.token}"
-        )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/create-group"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
         payload = {
-            "subject":      name,
-            "participants": [{"number": p} for p in participants],
+            "name":         name,
+            "participants": [f"{p}@c.us" for p in participants],
         }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=30)
             if r.status_code in (200, 201):
-                # v2 returns the Baileys GroupMetadata object; the JID is "id"
-                return True, r.json().get("id", "")
+                resp = r.json().get("response", {})
+                gid = resp.get("gid", {})
+                if isinstance(gid, dict):
+                    gid = gid.get("_serialized", "")
+                return True, gid or ""
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
         except Exception as exc:
             return False, str(exc)
@@ -5038,16 +5063,14 @@ class MainWindow(wx.Frame):
         Add one or more participants to a group.
         Returns (True, "") on success, (False, error_message) on failure.
         """
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/group/updateParticipant/{self.token}"
-        )
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
-        # v2 expects numeric strings (phone numbers), not full JIDs
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/add-participant-group"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
         payload = {
-            "groupJid":    group_jid,
-            "action":      "add",
-            "participants": [j.split("@")[0] for j in participant_jids],
+            "groupId":      group_jid,
+            "participantId": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
         }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -5078,28 +5101,38 @@ class MainWindow(wx.Frame):
             return False
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         filename = os.path.basename(file_path)
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/message/sendMedia/{self.token}"
-        )
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file-base64"
         payload = {
-            "number":    remote_jid,
-            "mediatype": media_type,
-            "media":     media_b64,
-            "mimetype":  mime,
-            "fileName":  filename,
-            "caption":   caption,
+            "phone":    [remote_jid],
+            "base64":   f"data:{mime};base64,{media_b64}",
+            "filename": filename,
+            "caption":  caption,
+            "isGroup":  remote_jid.endswith("@g.us"),
         }
         if quoted:
-            _cq = self._clean_quoted(quoted)
-            if _cq:
-                payload["quoted"] = _cq
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+            quoted_id = self._serialize_quoted_id(quoted)
+            if quoted_id:
+                payload["quotedMessageId"] = quoted_id
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=60)
             if r.status_code in (200, 201):
                 try:
-                    return r.json().get("key", {}).get("id") or True
+                    body = r.json()
+                    resp = body.get("response", body)
+                    if isinstance(resp, list) and resp:
+                        resp = resp[0]
+                    if isinstance(resp, dict):
+                        msg_id = resp.get("id")
+                        if isinstance(msg_id, dict):
+                            msg_id = msg_id.get("_serialized", "")
+                        if msg_id:
+                            parts = msg_id.split("_")
+                            return parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                    return True
                 except Exception:
                     return True
             err = f"HTTP {r.status_code}"
@@ -5124,25 +5157,28 @@ class MainWindow(wx.Frame):
         name = contact_info.get("pushName") or ""
         jid = contact_info.get("remoteJid", "")
         phone_raw = jid.split("@")[0] if "@" in jid else jid
-        phone_fmt  = format_number(jid)
-        url = (
-            f"{self.evolution_server}:{self.evolution_port}"
-            f"/message/sendContact/{self.token}"
-        )
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact-vcard"
         payload = {
-            "number":  remote_jid,
-            "contact": [{"fullName": name, "wuid": phone_raw, "phoneNumber": phone_fmt}],
+            "phone":       [remote_jid],
+            "isGroup":     remote_jid.endswith("@g.us"),
+            "contactsId":  [f"{phone_raw}@c.us"],
         }
         if quoted:
-            _cq = self._clean_quoted(quoted)
-            if _cq:
-                payload["quoted"] = _cq
-        headers = {"apikey": self.token, "Content-Type": "application/json"}
+            quoted_id = self._serialize_quoted_id(quoted)
+            if quoted_id:
+                payload["quotedMessageId"] = quoted_id
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 try:
-                    return r.json().get("key", {}).get("id") or True
+                    resp = r.json().get("response", {})
+                    if isinstance(resp, list) and resp:
+                        resp = resp[0]
+                    return (resp or {}).get("id") or True
                 except Exception:
                     return True
             return None
@@ -5157,7 +5193,7 @@ class MainWindow(wx.Frame):
         if lid_jid:
             remote_jid = lid_jid
         url = (
-            f"{self.evolution_server}:{self.evolution_port}"
+            f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/edit-message"
         )
         if remote_jid.endswith("@g.us"):
@@ -5184,7 +5220,7 @@ class MainWindow(wx.Frame):
         if lid_jid:
             remote_jid = lid_jid
         url = (
-            f"{self.evolution_server}:{self.evolution_port}"
+            f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/delete-message"
         )
         if remote_jid.endswith("@g.us"):
