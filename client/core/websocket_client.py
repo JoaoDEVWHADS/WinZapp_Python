@@ -809,28 +809,40 @@ class WebSocketClient:
                 if author:
                     participant_jid = author.replace("@c.us", "@s.whatsapp.net")
 
-        if has_quote:
-            # Preserve full Baileys-style dict format if available, otherwise fallback to plain conversation dict
-            quoted_msg_payload = quoted_msg if isinstance(quoted_msg, dict) else {"conversation": quoted_body}
+        wpp_mentioned = wpp_msg.get("mentionedJidList") or []
+        mentioned_jids = [
+            m.replace("@c.us", "@s.whatsapp.net")
+            for m in wpp_mentioned
+            if isinstance(m, str)
+        ]
 
-            context_info = {
-                "stanzaId": clean_quoted_id,
-                "participant": participant_jid,
-                "quotedMessage": quoted_msg_payload
-            }
+        if has_quote or mentioned_jids:
+            quoted_msg_payload = quoted_msg if isinstance(quoted_msg, dict) else {"conversation": quoted_body}
+            context_info = {}
+            if has_quote:
+                context_info["stanzaId"] = clean_quoted_id
+                context_info["participant"] = participant_jid
+                context_info["quotedMessage"] = quoted_msg_payload
+            if mentioned_jids:
+                context_info["mentionedJid"] = mentioned_jids
             
-            # Put under extendedTextMessage (legacy format support)
-            normalized["message"]["extendedTextMessage"] = {
-                "text": conversation,
-                "contextInfo": context_info
-            }
-            
-            # Also put under specific sub-keys (e.g. imageMessage, videoMessage) if they exist
-            for sub_key in (
-                "imageMessage", "videoMessage", "audioMessage", "documentMessage",
-                "stickerMessage", "locationMessage", "contactMessage"
-            ):
-                if sub_key in normalized["message"] and isinstance(normalized["message"][sub_key], dict):
-                    normalized["message"][sub_key]["contextInfo"] = context_info
+            # If msg_type is conversation, promote it to extendedTextMessage
+            if mapped_type == "conversation":
+                mapped_type = "extendedTextMessage"
+                normalized["messageType"] = "extendedTextMessage"
+                normalized["message"] = {
+                    "extendedTextMessage": {
+                        "text": conversation,
+                        "contextInfo": context_info
+                    }
+                }
+            else:
+                # Put under specific sub-keys (e.g. imageMessage, videoMessage) if they exist
+                for sub_key in (
+                    "imageMessage", "videoMessage", "audioMessage", "documentMessage",
+                    "stickerMessage", "locationMessage", "contactMessage"
+                ):
+                    if sub_key in normalized["message"] and isinstance(normalized["message"][sub_key], dict):
+                        normalized["message"][sub_key]["contextInfo"] = context_info
 
         return normalized
