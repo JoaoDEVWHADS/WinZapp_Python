@@ -2741,7 +2741,38 @@ class ConversationsPanel(wx.Panel):
             daemon=True,
         ).start()
 
-    # ── Open / Save As ──────────────────────────────────────────────────────
+    def _open_file_safely(self, filepath: str):
+        """Open a file with the default associated program in the foreground.
+        Falls back to Windows 'openas' dialog if no program is associated."""
+        import sys
+        import os
+        import ctypes
+        if sys.platform == "win32":
+            try:
+                # SW_SHOW = 5
+                res = ctypes.windll.shell32.ShellExecuteW(None, "open", filepath, None, None, 5)
+                # ShellExecuteW returns <= 32 if failed
+                if res <= 32:
+                    if res == 31:  # SE_ERR_NOASSOC
+                        ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
+                    else:
+                        raise OSError(f"ShellExecuteW failed with code {res}")
+            except Exception:
+                try:
+                    ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
+                except Exception:
+                    os.startfile(filepath)
+        else:
+            if sys.platform == "darwin":
+                import subprocess
+                subprocess.call(["open", filepath])
+            else:
+                import subprocess
+                try:
+                    subprocess.call(["xdg-open", filepath])
+                except Exception:
+                    if hasattr(os, "startfile"):
+                        os.startfile(filepath)
 
     def _on_action_open(self, event, index=None):
         if index is None:
@@ -2788,7 +2819,7 @@ class ConversationsPanel(wx.Panel):
                 tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
                 tmp.write(content)
                 tmp.close()
-                wx.CallAfter(lambda: os.startfile(tmp.name))
+                wx.CallAfter(lambda: self._open_file_safely(tmp.name))
             except Exception as exc:
                 wx.CallAfter(
                     wx.MessageBox,
