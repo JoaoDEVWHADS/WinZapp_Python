@@ -2536,9 +2536,15 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
-        # Full untruncated message text is delivered to screen readers via
-        # AccessibleMessageList.GetName() (IAccessible override). No direct
-        # output() call needed here — that would cause double speech on NVDA/JAWS.
+        # Speak full message text via accessible_output2 (covers NVDA/JAWS via
+        # their direct speech API, bypassing the OS ListView truncation).
+        # interrupt=True cancels any truncated native announcement already in progress.
+        # AccessibleMessageList.GetName() additionally covers IAccessible/MSAA readers.
+        if 0 <= idx < len(self._sorted_messages):
+            m = self._sorted_messages[idx]
+            if not self._is_separator(m):
+                full_text = self._render_message_line(m, truncate=False)
+                self.main_window.output(full_text, interrupt=True)
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
