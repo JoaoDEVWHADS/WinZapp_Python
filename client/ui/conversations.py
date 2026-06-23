@@ -2641,13 +2641,42 @@ class ConversationsPanel(wx.Panel):
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
     def _on_messages_list_key_down(self, event):
-        """Make Space fire the same activation as Enter / double-click."""
+        """Space: activate, L: show full message in dialog."""
+        idx = self.messages_list.GetFocusedItem()
         if event.GetKeyCode() == wx.WXK_SPACE:
-            idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
+        elif event.GetKeyCode() in (ord("L"), ord("l")):
+            if idx >= 0 and self._is_truncated(idx):
+                self._show_full_message_dialog(idx)
         else:
             event.Skip()
+
+    def _is_truncated(self, index):
+        msgs = getattr(self, "_sorted_messages", [])
+        if 0 <= index < len(msgs):
+            full = self._render_message_line(msgs[index], truncate=False)
+            truncated = self._render_message_line(msgs[index], truncate=True)
+            return len(full) > len(truncated)
+        return False
+
+    def _show_full_message_dialog(self, index):
+        msgs = getattr(self, "_sorted_messages", [])
+        if not (0 <= index < len(msgs)):
+            return
+        text = self._render_message_line(msgs[index], truncate=False)
+        dlg = wx.Dialog(self, title="Mensagem completa", size=(600, 400))
+        txt = wx.TextCtrl(dlg, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2)
+        txt.SetValue(text)
+        txt.SetInsertionPoint(0)
+        btn = wx.Button(dlg, wx.ID_CLOSE, "Fechar")
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(txt, 1, wx.EXPAND | wx.ALL, 5)
+        sizer.Add(btn, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
+        dlg.SetSizer(sizer)
+        btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Close())
+        dlg.ShowModal()
+        dlg.Destroy()
 
     def _on_messages_list_resize(self, event):
         if hasattr(self, "messages_list") and self.messages_list:
