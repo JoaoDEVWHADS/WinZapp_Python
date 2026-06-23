@@ -508,60 +508,6 @@ export async function getMediaByMessage(req: Request, res: Response) {
   }
 }
 
-export async function getMediaByMessage(req: Request, res: Response) {
-  /**
-   * #swagger.tags = ["Messages"]
-     #swagger.autoBody=false
-     #swagger.operationId = 'getMediaByMessage'
-     #swagger.security = [{
-            "bearerAuth": []
-     }]
-     #swagger.parameters["session"] = {
-      schema: 'NERDWHATS_AMERICA'
-     }
-     #swagger.parameters["session"] = {
-      schema: 'messageId'
-     }
-   */
-  const client = req.client;
-  const { messageId } = req.params;
-
-  try {
-    const message = await client.getMessageById(messageId);
-
-    if (!message)
-      res.status(400).json({
-        status: 'error',
-        message: 'Message not found',
-      });
-
-    if (!(message['mimetype'] || message.isMedia || message.isMMS))
-      res.status(400).json({
-        status: 'error',
-        message: 'Message does not contain media',
-      });
-
-    const msgAny = message as any;
-    const tempSavePath = `./userDataDir/temp_media_${(msgAny.id && typeof msgAny.id === 'object') ? msgAny.id.id : (msgAny.id || messageId)}`;
-    await client.decryptAndSaveFile(message, tempSavePath);
-    const buffer = fs.readFileSync(tempSavePath);
-    try {
-      fs.unlinkSync(tempSavePath);
-    } catch {}
-
-    res
-      .status(200)
-      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype });
-  } catch (ex) {
-    req.logger.error(ex);
-    res.status(500).json({
-      status: 'error',
-      message: 'Decrypt file error',
-      error: ex,
-    });
-  }
-}
-
 export async function getSessionState(req: Request, res: Response) {
   /**
      #swagger.tags = ["Auth"]
