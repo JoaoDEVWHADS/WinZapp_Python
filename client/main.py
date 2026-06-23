@@ -973,6 +973,11 @@ class MainWindow(wx.Frame):
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
 
+        # If the message is from ourselves, ensure from_me is True
+        sender = key.get("participant") or key.get("remoteJid") or ""
+        if sender and self._is_self_jid(sender):
+            from_me = True
+
         if not remote_jid:
             return
 
@@ -1258,16 +1263,26 @@ class MainWindow(wx.Frame):
         In background mode dialogs are never shown; if the setup is incomplete
         the process exits silently.
         """
-        node_exe     = resource_path("node", "node.exe")
+        import sys
+        import shutil
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+
         dist_server  = resource_path("api",  "dist", "server.js")
         node_modules = resource_path("api",  "node_modules")
 
-        # node.exe is mandatory — without it neither npm nor the API can run.
+        # Node.js is mandatory — without it neither npm nor the API can run.
         if not os.path.isfile(node_exe):
             wx.MessageBox(
-                "O Node.js portátil não foi encontrado (node/node.exe).\n\n"
+                "O Node.js não foi encontrado.\n\n"
                 "Este arquivo é essencial para o funcionamento do WinZapp. "
-                "Por favor, reinstale o programa.",
+                "Por favor, instale o Node.js no sistema ou reinstale o programa.",
                 "Node.js não encontrado",
                 wx.OK | wx.ICON_ERROR,
             )
@@ -1300,22 +1315,39 @@ class MainWindow(wx.Frame):
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
                     missing,
                 )
-                node_exe = resource_path("node", "node.exe")
-                npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
-                node_dir = resource_path("node")
+                if sys.platform == "win32":
+                    node_exe = resource_path("node", "node.exe")
+                    npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                    npm_cmd  = [node_exe, npm_cli]
+                    node_dir = resource_path("node")
+                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+                else:
+                    local_node = resource_path("node", "node")
+                    if os.path.isfile(local_node):
+                        node_exe = local_node
+                    else:
+                        node_exe = shutil.which("node") or "node"
+                    local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                    if os.path.isfile(local_npm):
+                        npm_cmd = [node_exe, local_npm]
+                    else:
+                        npm_cmd = [shutil.which("npm") or "npm"]
+                    node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
                 npm_env  = {
                     **os.environ,
-                    "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+                    "PATH": path_env,
                     "PUPPETEER_CACHE_DIR": resource_path("api", ".cache", "puppeteer"),
                 }
                 api_dir  = resource_path("api")
                 creation_flags = 0
-                if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
                     creation_flags = subprocess.CREATE_NO_WINDOW
 
                 try:
                     proc = subprocess.Popen(
-                        [node_exe, npm_cli, "install", "--no-audit", "--no-fund", "--include=optional"],
+                        npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
                         cwd=api_dir,
                         env=npm_env,
                         creationflags=creation_flags,
@@ -1487,7 +1519,18 @@ class MainWindow(wx.Frame):
         is spawned using the non-elevated linked token via CreateProcessWithTokenW
         so that PostgreSQL's initdb can start (it refuses to run as root/admin).
         """
-        node_exe = resource_path("node", "node.exe")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+
         start_js  = resource_path("api",  "start.js")
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs Evolution separately
@@ -1534,10 +1577,14 @@ class MainWindow(wx.Frame):
             # when the parent process is elevated.  De-elevation via the Safer API
             # is therefore not needed and would prevent Node.js from writing session
             # tokens/cache to the installation directory, breaking admin users.
+            creation_flags = 0
+            if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
             self.evolution_process = subprocess.Popen(
                 [node_exe, start_js],
                 cwd=cwd,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=creation_flags,
                 stdout=log_fh,
                 stderr=log_fh,
             )
@@ -1608,7 +1655,18 @@ class MainWindow(wx.Frame):
         if self._is_evolution_running():
             return  # Already up (e.g. left running from a previous session)
 
-        node_exe  = resource_path("node", "node.exe")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+
         start_js  = resource_path("api",  "start.js")
         dist_server = resource_path("api",  "dist", "server.js")
 
@@ -2302,7 +2360,19 @@ class MainWindow(wx.Frame):
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
-        self._sync_completed = True
+        if len(self.chats) > 0:
+            self._sync_completed = True
+        else:
+            self._sync_completed = False
+            # Schedule a retry in 15 seconds to see if history has loaded
+            def _retry_sync():
+                time.sleep(15)
+                # Check if we are still connected and still have 0 chats
+                if getattr(self, "_wa_connected", False) and len(self.chats) == 0:
+                    logging.info("[start_sync] Retrying empty chats sync...")
+                    self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+                    self.sync_thread.start()
+            threading.Thread(target=_retry_sync, daemon=True).start()
         self._initial_sync_running = False
 
     def wait_messages_set(self):
@@ -3202,6 +3272,13 @@ class MainWindow(wx.Frame):
         alt = key.get("remoteJidAlt", "")
         participant = key.get("participant", "")
 
+        # Guard against corrupt self-mappings: if any JID is ours, block cross-mapping with others
+        if self._is_self_jid(remote) or self._is_self_jid(alt) or self._is_self_jid(participant):
+            if alt and (self._is_self_jid(remote) != self._is_self_jid(alt)):
+                alt = ""
+            if participant and (self._is_self_jid(remote) != self._is_self_jid(participant)):
+                participant = ""
+
         updated = False
         # Initialize dictionary if not present
         if not hasattr(self, "_lid_to_phone"):
@@ -3215,11 +3292,6 @@ class MainWindow(wx.Frame):
                 self._phone_to_lid[alt] = remote
                 updated = True
                 logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
-            if participant and participant.endswith("@lid") and self._lid_to_phone.get(participant) != alt:
-                self._lid_to_phone[participant] = alt
-                self._phone_to_lid[alt] = participant
-                updated = True
-                logging.info(f"[LID Mapping] Extracted participant mapping: {participant} <-> {alt}")
         elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
             if self._lid_to_phone.get(alt) != remote:
                 self._lid_to_phone[alt] = remote
@@ -3344,8 +3416,6 @@ class MainWindow(wx.Frame):
                     if alt and alt.endswith("@s.whatsapp.net"):
                         if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
                             self.register_jid_mapping(remote, alt)
-                        if participant and participant.endswith("@lid") and self._lid_to_phone.get(participant) != alt:
-                            self.register_jid_mapping(participant, alt)
                     elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
                         if self._lid_to_phone.get(alt) != remote:
                             self.register_jid_mapping(alt, remote)
@@ -3964,6 +4034,8 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
+        quoted_id = None
+
         if mentioned_jids:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
             phone_net = remote_jid
@@ -3976,7 +4048,10 @@ class MainWindow(wx.Frame):
             payload = {
                 "phone": [phone_net],
                 "message": text,
-                "mentioned": mentioned_clean
+                "mentioned": mentioned_clean,
+                "options": {
+                    "linkPreview": False
+                }
             }
         else:
             quoted_id = self._serialize_quoted_id(quoted) if quoted else None
@@ -3988,7 +4063,10 @@ class MainWindow(wx.Frame):
                 payload = {
                     "phone": [phone_net],
                     "message": text,
-                    "messageId": quoted_id
+                    "messageId": quoted_id,
+                    "options": {
+                        "linkPreview": False
+                    }
                 }
                 logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
             else:
@@ -3999,7 +4077,10 @@ class MainWindow(wx.Frame):
                 payload = {
                     "phone": [phone_net],
                     "message": text,
-                    "isGroup": phone_net.endswith("@g.us")
+                    "isGroup": phone_net.endswith("@g.us"),
+                    "options": {
+                        "linkPreview": False
+                    }
                 }
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -4015,7 +4096,10 @@ class MainWindow(wx.Frame):
                     payload = {
                         "phone": [fb_phone],
                         "message": text,
-                        "isGroup": fb_phone.endswith("@g.us")
+                        "isGroup": fb_phone.endswith("@g.us"),
+                        "options": {
+                            "linkPreview": False
+                        }
                     }
                     response = requests.post(url, json=payload, headers=headers, timeout=15)
                 
@@ -4759,6 +4843,14 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
+        # Resolve LID if available, otherwise format to @c.us for WPPConnect
+        target_phone = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if not target_phone:
+            if remote_jid.endswith("@s.whatsapp.net"):
+                target_phone = remote_jid.split("@")[0] + "@c.us"
+            else:
+                target_phone = remote_jid
+
         def _do_api():
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {
@@ -4768,15 +4860,15 @@ class MainWindow(wx.Frame):
             try:
                 resp = requests.post(
                     url,
-                    json={"phone": [remote_jid]},
+                    json={"phone": [target_phone]},
                     headers=headers,
                     timeout=10,
                 )
                 if not resp.ok:
                     logging.warning("[mark_as_read] API error %s for %s: %s",
-                                    resp.status_code, remote_jid, resp.text[:200])
+                                    resp.status_code, target_phone, resp.text[:200])
             except Exception as exc:
-                logging.warning("[mark_as_read] Request failed for %s: %s", remote_jid, exc)
+                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
 
         threading.Thread(target=_do_api, daemon=True).start()
 
@@ -4812,38 +4904,48 @@ class MainWindow(wx.Frame):
                 if response.status_code in (200, 201):
                     res = response.json() or {}
                     logging.info(f"[Self LID Resolution] Response: {res}")
-                    res_data = res.get("response") if isinstance(res.get("response"), dict) else res
-                    lid_obj = res_data.get("lid") or {}
+                    # Parse LID JID
+                    lid_obj = res.get("lid") or {}
                     lid_jid = None
                     if isinstance(lid_obj, dict):
                         lid_jid = lid_obj.get("_serialized") or lid_obj.get("id")
                     elif isinstance(lid_obj, str):
                         lid_jid = lid_obj
                     if not lid_jid:
-                        lid_jid = res_data.get("lidJid")
+                        lid_jid = res.get("lidJid")
 
-                    if lid_jid:
+                    # Parse Phone JID
+                    phone_obj = res.get("phone") or res.get("phoneJid") or res.get("id") or {}
+                    phone_jid = None
+                    if isinstance(phone_obj, dict):
+                        phone_jid = phone_obj.get("_serialized") or phone_obj.get("id")
+                    elif isinstance(phone_obj, str):
+                        phone_jid = phone_obj
+
+                    if lid_jid and phone_jid:
+                        normalized_phone = self._normalize_jid(phone_jid)
                         normalized_lid = self._normalize_jid(lid_jid)
+                        self.my_jid = normalized_phone
                         self.my_lid = normalized_lid
                         
-                        # Clean up any bad mappings where my_jid or normalized_lid were mapped to other contacts
+                        # Clean up any bad mappings where normalized_phone or normalized_lid were mapped to other contacts
                         if hasattr(self, "_lid_to_phone"):
                             # If my own LID JID was mapped to another phone number, delete it
                             old_phone = self._lid_to_phone.get(normalized_lid)
-                            if old_phone and old_phone != my_jid:
+                            if old_phone and old_phone != normalized_phone:
                                 self._lid_to_phone.pop(normalized_lid, None)
                                 self._phone_to_lid.pop(old_phone, None)
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
                             
                             # If my own phone JID was mapped to another LID, delete it
-                            old_lid = self._phone_to_lid.get(my_jid)
+                            old_lid = self._phone_to_lid.get(normalized_phone)
                             if old_lid and old_lid != normalized_lid:
                                 self._phone_to_lid.pop(old_lid, None)
                                 self._lid_to_phone.pop(old_lid, None)
-                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {my_jid} was mapped to {old_lid}")
+                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_phone} was mapped to {old_lid}")
 
-                        self.register_jid_mapping(normalized_lid, my_jid)
-                        logging.info(f"[Self LID Resolution] Successfully resolved and registered own LID JID: {normalized_lid}")
+                        self.register_jid_mapping(normalized_lid, normalized_phone)
+                        logging.info(f"[Self LID Resolution] Successfully resolved and registered own JID mapping: {normalized_lid} <-> {normalized_phone}")
             except Exception as e:
                 logging.error(f"[Self LID Resolution] Error resolving self LID: {e}")
 
@@ -4855,6 +4957,12 @@ class MainWindow(wx.Frame):
             return
         if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
             return
+            
+        # Guard against corrupt self-mappings
+        if self._is_self_jid(lid_jid) or self._is_self_jid(phone_jid):
+            if not (self._is_self_jid(lid_jid) and self._is_self_jid(phone_jid)):
+                logging.warning(f"[LID Mapping] Blocked corrupt self-mapping attempt: {lid_jid} <-> {phone_jid}")
+                return
             
         if not hasattr(self, "_lid_to_phone"):
             self._lid_to_phone = {}
@@ -5539,12 +5647,32 @@ class MainWindow(wx.Frame):
         lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid_jid:
             remote_jid = lid_jid
+
+        # Find the message in records to see if we have a participant JID
+        participant = ""
+        chat = self.chats.get(remote_jid)
+        if chat:
+            records = chat.get("messages", {}).get("messages", {}).get("records", [])
+            for r in records:
+                if r.get("key", {}).get("id") == message_id:
+                    participant = r.get("key", {}).get("participant", "")
+                    break
+
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/edit-message"
         )
         if remote_jid.endswith("@g.us"):
-            full_id = f"true_{remote_jid}_{message_id}"
+            if participant:
+                participant_clean = participant.replace("@s.whatsapp.net", "@c.us")
+                full_id = f"true_{remote_jid}_{message_id}_{participant_clean}"
+            else:
+                my_jid = getattr(self, "my_jid", "")
+                if my_jid:
+                    my_jid_clean = my_jid.replace("@s.whatsapp.net", "@c.us")
+                    full_id = f"true_{remote_jid}_{message_id}_{my_jid_clean}"
+                else:
+                    full_id = f"true_{remote_jid}_{message_id}"
         else:
             full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
         
@@ -6118,6 +6246,7 @@ class MainWindow(wx.Frame):
             generate_and_save_key(key_file)
 
     def retrieve_secret_key(self):
+        self.generate_secret_key()
         return retrieve_key(data_path("secret.key"))
 
     def exception_handler(self, exc_type, exc_value, exc_traceback):

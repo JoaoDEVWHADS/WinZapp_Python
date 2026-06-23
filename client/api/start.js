@@ -91,7 +91,6 @@ const optimizedBrowserArgs = [
   '--ignore-certificate-errors-spki-list',
   '--js-flags="--max-old-space-size=256"', // Limits V8 heap size to 256MB
   '--no-zygote',
-  '--single-process', // Reduces multi-process overhead, saving memory/CPU
   '--disable-shared-workers',
 ];
 

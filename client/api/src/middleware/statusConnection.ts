@@ -28,15 +28,28 @@ export default async function statusConnection(
     if (req.client && req.client.isConnected) {
       await req.client.isConnected();
 
+      let isGroup = req.body.isGroup;
+      let isNewsletter = req.body.isNewsletter;
+      let isLid = req.body.isLid;
+
+      const phones = Array.isArray(req.body.phone) ? req.body.phone : (typeof req.body.phone === 'string' ? [req.body.phone] : []);
+      for (const p of phones) {
+        if (typeof p === 'string') {
+          if (p.endsWith('@g.us')) isGroup = true;
+          if (p.endsWith('@newsletter')) isNewsletter = true;
+          if (p.endsWith('@lid')) isLid = true;
+        }
+      }
+
       const localArr = contactToArray(
         req.body.phone || [],
-        req.body.isGroup,
-        req.body.isNewsletter,
-        req.body.isLid
+        isGroup,
+        isNewsletter,
+        isLid
       );
       let index = 0;
       for (const contact of localArr) {
-        if (req.body.isGroup || req.body.isNewsletter) {
+        if (isGroup || isNewsletter) {
           localArr[index] = contact;
         } else if (numbers.indexOf(contact) < 0) {
           console.log(contact);
@@ -50,6 +63,7 @@ export default async function statusConnection(
               status: 'Connected',
               message: `O número ${num} não existe.`,
             });
+            return;
           } else {
             if ((numbers as any).indexOf(profile.id._serialized) < 0) {
               (numbers as any).push(profile.id._serialized);
@@ -66,6 +80,7 @@ export default async function statusConnection(
         status: 'Disconnected',
         message: 'A sessão do WhatsApp não está ativa.',
       });
+      return;
     }
     next();
   } catch (error) {
