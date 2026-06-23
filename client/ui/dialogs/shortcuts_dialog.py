@@ -107,6 +107,7 @@ class ShortcutsDialog(wx.Dialog):
             i18n.t("shortcut_alt_shift_v_label"),
             i18n.t("shortcut_alt_shift_q_label"),
             i18n.t("shortcut_alt_shift_s_label"),
+            i18n.t("shortcut_l_label"),
             "",
             section("shortcuts_status_section"),
             i18n.t("shortcut_ctrl_left_label"),

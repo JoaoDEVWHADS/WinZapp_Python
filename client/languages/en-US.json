@@ -319,6 +319,7 @@
     "shortcut_ctrl_shift_s_label": "Ctrl+Shift+S: save/download media",
     "shortcut_ctrl_shift_m_label": "Ctrl+Shift+M: mark as read/unread",
     "shortcut_ctrl_shift_l_label": "Ctrl+Shift+L: clear conversation",
+    "shortcut_l_label": "L: show full message",
     "shortcut_ctrl_shift_alt_m_label": "Ctrl+Shift+Alt+M: mark all conversations as read",
     "shortcut_alt_c_label": "Alt+C: show message text in popup",
     "shortcut_alt_e_label": "Alt+E: edit message",
