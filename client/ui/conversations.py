@@ -107,6 +107,7 @@ class ConversationsPanel(wx.Panel):
         # ── Attachment staging ──────────────────────────────────────────────
         # list of {"path": str, "media_type": str}
         self._staged_attachments: list = []
+        self._speak_timer = None
 
         # ── Contact message state ───────────────────────────────────────────
         self._contact_msg_jid: str | None = None  # JID in currently-selected contactMessage
@@ -2537,7 +2538,20 @@ class ConversationsPanel(wx.Panel):
         if 0 <= idx < len(self._sorted_messages):
             m = self._sorted_messages[idx]
             full_text = self._render_message_line(m, truncate=False)
-            self.main_window.output(full_text, interrupt=True)
+            
+            # Cancel any pending speech timer to avoid queuing speech during rapid navigation
+            if hasattr(self, "_speak_timer") and self._speak_timer and self._speak_timer.IsRunning():
+                self._speak_timer.Stop()
+                
+            # Delay the speech output slightly (e.g. 150ms) to ensure it executes
+            # AFTER the OS's native focus speech event, thus interrupting the native
+            # truncated speech with our full-text speech.
+            self._speak_timer = wx.CallLater(
+                150,
+                self.main_window.output,
+                full_text,
+                interrupt=True
+            )
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
