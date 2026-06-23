@@ -33,12 +33,17 @@ _load_dotenv()
 
 # ── Update URLs ───────────────────────────────────────────────────────────────
 
-GITHUB_RELEASE_URL = os.environ.get(
-    "WINZAPP_GITHUB_RELEASE_URL",
-    "https://api.github.com/repos/JoaoDEVWHADS/WinZapp_Python/releases/latest",
+UPDATE_VERSION_URL = os.environ.get(
+    "WINZAPP_VERSION_URL",
+    "https://blind-center.com.br/downloads/winzapp/version.json",
+)
+
+UPDATE_CHANGELOG_URL = os.environ.get(
+    "WINZAPP_CHANGELOG_URL",
+    "https://blind-center.com.br/downloads/winzapp/changelog.txt",
 )
 
 UPDATE_ZIP_URL = os.environ.get(
     "WINZAPP_ZIP_URL",
-    "https://github.com/JoaoDEVWHADS/WinZapp_Python/releases/latest/download/WinZapp.zip",
+    "https://blind-center.com.br/downloads/winzapp/winzapp.zip",
 )
