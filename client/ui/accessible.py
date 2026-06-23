@@ -154,26 +154,36 @@ class AccessibleMessageList(wx.Accessible):
         return (wx.ACC_NOT_IMPLEMENTED, "")
 
 
-class MessageListCtrl(wx.ListCtrl):
-    """Virtual wx.ListCtrl for the messages panel.
+class MessageListBox(wx.VListBox):
+    """wx.VListBox for the messages panel.
 
-    In virtual mode (LC_VIRTUAL) Windows never stores item text internally.
-    Instead, it calls OnGetItemText() every time the text is needed — including
-    when UIA/NVDA queries it for accessibility. This means the screen reader
-    receives the full, untruncated text directly with no timing tricks required.
+    VListBox draws item text directly via OnDrawItem — no native ListView buffer
+    limits, no text truncation. Full message text is displayed without cutting
+    off long content, and screen readers receive the full text natively.
     """
 
     def __init__(self, parent, conversations_panel, **kwargs):
-        style = kwargs.pop("style", 0) | wx.LC_REPORT | wx.LC_VIRTUAL
-        super().__init__(parent, style=style, **kwargs)
+        kwargs.pop("style", 0)
+        super().__init__(parent)
         self._panel = conversations_panel
 
-    def OnGetItemText(self, item: int, col: int) -> str:  # noqa: N802
+    def OnDrawItem(self, dc, rect, item):  # noqa: N802
         msgs = getattr(self._panel, "_sorted_messages", [])
         if 0 <= item < len(msgs):
-            try:
-                return self._panel._render_message_line(msgs[item], truncate=False)
-            except Exception:
-                pass
-        return ""
+            text = self._panel._render_message_line(msgs[item], truncate=False)
+            dc.SetFont(self.GetFont())
+            dc.SetTextForeground(self.GetForegroundColour())
+            dc.SetClippingRect(rect)
+            dc.DrawLabel(text, rect, alignment=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+            dc.DestroyClippingRect()
+
+    def OnMeasureItem(self, item):  # noqa: N802
+        msgs = getattr(self._panel, "_sorted_messages", [])
+        if 0 <= item < len(msgs):
+            text = self._panel._render_message_line(msgs[item], truncate=False)
+            dc = wx.ClientDC(self)
+            dc.SetFont(self.GetFont())
+            _, y = dc.GetTextExtent("Ag")
+            return max(y + 6, 24)
+        return 24
 
