@@ -1727,8 +1727,9 @@ class ConversationsPanel(wx.Panel):
                 self.conversation_panel.Layout()
 
         # ── Link detection ────────────────────────────────────────────────
-        # Always check the rendered text for URLs (regardless of msg_type)
-        rendered = self.messages_list.GetItemText(index)
+        # Use _render_message_line directly — GetItemText is truncated by the
+        # Windows ListView API (~512 chars) and misses links in long messages.
+        rendered = self._render_message_line(msg)
         self._update_links_panel(self._extract_links(rendered))
 
         # ── Mention detection ─────────────────────────────────────────────
@@ -1753,7 +1754,9 @@ class ConversationsPanel(wx.Panel):
 
         # For text-based messages: open the first link if one is present
         if msg_type in ("conversation", "extendedTextMessage", ""):
-            rendered = self.messages_list.GetItemText(index)
+            # Use _render_message_line directly — GetItemText is truncated by
+            # the Windows ListView API and misses links in long messages.
+            rendered = self._render_message_line(msg)
             links = self._extract_links(rendered)
             if links:
                 try:
@@ -3885,7 +3888,11 @@ class ConversationsPanel(wx.Panel):
             return self._render_separator(msg.get("count", 1))
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
-        body     = (self._get_message_content(msg) or "").replace("\n", " ")
+        # Limit the preview body stored in the ListCtrl item to avoid the
+        # Windows ListView text limit (~512 chars). Full text is always
+        # available via _get_message_content() for any read/search operation.
+        _raw_body = (self._get_message_content(msg) or "").replace("\n", " ")
+        body      = _raw_body[:500] + "…" if len(_raw_body) > 500 else _raw_body
         sender   = self._sender_label(msg)
         status   = self._map_status(msg)
         i18n     = self.main_window.i18n
