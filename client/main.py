@@ -4022,6 +4022,8 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
+        quoted_id = None
+
         if mentioned_jids:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
             phone_net = remote_jid
@@ -4891,17 +4893,17 @@ class MainWindow(wx.Frame):
                     res = response.json() or {}
                     logging.info(f"[Self LID Resolution] Response: {res}")
                     # Parse LID JID
-                    lid_obj = res_data.get("lid") or {}
+                    lid_obj = res.get("lid") or {}
                     lid_jid = None
                     if isinstance(lid_obj, dict):
                         lid_jid = lid_obj.get("_serialized") or lid_obj.get("id")
                     elif isinstance(lid_obj, str):
                         lid_jid = lid_obj
                     if not lid_jid:
-                        lid_jid = res_data.get("lidJid")
+                        lid_jid = res.get("lidJid")
 
                     # Parse Phone JID
-                    phone_obj = res_data.get("phone") or res_data.get("phoneJid") or res_data.get("id") or {}
+                    phone_obj = res.get("phone") or res.get("phoneJid") or res.get("id") or {}
                     phone_jid = None
                     if isinstance(phone_obj, dict):
                         phone_jid = phone_obj.get("_serialized") or phone_obj.get("id")
