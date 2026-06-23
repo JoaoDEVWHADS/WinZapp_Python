@@ -164,10 +164,21 @@ class MessageListCtrl(wx.ListCtrl):
     for search, link detection, and screen readers.
     """
 
+    ID_READ_MORE = wx.NewIdRef()
+
     def __init__(self, parent, conversations_panel, **kwargs):
         style = kwargs.pop("style", 0) | wx.LC_REPORT | wx.LC_VIRTUAL
         super().__init__(parent, style=style, **kwargs)
         self._panel = conversations_panel
+        accel = wx.AcceleratorEntry(wx.ACCEL_NORMAL, ord("L"), self.ID_READ_MORE)
+        self.SetAcceleratorTable(wx.AcceleratorTable([accel]))
+        self.Bind(wx.EVT_MENU, self._on_read_more, self.ID_READ_MORE)
+
+    def _on_read_more(self, event):
+        panel = self._panel
+        idx = self.GetFocusedItem()
+        if idx >= 0 and panel._is_truncated(idx):
+            panel._show_full_message_dialog(idx)
 
     def OnGetItemText(self, item: int, col: int) -> str:  # noqa: N802
         msgs = getattr(self._panel, "_sorted_messages", [])

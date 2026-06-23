@@ -2641,14 +2641,11 @@ class ConversationsPanel(wx.Panel):
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
     def _on_messages_list_key_down(self, event):
-        """Space: activate, L: show full message in dialog."""
-        idx = self.messages_list.GetFocusedItem()
+        """Space fires activation (same as Enter / double-click)."""
         if event.GetKeyCode() == wx.WXK_SPACE:
+            idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
-        elif event.GetKeyCode() == ord("L") and event.GetModifiers() == wx.MOD_NONE:
-            if idx >= 0 and self._is_truncated(idx):
-                self._show_full_message_dialog(idx)
         else:
             event.Skip()
 
