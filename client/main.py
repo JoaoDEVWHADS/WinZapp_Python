@@ -4079,6 +4079,7 @@ class MainWindow(wx.Frame):
         try:
             result = subprocess.run(
                 [ffmpeg, "-y", "-i", wav_path,
+                 "-ac", "1",
                  "-c:a", "libopus", "-b:a", "64k",
                  "-vbr", "on", "-compression_level", "10",
                  ogg_path],
