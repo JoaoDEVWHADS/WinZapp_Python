@@ -176,27 +176,15 @@ class Connect:
                 # The WPPConnect browser can stay alive for a while after the app closes
                 # mid-pairing, causing this endpoint to return status:true even though the
                 # WhatsApp account was never linked. Requiring paired=True prevents that false positive.
-                if check_data.get("status") is True and is_paired:
+                if check_data.get("status") is True:
+                    if not is_paired:
+                        logging.info(
+                            "[check_connection_status] check-connection-session returned true and paired=False. "
+                            "Marking session as paired locally."
+                        )
+                        self.main_window.settings.setdefault("privateinfo", {})["paired"] = True
+                        self.main_window.save_settings()
                     return True
-                if check_data.get("status") is True and not is_paired:
-                    logging.warning(
-                        "[check_connection_status] check-connection-session returned true but "
-                        "paired=False — pairing was never completed. Clearing stale WA_token."
-                    )
-                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
-                    self.main_window.save_settings()
-                    if token:
-                        def _close(t=token):
-                            try:
-                                requests.post(
-                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
-                                    headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
-                                    timeout=5,
-                                )
-                            except Exception:
-                                pass
-                        threading.Thread(target=_close, daemon=True).start()
-                    return False
 
                 # status:false — session offline but may have valid token in store.
                 # If paired=True, trust the local flag and let the app reconnect.
@@ -241,6 +229,15 @@ class Connect:
                     or data.get("response", {}).get("status")
                     or ""
                 )
+                if status == "CONNECTED":
+                    if not is_paired:
+                        logging.info(
+                            "[check_connection_status] status-session returned CONNECTED and paired=False. "
+                            "Marking session as paired locally."
+                        )
+                        self.main_window.settings.setdefault("privateinfo", {})["paired"] = True
+                        self.main_window.save_settings()
+                    return True
                 _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", ""}
                 if status not in _INCOMPLETE and is_paired:
                     # Session is connected or closed (but closed is allowed if still paired)
