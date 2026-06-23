@@ -50,6 +50,7 @@ export default async function statusConnection(
               status: 'Connected',
               message: `O número ${num} não existe.`,
             });
+            return;
           } else {
             if ((numbers as any).indexOf(profile.id._serialized) < 0) {
               (numbers as any).push(profile.id._serialized);
@@ -66,6 +67,7 @@ export default async function statusConnection(
         status: 'Disconnected',
         message: 'A sessão do WhatsApp não está ativa.',
       });
+      return;
     }
     next();
   } catch (error) {
