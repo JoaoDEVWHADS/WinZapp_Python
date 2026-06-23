@@ -3228,18 +3228,20 @@ class MainWindow(wx.Frame):
                 logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
                 
         # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
-        if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
-            if self._lid_to_phone.get(remote) != participant:
-                self._lid_to_phone[remote] = participant
-                self._phone_to_lid[participant] = remote
-                updated = True
-                logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
-        elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
-            if self._lid_to_phone.get(participant) != remote:
-                self._lid_to_phone[participant] = remote
-                self._phone_to_lid[remote] = participant
-                updated = True
-                logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
+        # ONLY if the message is NOT fromMe (if fromMe is True, participant is the user, and remote is the contact!)
+        if not key.get("fromMe", False):
+            if remote.endswith("@lid") and participant.endswith("@s.whatsapp.net"):
+                if self._lid_to_phone.get(remote) != participant:
+                    self._lid_to_phone[remote] = participant
+                    self._phone_to_lid[participant] = remote
+                    updated = True
+                    logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
+            elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
+                if self._lid_to_phone.get(participant) != remote:
+                    self._lid_to_phone[participant] = remote
+                    self._phone_to_lid[remote] = participant
+                    updated = True
+                    logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
 
         if updated:
             # Propagate contact details from phone contact to LID contact to make it immediately available
@@ -4822,6 +4824,23 @@ class MainWindow(wx.Frame):
                     if lid_jid:
                         normalized_lid = self._normalize_jid(lid_jid)
                         self.my_lid = normalized_lid
+                        
+                        # Clean up any bad mappings where my_jid or normalized_lid were mapped to other contacts
+                        if hasattr(self, "_lid_to_phone"):
+                            # If my own LID JID was mapped to another phone number, delete it
+                            old_phone = self._lid_to_phone.get(normalized_lid)
+                            if old_phone and old_phone != my_jid:
+                                self._lid_to_phone.pop(normalized_lid, None)
+                                self._phone_to_lid.pop(old_phone, None)
+                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
+                            
+                            # If my own phone JID was mapped to another LID, delete it
+                            old_lid = self._phone_to_lid.get(my_jid)
+                            if old_lid and old_lid != normalized_lid:
+                                self._phone_to_lid.pop(old_lid, None)
+                                self._lid_to_phone.pop(old_lid, None)
+                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {my_jid} was mapped to {old_lid}")
+
                         self.register_jid_mapping(normalized_lid, my_jid)
                         logging.info(f"[Self LID Resolution] Successfully resolved and registered own LID JID: {normalized_lid}")
             except Exception as e:
