@@ -118,6 +118,9 @@
     "typescript": "^5.9.3",
     "webpack-cli": "^6.0.1"
   },
+  "overrides": {
+    "@wppconnect/wa-version": "^1.5.4205"
+  },
   "peerDependencies": {
     "crypto-js": "^4.2.0",
     "mongoose": "^8.23.0",
