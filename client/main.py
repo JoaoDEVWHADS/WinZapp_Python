@@ -3087,12 +3087,15 @@ class MainWindow(wx.Frame):
             msg_push = self.find_name_through_messages(chat)
             chat_name_field = get_valid_name(chat.get("name", ""))
             
-            name = (
-                resolved_name
-                or chat_push
-                or msg_push
-                or chat_name_field
-            )
+            if jid.endswith("@g.us"):
+                name = chat_name_field
+            else:
+                name = (
+                    resolved_name
+                    or chat_push
+                    or msg_push
+                    or chat_name_field
+                )
             
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
