@@ -2360,7 +2360,19 @@ class MainWindow(wx.Frame):
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
-        self._sync_completed = True
+        if len(self.chats) > 0:
+            self._sync_completed = True
+        else:
+            self._sync_completed = False
+            # Schedule a retry in 15 seconds to see if history has loaded
+            def _retry_sync():
+                time.sleep(15)
+                # Check if we are still connected and still have 0 chats
+                if getattr(self, "_wa_connected", False) and len(self.chats) == 0:
+                    logging.info("[start_sync] Retrying empty chats sync...")
+                    self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+                    self.sync_thread.start()
+            threading.Thread(target=_retry_sync, daemon=True).start()
         self._initial_sync_running = False
 
     def wait_messages_set(self):
