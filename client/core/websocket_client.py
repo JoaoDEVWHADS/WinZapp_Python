@@ -834,7 +834,7 @@ class WebSocketClient:
                 "fromMe": from_me,
                 "id": clean_id
             },
-            "pushName": wpp_msg.get("sender", {}).get("pushname") or wpp_msg.get("notifyName") or "",
+            "pushName": (wpp_msg.get("sender") or {}).get("pushname") or wpp_msg.get("notifyName") or "",
             "message": message_content,
             "messageTimestamp": ts,
             "messageType": mapped_type,

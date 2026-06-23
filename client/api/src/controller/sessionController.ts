@@ -418,7 +418,13 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
         message: 'Message does not contain media',
       });
 
-    const buffer = await client.decryptFile(message);
+    const msgAny = message as any;
+    const tempSavePath = `./userDataDir/temp_media_${(msgAny.id && typeof msgAny.id === 'object') ? msgAny.id.id : (msgAny.id || messageId)}`;
+    await client.decryptAndSaveFile(message, tempSavePath);
+    const buffer = fs.readFileSync(tempSavePath);
+    try {
+      fs.unlinkSync(tempSavePath);
+    } catch {}
 
     res
       .status(200)
@@ -466,7 +472,13 @@ export async function getMediaByMessage(req: Request, res: Response) {
         message: 'Message does not contain media',
       });
 
-    const buffer = await client.decryptFile(message);
+    const msgAny = message as any;
+    const tempSavePath = `./userDataDir/temp_media_${(msgAny.id && typeof msgAny.id === 'object') ? msgAny.id.id : (msgAny.id || messageId)}`;
+    await client.decryptAndSaveFile(message, tempSavePath);
+    const buffer = fs.readFileSync(tempSavePath);
+    try {
+      fs.unlinkSync(tempSavePath);
+    } catch {}
 
     res
       .status(200)
@@ -475,7 +487,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
     req.logger.error(ex);
     res.status(500).json({
       status: 'error',
-      message: 'The session is not active',
+      message: 'Decrypt file error',
       error: ex,
     });
   }
