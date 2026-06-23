@@ -3215,11 +3215,6 @@ class MainWindow(wx.Frame):
                 self._phone_to_lid[alt] = remote
                 updated = True
                 logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
-            if participant and participant.endswith("@lid") and self._lid_to_phone.get(participant) != alt:
-                self._lid_to_phone[participant] = alt
-                self._phone_to_lid[alt] = participant
-                updated = True
-                logging.info(f"[LID Mapping] Extracted participant mapping: {participant} <-> {alt}")
         elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
             if self._lid_to_phone.get(alt) != remote:
                 self._lid_to_phone[alt] = remote
@@ -3344,8 +3339,6 @@ class MainWindow(wx.Frame):
                     if alt and alt.endswith("@s.whatsapp.net"):
                         if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
                             self.register_jid_mapping(remote, alt)
-                        if participant and participant.endswith("@lid") and self._lid_to_phone.get(participant) != alt:
-                            self.register_jid_mapping(participant, alt)
                     elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
                         if self._lid_to_phone.get(alt) != remote:
                             self.register_jid_mapping(alt, remote)
