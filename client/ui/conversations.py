@@ -27,6 +27,7 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
+    AccessibleMessageList,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
@@ -302,6 +303,9 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
         self.messages_list.Bind(wx.EVT_SIZE, self._on_messages_list_resize)
+        # Override IAccessible so screen readers receive full untruncated text
+        # directly from our data model instead of the OS-truncated ListView API.
+        self.messages_list.SetAccessible(AccessibleMessageList(self))
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── Link controls (shown when focused message contains URLs) ─────────
@@ -2532,26 +2536,14 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
-        # Speak the full message text via the app's own speech engine so that
-        # the Windows ListView ~512-char API limit never truncates long messages
-        # for screen-reader users.
+        # AccessibleMessageList.GetName() already provides full untruncated text
+        # to screen readers via IAccessible. The output() call below is kept as
+        # a fallback for speech libraries (e.g. accessible_output2) that bypass
+        # the accessibility API and speak directly.
         if 0 <= idx < len(self._sorted_messages):
             m = self._sorted_messages[idx]
             full_text = self._render_message_line(m, truncate=False)
-            
-            # Cancel any pending speech timer to avoid queuing speech during rapid navigation
-            if hasattr(self, "_speak_timer") and self._speak_timer and self._speak_timer.IsRunning():
-                self._speak_timer.Stop()
-                
-            # Delay the speech output slightly (e.g. 150ms) to ensure it executes
-            # AFTER the OS's native focus speech event, thus interrupting the native
-            # truncated speech with our full-text speech.
-            self._speak_timer = wx.CallLater(
-                10,
-                self.main_window.output,
-                full_text,
-                interrupt=True
-            )
+            self.main_window.output(full_text, interrupt=True)
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
