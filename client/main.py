@@ -1263,16 +1263,26 @@ class MainWindow(wx.Frame):
         In background mode dialogs are never shown; if the setup is incomplete
         the process exits silently.
         """
-        node_exe     = resource_path("node", "node.exe")
+        import sys
+        import shutil
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+
         dist_server  = resource_path("api",  "dist", "server.js")
         node_modules = resource_path("api",  "node_modules")
 
-        # node.exe is mandatory — without it neither npm nor the API can run.
+        # Node.js is mandatory — without it neither npm nor the API can run.
         if not os.path.isfile(node_exe):
             wx.MessageBox(
-                "O Node.js portátil não foi encontrado (node/node.exe).\n\n"
+                "O Node.js não foi encontrado.\n\n"
                 "Este arquivo é essencial para o funcionamento do WinZapp. "
-                "Por favor, reinstale o programa.",
+                "Por favor, instale o Node.js no sistema ou reinstale o programa.",
                 "Node.js não encontrado",
                 wx.OK | wx.ICON_ERROR,
             )
@@ -1305,22 +1315,39 @@ class MainWindow(wx.Frame):
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
                     missing,
                 )
-                node_exe = resource_path("node", "node.exe")
-                npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
-                node_dir = resource_path("node")
+                if sys.platform == "win32":
+                    node_exe = resource_path("node", "node.exe")
+                    npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                    npm_cmd  = [node_exe, npm_cli]
+                    node_dir = resource_path("node")
+                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+                else:
+                    local_node = resource_path("node", "node")
+                    if os.path.isfile(local_node):
+                        node_exe = local_node
+                    else:
+                        node_exe = shutil.which("node") or "node"
+                    local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                    if os.path.isfile(local_npm):
+                        npm_cmd = [node_exe, local_npm]
+                    else:
+                        npm_cmd = [shutil.which("npm") or "npm"]
+                    node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
                 npm_env  = {
                     **os.environ,
-                    "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+                    "PATH": path_env,
                     "PUPPETEER_CACHE_DIR": resource_path("api", ".cache", "puppeteer"),
                 }
                 api_dir  = resource_path("api")
                 creation_flags = 0
-                if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
                     creation_flags = subprocess.CREATE_NO_WINDOW
 
                 try:
                     proc = subprocess.Popen(
-                        [node_exe, npm_cli, "install", "--no-audit", "--no-fund", "--include=optional"],
+                        npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
                         cwd=api_dir,
                         env=npm_env,
                         creationflags=creation_flags,
@@ -1492,7 +1519,18 @@ class MainWindow(wx.Frame):
         is spawned using the non-elevated linked token via CreateProcessWithTokenW
         so that PostgreSQL's initdb can start (it refuses to run as root/admin).
         """
-        node_exe = resource_path("node", "node.exe")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+
         start_js  = resource_path("api",  "start.js")
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs Evolution separately
@@ -1539,10 +1577,14 @@ class MainWindow(wx.Frame):
             # when the parent process is elevated.  De-elevation via the Safer API
             # is therefore not needed and would prevent Node.js from writing session
             # tokens/cache to the installation directory, breaking admin users.
+            creation_flags = 0
+            if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
             self.evolution_process = subprocess.Popen(
                 [node_exe, start_js],
                 cwd=cwd,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=creation_flags,
                 stdout=log_fh,
                 stderr=log_fh,
             )
@@ -1613,7 +1655,18 @@ class MainWindow(wx.Frame):
         if self._is_evolution_running():
             return  # Already up (e.g. left running from a previous session)
 
-        node_exe  = resource_path("node", "node.exe")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+
         start_js  = resource_path("api",  "start.js")
         dist_server = resource_path("api",  "dist", "server.js")
 
@@ -4837,7 +4890,7 @@ class MainWindow(wx.Frame):
                 if response.status_code in (200, 201):
                     res = response.json() or {}
                     logging.info(f"[Self LID Resolution] Response: {res}")
-                    res_data = res.get("response") if isinstance(res.get("response"), dict) else res
+                    # Parse LID JID
                     lid_obj = res_data.get("lid") or {}
                     lid_jid = None
                     if isinstance(lid_obj, dict):
@@ -4847,28 +4900,38 @@ class MainWindow(wx.Frame):
                     if not lid_jid:
                         lid_jid = res_data.get("lidJid")
 
-                    if lid_jid:
+                    # Parse Phone JID
+                    phone_obj = res_data.get("phone") or res_data.get("phoneJid") or res_data.get("id") or {}
+                    phone_jid = None
+                    if isinstance(phone_obj, dict):
+                        phone_jid = phone_obj.get("_serialized") or phone_obj.get("id")
+                    elif isinstance(phone_obj, str):
+                        phone_jid = phone_obj
+
+                    if lid_jid and phone_jid:
+                        normalized_phone = self._normalize_jid(phone_jid)
                         normalized_lid = self._normalize_jid(lid_jid)
+                        self.my_jid = normalized_phone
                         self.my_lid = normalized_lid
                         
-                        # Clean up any bad mappings where my_jid or normalized_lid were mapped to other contacts
+                        # Clean up any bad mappings where normalized_phone or normalized_lid were mapped to other contacts
                         if hasattr(self, "_lid_to_phone"):
                             # If my own LID JID was mapped to another phone number, delete it
                             old_phone = self._lid_to_phone.get(normalized_lid)
-                            if old_phone and old_phone != my_jid:
+                            if old_phone and old_phone != normalized_phone:
                                 self._lid_to_phone.pop(normalized_lid, None)
                                 self._phone_to_lid.pop(old_phone, None)
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
                             
                             # If my own phone JID was mapped to another LID, delete it
-                            old_lid = self._phone_to_lid.get(my_jid)
+                            old_lid = self._phone_to_lid.get(normalized_phone)
                             if old_lid and old_lid != normalized_lid:
                                 self._phone_to_lid.pop(old_lid, None)
                                 self._lid_to_phone.pop(old_lid, None)
-                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {my_jid} was mapped to {old_lid}")
+                                logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_phone} was mapped to {old_lid}")
 
-                        self.register_jid_mapping(normalized_lid, my_jid)
-                        logging.info(f"[Self LID Resolution] Successfully resolved and registered own LID JID: {normalized_lid}")
+                        self.register_jid_mapping(normalized_lid, normalized_phone)
+                        logging.info(f"[Self LID Resolution] Successfully resolved and registered own JID mapping: {normalized_lid} <-> {normalized_phone}")
             except Exception as e:
                 logging.error(f"[Self LID Resolution] Error resolving self LID: {e}")
 

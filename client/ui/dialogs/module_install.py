@@ -85,26 +85,48 @@ class ModuleInstallDialog(wx.Dialog):
 
     def _run_install(self):
         """Run npm install then npm run db:generate; schedule UI updates via wx.CallAfter."""
-        node_exe = resource_path("node", "node.exe")
-        npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+            npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            npm_cmd  = [node_exe, npm_cli]
+            node_dir = resource_path("node")
+            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+            local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            if os.path.isfile(local_npm):
+                npm_cmd = [node_exe, local_npm]
+            else:
+                npm_cmd = [shutil.which("npm") or "npm"]
+            node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
         api_dir  = resource_path("api")
-        # Prepend bundled node/ to PATH so npm's internal sub-processes use
-        # the portable node.exe rather than whatever is on the system PATH.
-        node_dir = resource_path("node")
         puppeteer_cache = resource_path("api", ".cache", "puppeteer")
         npm_env  = {
             **os.environ,
-            "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+            "PATH": path_env,
             "PUPPETEER_CACHE_DIR": puppeteer_cache
         }
+
+        creation_flags = 0
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags = subprocess.CREATE_NO_WINDOW
 
         try:
             # ── Step 1: npm install ──────────────────────────────────────
             self._proc = subprocess.Popen(
-                [node_exe, npm_cli, "install", "--no-audit", "--no-fund", "--include=optional"],
+                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
                 cwd=api_dir,
                 env=npm_env,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=creation_flags,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
@@ -131,9 +153,9 @@ class ModuleInstallDialog(wx.Dialog):
             if has_db_generate:
                 db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
                 self._proc = subprocess.Popen(
-                    [node_exe, npm_cli, "run", "db:generate"],
+                    npm_cmd + ["run", "db:generate"],
                     cwd=api_dir,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=creation_flags,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     env=db_env,
@@ -159,13 +181,17 @@ class ModuleInstallDialog(wx.Dialog):
     def _kill_proc_tree(self):
         """Kill the npm process and all its spawned children."""
         if self._proc and self._proc.poll() is None:
+            import sys
             try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    self._proc.terminate()
             except Exception:
                 try:
                     self._proc.kill()
