@@ -2429,8 +2429,11 @@ class MainWindow(wx.Frame):
             
         messages_file = data_path("messages.dat")
         try:
+            key = getattr(self, "key", None)
+            if key is None:
+                key = self.retrieve_secret_key()
             with open(messages_file, "wb") as f:
-                f.write(encrypt_json({"chats": {}, "contacts": {}}, self.key))
+                f.write(encrypt_json({"chats": {}, "contacts": {}}, key))
             logging.info("[clear_local_data] Reset messages.dat successfully.")
         except Exception as e:
             logging.error(f"[clear_local_data] Failed to reset messages.dat: {e}")
@@ -3656,10 +3659,13 @@ class MainWindow(wx.Frame):
 
         all_messages = []
         try:
+            logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid}")
             response = requests.get(url, headers=headers, timeout=30)
+            logging.info(f"[sync_chat_messages] URL: {url} returned status: {response.status_code}")
             if response.status_code in (200, 201):
                 body = response.json()
                 wpp_messages = body.get("response", []) if isinstance(body, dict) else []
+                logging.info(f"[sync_chat_messages] Fetched {len(wpp_messages)} messages from API for {remote_jid}")
                 if not isinstance(wpp_messages, list):
                     wpp_messages = []
                 for wm in wpp_messages:
@@ -3667,8 +3673,10 @@ class MainWindow(wx.Frame):
                         try:
                             normalized = self.ws._normalize_wpp_message(wm)
                             all_messages.append(normalized)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
+            else:
+                logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
         except Exception as e:
             logging.error(f"[sync_chat_messages] failed to get messages for {remote_jid}: {e}")
 
