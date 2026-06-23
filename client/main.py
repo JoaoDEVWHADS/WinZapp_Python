@@ -3981,7 +3981,10 @@ class MainWindow(wx.Frame):
             payload = {
                 "phone": [phone_net],
                 "message": text,
-                "mentioned": mentioned_clean
+                "mentioned": mentioned_clean,
+                "options": {
+                    "linkPreview": False
+                }
             }
         else:
             quoted_id = self._serialize_quoted_id(quoted) if quoted else None
@@ -3993,7 +3996,10 @@ class MainWindow(wx.Frame):
                 payload = {
                     "phone": [phone_net],
                     "message": text,
-                    "messageId": quoted_id
+                    "messageId": quoted_id,
+                    "options": {
+                        "linkPreview": False
+                    }
                 }
                 logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
             else:
@@ -4004,7 +4010,10 @@ class MainWindow(wx.Frame):
                 payload = {
                     "phone": [phone_net],
                     "message": text,
-                    "isGroup": phone_net.endswith("@g.us")
+                    "isGroup": phone_net.endswith("@g.us"),
+                    "options": {
+                        "linkPreview": False
+                    }
                 }
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -4020,7 +4029,10 @@ class MainWindow(wx.Frame):
                     payload = {
                         "phone": [fb_phone],
                         "message": text,
-                        "isGroup": fb_phone.endswith("@g.us")
+                        "isGroup": fb_phone.endswith("@g.us"),
+                        "options": {
+                            "linkPreview": False
+                        }
                     }
                     response = requests.post(url, json=payload, headers=headers, timeout=15)
                 
@@ -5558,12 +5570,32 @@ class MainWindow(wx.Frame):
         lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid_jid:
             remote_jid = lid_jid
+
+        # Find the message in records to see if we have a participant JID
+        participant = ""
+        chat = self.chats.get(remote_jid)
+        if chat:
+            records = chat.get("messages", {}).get("messages", {}).get("records", [])
+            for r in records:
+                if r.get("key", {}).get("id") == message_id:
+                    participant = r.get("key", {}).get("participant", "")
+                    break
+
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/edit-message"
         )
         if remote_jid.endswith("@g.us"):
-            full_id = f"true_{remote_jid}_{message_id}"
+            if participant:
+                participant_clean = participant.replace("@s.whatsapp.net", "@c.us")
+                full_id = f"true_{remote_jid}_{message_id}_{participant_clean}"
+            else:
+                my_jid = getattr(self, "my_jid", "")
+                if my_jid:
+                    my_jid_clean = my_jid.replace("@s.whatsapp.net", "@c.us")
+                    full_id = f"true_{remote_jid}_{message_id}_{my_jid_clean}"
+                else:
+                    full_id = f"true_{remote_jid}_{message_id}"
         else:
             full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
         
