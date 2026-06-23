@@ -40,6 +40,15 @@ class WebSocketClient:
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
 
+    def _clean_jid(self, jid_val):
+        if not jid_val:
+            return ""
+        if isinstance(jid_val, dict):
+            jid_val = jid_val.get("_serialized") or jid_val.get("id") or ""
+        if not isinstance(jid_val, str):
+            jid_val = str(jid_val)
+        return jid_val.replace("@c.us", "@s.whatsapp.net")
+
     def on_connect(self):
         print("WebSocket connected.")
         # Record when we connected so on_messages_upsert can use a stable
@@ -635,7 +644,7 @@ class WebSocketClient:
             if not remote_jid and len(parts) > 1:
                 remote_jid = parts[1]
             if remote_jid:
-                remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+                remote_jid = self._clean_jid(remote_jid)
 
             self.on_messages_update({
                 "data": {
@@ -681,10 +690,9 @@ class WebSocketClient:
 
         if is_status:
             remote_jid = "status@broadcast"
-            status_participant = from_jid.replace("@c.us", "@s.whatsapp.net") if from_jid else ""
+            status_participant = self._clean_jid(from_jid)
         else:
-            remote_jid = to_jid if from_me else from_jid
-            remote_jid = remote_jid.replace("@c.us", "@s.whatsapp.net")
+            remote_jid = self._clean_jid(to_jid if from_me else from_jid)
             status_participant = ""
 
         ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
@@ -835,7 +843,7 @@ class WebSocketClient:
             or ""
         )
         if participant:
-            normalized["key"]["participant"] = participant.replace("@c.us", "@s.whatsapp.net")
+            normalized["key"]["participant"] = self._clean_jid(participant)
 
         quoted_msg = wpp_msg.get("quotedMsg")
         quoted_msg_obj = wpp_msg.get("quotedMsgObj")
@@ -881,7 +889,7 @@ class WebSocketClient:
 
         if quoted_participant:
             has_quote = True
-            participant_jid = quoted_participant.replace("@c.us", "@s.whatsapp.net")
+            participant_jid = self._clean_jid(quoted_participant)
 
         # 2. Extract content from quotedMsg (dictionary or string)
         if isinstance(quoted_msg, dict):
@@ -940,13 +948,13 @@ class WebSocketClient:
             if not participant_jid:
                 author = quoted_msg_obj.get("author") or quoted_msg_obj.get("sender", {}).get("id") or ""
                 if author:
-                    participant_jid = author.replace("@c.us", "@s.whatsapp.net")
+                    participant_jid = self._clean_jid(author)
 
         wpp_mentioned = wpp_msg.get("mentionedJidList") or []
         mentioned_jids = [
-            m.replace("@c.us", "@s.whatsapp.net")
+            self._clean_jid(m)
             for m in wpp_mentioned
-            if isinstance(m, str)
+            if m
         ]
 
         if has_quote or mentioned_jids:
