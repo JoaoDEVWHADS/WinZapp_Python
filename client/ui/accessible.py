@@ -152,3 +152,28 @@ class AccessibleMessageList(wx.Accessible):
             except Exception:
                 pass
         return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
+class MessageListCtrl(wx.ListCtrl):
+    """Virtual wx.ListCtrl for the messages panel.
+
+    In virtual mode (LC_VIRTUAL) Windows never stores item text internally.
+    Instead, it calls OnGetItemText() every time the text is needed — including
+    when UIA/NVDA queries it for accessibility. This means the screen reader
+    receives the full, untruncated text directly with no timing tricks required.
+    """
+
+    def __init__(self, parent, conversations_panel, **kwargs):
+        style = kwargs.pop("style", 0) | wx.LC_REPORT | wx.LC_VIRTUAL
+        super().__init__(parent, style=style, **kwargs)
+        self._panel = conversations_panel
+
+    def OnGetItemText(self, item: int, col: int) -> str:  # noqa: N802
+        msgs = getattr(self._panel, "_sorted_messages", [])
+        if 0 <= item < len(msgs):
+            try:
+                return self._panel._render_message_line(msgs[item], truncate=False)
+            except Exception:
+                pass
+        return ""
+
