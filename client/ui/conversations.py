@@ -2547,7 +2547,7 @@ class ConversationsPanel(wx.Panel):
             # AFTER the OS's native focus speech event, thus interrupting the native
             # truncated speech with our full-text speech.
             self._speak_timer = wx.CallLater(
-                150,
+                10,
                 self.main_window.output,
                 full_text,
                 interrupt=True
