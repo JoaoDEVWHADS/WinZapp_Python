@@ -1729,7 +1729,7 @@ class ConversationsPanel(wx.Panel):
         # ── Link detection ────────────────────────────────────────────────
         # Use _render_message_line directly — GetItemText is truncated by the
         # Windows ListView API (~512 chars) and misses links in long messages.
-        rendered = self._render_message_line(msg)
+        rendered = self._render_message_line(msg, truncate=False)
         self._update_links_panel(self._extract_links(rendered))
 
         # ── Mention detection ─────────────────────────────────────────────
@@ -1756,7 +1756,7 @@ class ConversationsPanel(wx.Panel):
         if msg_type in ("conversation", "extendedTextMessage", ""):
             # Use _render_message_line directly — GetItemText is truncated by
             # the Windows ListView API and misses links in long messages.
-            rendered = self._render_message_line(msg)
+            rendered = self._render_message_line(msg, truncate=False)
             links = self._extract_links(rendered)
             if links:
                 try:
@@ -2536,7 +2536,7 @@ class ConversationsPanel(wx.Panel):
         # for screen-reader users.
         if 0 <= idx < len(self._sorted_messages):
             m = self._sorted_messages[idx]
-            full_text = self._render_message_line(m)
+            full_text = self._render_message_line(m, truncate=False)
             self.main_window.output(full_text, interrupt=True)
 
         # Show audio controls only when the focused item IS the playing audio.
@@ -3890,7 +3890,7 @@ class ConversationsPanel(wx.Panel):
 
         return self._get_participant_name(clean_p)
 
-    def _render_message_line(self, msg) -> str:
+    def _render_message_line(self, msg, truncate=True) -> str:
         """Produce the full display string for a single message row."""
         # Unread separator sentinel
         if self._is_separator(msg):
@@ -3901,7 +3901,10 @@ class ConversationsPanel(wx.Panel):
         # Windows ListView text limit (~512 chars). Full text is always
         # available via _get_message_content() for any read/search operation.
         _raw_body = (self._get_message_content(msg) or "").replace("\n", " ")
-        body      = _raw_body[:500] + "…" if len(_raw_body) > 500 else _raw_body
+        if truncate:
+            body      = _raw_body[:500] + "…" if len(_raw_body) > 500 else _raw_body
+        else:
+            body      = _raw_body
         sender   = self._sender_label(msg)
         status   = self._map_status(msg)
         i18n     = self.main_window.i18n
@@ -5095,7 +5098,7 @@ class ConversationsPanel(wx.Panel):
         self._search_results = [
             i for i, msg in enumerate(self._sorted_messages)
             if not self._is_separator(msg)
-            and qlow in self._render_message_line(msg).lower()
+            and qlow in self._render_message_line(msg, truncate=False).lower()
         ]
         self._search_result_idx = -1
 
