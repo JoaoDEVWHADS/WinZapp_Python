@@ -2531,6 +2531,14 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
+        # Speak the full message text via the app's own speech engine so that
+        # the Windows ListView ~512-char API limit never truncates long messages
+        # for screen-reader users.
+        if 0 <= idx < len(self._sorted_messages):
+            m = self._sorted_messages[idx]
+            full_text = self._render_message_line(m)
+            self.main_window.output(full_text, interrupt=True)
+
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
             if 0 <= idx < len(self._sorted_messages):
@@ -2541,6 +2549,7 @@ class ConversationsPanel(wx.Panel):
                 else:
                     self._hide_audio_controls()
         event.Skip()
+
 
     def _load_older_messages_from_server(self):
         """Fetch older messages from server when the beginning of local history is reached."""
