@@ -109,7 +109,6 @@ class ConversationsPanel(wx.Panel):
         # ── Attachment staging ──────────────────────────────────────────────
         # list of {"path": str, "media_type": str}
         self._staged_attachments: list = []
-        self._speak_timer = None
 
         # ── Contact message state ───────────────────────────────────────────
         self._contact_msg_jid: str | None = None  # JID in currently-selected contactMessage
@@ -1239,7 +1238,7 @@ class ConversationsPanel(wx.Panel):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
                 msg["_send_failed"]   = True
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                self.messages_list.RefreshItem(i)
                 break
 
     def refresh_message_status(self, msg_id: str, status: str):
@@ -1247,7 +1246,7 @@ class ConversationsPanel(wx.Panel):
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
                 msg.setdefault("MessageUpdate", []).append({"status": status})
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                self.messages_list.RefreshItem(i)
                 break
 
     # ── Voice recording ──────────────────────────────────────────────────────
@@ -1446,8 +1445,8 @@ class ConversationsPanel(wx.Panel):
                 "quotedMessage": self._quoted_message.get("message") or {},
             }
         self._sorted_messages.append(virtual_msg)
-        self.messages_list.Append((self._render_message_line(virtual_msg),))
-        last = self.messages_list.GetItemCount() - 1
+        self.messages_list.SetItemCount(len(self._sorted_messages))
+        last = len(self._sorted_messages) - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
@@ -4672,7 +4671,8 @@ class ConversationsPanel(wx.Panel):
 
         # Always delete locally
         self._sorted_messages.pop(index)
-        self.messages_list.DeleteItem(index)
+        # In virtual mode, decrement the count and refresh
+        self.messages_list.SetItemCount(len(self._sorted_messages))
         if self.conversation:
             records = (
                 self.conversation.get("messages", {})
@@ -5756,7 +5756,7 @@ class ConversationsPanel(wx.Panel):
     # ── Populate ─────────────────────────────────────────────────────────────
 
     def populate_messages(self):
-        self.messages_list.DeleteAllItems()
+        self.messages_list.SetItemCount(0)
         self._unread_sep_idx = -1
         self._reaction_map = {}
         messages_container = (
@@ -5851,9 +5851,8 @@ class ConversationsPanel(wx.Panel):
             paginated = displayable
 
         self._sorted_messages = paginated
-
-        for msg in paginated:
-            self.messages_list.Append((self._render_message_line(msg),))
+        # LC_VIRTUAL: one SetItemCount replaces the full Append() loop.
+        self.messages_list.SetItemCount(len(paginated))
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
         if self._unread_sep_idx >= 0:
