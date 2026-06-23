@@ -973,6 +973,11 @@ class MainWindow(wx.Frame):
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
 
+        # If the message is from ourselves, ensure from_me is True
+        sender = key.get("participant") or key.get("remoteJid") or ""
+        if sender and self._is_self_jid(sender):
+            from_me = True
+
         if not remote_jid:
             return
 
@@ -3202,6 +3207,13 @@ class MainWindow(wx.Frame):
         alt = key.get("remoteJidAlt", "")
         participant = key.get("participant", "")
 
+        # Guard against corrupt self-mappings: if any JID is ours, block cross-mapping with others
+        if self._is_self_jid(remote) or self._is_self_jid(alt) or self._is_self_jid(participant):
+            if alt and (self._is_self_jid(remote) != self._is_self_jid(alt)):
+                alt = ""
+            if participant and (self._is_self_jid(remote) != self._is_self_jid(participant)):
+                participant = ""
+
         updated = False
         # Initialize dictionary if not present
         if not hasattr(self, "_lid_to_phone"):
@@ -4856,6 +4868,12 @@ class MainWindow(wx.Frame):
             return
         if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
             return
+            
+        # Guard against corrupt self-mappings
+        if self._is_self_jid(lid_jid) or self._is_self_jid(phone_jid):
+            if not (self._is_self_jid(lid_jid) and self._is_self_jid(phone_jid)):
+                logging.warning(f"[LID Mapping] Blocked corrupt self-mapping attempt: {lid_jid} <-> {phone_jid}")
+                return
             
         if not hasattr(self, "_lid_to_phone"):
             self._lid_to_phone = {}

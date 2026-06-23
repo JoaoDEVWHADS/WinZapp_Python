@@ -723,6 +723,8 @@ class ConversationsPanel(wx.Panel):
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
+        self._first_unread_msg_id = None
+        self._first_unread_count = 0
         self._quoted_message = None
         self._reaction_map   = {}
         # Reset mention state for the new conversation
@@ -5798,11 +5800,23 @@ class ConversationsPanel(wx.Panel):
         unread_count = self._pending_open_unread
         self._pending_open_unread = 0
         if unread_count > 0 and len(displayable) >= unread_count:
-            sep_pos = len(displayable) - unread_count
-            sep = {"_type": "unread_separator", "count": unread_count}
-            displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
-            self._unread_sep_idx = sep_pos
-            self._sep_from_open = True
+            first_unread_idx = len(displayable) - unread_count
+            first_unread_msg = displayable[first_unread_idx]
+            if isinstance(first_unread_msg, dict):
+                self._first_unread_msg_id = first_unread_msg.get("key", {}).get("id")
+                self._first_unread_count = unread_count
+
+        if getattr(self, "_first_unread_msg_id", None):
+            sep_pos = -1
+            for idx, msg in enumerate(displayable):
+                if isinstance(msg, dict) and msg.get("key", {}).get("id") == self._first_unread_msg_id:
+                    sep_pos = idx
+                    break
+            if sep_pos >= 0:
+                sep = {"_type": "unread_separator", "count": getattr(self, "_first_unread_count", 1)}
+                displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
+                self._unread_sep_idx = sep_pos
+                self._sep_from_open = True
 
         # ── Pagination: show only last N messages ────────────────────────────
         self._all_sorted_messages = displayable
@@ -5827,6 +5841,10 @@ class ConversationsPanel(wx.Panel):
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
         if self._unread_sep_idx >= 0:
+            last = self.messages_list.GetItemCount() - 1
+            target_visible = min(self._unread_sep_idx + 3, last)
+            if target_visible >= 0:
+                self.messages_list.EnsureVisible(target_visible)
             self.messages_list.EnsureVisible(self._unread_sep_idx)
             self.messages_list.Focus(self._unread_sep_idx)
             self.messages_list.Select(self._unread_sep_idx)
