@@ -2536,15 +2536,24 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
-        # Speak full message text via accessible_output2 (covers NVDA/JAWS via
-        # their direct speech API, bypassing the OS ListView truncation).
-        # interrupt=True cancels any truncated native announcement already in progress.
-        # AccessibleMessageList.GetName() additionally covers IAccessible/MSAA readers.
+        # Delay the output() so it fires AFTER NVDA's native UIA announcement.
+        # NVDA first speaks the truncated text (~512 chars) via UIA; our delayed
+        # output(interrupt=True) then cancels it and speaks the full text last.
+        # Without the delay, our speech fires first and the truncated UIA speech
+        # plays on top of it as the final announcement heard by the user.
         if 0 <= idx < len(self._sorted_messages):
             m = self._sorted_messages[idx]
             if not self._is_separator(m):
                 full_text = self._render_message_line(m, truncate=False)
-                self.main_window.output(full_text, interrupt=True)
+                # Cancel any pending timer from rapid navigation
+                if self._speak_timer and self._speak_timer.IsRunning():
+                    self._speak_timer.Stop()
+                self._speak_timer = wx.CallLater(
+                    150,
+                    self.main_window.output,
+                    full_text,
+                    interrupt=True,
+                )
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
