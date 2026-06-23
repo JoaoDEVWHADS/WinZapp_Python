@@ -4851,6 +4851,8 @@ class MainWindow(wx.Frame):
         WPPConnect's sendSeen only needs the chat JID — no message key required.
         The HTTP call runs in a background thread to avoid blocking the UI.
         """
+        if not getattr(self, "_wa_connected", False):
+            return
         chat = self.chats.get(remote_jid)
         if chat is None:
             return
