@@ -315,9 +315,9 @@ class UpdateDialog(wx.Dialog):
     Buttons: Sim | Nao
     """
 
-    def __init__(self, parent, new_version: str):
-        self._main_window = parent
-        i18n = parent.i18n
+    def __init__(self, parent, new_version: str, main_window=None):
+        self._main_window = main_window or parent
+        i18n = self._main_window.i18n
         super().__init__(
             parent,
             title=i18n.t("update_available_title"),
@@ -443,7 +443,8 @@ class UpdateChecker:
         )
 
     def _show_update_dialog(self, remote_version: str):
-        dlg    = UpdateDialog(self._mw, remote_version)
+        parent = wx.GetActiveWindow() or self._mw
+        dlg    = UpdateDialog(parent, remote_version, self._mw)
         result = dlg.ShowModal()
         dlg.Destroy()
 
@@ -455,7 +456,8 @@ class UpdateChecker:
 
     def _do_install(self, new_version: str):
         while True:
-            prog = UpdateProgressDialog(self._mw, new_version, self._mw)
+            parent = wx.GetActiveWindow() or self._mw
+            prog = UpdateProgressDialog(parent, new_version, self._mw)
             result = prog.run()
             prog.Destroy()
 
