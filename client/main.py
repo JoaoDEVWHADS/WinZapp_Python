@@ -3594,43 +3594,7 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
-        # Sort chats by last activity timestamp descending
-        def _chat_sort_time(c):
-            ts = int(c.get("t", 0) or 0)
-            for m in c.get("messages", {}).get("messages", {}).get("records", []):
-                t = int(m.get("messageTimestamp", 0) or 0)
-                if t > ts:
-                    ts = t
-            return ts
-
-        sorted_chats = sorted(self.chats.values(), key=_chat_sort_time, reverse=True)
-
-        # Sync all chats that have unread messages + the top 20 most active chats
-        sync_limit = 20
-        synced_jids = set()
-        chats_to_sync = []
-
-        # 1. Add chats with unread messages
-        for chat in sorted_chats:
-            unread = int(chat.get("unreadCount") or 0)
-            if unread > 0:
-                chats_to_sync.append(chat)
-                synced_jids.add(chat.get("remoteJid"))
-
-        # 2. Add top N active chats that aren't already included
-        added_recent = 0
-        for chat in sorted_chats:
-            jid = chat.get("remoteJid")
-            if jid not in synced_jids:
-                chats_to_sync.append(chat)
-                synced_jids.add(jid)
-                added_recent += 1
-                if added_recent >= sync_limit:
-                    break
-
-        print(f"[sync_remote_chats] Sincronizando {len(chats_to_sync)} de {len(self.chats)} conversas.")
-
-        for chat in chats_to_sync:
+        for chat in self.chats.values():
             try:
                 self.sync_chat_messages(chat.copy())
             except Exception:
