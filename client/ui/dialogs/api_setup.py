@@ -271,10 +271,14 @@ class ApiSetupDialog(wx.Dialog):
         Run a subprocess and wait for it to finish.
         Returns (success: bool, stderr: str).
         """
+        import sys
+        creation_flags = 0
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags = subprocess.CREATE_NO_WINDOW
         try:
             self._proc = subprocess.Popen(
                 cmd, cwd=cwd, env=env,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=creation_flags,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
@@ -291,17 +295,34 @@ class ApiSetupDialog(wx.Dialog):
     # ── Background setup thread ───────────────────────────────────────────────
 
     def _run_setup(self):
-        node_exe = resource_path("node", "node.exe")
-        npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+            npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            npm_cmd  = [node_exe, npm_cli]
+            node_dir = resource_path("node")
+            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+            local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            if os.path.isfile(local_npm):
+                npm_cmd = [node_exe, local_npm]
+            else:
+                npm_cmd = [shutil.which("npm") or "npm"]
+            node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
         api_dir  = resource_path("api")
-        # Prepend the bundled node/ dir to PATH so that npm's internal
-        # sub-processes (lifecycle scripts, node-gyp, etc.) use the portable
-        # node.exe instead of whatever is (or isn't) on the system PATH.
-        node_dir = resource_path("node")
         puppeteer_cache = resource_path("api", ".cache", "puppeteer")
         npm_env  = {
             **os.environ,
-            "PATH": node_dir + os.pathsep + os.environ.get("PATH", ""),
+            "PATH": path_env,
             "PUPPETEER_CACHE_DIR": puppeteer_cache
         }
         tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
@@ -356,7 +377,7 @@ class ApiSetupDialog(wx.Dialog):
             # ── Step 4: npm install ───────────────────────────────────────
             self._set_status("Instalando dependências (npm install)...")
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "install", "--no-audit", "--no-fund", "--include=optional"],
+                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
                 cwd=api_dir,
                 env=npm_env,
             )
@@ -372,7 +393,7 @@ class ApiSetupDialog(wx.Dialog):
             # ── Step 4.5: download chrome if using modern puppeteer ───────
             self._set_status("Baixando executável do Chrome (puppeteer)...")
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "exec", "puppeteer", "browsers", "install", "chrome"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
                 cwd=api_dir,
                 env=npm_env,
             )
@@ -389,7 +410,7 @@ class ApiSetupDialog(wx.Dialog):
                 "isso pode levar alguns minutos..."
             )
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "run", "build"],
+                npm_cmd + ["run", "build"],
                 cwd=api_dir,
                 env=npm_env,
             )
@@ -411,13 +432,17 @@ class ApiSetupDialog(wx.Dialog):
     def _kill_proc_tree(self):
         """Kill the active npm process and all its spawned children."""
         if self._proc and self._proc.poll() is None:
+            import sys
             try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    self._proc.terminate()
             except Exception:
                 try:
                     self._proc.kill()
