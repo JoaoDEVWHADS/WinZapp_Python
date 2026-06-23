@@ -692,7 +692,17 @@ class WebSocketClient:
             remote_jid = "status@broadcast"
             status_participant = self._clean_jid(from_jid)
         else:
-            remote_jid = self._clean_jid(to_jid if from_me else from_jid)
+            key_remote = ""
+            wpp_id_obj = wpp_msg.get("id")
+            if isinstance(wpp_id_obj, dict):
+                key_remote = wpp_id_obj.get("remote", "")
+            if not key_remote and len(parts) > 1:
+                key_remote = parts[1]
+
+            if key_remote:
+                remote_jid = self._clean_jid(key_remote)
+            else:
+                remote_jid = self._clean_jid(to_jid if from_me else from_jid)
             status_participant = ""
 
         ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
