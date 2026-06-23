@@ -28,7 +28,7 @@ from ui.accessible import (
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
     AccessibleMessageList,
-    MessageListBox,
+    MessageListCtrl,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
@@ -295,12 +295,15 @@ class ConversationsPanel(wx.Panel):
         )
         conv_sizer.Add(self.messages_label, 0, wx.LEFT | wx.TOP, 5)
 
-        # MessageListBox uses wx.VListBox — no native buffer limits, no truncation.
-        self.messages_list = MessageListBox(self.conversation_panel, self)
-        self.messages_list.Bind(wx.EVT_LISTBOX_DCLICK, self.on_message_activated)
-        self.messages_list.Bind(wx.EVT_LISTBOX, self._on_messages_selection_changed)
+        # MessageListCtrl uses LC_VIRTUAL mode — OnGetItemText provides safe truncation.
+        self.messages_list = MessageListCtrl(self.conversation_panel, self)
+        self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
+        self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
+        self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
+        self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
+        self.messages_list.Bind(wx.EVT_SIZE, self._on_messages_list_resize)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── Link controls (shown when focused message contains URLs) ─────────
@@ -840,7 +843,9 @@ class ConversationsPanel(wx.Panel):
         if self._unread_sep_idx < 0:
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
-                self.messages_list.SetSelection(last)
+                self.messages_list.Focus(last)
+                self.messages_list.Select(last, True)
+                self.messages_list.EnsureVisible(last)
 
         # Move keyboard focus based on user preference.
         # Deferred via wx.CallAfter so this is the last item in the event
@@ -854,7 +859,8 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.message_field.SetFocus)
 
     def preselect_messages(self):
-        self.messages_list.SetSelection(0)
+        self.messages_list.Focus(0)
+        self.messages_list.Select(0, True)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -1120,7 +1126,7 @@ class ConversationsPanel(wx.Panel):
         # Scroll to the new item.
         last = len(self._sorted_messages) - 1
         if last >= 0:
-            self.messages_list.ScrollToLine(last)
+            self.messages_list.EnsureVisible(last)
 
         # Clear any pending @mentions before clearing the field.
         self._pending_mentions.clear()
@@ -1438,7 +1444,7 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.SetItemCount(len(self._sorted_messages))
         last = len(self._sorted_messages) - 1
         if last >= 0:
-            self.messages_list.ScrollToLine(last)
+            self.messages_list.EnsureVisible(last)
 
         # Immediately save a local copy of this voice message as local_id.msv
         try:
@@ -1643,8 +1649,9 @@ class ConversationsPanel(wx.Panel):
 
     # ── Messages list events ────────────────────────────────────────────────
 
-    def _on_message_selected_by_index(self, index: int):
+    def on_message_selected(self, event):
         """Show / hide action controls when the selection changes in the messages list."""
+        index = event.GetIndex()
         self._hide_all_media_controls()   # also clears links panel
         if index < 0 or index >= len(self._sorted_messages):
             return
@@ -1727,7 +1734,7 @@ class ConversationsPanel(wx.Panel):
 
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
-        idx = event.GetSelection()
+        idx = event.GetIndex()
         if idx >= 0:
             self._do_activate_message(idx)
 
@@ -2501,7 +2508,7 @@ class ConversationsPanel(wx.Panel):
 
     def _focused_msg_id(self) -> str:
         """Return the message ID of the currently focused list item, or ''."""
-        idx = self.messages_list.GetSelection()
+        idx = self.messages_list.GetFocusedItem()
         if idx < 0 or idx >= len(self._sorted_messages):
             return ""
         m = self._sorted_messages[idx]
@@ -2509,11 +2516,8 @@ class ConversationsPanel(wx.Panel):
             return ""
         return m.get("key", {}).get("id", "")
 
-    def _on_messages_selection_changed(self, event):
-        idx = event.GetSelection()
-        if 0 <= idx < len(self._sorted_messages):
-            self._on_message_selected_by_index(idx)
-
+    def _on_message_focused(self, event):
+        idx = event.GetIndex()
         if (
             idx == 0
             and not self._is_loading_more
@@ -2523,7 +2527,7 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
-        # Show audio controls only when the selected item IS the playing audio.
+        # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
             if 0 <= idx < len(self._sorted_messages):
                 m = self._sorted_messages[idx]
@@ -2597,7 +2601,9 @@ class ConversationsPanel(wx.Panel):
                 
             self.messages_list.SetItemCount(len(self._sorted_messages))
             self.messages_list.RefreshItems(0, len(self._sorted_messages) - 1)
-            self.messages_list.SetSelection(n_new)
+            self.messages_list.Focus(n_new)
+            self.messages_list.Select(n_new, True)
+            self.messages_list.EnsureVisible(n_new)
         finally:
             self.messages_list.Thaw()
 
@@ -2626,20 +2632,29 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.SetItemCount(len(self._sorted_messages))
             self.messages_list.RefreshItems(0, len(self._sorted_messages) - 1)
             # Keep the previously-first item in view (now at index n_new)
-            self.messages_list.SetSelection(n_new)
+            self.messages_list.Focus(n_new)
+            self.messages_list.Select(n_new, True)
+            self.messages_list.EnsureVisible(n_new)
         finally:
             self._is_loading_more = False
 
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
     def _on_messages_list_key_down(self, event):
-        """Enter / Space fire activation (same as double-click)."""
-        if event.GetKeyCode() in (wx.WXK_SPACE, wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
-            idx = self.messages_list.GetSelection()
+        """Make Space fire the same activation as Enter / double-click."""
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
         else:
             event.Skip()
+
+    def _on_messages_list_resize(self, event):
+        if hasattr(self, "messages_list") and self.messages_list:
+            width = self.messages_list.GetClientSize().width
+            if width > 0:
+                self.messages_list.SetColumnWidth(0, width)
+        event.Skip()
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
@@ -3188,7 +3203,8 @@ class ConversationsPanel(wx.Panel):
                     (next_msg.get("message") or {}).get("audioMessage") or {}
                 ).get("seconds", 0) or 0
                 # Update list selection to the next audio
-                self.messages_list.SetSelection(next_idx)
+                self.messages_list.Focus(next_idx)
+                self.messages_list.Select(next_idx, True)
                 clean_msg_id = msg_id
                 if "_" in msg_id:
                     parts = msg_id.split("_")
@@ -3870,7 +3886,7 @@ class ConversationsPanel(wx.Panel):
         # available via _get_message_content() for any read/search operation.
         _raw_body = (self._get_message_content(msg) or "").replace("\n", " ")
         if truncate:
-            body      = _raw_body[:500] + "…" if len(_raw_body) > 500 else _raw_body
+            body      = _raw_body[:250] + "…" if len(_raw_body) > 250 else _raw_body
         else:
             body      = _raw_body
         sender   = self._sender_label(msg)
@@ -4433,7 +4449,9 @@ class ConversationsPanel(wx.Panel):
             return
         for i, m in enumerate(self._sorted_messages):
             if not self._is_separator(m) and m.get("key", {}).get("id") == quoted_id:
-                self.messages_list.SetSelection(i)
+                self.messages_list.Focus(i)
+                self.messages_list.Select(i, True)
+                self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
         self._show_quoted_not_found_error()
@@ -4579,7 +4597,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.SetItemCount(len(self._sorted_messages))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
-                self.messages_list.ScrollToLine(last)
+                self.messages_list.EnsureVisible(last)
 
         mw.set_chats()
 
@@ -5014,7 +5032,9 @@ class ConversationsPanel(wx.Panel):
         count = self.messages_list.GetItemCount()
         if count > 0:
             last = count - 1
-            self.messages_list.SetSelection(last)
+            self.messages_list.Focus(last)
+            self.messages_list.Select(last, True)
+            self.messages_list.EnsureVisible(last)
             self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
@@ -5024,7 +5044,9 @@ class ConversationsPanel(wx.Panel):
         if self._unread_sep_idx < 0 or self._unread_sep_idx >= self.messages_list.GetItemCount():
             self.main_window.output(i18n.t("no_unread_in_conv"), interrupt=True)
             return
-        self.messages_list.SetSelection(self._unread_sep_idx)
+        self.messages_list.Focus(self._unread_sep_idx)
+        self.messages_list.Select(self._unread_sep_idx, True)
+        self.messages_list.EnsureVisible(self._unread_sep_idx)
         self.messages_list.SetFocus()
         self.main_window.output(
             self._render_message_line(self._sorted_messages[self._unread_sep_idx], truncate=False),
@@ -5096,7 +5118,9 @@ class ConversationsPanel(wx.Panel):
         i18n  = self.main_window.i18n
         idx   = self._search_results[self._search_result_idx]
         total = len(self._search_results)
-        self.messages_list.SetSelection(idx)
+        self.messages_list.Focus(idx)
+        self.messages_list.Select(idx, True)
+        self.messages_list.EnsureVisible(idx)
         ann = i18n.t("search_result").format(
             current=self._search_result_idx + 1,
             total=total,
@@ -5440,7 +5464,7 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.SetItemCount(len(self._sorted_messages))
         last = self.messages_list.GetItemCount() - 1
         if last >= 0:
-            self.messages_list.ScrollToLine(last)
+            self.messages_list.EnsureVisible(last)
         pm = PendingMessage(local_id, remote_jid, contact_info=contact,
                             quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
@@ -5580,7 +5604,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.SetItemCount(len(self._sorted_messages))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
-                self.messages_list.ScrollToLine(last)
+                self.messages_list.EnsureVisible(last)
             pm = PendingMessage(
                 local_id, remote_jid,
                 media_path=path, media_type=media_type, caption=caption,
@@ -5702,7 +5726,7 @@ class ConversationsPanel(wx.Panel):
         if getattr(self.main_window, "_allow_ui_focus_changes", lambda: False)():
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
-                self.messages_list.ScrollToLine(last)
+                self.messages_list.EnsureVisible(last)
 
     def navigate_to_jid(self, jid: str):
         """Select and open the conversation matching jid, clearing any search."""
@@ -5818,7 +5842,7 @@ class ConversationsPanel(wx.Panel):
             paginated = displayable
 
         self._sorted_messages = paginated
-        # VListBox: one SetItemCount replaces the full Append() loop.
+        # LC_VIRTUAL: one SetItemCount replaces the full Append() loop.
         self.messages_list.SetItemCount(len(paginated))
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
@@ -5826,14 +5850,16 @@ class ConversationsPanel(wx.Panel):
             last = self.messages_list.GetItemCount() - 1
             target_visible = min(self._unread_sep_idx + 3, last)
             if target_visible >= 0:
-                self.messages_list.ScrollToLine(target_visible)
-            self.messages_list.ScrollToLine(self._unread_sep_idx)
-            self.messages_list.SetSelection(self._unread_sep_idx)
+                self.messages_list.EnsureVisible(target_visible)
+            self.messages_list.EnsureVisible(self._unread_sep_idx)
+            self.messages_list.Focus(self._unread_sep_idx)
+            self.messages_list.Select(self._unread_sep_idx)
         else:
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
-                self.messages_list.ScrollToLine(last)
-                self.messages_list.SetSelection(last)
+                self.messages_list.EnsureVisible(last)
+                self.messages_list.Focus(last)
+                self.messages_list.Select(last)
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────

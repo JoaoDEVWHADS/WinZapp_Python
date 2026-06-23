@@ -154,42 +154,27 @@ class AccessibleMessageList(wx.Accessible):
         return (wx.ACC_NOT_IMPLEMENTED, "")
 
 
-class MessageListBox(wx.VListBox):
-    """wx.VListBox for the messages panel.
+class MessageListCtrl(wx.ListCtrl):
+    """Virtual wx.ListCtrl for the messages panel.
 
-    VListBox draws item text directly via OnDrawItem — no native ListView buffer
-    limits, no text truncation. Full message text is displayed without cutting
-    off long content, and screen readers receive the full text natively.
+    Uses LC_VIRTUAL so OnGetItemText is called for every item. Text is
+    truncated at a safe limit (250 chars + "…") to stay within the native
+    Windows ListView buffer, avoiding silent mid-word truncation.
+    Full text is always available via _render_message_line(truncate=False)
+    for search, link detection, and screen readers.
     """
 
     def __init__(self, parent, conversations_panel, **kwargs):
-        kwargs.pop("style", 0)
-        super().__init__(parent)
+        style = kwargs.pop("style", 0) | wx.LC_REPORT | wx.LC_VIRTUAL
+        super().__init__(parent, style=style, **kwargs)
         self._panel = conversations_panel
 
-    def OnDrawItem(self, dc, rect, item):  # noqa: N802
-        try:
-            msgs = getattr(self._panel, "_sorted_messages", [])
-            if 0 <= item < len(msgs):
-                text = self._panel._render_message_line(msgs[item], truncate=False)
-                bg = self.GetBackgroundColour()
-                dc.SetPen(wx.Pen(bg))
-                dc.SetBrush(wx.Brush(bg))
-                dc.DrawRectangle(rect)
-                dc.SetFont(self.GetFont())
-                dc.SetTextForeground(self.GetForegroundColour())
-                dc.SetClippingRect(rect)
-                dc.DrawLabel(text, rect, alignment=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-                dc.DestroyClippingRect()
-        except Exception:
-            pass
-
-    def OnMeasureItem(self, item):  # noqa: N802
-        try:
-            dc = wx.ClientDC(self)
-            dc.SetFont(self.GetFont())
-            _, y = dc.GetTextExtent("Ag")
-            return max(y + 6, 24)
-        except Exception:
-            return 24
+    def OnGetItemText(self, item: int, col: int) -> str:  # noqa: N802
+        msgs = getattr(self._panel, "_sorted_messages", [])
+        if 0 <= item < len(msgs):
+            try:
+                return self._panel._render_message_line(msgs[item], truncate=True)
+            except Exception:
+                pass
+        return ""
 
