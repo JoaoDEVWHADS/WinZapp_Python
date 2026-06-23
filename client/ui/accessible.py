@@ -168,22 +168,28 @@ class MessageListBox(wx.VListBox):
         self._panel = conversations_panel
 
     def OnDrawItem(self, dc, rect, item):  # noqa: N802
-        msgs = getattr(self._panel, "_sorted_messages", [])
-        if 0 <= item < len(msgs):
-            text = self._panel._render_message_line(msgs[item], truncate=False)
-            dc.SetFont(self.GetFont())
-            dc.SetTextForeground(self.GetForegroundColour())
-            dc.SetClippingRect(rect)
-            dc.DrawLabel(text, rect, alignment=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
-            dc.DestroyClippingRect()
+        try:
+            msgs = getattr(self._panel, "_sorted_messages", [])
+            if 0 <= item < len(msgs):
+                text = self._panel._render_message_line(msgs[item], truncate=False)
+                bg = self.GetBackgroundColour()
+                dc.SetPen(wx.Pen(bg))
+                dc.SetBrush(wx.Brush(bg))
+                dc.DrawRectangle(rect)
+                dc.SetFont(self.GetFont())
+                dc.SetTextForeground(self.GetForegroundColour())
+                dc.SetClippingRect(rect)
+                dc.DrawLabel(text, rect, alignment=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL)
+                dc.DestroyClippingRect()
+        except Exception:
+            pass
 
     def OnMeasureItem(self, item):  # noqa: N802
-        msgs = getattr(self._panel, "_sorted_messages", [])
-        if 0 <= item < len(msgs):
-            text = self._panel._render_message_line(msgs[item], truncate=False)
+        try:
             dc = wx.ClientDC(self)
             dc.SetFont(self.GetFont())
             _, y = dc.GetTextExtent("Ag")
             return max(y + 6, 24)
-        return 24
+        except Exception:
+            return 24
 
