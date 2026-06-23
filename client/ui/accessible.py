@@ -124,3 +124,31 @@ class AccessibleAudioSlider(wx.Accessible):
             total_str = panel._format_duration(panel._audio_stream_duration)
             return (wx.ACC_OK, f"{current_str} {i18n.t('of')} {total_str}")
         return (wx.ACC_OK, "")
+
+
+class AccessibleMessageList(wx.Accessible):
+    """Provides full, untruncated message text to screen readers via IAccessible.
+
+    The Windows ListView API truncates item text at ~512 characters when screen
+    readers query IAccessible::get_accName. By overriding GetName here, we
+    return the full rendered message directly from our data model — bypassing
+    the OS truncation entirely, with no timing dependency.
+    """
+
+    def __init__(self, conversations_panel):
+        super().__init__()
+        self._panel = conversations_panel
+
+    def GetName(self, childId):
+        # childId == 0 → the list control itself; > 0 → item (1-based index)
+        if childId == 0:
+            return (wx.ACC_OK, "")
+        idx = childId - 1
+        msgs = getattr(self._panel, "_sorted_messages", [])
+        if 0 <= idx < len(msgs):
+            try:
+                full_text = self._panel._render_message_line(msgs[idx], truncate=False)
+                return (wx.ACC_OK, full_text)
+            except Exception:
+                pass
+        return (wx.ACC_NOT_IMPLEMENTED, "")
