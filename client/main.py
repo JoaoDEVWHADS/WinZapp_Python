@@ -4752,6 +4752,14 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
+        # Resolve LID if available, otherwise format to @c.us for WPPConnect
+        target_phone = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if not target_phone:
+            if remote_jid.endswith("@s.whatsapp.net"):
+                target_phone = remote_jid.split("@")[0] + "@c.us"
+            else:
+                target_phone = remote_jid
+
         def _do_api():
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {
@@ -4761,15 +4769,15 @@ class MainWindow(wx.Frame):
             try:
                 resp = requests.post(
                     url,
-                    json={"phone": [remote_jid]},
+                    json={"phone": [target_phone]},
                     headers=headers,
                     timeout=10,
                 )
                 if not resp.ok:
                     logging.warning("[mark_as_read] API error %s for %s: %s",
-                                    resp.status_code, remote_jid, resp.text[:200])
+                                    resp.status_code, target_phone, resp.text[:200])
             except Exception as exc:
-                logging.warning("[mark_as_read] Request failed for %s: %s", remote_jid, exc)
+                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
 
         threading.Thread(target=_do_api, daemon=True).start()
 
@@ -6111,6 +6119,7 @@ class MainWindow(wx.Frame):
             generate_and_save_key(key_file)
 
     def retrieve_secret_key(self):
+        self.generate_secret_key()
         return retrieve_key(data_path("secret.key"))
 
     def exception_handler(self, exc_type, exc_value, exc_traceback):
