@@ -366,6 +366,21 @@ export async function checkConnectionSession(
   }
 }
 
+async function _getMessageById(client: any, messageId: string) {
+  if (typeof client.getMessageById === 'function')
+    return await client.getMessageById(messageId);
+  const wpp = (client as any).page?.evaluate
+    ? await (client as any).page.evaluate(
+        (id: string) => (window as any).WPP?.chat?.getMessageById(id),
+        messageId
+      )
+    : null;
+  if (wpp) return wpp;
+  throw new Error(
+    `getMessageById is not available — check @wppconnect-team/wppconnect version`
+  );
+}
+
 export async function downloadMediaByMessage(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]
@@ -393,7 +408,7 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
         }
       }
      }
-   */
+    */
   const client = req.client;
   const { messageId } = req.body;
 
@@ -401,19 +416,19 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
 
   try {
     if (!messageId.isMedia || !messageId.type) {
-      message = await client.getMessageById(messageId);
+      message = await _getMessageById(client, messageId);
     } else {
       message = messageId;
     }
 
     if (!message)
-      res.status(400).json({
+      return void res.status(400).json({
         status: 'error',
         message: 'Message not found',
       });
 
     if (!(message['mimetype'] || message.isMedia || message.isMMS))
-      res.status(400).json({
+      return void res.status(400).json({
         status: 'error',
         message: 'Message does not contain media',
       });
@@ -429,6 +444,60 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
       status: 'error',
       message: 'Decrypt file error',
       error: e,
+    });
+  }
+}
+
+export async function getMediaByMessage(req: Request, res: Response) {
+  /**
+   * #swagger.tags = ["Messages"]
+     #swagger.autoBody=false
+     #swagger.operationId = 'getMediaByMessage'
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.parameters["session"] = {
+      schema: 'messageId'
+     }
+    */
+  const client = req.client;
+  const { messageId } = req.params;
+
+  try {
+    const message = await _getMessageById(client, messageId);
+
+    if (!message)
+      return void res.status(400).json({
+        status: 'error',
+        message: 'Message not found',
+      });
+
+    if (!(message['mimetype'] || message.isMedia || message.isMMS))
+      return void res.status(400).json({
+        status: 'error',
+        message: 'Message does not contain media',
+      });
+
+    const msgAny = message as any;
+    const tempSavePath = `./userDataDir/temp_media_${(msgAny.id && typeof msgAny.id === 'object') ? msgAny.id.id : (msgAny.id || messageId)}`;
+    await client.decryptAndSaveFile(message, tempSavePath);
+    const buffer = fs.readFileSync(tempSavePath);
+    try {
+      fs.unlinkSync(tempSavePath);
+    } catch {}
+
+    res
+      .status(200)
+      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype });
+  } catch (ex) {
+    req.logger.error(ex);
+    res.status(500).json({
+      status: 'error',
+      message: 'Decrypt file error',
+      error: ex,
     });
   }
 }
