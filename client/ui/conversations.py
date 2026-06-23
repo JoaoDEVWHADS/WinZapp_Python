@@ -300,6 +300,7 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
+        self.messages_list.Bind(wx.EVT_SIZE, self._on_messages_list_resize)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── Link controls (shown when focused message contains URLs) ─────────
@@ -2651,6 +2652,13 @@ class ConversationsPanel(wx.Panel):
                 self._do_activate_message(idx)
         else:
             event.Skip()
+
+    def _on_messages_list_resize(self, event):
+        if hasattr(self, "messages_list") and self.messages_list:
+            width = self.messages_list.GetClientSize().width
+            if width > 0:
+                self.messages_list.SetColumnWidth(0, width)
+        event.Skip()
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
