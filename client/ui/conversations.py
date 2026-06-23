@@ -2646,7 +2646,7 @@ class ConversationsPanel(wx.Panel):
         if event.GetKeyCode() == wx.WXK_SPACE:
             if idx >= 0:
                 self._do_activate_message(idx)
-        elif event.GetKeyCode() in (ord("L"), ord("l")):
+        elif event.GetKeyCode() == ord("L") and event.GetModifiers() == wx.MOD_NONE:
             if idx >= 0 and self._is_truncated(idx):
                 self._show_full_message_dialog(idx)
         else:
