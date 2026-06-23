@@ -3683,6 +3683,8 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
+        if not getattr(self, "_wa_connected", False):
+            return
         for chat in self.chats.values():
             try:
                 self.sync_chat_messages(chat.copy())
@@ -3724,6 +3726,8 @@ class MainWindow(wx.Frame):
                 pass
 
     def sync_chat_messages(self, chat):
+        if not getattr(self, "_wa_connected", False):
+            return
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
         # Formata o JID corretamente para o WPPConnect
@@ -3763,6 +3767,8 @@ class MainWindow(wx.Frame):
                             logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
             else:
                 logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
+                if "sessão" in response.text.lower() and "não está ativa" in response.text.lower():
+                    self._wa_connected = False
         except Exception as e:
             logging.error(f"[sync_chat_messages] failed to get messages for {remote_jid}: {e}")
 
