@@ -249,6 +249,20 @@ export default class CreateSessionUtil {
   async start(req: Request, client: WhatsAppServer) {
     try {
       await client.isConnected();
+
+      const maxWaitMs = 120000;
+      const pollMs = 2000;
+      const startTime = Date.now();
+      while (Date.now() - startTime < maxWaitMs) {
+        try {
+          if (await client.isMainReady()) {
+            req.logger.info(`[${client.session}] Main ready after ${Date.now() - startTime}ms`);
+            break;
+          }
+        } catch (_) {}
+        await new Promise(r => setTimeout(r, pollMs));
+      }
+
       Object.assign(client, { status: 'CONNECTED', qrcode: null });
 
       req.logger.info(`Started Session: ${client.session}`);
