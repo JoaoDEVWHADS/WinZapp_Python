@@ -262,6 +262,7 @@ export async function sendFile(req: Request, res: Response) {
             if (!chat?.msgs) return;
             if (chat.msgs.get(msgId)) return;
             chat.msgs.add({
+              id: msgId,
               key: { remote: remoteJid, id: msgId, fromMe, participant },
               message: { conversation: '' },
               messageTimestamp: Math.floor(Date.now() / 1000),
@@ -445,10 +446,12 @@ export async function sendVoice64(req: Request, res: Response) {
             if (!chat?.msgs) return;
             // Check if the message already exists
             if (chat.msgs.get(msgId)) return;
-            // Add a stub matching WA-JS Message model structure.
-            // WA-JS expects key (not id at top-level) and message
-            // (not body/type).
+            // Add a stub that WA-JS getMessageById can find.
+            // WA-JS Message model expects id as a top-level attribute
+            // (used by memoized getters), plus the key inside a key
+            // object and message content inside message.
             chat.msgs.add({
+              id: msgId,
               key: { remote: remoteJid, id: msgId, fromMe, participant },
               message: { conversation: '' },
               messageTimestamp: Math.floor(Date.now() / 1000),
