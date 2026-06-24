@@ -381,12 +381,12 @@ class MainWindow(wx.Frame):
         self.ws = None
 
         conn = self.settings.get("connection", {})
-        self.wpp_server = conn.get("wpp_server") or conn.get("evolution_server", "http://127.0.0.1")
-        self.wpp_port = conn.get("wpp_port") or conn.get("evolution_port", 6300)
+        self.wpp_server    = conn.get("wpp_server",    "http://127.0.0.1")
+        self.wpp_port      = conn.get("wpp_port",      6300)
         if self.wpp_port == 3417:
             self.wpp_port = 6300
-        self.wpp_ws_server = conn.get("wpp_ws_server") or conn.get("evolution_ws_server", "ws://127.0.0.1")
-        self.wpp_api_key = conn.get("wpp_api_key") or conn.get("evolution_api_key", "wz-local-api-key")
+        self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
+        self.wpp_api_key   = conn.get("wpp_api_key",   "wz-local-api-key")
         logging.info("MainWindow: WPPConnect config - server=%s, port=%s", self.wpp_server, self.wpp_port)
 
         #Set basic variables

@@ -24,7 +24,7 @@ import requests
 import wx
 
 from app_paths import _outer_exe_dir, _is_frozen
-from config import UPDATE_VERSION_URL, UPDATE_CHANGELOG_URL, UPDATE_ZIP_URL
+from config import GITHUB_API_LATEST_RELEASE
 from version import __version__
 
 
@@ -224,7 +224,7 @@ class UpdateProgressDialog(wx.Dialog):
     Runs the download in a background thread, updates gauge via CallAfter.
     """
 
-    def __init__(self, parent, new_version: str, main_window):
+    def __init__(self, parent, new_version: str, main_window, zip_url: str):
         i18n = main_window.i18n
         super().__init__(
             parent,
@@ -233,6 +233,7 @@ class UpdateProgressDialog(wx.Dialog):
         )
         self._main_window  = main_window
         self._new_version  = new_version
+        self._zip_url      = zip_url
         self._cancelled    = False
         self._install_ok   = False
         self._error_msg    = ""
@@ -273,8 +274,8 @@ class UpdateProgressDialog(wx.Dialog):
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="winzapp_upd_")
             os.close(zip_fd)
 
-            logging.info("Auto-updater: Downloading ZIP from %s to %s", UPDATE_ZIP_URL, zip_path)
-            resp = requests.get(UPDATE_ZIP_URL, stream=True, timeout=60)
+            logging.info("Auto-updater: Downloading ZIP from %s to %s", self._zip_url, zip_path)
+            resp = requests.get(self._zip_url, stream=True, timeout=60)
             resp.raise_for_status()
 
             total = int(resp.headers.get("content-length", 0))
@@ -441,15 +442,42 @@ class UpdateChecker:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _check_once(self):
-        logging.info("Auto-updater: Starting update check...")
+        logging.info("Auto-updater: Checking GitHub Releases for updates...")
         try:
-            resp = requests.get(UPDATE_VERSION_URL, timeout=15)
+            resp = requests.get(
+                GITHUB_API_LATEST_RELEASE,
+                headers={"User-Agent": f"WinZapp/{__version__}"},
+                timeout=15,
+            )
             resp.raise_for_status()
-            data           = resp.json()
-            remote_version = data.get("version", "")
-            logging.info("Auto-updater: Remote version is %s", remote_version)
+            data = resp.json()
         except Exception:
             logging.exception("Auto-updater: Exception checking for updates")
+            self._schedule_retry()
+            return
+
+        tag_name       = data.get("tag_name", "")
+        remote_version = tag_name.lstrip("vV")
+        logging.info("Auto-updater: Latest release tag=%s version=%s", tag_name, remote_version)
+
+        if not remote_version:
+            logging.warning("Auto-updater: Could not parse version from tag_name=%r", tag_name)
+            self._schedule_retry()
+            return
+
+        # Find the portable ZIP asset (prefer WinZapp.zip by exact name)
+        zip_url = ""
+        for asset in data.get("assets", []):
+            name = asset.get("name", "").lower()
+            url  = asset.get("browser_download_url", "")
+            if name == "winzapp.zip":
+                zip_url = url
+                break
+            if name.endswith(".zip") and not zip_url:
+                zip_url = url
+
+        if not zip_url:
+            logging.warning("Auto-updater: No ZIP asset found in release %s", tag_name)
             self._schedule_retry()
             return
 
@@ -468,18 +496,10 @@ class UpdateChecker:
         logging.info("Auto-updater: Newer version %s is available!", remote_version)
         self._force = False
 
-        # Fetch changelog (optional)
-        changelog = ""
-        try:
-            resp2 = requests.get(UPDATE_CHANGELOG_URL, timeout=15)
-            resp2.raise_for_status()
-            changelog = get_changelog_for_update(
-                resp2.text, local_version, remote_version
-            )
-        except Exception:
-            pass
+        # Use the GitHub release body (notes written at release creation time)
+        changelog = data.get("body", "").strip()
 
-        wx.CallAfter(self._show_update_dialog, remote_version, changelog)
+        wx.CallAfter(self._show_update_dialog, remote_version, changelog, zip_url)
 
     def _show_no_update(self):
         i18n = self._mw.i18n
@@ -490,20 +510,20 @@ class UpdateChecker:
             self._mw,
         )
 
-    def _show_update_dialog(self, remote_version: str, changelog: str):
+    def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str):
         dlg    = UpdateDialog(self._mw, remote_version, changelog)
         result = dlg.ShowModal()
         dlg.Destroy()
 
         if result == wx.ID_YES:
-            self._do_install(remote_version)
+            self._do_install(remote_version, zip_url)
         else:
             # User said No — retry in 3 hours
             self._schedule_retry()
 
-    def _do_install(self, new_version: str):
+    def _do_install(self, new_version: str, zip_url: str):
         while True:
-            prog = UpdateProgressDialog(self._mw, new_version, self._mw)
+            prog = UpdateProgressDialog(self._mw, new_version, self._mw, zip_url)
             result = prog.run()
             prog.Destroy()
 
