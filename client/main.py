@@ -3669,7 +3669,7 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
-        for chat in self.chats.values():
+        for chat in list(self.chats.values()):
             try:
                 self.sync_chat_messages(chat.copy())
             except Exception:
