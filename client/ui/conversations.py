@@ -3430,7 +3430,10 @@ class ConversationsPanel(wx.Panel):
                 pct      = int(progress * 100)
                 prog_str = i18n.t("downloading_progress").format(pct=pct)
                 return f"{i18n.t('document')}, {filename}, {prog_str}"
-            return f"{i18n.t('document')}, {filename}, {size_str}"
+            parts = [i18n.t("document"), filename]
+            if size_str:
+                parts.append(size_str)
+            return ", ".join(parts)
 
         # ── Image ────────────────────────────────────────────────────────────
         if msg_type == "imageMessage":
@@ -5168,10 +5171,13 @@ class ConversationsPanel(wx.Panel):
                     out.append(line)
             return "\n".join(out)
 
-        dlg = wx.Dialog(
-            self.main_window,
+        # Use wx.Frame with parent=None so the window is completely independent:
+        # it appears in the taskbar, stays visible when Alt+Tab switches away from
+        # WinZapp, and never blocks the main window's input focus.
+        dlg = wx.Frame(
+            None,
             title=i18n.t("msg_text_title"),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            style=wx.DEFAULT_FRAME_STYLE | wx.FRAME_NO_TASKBAR,
             size=(480, 320),
         )
         panel = wx.Panel(dlg)
@@ -5187,8 +5193,6 @@ class ConversationsPanel(wx.Panel):
         dlg_sizer = wx.BoxSizer(wx.VERTICAL)
         dlg_sizer.Add(panel, 1, wx.EXPAND)
         dlg.SetSizer(dlg_sizer)
-        # Non-modal: self-destroy on close/Esc/button so the main window stays
-        # fully interactive while the popup is open.
         close_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Destroy())
         dlg.Bind(wx.EVT_CLOSE, lambda e: dlg.Destroy())
         dlg.Bind(
@@ -5196,7 +5200,7 @@ class ConversationsPanel(wx.Panel):
             lambda e: dlg.Destroy() if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip(),
         )
         text_ctrl.SetFocus()
-        dlg.CentreOnParent()
+        dlg.CentreOnScreen()
         dlg.Show()
 
     def _on_menu_react(self, msg: dict):

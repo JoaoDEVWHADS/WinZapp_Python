@@ -6052,7 +6052,30 @@ class MainWindow(wx.Frame):
             caption = (img.get("caption") or "").strip()
             content = i18n.t("photo") + (f" {caption}" if caption else "")
         elif msg_type == "documentMessage":
-            content = i18n.t("document")
+            doc      = msg_obj.get("documentMessage") or {}
+            filename = doc.get("fileName") or doc.get("title") or ""
+            size_bytes = doc.get("fileLength")
+            size_str = ""
+            if size_bytes:
+                try:
+                    sz  = int(size_bytes)
+                    sep = i18n.t("decimal_separator")
+                    if sz < 1024:
+                        size_str = f"{sz} b"
+                    elif sz < 1024 ** 2:
+                        size_str = f"{sz / 1024:.1f}".replace(".", sep) + " kb"
+                    elif sz < 1024 ** 3:
+                        size_str = f"{sz / 1024 ** 2:.1f}".replace(".", sep) + " mb"
+                    else:
+                        size_str = f"{sz / 1024 ** 3:.1f}".replace(".", sep) + " gb"
+                except (ValueError, TypeError):
+                    pass
+            parts = [i18n.t("document")]
+            if filename:
+                parts.append(filename)
+            if size_str:
+                parts.append(size_str)
+            content = ", ".join(parts)
         elif msg_type == "stickerMessage":
             content = i18n.t("sticker")
         elif msg_type == "contactMessage":
