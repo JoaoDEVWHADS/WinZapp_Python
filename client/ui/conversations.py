@@ -2527,6 +2527,18 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
+        # When the user navigates onto the unread separator (by any means:
+        # arrow keys, Alt+3, or page-up/down) mark the conversation as read.
+        if idx == self._unread_sep_idx and self._unread_sep_idx >= 0:
+            if self.conversation is not None:
+                jid = self.conversation.get("remoteJid", "")
+                if jid:
+                    threading.Thread(
+                        target=self.main_window.mark_conversation_as_read,
+                        args=(jid,),
+                        daemon=True,
+                    ).start()
+
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
             if 0 <= idx < len(self._sorted_messages):
@@ -3198,9 +3210,14 @@ class ConversationsPanel(wx.Panel):
                 duration = (
                     (next_msg.get("message") or {}).get("audioMessage") or {}
                 ).get("seconds", 0) or 0
-                # Update list selection to the next audio
-                self.messages_list.Focus(next_idx)
-                self.messages_list.Select(next_idx, True)
+                # Only move list focus to the next audio if the user hasn't
+                # already scrolled past it — avoids disrupting reading when
+                # sequential audio plays in the background.
+                current_focus = self.messages_list.GetFocusedItem()
+                if current_focus < 0 or current_focus <= next_idx:
+                    self.messages_list.Focus(next_idx)
+                    self.messages_list.Select(next_idx, True)
+                    self.messages_list.EnsureVisible(next_idx)
                 clean_msg_id = msg_id
                 if "_" in msg_id:
                     parts = msg_id.split("_")
@@ -5040,6 +5057,8 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.GetItemText(self._unread_sep_idx),
             interrupt=True,
         )
+        # mark_conversation_as_read is triggered by _on_message_focused which
+        # fires when Focus() is called above — no need to call it here again.
 
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 

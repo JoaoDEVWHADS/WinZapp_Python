@@ -572,6 +572,9 @@ class MainWindow(wx.Frame):
     def _build_menubar(self):
         """Create the menu bar with Arquivo and Ajuda menus."""
         self._ID_MARK_ALL_READ = wx.NewIdRef()
+        self._ID_SETTINGS      = wx.NewIdRef()
+        self._ID_DISCONNECT    = wx.NewIdRef()
+        self._ID_EXIT          = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
@@ -583,6 +586,21 @@ class MainWindow(wx.Frame):
         file_menu.Append(
             self._ID_MARK_ALL_READ,
             f"{self.i18n.t('menu_mark_all_read')}\tCtrl+Shift+Alt+M",
+        )
+        file_menu.AppendSeparator()
+        file_menu.Append(
+            self._ID_SETTINGS,
+            f"{self.i18n.t('menu_settings')}\tCtrl+,",
+        )
+        file_menu.AppendSeparator()
+        file_menu.Append(
+            self._ID_DISCONNECT,
+            f"{self.i18n.t('menu_disconnect')}\tCtrl+Alt+Shift+D",
+        )
+        file_menu.AppendSeparator()
+        file_menu.Append(
+            self._ID_EXIT,
+            f"{self.i18n.t('menu_exit')}\tCtrl+Alt+Shift+Q",
         )
         menubar.Append(file_menu, self.i18n.t("menu_file"))
 
@@ -600,6 +618,9 @@ class MainWindow(wx.Frame):
 
         self.SetMenuBar(menubar)
         self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
+        self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
+        self.Bind(wx.EVT_MENU, self._on_disconnect,    id=self._ID_DISCONNECT)
+        self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
@@ -609,9 +630,19 @@ class MainWindow(wx.Frame):
         mb = self.GetMenuBar()
         if mb is None:
             return
+        file_menu = mb.GetMenu(0)
         mb.SetMenuLabel(0, self.i18n.t("menu_file"))
-        mb.GetMenu(0).FindItemById(self._ID_MARK_ALL_READ).SetItemLabel(
+        file_menu.FindItemById(self._ID_MARK_ALL_READ).SetItemLabel(
             f"{self.i18n.t('menu_mark_all_read')}\tCtrl+Shift+Alt+M"
+        )
+        file_menu.FindItemById(self._ID_SETTINGS).SetItemLabel(
+            f"{self.i18n.t('menu_settings')}\tCtrl+,"
+        )
+        file_menu.FindItemById(self._ID_DISCONNECT).SetItemLabel(
+            f"{self.i18n.t('menu_disconnect')}\tCtrl+Alt+Shift+D"
+        )
+        file_menu.FindItemById(self._ID_EXIT).SetItemLabel(
+            f"{self.i18n.t('menu_exit')}\tCtrl+Alt+Shift+Q"
         )
         mb.SetMenuLabel(1, self.i18n.t("menu_help"))
         mb.GetMenu(1).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
@@ -659,6 +690,36 @@ class MainWindow(wx.Frame):
         panel.SetSizer(sizer)
         dialog.ShowModal()
         dialog.Destroy()
+
+    def _on_disconnect(self, event=None):
+        """Disconnect from WhatsApp: wipe credentials, stop WebSocket and show pairing dialog."""
+        pi = self.settings.setdefault("privateinfo", {})
+        old_token = pi.pop("WA_token", "")
+        pi.pop("WA_phone_number", None)
+        pi.pop("paired", None)
+        self.settings.setdefault("status", {})["messages_set_completed"] = False
+        self.token = ""
+        self.save_settings()
+        self.clear_local_data()
+        # Best-effort: close the WPPConnect session so Chrome is released.
+        if old_token:
+            def _close():
+                try:
+                    import requests as _req
+                    _req.post(
+                        f"{self.wpp_server}:{self.wpp_port}/api/{old_token}/close-session",
+                        headers={"Authorization": f"Bearer {old_token}", "Content-Type": "application/json"},
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+            threading.Thread(target=_close, daemon=True).start()
+        try:
+            if self.ws and self.ws.sio.connected:
+                self.ws.sio.disconnect()
+        except Exception:
+            pass
+        self.connect.show_connection_dial()
 
     def _on_mark_all_read(self, event=None):
         """Mark every conversation with unread messages as read."""
@@ -876,6 +937,10 @@ class MainWindow(wx.Frame):
         ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
         ctypes.windll.user32.SetForegroundWindow(hwnd)
         self._window_hidden = False
+        # When started via --background the window was never shown; clear the
+        # flag so _allow_ui_focus_changes(), _on_window_activate() and the
+        # notification window_active check all work correctly from now on.
+        self.background_mode = False
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.add_chats_to_ui)
 
@@ -1718,6 +1783,8 @@ class MainWindow(wx.Frame):
     def create_accelerator_table(self):
         #Set IDs
         self.ID_ALT_1      = wx.NewIdRef()
+        self.ID_ALT_2      = wx.NewIdRef()
+        self.ID_ALT_3      = wx.NewIdRef()
         self.ID_ALT_4      = wx.NewIdRef()
         self.ID_ALT_5      = wx.NewIdRef()
         self.ID_CTRL_COMMA = wx.NewIdRef()
@@ -1725,6 +1792,8 @@ class MainWindow(wx.Frame):
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_ALT,    ord('1'),    self.ID_ALT_1),
+            (wx.ACCEL_ALT,    ord('2'),    self.ID_ALT_2),
+            (wx.ACCEL_ALT,    ord('3'),    self.ID_ALT_3),
             (wx.ACCEL_ALT,    ord('4'),    self.ID_ALT_4),
             (wx.ACCEL_ALT,    ord('5'),    self.ID_ALT_5),
             (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
@@ -1732,10 +1801,24 @@ class MainWindow(wx.Frame):
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_alt_1,       id=self.ID_ALT_1)
+        self.Bind(wx.EVT_MENU, self._on_global_alt2, id=self.ID_ALT_2)
+        self.Bind(wx.EVT_MENU, self._on_global_alt3, id=self.ID_ALT_3)
         self.Bind(wx.EVT_MENU, self.on_alt_4,       id=self.ID_ALT_4)
         self.Bind(wx.EVT_MENU, self.on_alt_5,       id=self.ID_ALT_5)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
         self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
+
+    def _on_global_alt2(self, event):
+        """Alt+2: jump to last message regardless of which panel has focus."""
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None and cp.conversation is not None:
+            cp._on_accel_jump_last(event)
+
+    def _on_global_alt3(self, event):
+        """Alt+3: jump to unread separator regardless of which panel has focus."""
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None and cp.conversation is not None:
+            cp._on_accel_jump_unread(event)
 
     def on_f1(self, event):
         from ui.dialogs.shortcuts_dialog import ShortcutsDialog
@@ -1776,7 +1859,9 @@ class MainWindow(wx.Frame):
             self.status_panel.Hide()
         self.conversations_panel.Show()
         self.content_panel.Layout()
-        self.conversations_panel.conversations_list.SetFocus()
+        # Restore focus AND selection so the list never ends up empty-focused
+        # when navigating back from a conversation or another panel.
+        self.conversations_panel._restore_conversation_selection()
 
     def on_alt_4(self, event):
         self.conversations_panel.Hide()
@@ -4617,6 +4702,18 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(normalized)
         if chat is None:
             return
+        # The server sometimes counts own (fromMe) messages as unread. Correct
+        # for that by inspecting the tail of the locally-stored message list.
+        if unread_count > 0:
+            records = (
+                (chat.get("messages") or {})
+                .get("messages", {})
+                .get("records", [])
+            )
+            if records:
+                tail = records[-unread_count:] if unread_count <= len(records) else records
+                own_count = sum(1 for m in tail if (m.get("key") or {}).get("fromMe"))
+                unread_count = max(0, unread_count - own_count)
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
             return
