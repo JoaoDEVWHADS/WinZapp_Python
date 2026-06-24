@@ -226,10 +226,10 @@ export async function sendFile(req: Request, res: Response) {
   const pathFile = path || base64 || req.file?.path;
   const msg = message || caption;
 
-  // Resolve quoted message — same strategy as sendVoice64
+  // Resolve quoted message — same logic as sendVoice64
   let quotedMsg: any = quotedMessageId;
+  let quotedCtx: any = null;
   if (quotedMessageId) {
-    let found = false;
     try {
       const resolved = await req.client.page.evaluate(
         (id: string) => (window as any).WPP?.chat?.getMessageById(id),
@@ -237,39 +237,30 @@ export async function sendFile(req: Request, res: Response) {
       );
       if (resolved && resolved.key) {
         quotedMsg = resolved;
-        found = true;
       }
     } catch {
-      // swallow — inject stub below
+      // swallow — build contextInfo below
     }
 
-    if (!found) {
+    if (typeof quotedMsg === 'string') {
       const parts = quotedMessageId.split('_');
       if (parts.length >= 3) {
         const fromMe = parts[0] === 'true';
         const remoteJid = parts[1];
-        const msgId = parts[2];
+        const stanzaId = parts[2];
         const participantRaw = parts.slice(3).join('_');
         const participant = participantRaw
-          ? participantRaw.replace(/@c\.us/g, '@s.whatsapp.net').replace(/@lid/g, '@s.whatsapp.net')
+          ? participantRaw
+              .replace(/@c\.us/g, '@s.whatsapp.net')
+              .replace(/@lid/g, '@s.whatsapp.net')
           : undefined;
 
-        await req.client.page.evaluate(
-          ({ remoteJid, msgId, fromMe, participant }: any) => {
-            const wpp = (window as any).WPP;
-            if (!wpp?.whatsapp?.ChatStore) return;
-            const chat = wpp.whatsapp.ChatStore.get(remoteJid);
-            if (!chat?.msgs) return;
-            if (chat.msgs.get(msgId)) return;
-            chat.msgs.add({
-              id: msgId,
-              key: { remote: remoteJid, id: msgId, fromMe, participant },
-              message: { conversation: '' },
-              messageTimestamp: Math.floor(Date.now() / 1000),
-            });
-          },
-          { remoteJid, msgId, fromMe, participant }
-        );
+        quotedCtx = {
+          stanzaId,
+          participant,
+          quotedMessage: { conversation: '' },
+        };
+        quotedMsg = undefined;
       }
     }
   }
@@ -277,12 +268,17 @@ export async function sendFile(req: Request, res: Response) {
   try {
     const results: any = [];
     for (const contact of phone) {
+      const sendOpts: any = { ...options };
+      if (quotedCtx) {
+        sendOpts.contextInfo = quotedCtx;
+      } else {
+        sendOpts.quotedMsg = quotedMsg;
+      }
       results.push(
         await req.client.sendFile(contact, pathFile, {
           filename: filename,
           caption: msg,
-          quotedMsg: quotedMsg,
-          ...options,
+          ...sendOpts,
         })
       );
     }
@@ -400,16 +396,16 @@ export async function sendVoice64(req: Request, res: Response) {
 
   // Resolve quoted message for reply.
   // sendPttFromBase64 internally calls getMessageById which fails when the
-  // quoted message is not in WA-JS's in-memory message store (common for
-  // older messages or messages from other participants in group chats).
+  // quoted message is not in WA-JS's in-memory store.  We try
+  // WPP.chat.getMessageById first (broader search), and if that fails we
+  // bypass WA-JS's message lookup entirely by passing contextInfo directly
+  // in the send options instead of a quotedMsg reference.
   //
-  // Strategy:
-  //  1. Try WPP.chat.getMessageById — broader search than WA-JS internal.
-  //  2. If that fails, inject a minimal message stub with the correct key
-  //     into the WA-JS store so the subsequent internal lookup succeeds.
+  // contextInfo is a raw WhatsApp Web structure that sendFileMessage /
+  // prepareRawMessage use as-is when present in options.
   let quotedMsg: any = quotedMessageId;
+  let quotedCtx: any = null;
   if (quotedMessageId) {
-    let found = false;
     try {
       const resolved = await req.client.page.evaluate(
         (id: string) => (window as any).WPP?.chat?.getMessageById(id),
@@ -417,49 +413,31 @@ export async function sendVoice64(req: Request, res: Response) {
       );
       if (resolved && resolved.key) {
         quotedMsg = resolved;
-        found = true;
       }
     } catch {
-      // swallow — inject stub below
+      // swallow — build contextInfo below
     }
 
-    if (!found) {
-      // Parse the serialised ID:  {fromMe}_{remoteJid}_{id}  or
-      //                           {fromMe}_{remoteJid}_{id}_{participant}
+    if (typeof quotedMsg === 'string') {
       const parts = quotedMessageId.split('_');
       if (parts.length >= 3) {
         const fromMe = parts[0] === 'true';
         const remoteJid = parts[1];
-        const msgId = parts[2];
+        const stanzaId = parts[2];
         const participantRaw = parts.slice(3).join('_');
         const participant = participantRaw
-          ? participantRaw.replace(/@c\.us/g, '@s.whatsapp.net').replace(/@lid/g, '@s.whatsapp.net')
+          ? participantRaw
+              .replace(/@c\.us/g, '@s.whatsapp.net')
+              .replace(/@lid/g, '@s.whatsapp.net')
           : undefined;
 
-        // Inject a minimal message stub into WA-JS's store so that the
-        // subsequent sendPttFromBase64 → getMessageById lookup succeeds.
-        await req.client.page.evaluate(
-          ({ remoteJid, msgId, fromMe, participant }: any) => {
-            const wpp = (window as any).WPP;
-            if (!wpp?.whatsapp?.ChatStore) return;
-            const chat = wpp.whatsapp.ChatStore.get(remoteJid);
-            if (!chat?.msgs) return;
-            // Check if the message already exists
-            if (chat.msgs.get(msgId)) return;
-            // Add a stub that WA-JS getMessageById can find.
-            // WA-JS Message model expects id as a top-level attribute
-            // (used by memoized getters), plus the key inside a key
-            // object and message content inside message.
-            chat.msgs.add({
-              id: msgId,
-              key: { remote: remoteJid, id: msgId, fromMe, participant },
-              message: { conversation: '' },
-              messageTimestamp: Math.floor(Date.now() / 1000),
-            });
-          },
-          { remoteJid, msgId, fromMe, participant }
-        );
-        // Keep the string ID — WA-JS will look it up from the store
+        quotedCtx = {
+          stanzaId,
+          participant,
+          quotedMessage: { conversation: '' },
+        };
+        // Clear quotedMsg so sendPttFromBase64 doesn't try to look it up
+        quotedMsg = undefined;
       }
     }
   }
@@ -473,7 +451,7 @@ export async function sendVoice64(req: Request, res: Response) {
           base64Ptt,
           'Voice Audio',
           '',
-          quotedMsg
+          quotedCtx ? { contextInfo: quotedCtx } : quotedMsg
         )
       );
     }
