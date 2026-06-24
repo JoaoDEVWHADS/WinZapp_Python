@@ -186,7 +186,7 @@ def _spawn_delevated(cmd: list, cwd: str, log_fh, main_window) -> bool:
     / CheckTokenMembership() returns FALSE even when the parent holds an
     elevated token, allowing initdb to proceed.
 
-    Returns True and sets main_window.evolution_process on success.
+    Returns True and sets main_window.wpp_process on success (de-elevated launch).
     Returns False when de-elevation is impossible or the API call fails.
     """
     import msvcrt
@@ -299,7 +299,7 @@ def _spawn_delevated(cmd: list, cwd: str, log_fh, main_window) -> bool:
             return False
 
         kernel32.CloseHandle(pi.hThread)
-        main_window.evolution_process = _Win32Proc(pi.hProcess, int(pi.dwProcessId))
+        main_window.wpp_process = _Win32Proc(pi.hProcess, int(pi.dwProcessId))
         print("[_spawn_delevated] node.exe launched de-elevated via Safer API")
         return True
 
@@ -382,12 +382,12 @@ class MainWindow(wx.Frame):
         self.ws = None
 
         conn = self.settings.get("connection", {})
-        self.wpp_server = conn.get("wpp_server") or conn.get("evolution_server", "http://127.0.0.1")
-        self.wpp_port = conn.get("wpp_port") or conn.get("evolution_port", 6300)
+        self.wpp_server    = conn.get("wpp_server",    "http://127.0.0.1")
+        self.wpp_port      = conn.get("wpp_port",      6300)
         if self.wpp_port == 3417:
             self.wpp_port = 6300
-        self.wpp_ws_server = conn.get("wpp_ws_server") or conn.get("evolution_ws_server", "ws://127.0.0.1")
-        self.wpp_api_key = conn.get("wpp_api_key") or conn.get("evolution_api_key", "wz-local-api-key")
+        self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
+        self.wpp_api_key   = conn.get("wpp_api_key",   "wz-local-api-key")
         logging.info("MainWindow: WPPConnect config - server=%s, port=%s", self.wpp_server, self.wpp_port)
 
         #Set basic variables
@@ -405,12 +405,12 @@ class MainWindow(wx.Frame):
 
         # Check that the installed WPPConnect Server meets the minimum required version
         logging.info("MainWindow: Checking WPPConnect Server version...")
-        self.ensure_evolution_version()
+        self.ensure_wpp_version()
 
         # Start local WPPConnect Server (if bundled)
-        self.evolution_process = None
+        self.wpp_process = None
         logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
-        self.ensure_evolution_running()
+        self.ensure_wpp_running()
 
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
         if not self.background_mode:
@@ -896,7 +896,7 @@ class MainWindow(wx.Frame):
             self.message_queue.stop()
         if self._update_checker is not None:
             self._update_checker.stop()
-        self._stop_evolution()
+        self._stop_wpp_server()
         try:
             wx.GetApp().ExitMainLoop()
         except Exception:
@@ -1348,7 +1348,7 @@ class MainWindow(wx.Frame):
 
                 try:
                     proc = subprocess.Popen(
-                        npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
+                        npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                         cwd=api_dir,
                         env=npm_env,
                         creationflags=creation_flags,
@@ -1408,7 +1408,7 @@ class MainWindow(wx.Frame):
             pass
         return default
 
-    def _get_installed_evolution_version(self) -> str:
+    def _get_installed_wpp_version(self) -> str:
         """Read the WPPConnect Server version from api/package.json."""
         pkg_path = resource_path("api", "package.json")
         try:
@@ -1435,10 +1435,10 @@ class MainWindow(wx.Frame):
         except Exception:
             return False
 
-    def ensure_evolution_version(self):
+    def ensure_wpp_version(self):
         """
         Compare the installed WPPConnect version against the minimum required
-        by this WinZapp build (EVOLUTION_API_MINIMUM_VERSION in client/.env).
+        by this WinZapp build (WPP_MINIMUM_VERSION in client/.env).
 
         If the installed version is older the user is prompted to:
           • Update now   — re-download + rebuild via ApiSetupDialog, then continue
@@ -1448,7 +1448,7 @@ class MainWindow(wx.Frame):
         The check is skipped when:
           - Running in background mode (no UI)
           - api/package.json is absent (setup not done yet)
-          - EVOLUTION_API_MINIMUM_VERSION is not defined in the .env
+          - WPP_MINIMUM_VERSION is not defined in the .env
         """
         if self.background_mode:
             return
@@ -1457,11 +1457,11 @@ class MainWindow(wx.Frame):
         if not os.path.isfile(dist_main):
             return  # API not installed yet — setup dialog will handle it
 
-        minimum  = self._read_env_value("EVOLUTION_API_MINIMUM_VERSION")
+        minimum  = self._read_env_value("WPP_MINIMUM_VERSION")
         if not minimum:
             return  # No minimum defined — nothing to check
 
-        installed = self._get_installed_evolution_version()
+        installed = self._get_installed_wpp_version()
         if not installed:
             return  # Could not determine installed version — skip silently
 
@@ -1501,7 +1501,7 @@ class MainWindow(wx.Frame):
 
     # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
-    def _is_evolution_running(self):
+    def _is_wpp_running(self):
         """Return True if the WPPConnect is already listening on the configured port."""
         try:
             with _socket.create_connection(("127.0.0.1", self.wpp_port), timeout=1):
@@ -1509,7 +1509,7 @@ class MainWindow(wx.Frame):
         except OSError:
             return False
 
-    def _start_evolution_background(self):
+    def _start_wpp_background(self):
         """
         Launch the bundled WPPConnect Server node process in the background.
         stdout and stderr are redirected to api/wppconnect.log so that startup
@@ -1534,16 +1534,16 @@ class MainWindow(wx.Frame):
 
         start_js  = resource_path("api",  "start.js")
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
-            return  # Not bundled — developer runs Evolution separately
+            return  # Not bundled — developer runs WPPConnect separately
         try:
             from app_paths import log_path
-            self._evolution_log_path = log_path("evolution.log")
-            log_fh = open(self._evolution_log_path, "w",
+            self._wpp_log_path = log_path("wppconnect.log")
+            log_fh = open(self._wpp_log_path, "w",
                           encoding="utf-8", errors="replace")
             # Use the short (8.3) path so PostgreSQL's initdb doesn't choke on
             # accented characters in the install path (e.g. "Área de Trabalho").
             cwd = _get_short_path_name(resource_path("api"))
-            self.evolution_process = None
+            self.wpp_process = None
 
             # Guarantee that the child Node process inherits the correct API key
             # regardless of whether the local start.js or .env has been preserved.
@@ -1582,7 +1582,7 @@ class MainWindow(wx.Frame):
             if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
                 creation_flags = subprocess.CREATE_NO_WINDOW
 
-            self.evolution_process = subprocess.Popen(
+            self.wpp_process = subprocess.Popen(
                 [node_exe, start_js],
                 cwd=cwd,
                 creationflags=creation_flags,
@@ -1590,16 +1590,16 @@ class MainWindow(wx.Frame):
                 stderr=log_fh,
             )
             # Release Python's file handle now that node.exe has inherited it.
-            # This avoids a double-lock on evolution.log so an update extraction
+            # This avoids a double-lock on wppconnect.log so an update extraction
             # can overwrite the file once WinZapp exits (only node.exe holds a
             # lock while it is running — we don't need it on the Python side).
             log_fh.close()
-            self._evolution_log_fh = None
-            atexit.register(self._stop_evolution)
+            self._wpp_log_fh = None
+            atexit.register(self._stop_wpp_server)
         except Exception:
             pass
 
-    def _stop_evolution(self):
+    def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
 
         Calls /close-session first so WPPConnect asks Puppeteer to
@@ -1621,7 +1621,7 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
 
-        proc = getattr(self, "evolution_process", None)
+        proc = getattr(self, "wpp_process", None)
         if proc and proc.poll() is None:
             try:
                 pid = proc.pid
@@ -1641,7 +1641,7 @@ class MainWindow(wx.Frame):
                 except Exception:
                     pass
 
-    def ensure_evolution_running(self):
+    def ensure_wpp_running(self):
         """
         Start the local WPPConnect Server if it is not already listening.
 
@@ -1653,7 +1653,7 @@ class MainWindow(wx.Frame):
         On first launch the database initialisation and migrations can take
         60-90 s; subsequent starts are much faster.
         """
-        if self._is_evolution_running():
+        if self._is_wpp_running():
             return  # Already up (e.g. left running from a previous session)
 
         import sys
@@ -1680,15 +1680,15 @@ class MainWindow(wx.Frame):
                 and os.path.isfile(dist_server)):
             return
 
-        self._evolution_log_path = None
-        self._evolution_log_fh   = None
-        self._start_evolution_background()
+        self._wpp_log_path = None
+        self._wpp_log_fh   = None
+        self._start_wpp_background()
 
         if self.background_mode:
             # Silent wait — no dialog, no speech.  Timeout → exit code 1.
             deadline = time.time() + 120
             while time.time() < deadline:
-                if self._is_evolution_running():
+                if self._is_wpp_running():
                     return
                 time.sleep(2)
             sys.exit(1)
@@ -1700,9 +1700,9 @@ class MainWindow(wx.Frame):
             dlg.Destroy()
 
         if result != wx.ID_OK:
-            # Collect the last 40 lines of the evolution log for diagnosis
+            # Collect the last 40 lines of the WPPConnect log for diagnosis
             details = ""
-            log_path = getattr(self, "_evolution_log_path", None)
+            log_path = getattr(self, "_wpp_log_path", None)
             if log_path and os.path.isfile(log_path):
                 try:
                     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -2591,7 +2591,7 @@ class MainWindow(wx.Frame):
             if not isinstance(response_data, list):
                 response_data = []
 
-            # Traduzir as chaves do WPPConnect para Evolution (remoteJid)
+            # Traduzir as chaves do WPPConnect (remoteJid)
             for chat in response_data:
                 if not isinstance(chat, dict):
                     continue
@@ -4896,7 +4896,7 @@ class MainWindow(wx.Frame):
     # ── WPPConnect — profile / group info ─────────────────────────────────
     
     def resolve_self_lid(self):
-        """Query Evolution/WPPConnect API for own PN-LID mapping so self-mentions resolve correctly."""
+        """Query WPPConnect API for own PN-LID mapping so self-mentions resolve correctly."""
         my_jid = getattr(self, "my_jid", "")
         if not my_jid:
             return

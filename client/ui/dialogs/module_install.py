@@ -123,7 +123,7 @@ class ModuleInstallDialog(wx.Dialog):
         try:
             # ── Step 1: npm install ──────────────────────────────────────
             self._proc = subprocess.Popen(
-                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
+                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
                 env=npm_env,
                 creationflags=creation_flags,

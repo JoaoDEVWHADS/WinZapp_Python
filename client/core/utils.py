@@ -58,7 +58,7 @@ def is_phone_like(name: str) -> bool:
     """Return True if name looks like a phone number rather than a display name.
 
     Also rejects purely-numeric strings of any length (e.g. "0") — those are
-    Evolution API fallbacks from contact.id.split('@')[0] when no real name is
+    WPPConnect API fallbacks from contact.id.split('@')[0] when no real name is
     available, not actual display names.
     """
     if not name:
