@@ -124,3 +124,68 @@ class AccessibleAudioSlider(wx.Accessible):
             total_str = panel._format_duration(panel._audio_stream_duration)
             return (wx.ACC_OK, f"{current_str} {i18n.t('of')} {total_str}")
         return (wx.ACC_OK, "")
+
+
+class AccessibleMessageList(wx.Accessible):
+    """Provides full, untruncated message text to screen readers via IAccessible.
+
+    The Windows ListView API truncates item text at ~512 characters when screen
+    readers query IAccessible::get_accName. By overriding GetName here, we
+    return the full rendered message directly from our data model — bypassing
+    the OS truncation entirely, with no timing dependency.
+    """
+
+    def __init__(self, conversations_panel):
+        super().__init__()
+        self._panel = conversations_panel
+
+    def GetName(self, childId):
+        # childId == 0 → the list control itself; > 0 → item (1-based index)
+        if childId == 0:
+            return (wx.ACC_OK, "")
+        idx = childId - 1
+        msgs = getattr(self._panel, "_sorted_messages", [])
+        if 0 <= idx < len(msgs):
+            try:
+                full_text = self._panel._render_message_line(msgs[idx], truncate=False)
+                return (wx.ACC_OK, full_text)
+            except Exception:
+                pass
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
+class MessageListCtrl(wx.ListCtrl):
+    """Virtual wx.ListCtrl for the messages panel.
+
+    Uses LC_VIRTUAL so OnGetItemText is called for every item. Text is
+    truncated at a safe limit (250 chars + "…") to stay within the native
+    Windows ListView buffer, avoiding silent mid-word truncation.
+    Full text is always available via _render_message_line(truncate=False)
+    for search, link detection, and screen readers.
+    """
+
+    ID_READ_MORE = wx.NewIdRef()
+
+    def __init__(self, parent, conversations_panel, **kwargs):
+        style = kwargs.pop("style", 0) | wx.LC_REPORT | wx.LC_VIRTUAL
+        super().__init__(parent, style=style, **kwargs)
+        self._panel = conversations_panel
+        accel = wx.AcceleratorEntry(wx.ACCEL_NORMAL, ord("L"), self.ID_READ_MORE)
+        self.SetAcceleratorTable(wx.AcceleratorTable([accel]))
+        self.Bind(wx.EVT_MENU, self._on_read_more, self.ID_READ_MORE)
+
+    def _on_read_more(self, event):
+        panel = self._panel
+        idx = self.GetFocusedItem()
+        if idx >= 0 and panel._is_truncated(idx):
+            panel._show_full_message_dialog(idx)
+
+    def OnGetItemText(self, item: int, col: int) -> str:  # noqa: N802
+        msgs = getattr(self._panel, "_sorted_messages", [])
+        if 0 <= item < len(msgs):
+            try:
+                return self._panel._render_message_line(msgs[item], truncate=True)
+            except Exception:
+                pass
+        return ""
+

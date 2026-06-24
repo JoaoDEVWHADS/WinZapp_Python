@@ -319,6 +319,7 @@
     "shortcut_ctrl_shift_s_label": "Ctrl+Shift+S: guardar/descargar medios",
     "shortcut_ctrl_shift_m_label": "Ctrl+Shift+M: marcar como leída/no leída",
     "shortcut_ctrl_shift_l_label": "Ctrl+Shift+L: limpiar conversación",
+    "shortcut_l_label": "L: mostrar mensaje completo",
     "shortcut_ctrl_shift_alt_m_label": "Ctrl+Shift+Alt+M: marcar todas las conversaciones como leídas",
     "shortcut_alt_c_label": "Alt+C: mostrar texto del mensaje en popup",
     "shortcut_alt_e_label": "Alt+E: editar mensaje",

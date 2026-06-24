@@ -132,10 +132,10 @@ export async function getAllChats(req: Request, res: Response) {
      }
    */
   try {
-    const response = await req.client.getAllChats();
+    const response = await req.client.listChats({});
     res
       .status(200)
-      .json({ status: 'success', response: response, mapper: 'chat' });
+      .json({ status: 'success', response: response });
   } catch (e) {
     req.logger.error(e);
     res

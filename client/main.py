@@ -325,6 +325,7 @@ class MainWindow(wx.Frame):
         self._unresolvable_names = set()
         self._resolving_lids = set()
         self._lid_resolution_lock = threading.Lock()
+        self._media_sync_running = False
 
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
@@ -2348,7 +2349,11 @@ class MainWindow(wx.Frame):
         # ── Phase 2: download media (silent) ──────────────────────────────
         if not self.background_mode:
             wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-        self.sync_media_for_all_chats()
+        self._media_sync_running = True
+        try:
+            self.sync_media_for_all_chats()
+        finally:
+            self._media_sync_running = False
         if not self.background_mode:
             wx.CallAfter(self._set_status, "")
         # Final refresh so any media-resolved previews appear in the list.
@@ -3082,12 +3087,15 @@ class MainWindow(wx.Frame):
             msg_push = self.find_name_through_messages(chat)
             chat_name_field = get_valid_name(chat.get("name", ""))
             
-            name = (
-                resolved_name
-                or chat_push
-                or msg_push
-                or chat_name_field
-            )
+            if jid.endswith("@g.us"):
+                name = chat_name_field
+            else:
+                name = (
+                    resolved_name
+                    or chat_push
+                    or msg_push
+                    or chat_name_field
+                )
             
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
@@ -3180,12 +3188,16 @@ class MainWindow(wx.Frame):
             self.tray_icon.update_tooltip()
 
     def set_chats(self):
+        if getattr(self, "_media_sync_running", False):
+            return
         self._build_lid_to_phone_cache()
         self._apply_chat_lists(*self._compute_chat_lists())
 
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
+        if getattr(self, "_media_sync_running", False):
+            return
         if getattr(self, "_set_chats_pending", False):
             return
         self._set_chats_pending = True
@@ -3194,6 +3206,8 @@ class MainWindow(wx.Frame):
     def _do_scheduled_set_chats(self):
         """Run heavy computation in background; apply UI changes on main thread."""
         self._set_chats_pending = False
+        if getattr(self, "_media_sync_running", False):
+            return
         def _bg():
             try:
                 self._build_lid_to_phone_cache()
@@ -3669,6 +3683,8 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
+        if not getattr(self, "_wa_connected", False):
+            return
         for chat in self.chats.values():
             try:
                 self.sync_chat_messages(chat.copy())
@@ -3710,6 +3726,8 @@ class MainWindow(wx.Frame):
                 pass
 
     def sync_chat_messages(self, chat):
+        if not getattr(self, "_wa_connected", False):
+            return
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
         # Formata o JID corretamente para o WPPConnect
@@ -3749,6 +3767,8 @@ class MainWindow(wx.Frame):
                             logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
             else:
                 logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
+                if "sessão" in response.text.lower() and "não está ativa" in response.text.lower():
+                    self._wa_connected = False
         except Exception as e:
             logging.error(f"[sync_chat_messages] failed to get messages for {remote_jid}: {e}")
 
@@ -4831,6 +4851,8 @@ class MainWindow(wx.Frame):
         WPPConnect's sendSeen only needs the chat JID — no message key required.
         The HTTP call runs in a background thread to avoid blocking the UI.
         """
+        if not getattr(self, "_wa_connected", False):
+            return
         chat = self.chats.get(remote_jid)
         if chat is None:
             return

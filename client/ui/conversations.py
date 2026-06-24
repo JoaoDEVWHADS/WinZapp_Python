@@ -27,6 +27,8 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
+    AccessibleMessageList,
+    MessageListCtrl,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
@@ -293,13 +295,15 @@ class ConversationsPanel(wx.Panel):
         )
         conv_sizer.Add(self.messages_label, 0, wx.LEFT | wx.TOP, 5)
 
-        self.messages_list = wx.ListCtrl(self.conversation_panel, style=wx.LC_REPORT)
+        # MessageListCtrl uses LC_VIRTUAL mode — OnGetItemText provides safe truncation.
+        self.messages_list = MessageListCtrl(self.conversation_panel, self)
         self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
+        self.messages_list.Bind(wx.EVT_SIZE, self._on_messages_list_resize)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── Link controls (shown when focused message contains URLs) ─────────
@@ -856,7 +860,7 @@ class ConversationsPanel(wx.Panel):
 
     def preselect_messages(self):
         self.messages_list.Focus(0)
-        self.messages_list.Select(0)
+        self.messages_list.Select(0, True)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -977,9 +981,6 @@ class ConversationsPanel(wx.Panel):
         self._search_next_btn.SetLabel(i18n.t("search_next_result"))
 
         self.messages_label.SetLabel(i18n.t("messages"))
-        col2 = wx.ListItem()
-        col2.SetText(i18n.t("messages"))
-        self.messages_list.SetColumn(0, col2)
 
         self.audio_progress_label.SetLabel(i18n.t("audio_progress_label"))
         self._action_save_as_btn.SetLabel(i18n.t("save_as"))
@@ -1056,9 +1057,7 @@ class ConversationsPanel(wx.Panel):
             if 0 <= idx < len(self._sorted_messages):
                 self._sorted_messages[idx]["message"] = {"conversation": text}
                 self._sorted_messages[idx]["messageType"] = "conversation"
-                self.messages_list.SetItemText(
-                    idx, self._render_message_line(self._sorted_messages[idx])
-                )
+                self.messages_list.RefreshItem(idx)
 
             self._on_cancel_edit()
             return
@@ -1121,11 +1120,11 @@ class ConversationsPanel(wx.Panel):
         if _mentioned:
             virtual_msg.setdefault("contextInfo", {})["mentionedJid"] = _mentioned
 
-        # Add to sorted list and UI list immediately.
+        # Add to sorted list and tell the virtual list there is one more item.
         self._sorted_messages.append(virtual_msg)
-        self.messages_list.Append((self._render_message_line(virtual_msg),))
+        self.messages_list.SetItemCount(len(self._sorted_messages))
         # Scroll to the new item.
-        last = self.messages_list.GetItemCount() - 1
+        last = len(self._sorted_messages) - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
@@ -1220,7 +1219,7 @@ class ConversationsPanel(wx.Panel):
                             args=(msg,),
                             daemon=True,
                         ).start()
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                self.messages_list.RefreshItem(i)
                 # Play sent sound — fires only when the originating conversation
                 # is still the active one (otherwise local_id is not found here).
                 if hasattr(self.main_window, "message_sent_sound"):
@@ -1235,7 +1234,7 @@ class ConversationsPanel(wx.Panel):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
                 msg["_send_failed"]   = True
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                self.messages_list.RefreshItem(i)
                 break
 
     def refresh_message_status(self, msg_id: str, status: str):
@@ -1243,7 +1242,7 @@ class ConversationsPanel(wx.Panel):
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
                 msg.setdefault("MessageUpdate", []).append({"status": status})
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                self.messages_list.RefreshItem(i)
                 break
 
     # ── Voice recording ──────────────────────────────────────────────────────
@@ -1442,8 +1441,8 @@ class ConversationsPanel(wx.Panel):
                 "quotedMessage": self._quoted_message.get("message") or {},
             }
         self._sorted_messages.append(virtual_msg)
-        self.messages_list.Append((self._render_message_line(virtual_msg),))
-        last = self.messages_list.GetItemCount() - 1
+        self.messages_list.SetItemCount(len(self._sorted_messages))
+        last = len(self._sorted_messages) - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
@@ -1726,8 +1725,8 @@ class ConversationsPanel(wx.Panel):
                 self.conversation_panel.Layout()
 
         # ── Link detection ────────────────────────────────────────────────
-        # Always check the rendered text for URLs (regardless of msg_type)
-        rendered = self.messages_list.GetItemText(index)
+        # Use _render_message_line directly — full text is always available.
+        rendered = self._render_message_line(msg, truncate=False)
         self._update_links_panel(self._extract_links(rendered))
 
         # ── Mention detection ─────────────────────────────────────────────
@@ -1735,7 +1734,7 @@ class ConversationsPanel(wx.Panel):
 
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
-        idx = self.messages_list.GetFocusedItem()
+        idx = event.GetIndex()
         if idx >= 0:
             self._do_activate_message(idx)
 
@@ -1752,7 +1751,8 @@ class ConversationsPanel(wx.Panel):
 
         # For text-based messages: open the first link if one is present
         if msg_type in ("conversation", "extendedTextMessage", ""):
-            rendered = self.messages_list.GetItemText(index)
+            # Use _render_message_line directly — no truncation concerns.
+            rendered = self._render_message_line(msg, truncate=False)
             links = self._extract_links(rendered)
             if links:
                 try:
@@ -2538,6 +2538,7 @@ class ConversationsPanel(wx.Panel):
                     self._hide_audio_controls()
         event.Skip()
 
+
     def _load_older_messages_from_server(self):
         """Fetch older messages from server when the beginning of local history is reached."""
         if not self.conversation or not self._all_sorted_messages:
@@ -2598,10 +2599,8 @@ class ConversationsPanel(wx.Panel):
             if self._unread_sep_idx >= 0:
                 self._unread_sep_idx += n_new
                 
-            self.messages_list.DeleteAllItems()
-            for msg in self._sorted_messages:
-                self.messages_list.Append((self._render_message_line(msg),))
-                
+            self.messages_list.SetItemCount(len(self._sorted_messages))
+            self.messages_list.RefreshItems(0, len(self._sorted_messages) - 1)
             self.messages_list.Focus(n_new)
             self.messages_list.Select(n_new, True)
             self.messages_list.EnsureVisible(n_new)
@@ -2630,10 +2629,8 @@ class ConversationsPanel(wx.Panel):
                 self._unread_sep_idx += n_new
 
             # Rebuild the wx.ListCtrl from the updated _sorted_messages
-            self.messages_list.DeleteAllItems()
-            for msg in self._sorted_messages:
-                self.messages_list.Append((self._render_message_line(msg),))
-
+            self.messages_list.SetItemCount(len(self._sorted_messages))
+            self.messages_list.RefreshItems(0, len(self._sorted_messages) - 1)
             # Keep the previously-first item in view (now at index n_new)
             self.messages_list.Focus(n_new)
             self.messages_list.Select(n_new, True)
@@ -2644,13 +2641,46 @@ class ConversationsPanel(wx.Panel):
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
     def _on_messages_list_key_down(self, event):
-        """Make Space fire the same activation as Enter / double-click."""
+        """Space fires activation (same as Enter / double-click)."""
         if event.GetKeyCode() == wx.WXK_SPACE:
             idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
         else:
             event.Skip()
+
+    def _is_truncated(self, index):
+        msgs = getattr(self, "_sorted_messages", [])
+        if 0 <= index < len(msgs):
+            full = self._render_message_line(msgs[index], truncate=False)
+            truncated = self._render_message_line(msgs[index], truncate=True)
+            return len(full) > len(truncated)
+        return False
+
+    def _show_full_message_dialog(self, index):
+        msgs = getattr(self, "_sorted_messages", [])
+        if not (0 <= index < len(msgs)):
+            return
+        text = self._render_message_line(msgs[index], truncate=False)
+        dlg = wx.Dialog(self, title="Mensagem completa", size=(600, 400))
+        txt = wx.TextCtrl(dlg, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2)
+        txt.SetValue(text)
+        txt.SetInsertionPoint(0)
+        btn = wx.Button(dlg, wx.ID_CLOSE, "Fechar")
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(txt, 1, wx.EXPAND | wx.ALL, 5)
+        sizer.Add(btn, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
+        dlg.SetSizer(sizer)
+        btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Close())
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def _on_messages_list_resize(self, event):
+        if hasattr(self, "messages_list") and self.messages_list:
+            width = self.messages_list.GetClientSize().width
+            if width > 0:
+                self.messages_list.SetColumnWidth(0, width)
+        event.Skip()
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
@@ -3870,14 +3900,21 @@ class ConversationsPanel(wx.Panel):
 
         return self._get_participant_name(clean_p)
 
-    def _render_message_line(self, msg) -> str:
+    def _render_message_line(self, msg, truncate=True) -> str:
         """Produce the full display string for a single message row."""
         # Unread separator sentinel
         if self._is_separator(msg):
             return self._render_separator(msg.get("count", 1))
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
-        body     = (self._get_message_content(msg) or "").replace("\n", " ")
+        # Limit the preview body stored in the ListCtrl item to avoid the
+        # Windows ListView text limit (~512 chars). Full text is always
+        # available via _get_message_content() for any read/search operation.
+        _raw_body = (self._get_message_content(msg) or "").replace("\n", " ")
+        if truncate:
+            body      = _raw_body[:250] + "…" if len(_raw_body) > 250 else _raw_body
+        else:
+            body      = _raw_body
         sender   = self._sender_label(msg)
         status   = self._map_status(msg)
         i18n     = self.main_window.i18n
@@ -3927,7 +3964,7 @@ class ConversationsPanel(wx.Panel):
         self._download_progress[msg_id] = progress
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                self.messages_list.RefreshItem(i)
                 break
 
     # ── Ctrl+Shift+D / Ctrl+Shift+P dispatch ────────────────────────────────
@@ -4142,7 +4179,7 @@ class ConversationsPanel(wx.Panel):
         # Refresh messages list if this conversation is open
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
-            self.messages_list.DeleteAllItems()
+            self.messages_list.SetItemCount(0)
 
     def _on_menu_delete_chat(self, jid: str):
         i18n = self.main_window.i18n
@@ -4406,9 +4443,9 @@ class ConversationsPanel(wx.Panel):
         """Re-render all messages in the active message list (useful after background name/LID resolution)."""
         if not self.conversation or not hasattr(self, "messages_list"):
             return
-        for i, msg in enumerate(self._sorted_messages):
-            if not self._is_separator(msg):
-                self.messages_list.SetItemText(i, self._render_message_line(msg))
+        n = len(self._sorted_messages)
+        if n > 0:
+            self.messages_list.RefreshItems(0, n - 1)
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
@@ -4583,7 +4620,7 @@ class ConversationsPanel(wx.Panel):
         current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if target_jid == current_jid:
             self._sorted_messages.append(virtual_msg)
-            self.messages_list.Append((self._render_message_line(virtual_msg),))
+            self.messages_list.SetItemCount(len(self._sorted_messages))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
                 self.messages_list.EnsureVisible(last)
@@ -4651,7 +4688,8 @@ class ConversationsPanel(wx.Panel):
 
         # Always delete locally
         self._sorted_messages.pop(index)
-        self.messages_list.DeleteItem(index)
+        # In virtual mode, decrement the count and refresh
+        self.messages_list.SetItemCount(len(self._sorted_messages))
         if self.conversation:
             records = (
                 self.conversation.get("messages", {})
@@ -5037,7 +5075,7 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.EnsureVisible(self._unread_sep_idx)
         self.messages_list.SetFocus()
         self.main_window.output(
-            self.messages_list.GetItemText(self._unread_sep_idx),
+            self._render_message_line(self._sorted_messages[self._unread_sep_idx], truncate=False),
             interrupt=True,
         )
 
@@ -5071,7 +5109,7 @@ class ConversationsPanel(wx.Panel):
         self._search_results = [
             i for i, msg in enumerate(self._sorted_messages)
             if not self._is_separator(msg)
-            and qlow in self._render_message_line(msg).lower()
+            and qlow in self._render_message_line(msg, truncate=False).lower()
         ]
         self._search_result_idx = -1
 
@@ -5289,7 +5327,7 @@ class ConversationsPanel(wx.Panel):
         # Re-render the original message row if currently visible
         for i, m in enumerate(self._sorted_messages):
             if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
-                self.messages_list.SetItemText(i, self._render_message_line(m))
+                self.messages_list.RefreshItem(i)
                 break
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
@@ -5449,7 +5487,7 @@ class ConversationsPanel(wx.Panel):
                 "quotedMessage": self._quoted_message.get("message") or {},
             }
         self._sorted_messages.append(virtual_msg)
-        self.messages_list.Append((self._render_message_line(virtual_msg),))
+        self.messages_list.SetItemCount(len(self._sorted_messages))
         last = self.messages_list.GetItemCount() - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
@@ -5589,7 +5627,7 @@ class ConversationsPanel(wx.Panel):
                     "quotedMessage": quoted.get("message") or {},
                 }
             self._sorted_messages.append(virtual_msg)
-            self.messages_list.Append((self._render_message_line(virtual_msg),))
+            self.messages_list.SetItemCount(len(self._sorted_messages))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
                 self.messages_list.EnsureVisible(last)
@@ -5662,7 +5700,7 @@ class ConversationsPanel(wx.Panel):
                 # Re-render the original message in the list
                 for i, m in enumerate(self._sorted_messages):
                     if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
-                        self.messages_list.SetItemText(i, self._render_message_line(m))
+                        self.messages_list.RefreshItem(i)
                         break
             return  # Don't add reaction as a separate row
         # Avoid duplicates
@@ -5684,7 +5722,6 @@ class ConversationsPanel(wx.Panel):
                 sep_pos = len(self._sorted_messages)
                 sep = {"_type": "unread_separator", "count": 1}
                 self._sorted_messages.insert(sep_pos, sep)
-                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
                 self._unread_sep_idx = sep_pos
                 self._sep_from_open = False
             elif self._sep_from_open:
@@ -5693,24 +5730,20 @@ class ConversationsPanel(wx.Panel):
                 # reset the count to 1.
                 old_idx = self._unread_sep_idx
                 self._sorted_messages.pop(old_idx)
-                self.messages_list.DeleteItem(old_idx)
                 sep_pos = len(self._sorted_messages)
                 sep = {"_type": "unread_separator", "count": 1}
                 self._sorted_messages.insert(sep_pos, sep)
-                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
                 self._unread_sep_idx = sep_pos
                 self._sep_from_open = False
             else:
                 # Separator was placed by a previous live message — increment count
                 sep = self._sorted_messages[self._unread_sep_idx]
                 sep["count"] = sep.get("count", 0) + 1
-                self.messages_list.SetItemText(
-                    self._unread_sep_idx, self._render_separator(sep["count"])
-                )
+                self.messages_list.RefreshItem(self._unread_sep_idx)
 
             # Append the real message (focus must NOT move)
             self._sorted_messages.append(msg)
-            self.messages_list.Append((self._render_message_line(msg),))
+            self.messages_list.SetItemCount(len(self._sorted_messages))
         finally:
             self.messages_list.Thaw()
 
@@ -5740,7 +5773,7 @@ class ConversationsPanel(wx.Panel):
     # ── Populate ─────────────────────────────────────────────────────────────
 
     def populate_messages(self):
-        self.messages_list.DeleteAllItems()
+        self.messages_list.SetItemCount(0)
         self._unread_sep_idx = -1
         self._reaction_map = {}
         messages_container = (
@@ -5835,9 +5868,8 @@ class ConversationsPanel(wx.Panel):
             paginated = displayable
 
         self._sorted_messages = paginated
-
-        for msg in paginated:
-            self.messages_list.Append((self._render_message_line(msg),))
+        # LC_VIRTUAL: one SetItemCount replaces the full Append() loop.
+        self.messages_list.SetItemCount(len(paginated))
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
         if self._unread_sep_idx >= 0:

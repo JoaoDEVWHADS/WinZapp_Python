@@ -38,7 +38,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@wppconnect-team/wppconnect": "^2.1.0",
+    "@wppconnect-team/wppconnect": "^2.2.1",
     "archiver": "^7.0.1",
     "axios": "^1.14.0",
     "bcrypt": "^6.0.0",
@@ -117,6 +117,9 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "webpack-cli": "^6.0.1"
+  },
+  "overrides": {
+    "@wppconnect/wa-version": "^1.5.4205"
   },
   "peerDependencies": {
     "crypto-js": "^4.2.0",
