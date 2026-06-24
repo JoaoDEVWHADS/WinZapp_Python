@@ -253,11 +253,21 @@ export default class CreateSessionUtil {
       const maxWaitMs = 120000;
       const pollMs = 2000;
       const startTime = Date.now();
+      let mainReady = false;
       while (Date.now() - startTime < maxWaitMs) {
         try {
-          if (await client.isMainReady()) {
+          if (!mainReady && await client.isMainReady()) {
+            mainReady = true;
             req.logger.info(`[${client.session}] Main ready after ${Date.now() - startTime}ms`);
-            break;
+          }
+          if (mainReady) {
+            try {
+              const chats = await (client as any).listChats({});
+              if (Array.isArray(chats) && chats.length > 0) {
+                req.logger.info(`[${client.session}] ${chats.length} chats available after ${Date.now() - startTime}ms`);
+                break;
+              }
+            } catch (_) {}
           }
         } catch (_) {}
         await new Promise(r => setTimeout(r, pollMs));
