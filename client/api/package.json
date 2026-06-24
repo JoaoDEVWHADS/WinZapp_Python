@@ -119,7 +119,8 @@
     "webpack-cli": "^6.0.1"
   },
   "overrides": {
-    "@wppconnect/wa-version": "^1.5.4205"
+    "@wppconnect/wa-version": "^1.5.4205",
+    "@wppconnect/wa-js": "4.3.2-alpha.0"
   },
   "peerDependencies": {
     "crypto-js": "^4.2.0",
