@@ -17,6 +17,8 @@ from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
+from core.database import DatabaseManager
+from core.migrator import run_migration
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
@@ -327,6 +329,9 @@ class MainWindow(wx.Frame):
         self._lid_resolution_lock = threading.Lock()
         self._media_sync_running = False
 
+        self.db = DatabaseManager()
+        run_migration(self.db)
+
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
 
@@ -346,7 +351,7 @@ class MainWindow(wx.Frame):
         self.load_sounds()
         self.settings = {}
         logging.info("MainWindow: Loading settings...")
-        self.load_settings()
+        self._load_settings_from_db()
 
         # Synchronize registry key with the autostart setting on Windows
         self._sync_autostart_registry()
@@ -1085,12 +1090,15 @@ class MainWindow(wx.Frame):
                 self._schedule_set_chats()
                 return
 
+        if msg_id and self.db.message_exists(msg_id):
+            return
         if msg_id:
             for existing in records:
                 if existing.get("key", {}).get("id") == msg_id:
-                    return  # already stored
+                    return
 
         records.append(msg)
+        self.db.save_message(msg)
 
         # ── Update unread count (only for messages we received) ───────────────
         if not from_me:
@@ -2038,27 +2046,20 @@ class MainWindow(wx.Frame):
         else:
             sys.exit(0)
 
-    def load_settings(self):
-        settings_file = data_path("settings.json")
-        # Bootstrap from default on first run
-        if not os.path.isfile(settings_file):
-            default_file = resource_path("data", "settings_default.json")
-            if os.path.isfile(default_file):
-                os.makedirs(os.path.dirname(settings_file), exist_ok=True)
-                shutil.copy2(default_file, settings_file)
+    def _load_settings_from_db(self):
         try:
-            with open(settings_file, "r") as f:
-                self.settings = json.load(f)
+            self.settings = self.db.all_settings()
+            if not self.settings:
+                self.settings = self._bootstrap_settings()
         except Exception:
             if hasattr(self, 'i18n'):
                 msg   = self.i18n.t('settings_load_failed')
                 title = self.i18n.t("error").format(app_name=self.app_name)
             else:
-                # i18n not yet initialised — load pt-BR directly as default
                 from core.i18n import _load_translations
                 _pt   = _load_translations("pt-BR")
                 msg   = _pt.get("settings_load_failed",
-                                "Erro ao carregar o arquivo de configuração:")
+                                "Erro ao carregar as configurações:")
                 title = _pt.get("error", "{app_name} Erro").format(
                     app_name=self.app_name)
             if hasattr(self, 'error_sound'):
@@ -2066,6 +2067,29 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
             sys.exit()
         self._migrate_settings()
+
+    def _bootstrap_settings(self):
+        settings_file = data_path("settings.json")
+        if os.path.isfile(settings_file):
+            try:
+                with open(settings_file, "r") as f:
+                    s = json.load(f)
+                if s:
+                    self.db.settings_save_batch(s)
+                    return s
+            except Exception:
+                pass
+        default_file = resource_path("data", "settings_default.json")
+        if os.path.isfile(default_file):
+            try:
+                with open(default_file, "r") as f:
+                    s = json.load(f)
+                if s:
+                    self.db.settings_save_batch(s)
+                    return s
+            except Exception:
+                pass
+        return {}
 
     def _migrate_settings(self):
         """Migrate settings from old section names to current ones."""
@@ -2084,18 +2108,13 @@ class MainWindow(wx.Frame):
 
     def save_settings(self):
         try:
-            with open(data_path("settings.json"), "w") as f:
-                json.dump(self.settings, f, indent=4)
+            self.db.settings_save_batch(self.settings)
         except Exception:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
 
     def _schedule_save_settings(self):
-        """Debounce save_settings: coalesce rapid calls into one write after 2 s.
-
-        Used when background events (e.g. presence.update bursts) update settings
-        frequently — avoids hammering the disk on every event.
-        """
+        """Debounce save_settings: coalesce rapid calls into one write after 2 s."""
         with self._save_timer_lock:
             existing = getattr(self, "_settings_save_timer", None)
             if existing is not None:
@@ -2166,23 +2185,28 @@ class MainWindow(wx.Frame):
             sys.exit()
         self.token = token
 
+    def _init_secret_key(self):
+        key_file = data_path("secret.key")
+        if not os.path.isfile(key_file):
+            generate_and_save_key(key_file)
+        self.key = retrieve_key(key_file)
+
     def prepare_sync(self):
         os.makedirs(data_path(), exist_ok=True)
         self._media_failed_lock = threading.Lock()
         self._media_failed_ids  = self._load_media_failed_ids()
-        self.generate_secret_key()
-        self.key = self.retrieve_secret_key()
-        self.create_basic_files()
+        self._create_data_dirs()
+        self._init_secret_key()
 
         #Get Local Chats
-        self.chats = self.get_chats()
-        self._load_local_lid_cache()
+        self.chats = self.db.get_all_chats()
+        self._load_lid_cache_from_db()
         # Build cache first so deduplicate_chats() can use it as a fallback
         # for @lid chats whose messages carry no remoteJidAlt bridge field.
         self._build_lid_to_phone_cache()
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
-        self.contacts = self.get_contacts()
+        self.contacts = self.db.get_all_contacts()
         self.scan_all_cached_messages_for_mentions()
         self.connected_sound.play()
         # Reset per-session sync guard so on_messages_set() can start a fresh
@@ -2461,6 +2485,7 @@ class MainWindow(wx.Frame):
         if msg_id and any(m.get("key", {}).get("id") == msg_id for m in bucket):
             return  # deduplicate
         bucket.append(msg)
+        self.db.save_status_update(msg)
         self._schedule_save()
         # Refresh the Status tab if it is currently visible
         try:
@@ -2473,7 +2498,7 @@ class MainWindow(wx.Frame):
 
     def clear_local_data(self):
         """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
-        logging.info("[clear_local_data] Clearing all local caches, media, and messages.dat...")
+        logging.info("[clear_local_data] Clearing all local caches, media, and database...")
         self.chats = {}
         self.contacts = {}
         self._status_updates = {}
@@ -2493,26 +2518,14 @@ class MainWindow(wx.Frame):
             self._unresolvable_names.clear()
         else:
             self._unresolvable_names = set()
-        if hasattr(self, "_unresolvable_names"):
-            self._unresolvable_names.clear()
-        else:
-            self._unresolvable_names = set()
         if hasattr(self, "_resolving_lids"):
             self._resolving_lids.clear()
         else:
             self._resolving_lids = set()
-            
-        messages_file = data_path("messages.dat")
-        try:
-            key = getattr(self, "key", None)
-            if key is None:
-                key = self.retrieve_secret_key()
-            with open(messages_file, "wb") as f:
-                f.write(encrypt_json({"chats": {}, "contacts": {}}, key))
-            logging.info("[clear_local_data] Reset messages.dat successfully.")
-        except Exception as e:
-            logging.error(f"[clear_local_data] Failed to reset messages.dat: {e}")
-            
+
+        self.db.clear_all()
+        logging.info("[clear_local_data] Database cleared.")
+
         # Clear local downloaded media files to prevent cross-account leakage
         for subdir in ("media", "voice_messages"):
             path = data_path(subdir)
@@ -2529,21 +2542,9 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error(f"[clear_local_data] Failed to clear {subdir} folder: {e}")
 
-    def create_basic_files(self):
-        data_dir = data_path("")
-        os.makedirs(data_dir, exist_ok=True)
-
-        #Create empty messages.dat if not exists
-        messages_file = data_path("messages.dat")
-        if not os.path.isfile(messages_file):
-            with open(messages_file, "wb") as f:
-                f.write(encrypt_json({"chats": {}, "contacts": {}}, self.key))
-
-        #Create media/voice message directories
+    def _create_data_dirs(self):
         os.makedirs(data_path("media"), exist_ok=True)
         os.makedirs(data_path("voice_messages"), exist_ok=True)
-
-        #Create stderr/stdout log files
         log_dir = data_path("log")
         os.makedirs(log_dir, exist_ok=True)
         stderr_log = os.path.join(log_dir, "stderr.log")
@@ -2552,24 +2553,11 @@ class MainWindow(wx.Frame):
             open(stderr_log, "w").close()
         if not os.path.isfile(stdout_log):
             open(stdout_log, "w").close()
-        #Set stderr and stdout
         sys.stderr = open(stderr_log, "a")
         sys.stdout = open(stdout_log, "a")
 
     def get_chats(self):
-        messages_file = data_path("messages.dat")
-        try:
-            with open(messages_file, "rb") as f:
-                encrypted_data = f.read()
-                if encrypted_data:
-                    decrypted_data = decrypt_json(encrypted_data, self.key)
-                    return decrypted_data.get("chats", {})
-                else:
-                    return {}
-        except Exception as e:
-            self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
-            return {}
+        return self.db.get_all_chats()
 
     def get_remote_chats(self, chats):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/all-chats"
@@ -2851,27 +2839,20 @@ class MainWindow(wx.Frame):
         return chats
 
     def save_data(self, chats, contacts):
-        """Write encrypted chat+contact data to disk.
+        """Persist chats and contacts to SQLite.
 
-        Protected by _save_lock so concurrent callers (background threads)
-        never write the same file at the same time, which would corrupt it.
+        Protected by _save_lock so concurrent callers never write at the same time.
         """
         with self._save_lock:
-            messages_file = data_path("messages.dat")
             try:
-                lid_to_phone = getattr(self, "_lid_to_phone", {})
-                unresolvable_lids = list(getattr(self, "_unresolvable_lids", set()))
-                unresolvable_names = list(getattr(self, "_unresolvable_names", set()))
-                encrypted_data = encrypt_json({
-                    "chats": chats,
-                    "contacts": contacts,
-                    "lid_to_phone": lid_to_phone,
-                    "unresolvable_lids": unresolvable_lids,
-                    "unresolvable_names": unresolvable_names,
-                    "status_updates": getattr(self, "_status_updates", {})
-                }, self.key)
-                with open(messages_file, "wb") as f:
-                    f.write(encrypted_data)
+                self.db.save_contacts_batch(contacts)
+                for jid, chat in chats.items():
+                    self.db._execute(
+                        """UPDATE contacts SET push_name = ?, unread_count = ?
+                        WHERE jid = ?""",
+                        (chat.get("pushName", ""), chat.get("unreadCount", 0), jid),
+                    )
+                self.db._commit()
             except Exception:
                 self.error_sound.play()
                 wx.CallAfter(
@@ -2882,17 +2863,10 @@ class MainWindow(wx.Frame):
                 )
 
     def _do_save(self):
-        """Timer callback: persist current self.chats / self.contacts."""
         self.save_data(self.chats, self.contacts)
 
     def _schedule_save(self):
-        """Debounce save_data: coalesce rapid calls into one write after 150 ms.
-
-        Replaces bare ``threading.Thread(target=self.save_data, ...).start()``
-        calls so that a burst of incoming messages (e.g. 50 messages arriving
-        during a group sync) triggers exactly ONE disk write instead of 50
-        concurrent threads all racing to overwrite messages.dat.
-        """
+        """Debounce: coalesce rapid calls into one write after 150 ms."""
         with self._save_timer_lock:
             if self._save_timer is not None:
                 self._save_timer.cancel()
@@ -2901,42 +2875,24 @@ class MainWindow(wx.Frame):
             self._save_timer = t
             t.start()
 
-    def _load_local_lid_cache(self):
-        messages_file = data_path("messages.dat")
+    def _load_lid_cache_from_db(self):
         try:
-            if os.path.exists(messages_file):
-                with open(messages_file, "rb") as f:
-                    encrypted_data = f.read()
-                    if encrypted_data:
-                        decrypted_data = decrypt_json(encrypted_data, self.key)
-                        self._lid_to_phone = decrypted_data.get("lid_to_phone", {})
-                        self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
-                        self._unresolvable_lids = set(decrypted_data.get("unresolvable_lids", []))
-                        self._unresolvable_names = set(decrypted_data.get("unresolvable_names", []))
-                        self._status_updates = decrypted_data.get("status_updates", {})
-                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} LIDs, {len(self._unresolvable_names)} names, and status updates for {len(self._status_updates)} participants.")
-                        return
+            lid_to_phone, phone_to_lid = self.db.get_all_lid_mappings()
+            self._lid_to_phone = lid_to_phone
+            self._phone_to_lid = phone_to_lid
+            self._unresolvable_lids = self.db.get_all_unresolvable_lids()
+            self._unresolvable_names = self.db.get_all_unresolvable_names()
+            self._status_updates = self.db.get_all_status_updates()
+            logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} LIDs, {len(self._unresolvable_names)} names.")
         except Exception as e:
-            logging.error(f"[LID Cache] Error loading JID mappings from cache: {e}")
-        self._lid_to_phone = {}
-        self._phone_to_lid = {}
-        self._unresolvable_lids = set()
-        self._unresolvable_names = set()
+            logging.error(f"[LID Cache] Error loading from DB: {e}")
+            self._lid_to_phone = {}
+            self._phone_to_lid = {}
+            self._unresolvable_lids = set()
+            self._unresolvable_names = set()
 
     def get_contacts(self):
-        messages_file = data_path("messages.dat")
-        try:
-            with open(messages_file, "rb") as f:
-                encrypted_data = f.read()
-                if encrypted_data:
-                    decrypted_data = decrypt_json(encrypted_data, self.key)
-                    return decrypted_data.get("contacts", {})
-                else:
-                    return {}
-        except Exception as e:
-            self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('contact_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
-            return {}
+        return self.db.get_all_contacts()
 
     def get_remote_contacts(self):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/all-contacts"
@@ -3808,19 +3764,17 @@ class MainWindow(wx.Frame):
     _MEDIA_SYNC_TIMEOUT    = 20              # seconds per request during bulk sync
 
     def _load_media_failed_ids(self) -> set:
-        """Load the set of message IDs whose media CDN URL has previously expired."""
         try:
-            with open(data_path("media_failed.json"), "r", encoding="utf-8") as f:
-                return set(json.load(f))
+            failed = self.db.get_all_failed_media()
+            return set(failed.keys())
         except Exception:
             return set()
 
     def _save_media_failed_ids(self):
-        """Persist the failed-media set so expired IDs are skipped on future launches."""
         with self._media_failed_lock:
             try:
-                with open(data_path("media_failed.json"), "w", encoding="utf-8") as f:
-                    json.dump(list(self._media_failed_ids), f)
+                for msg_id in self._media_failed_ids:
+                    self.db.set_failed_media(msg_id, "expired")
             except Exception:
                 pass
 
@@ -6253,15 +6207,6 @@ class MainWindow(wx.Frame):
                         panel.conversations_list.Focus(target_idx)
                     panel.conversations_list.Select(target_idx)
                     panel.conversations_list.EnsureVisible(target_idx)
-
-    def generate_secret_key(self):
-        key_file = data_path("secret.key")
-        if not os.path.isfile(key_file):
-            generate_and_save_key(key_file)
-
-    def retrieve_secret_key(self):
-        self.generate_secret_key()
-        return retrieve_key(data_path("secret.key"))
 
     def exception_handler(self, exc_type, exc_value, exc_traceback):
         """Global exception handler for unexpected errors."""
