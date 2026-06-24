@@ -834,7 +834,7 @@ class WebSocketClient:
                 "fromMe": from_me,
                 "id": clean_id
             },
-            "pushName": wpp_msg.get("sender", {}).get("pushname") or wpp_msg.get("notifyName") or "",
+            "pushName": (wpp_msg.get("sender") or {}).get("pushname") or wpp_msg.get("notifyName") or "",
             "message": message_content,
             "messageTimestamp": ts,
             "messageType": mapped_type,
@@ -923,7 +923,7 @@ class WebSocketClient:
                     clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
             
             if not participant_jid:
-                author = quoted_msg.get("author") or quoted_msg.get("sender", {}).get("id") or ""
+                author = quoted_msg.get("author") or (quoted_msg.get("sender") or {}).get("id") or ""
                 if author:
                     participant_jid = author.replace("@c.us", "@s.whatsapp.net")
 
@@ -956,7 +956,7 @@ class WebSocketClient:
                     clean_quoted_id = parts[2] if len(parts) > 2 else parts[-1]
             
             if not participant_jid:
-                author = quoted_msg_obj.get("author") or quoted_msg_obj.get("sender", {}).get("id") or ""
+                author = quoted_msg_obj.get("author") or (quoted_msg_obj.get("sender") or {}).get("id") or ""
                 if author:
                     participant_jid = self._clean_jid(author)
 
