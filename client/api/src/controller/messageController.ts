@@ -226,7 +226,7 @@ export async function sendFile(req: Request, res: Response) {
   const pathFile = path || base64 || req.file?.path;
   const msg = message || caption;
 
-  // Pre-resolve quoted message via page.evaluate (same rationale as sendVoice64)
+  // Resolve quoted message — same logic as sendVoice64
   let quotedMsg: any = quotedMessageId;
   if (quotedMessageId) {
     try {
@@ -238,7 +238,30 @@ export async function sendFile(req: Request, res: Response) {
         quotedMsg = resolved;
       }
     } catch {
-      // fall back to string ID
+      // swallow — construct key manually below
+    }
+
+    if (typeof quotedMsg === 'string') {
+      const parts = quotedMessageId.split('_');
+      if (parts.length >= 3) {
+        const fromMe = parts[0] === 'true';
+        const remoteJid = parts[1];
+        const msgId = parts[2];
+        let participant = parts.slice(3).join('_') || undefined;
+        if (participant) {
+          participant = participant
+            .replace(/@c\.us/g, '@s.whatsapp.net')
+            .replace(/@lid/g, '@s.whatsapp.net');
+        }
+        quotedMsg = {
+          key: {
+            remoteJid,
+            id: msgId,
+            fromMe,
+            ...(participant ? { participant } : {}),
+          },
+        };
+      }
     }
   }
 
@@ -366,10 +389,11 @@ export async function sendVoice64(req: Request, res: Response) {
    */
   let { phone, base64Ptt, quotedMessageId } = req.body;
 
-  // Pre-resolve quoted message via page.evaluate — sendPttFromBase64's
-  // internal getMessageById can't always find messages in the in-memory
-  // cache (especially own messages where participant JID format may differ).
-  // WPP.chat.getMessageById queries the full store and succeeds more often.
+  // Resolve quoted message for reply.
+  // sendPttFromBase64 internally tries getMessageById which fails when the
+  // message is not in WA-JS's in-memory store.  We try WPP.chat.getMessageById
+  // first (broader search), and if that fails we construct a minimal key object
+  // so WA-JS can build contextInfo from the key alone, skipping the lookup.
   let quotedMsg: any = quotedMessageId;
   if (quotedMessageId) {
     try {
@@ -381,7 +405,33 @@ export async function sendVoice64(req: Request, res: Response) {
         quotedMsg = resolved;
       }
     } catch {
-      // fall back to sending string ID — same behaviour as before
+      // swallow — construct key manually below
+    }
+
+    // If getMessageById failed, parse the serialised ID and build a minimal
+    // key object.  Normalise participant to @s.whatsapp.net (WA-JS store
+    // format) instead of @c.us (legacy WPPConnect format).
+    if (typeof quotedMsg === 'string') {
+      const parts = quotedMessageId.split('_');
+      if (parts.length >= 3) {
+        const fromMe = parts[0] === 'true';
+        const remoteJid = parts[1];
+        const msgId = parts[2];
+        let participant = parts.slice(3).join('_') || undefined;
+        if (participant) {
+          participant = participant
+            .replace(/@c\.us/g, '@s.whatsapp.net')
+            .replace(/@lid/g, '@s.whatsapp.net');
+        }
+        quotedMsg = {
+          key: {
+            remoteJid,
+            id: msgId,
+            fromMe,
+            ...(participant ? { participant } : {}),
+          },
+        };
+      }
     }
   }
 
