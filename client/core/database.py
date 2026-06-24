@@ -91,7 +91,6 @@ class DatabaseManager:
             timestamp INTEGER
         );
         """
-        self._executemany("", [])
         for statement in sql.split(";"):
             stmt = statement.strip()
             if stmt:
