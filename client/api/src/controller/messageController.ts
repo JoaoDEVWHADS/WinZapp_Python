@@ -463,29 +463,32 @@ export async function sendVoice64(req: Request, res: Response) {
     }
   }
 
-  const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> =>
-    Promise.race([
-      promise,
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new Error(`sendVoice64 timed out after ${ms}ms`)), ms)
-      ),
-    ]);
-
   try {
     const results: any = [];
     for (const contato of phone) {
-      results.push(
-        await withTimeout(
-          req.client.sendPttFromBase64(
-            contato,
-            base64Ptt,
-            'Voice Audio',
-            '',
-            quotedMsg
-          ),
-          120000
-        )
+      const sendOpts: Record<string, any> = {
+        type: 'audio',
+        isPtt: true,
+        filename: 'Voice Audio',
+        caption: '',
+        waitForAck: true,
+      };
+      if (quotedMsg) sendOpts.quotedMsg = quotedMsg;
+      const result = await req.client.page.evaluate(
+        ({ contato, base64Ptt, sendOpts }: any) => {
+          const WPP: any = (window as any).WPP;
+          if (!WPP?.chat?.sendFileMessage) {
+            throw new Error('WPP.chat.sendFileMessage not available');
+          }
+          return WPP.chat.sendFileMessage(contato, base64Ptt, sendOpts)
+            .then((r: any) => ({ ack: r?.ack, id: r?.id?.toString() }))
+            .catch((err: any) => {
+              throw new Error(err?.message || 'sendFileMessage failed');
+            });
+        },
+        { contato, base64Ptt, sendOpts }
       );
+      results.push(result);
     }
 
     if (results.length === 0) res.status(400).json('Error sending message');
