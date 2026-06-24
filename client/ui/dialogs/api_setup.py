@@ -377,7 +377,7 @@ class ApiSetupDialog(wx.Dialog):
             # ── Step 4: npm install ───────────────────────────────────────
             self._set_status("Instalando dependências (npm install)...")
             ok, err = self._run_subprocess(
-                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional"],
+                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
                 env=npm_env,
             )

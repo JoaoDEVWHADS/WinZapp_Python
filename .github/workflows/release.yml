@@ -84,7 +84,7 @@ jobs:
 
           Set-Location "$env:GITHUB_WORKSPACE\client\api"
 
-          & $node $npm install --no-audit --no-fund
+          & $node $npm install --no-audit --no-fund --legacy-peer-deps
 
           # Run Prisma generate only if the package defines the script
           $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
