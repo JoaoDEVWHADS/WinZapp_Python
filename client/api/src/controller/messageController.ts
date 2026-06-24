@@ -226,9 +226,10 @@ export async function sendFile(req: Request, res: Response) {
   const pathFile = path || base64 || req.file?.path;
   const msg = message || caption;
 
-  // Resolve quoted message — same logic as sendVoice64
+  // Resolve quoted message — same strategy as sendVoice64
   let quotedMsg: any = quotedMessageId;
   if (quotedMessageId) {
+    let found = false;
     try {
       const resolved = await req.client.page.evaluate(
         (id: string) => (window as any).WPP?.chat?.getMessageById(id),
@@ -236,31 +237,39 @@ export async function sendFile(req: Request, res: Response) {
       );
       if (resolved && resolved.key) {
         quotedMsg = resolved;
+        found = true;
       }
     } catch {
-      // swallow — construct key manually below
+      // swallow — inject stub below
     }
 
-    if (typeof quotedMsg === 'string') {
+    if (!found) {
       const parts = quotedMessageId.split('_');
       if (parts.length >= 3) {
         const fromMe = parts[0] === 'true';
         const remoteJid = parts[1];
         const msgId = parts[2];
-        let participant = parts.slice(3).join('_') || undefined;
-        if (participant) {
-          participant = participant
-            .replace(/@c\.us/g, '@s.whatsapp.net')
-            .replace(/@lid/g, '@s.whatsapp.net');
-        }
-        quotedMsg = {
-          key: {
-            remoteJid,
-            id: msgId,
-            fromMe,
-            ...(participant ? { participant } : {}),
+        const participantRaw = parts.slice(3).join('_');
+        const participant = participantRaw
+          ? participantRaw.replace(/@c\.us/g, '@s.whatsapp.net').replace(/@lid/g, '@s.whatsapp.net')
+          : undefined;
+
+        await req.client.page.evaluate(
+          ({ remoteJid, msgId, fromMe, participant }: any) => {
+            const wpp = (window as any).WPP;
+            if (!wpp?.whatsapp?.ChatStore) return;
+            const chat = wpp.whatsapp.ChatStore.get(remoteJid);
+            if (!chat?.msgs) return;
+            if (chat.msgs.get(msgId)) return;
+            chat.msgs.add({
+              id: { id: msgId, remote: remoteJid, fromMe, participant },
+              body: '',
+              type: 'text',
+              t: Math.floor(Date.now() / 1000),
+            });
           },
-        };
+          { remoteJid, msgId, fromMe, participant }
+        );
       }
     }
   }
@@ -390,12 +399,17 @@ export async function sendVoice64(req: Request, res: Response) {
   let { phone, base64Ptt, quotedMessageId } = req.body;
 
   // Resolve quoted message for reply.
-  // sendPttFromBase64 internally tries getMessageById which fails when the
-  // message is not in WA-JS's in-memory store.  We try WPP.chat.getMessageById
-  // first (broader search), and if that fails we construct a minimal key object
-  // so WA-JS can build contextInfo from the key alone, skipping the lookup.
+  // sendPttFromBase64 internally calls getMessageById which fails when the
+  // quoted message is not in WA-JS's in-memory message store (common for
+  // older messages or messages from other participants in group chats).
+  //
+  // Strategy:
+  //  1. Try WPP.chat.getMessageById — broader search than WA-JS internal.
+  //  2. If that fails, inject a minimal message stub with the correct key
+  //     into the WA-JS store so the subsequent internal lookup succeeds.
   let quotedMsg: any = quotedMessageId;
   if (quotedMessageId) {
+    let found = false;
     try {
       const resolved = await req.client.page.evaluate(
         (id: string) => (window as any).WPP?.chat?.getMessageById(id),
@@ -403,34 +417,46 @@ export async function sendVoice64(req: Request, res: Response) {
       );
       if (resolved && resolved.key) {
         quotedMsg = resolved;
+        found = true;
       }
     } catch {
-      // swallow — construct key manually below
+      // swallow — inject stub below
     }
 
-    // If getMessageById failed, parse the serialised ID and build a minimal
-    // key object.  Normalise participant to @s.whatsapp.net (WA-JS store
-    // format) instead of @c.us (legacy WPPConnect format).
-    if (typeof quotedMsg === 'string') {
+    if (!found) {
+      // Parse the serialised ID:  {fromMe}_{remoteJid}_{id}  or
+      //                           {fromMe}_{remoteJid}_{id}_{participant}
       const parts = quotedMessageId.split('_');
       if (parts.length >= 3) {
         const fromMe = parts[0] === 'true';
         const remoteJid = parts[1];
         const msgId = parts[2];
-        let participant = parts.slice(3).join('_') || undefined;
-        if (participant) {
-          participant = participant
-            .replace(/@c\.us/g, '@s.whatsapp.net')
-            .replace(/@lid/g, '@s.whatsapp.net');
-        }
-        quotedMsg = {
-          key: {
-            remoteJid,
-            id: msgId,
-            fromMe,
-            ...(participant ? { participant } : {}),
+        const participantRaw = parts.slice(3).join('_');
+        const participant = participantRaw
+          ? participantRaw.replace(/@c\.us/g, '@s.whatsapp.net').replace(/@lid/g, '@s.whatsapp.net')
+          : undefined;
+
+        // Inject a minimal message stub into WA-JS's store so that the
+        // subsequent sendPttFromBase64 → getMessageById lookup succeeds.
+        await req.client.page.evaluate(
+          ({ remoteJid, msgId, fromMe, participant }: any) => {
+            const wpp = (window as any).WPP;
+            if (!wpp?.whatsapp?.ChatStore) return;
+            const chat = wpp.whatsapp.ChatStore.get(remoteJid);
+            if (!chat?.msgs) return;
+            // Check if the message already exists
+            if (chat.msgs.get(msgId)) return;
+            // Add a stub that WA-JS can find by key
+            chat.msgs.add({
+              id: { id: msgId, remote: remoteJid, fromMe, participant },
+              body: '',
+              type: 'text',
+              t: Math.floor(Date.now() / 1000),
+            });
           },
-        };
+          { remoteJid, msgId, fromMe, participant }
+        );
+        // Keep the string ID — WA-JS will look it up from the store
       }
     }
   }
