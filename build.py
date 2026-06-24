@@ -20,8 +20,8 @@ Visible structure after install / extraction:
   sounds/       <- OGG audio files
   languages/    <- JSON translation files
   data/         <- settings_default.json (bootstrap); settings.json created on first run
-  node/         <- portable Node.js runtime (node.exe + runtime files)
-  api/          <- Evolution API (dist/ + node_modules/ + prisma/ + start.js + .env)
+  node/         <- portable Node.js runtime (node.exe + npm)
+  api/          <- WPPConnect Server (dist/ + prisma/ + start.js + .env + config)
 
 Before running this script you must prepare:
 
@@ -39,7 +39,7 @@ Before running this script you must prepare:
                   npm install
                   npm run db:generate
                   npm run build
-                Verify: client/api/dist/main.js must exist.
+                Verify: client/api/dist/server.js must exist.
 
 Usage:
   venv\\Scripts\\python.exe build_pyinstaller.py
@@ -97,14 +97,25 @@ AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 API_EXCLUDE_DIRS  = {
     "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
     ".github", ".husky", ".vscode", "src", "log", "tokens", "uploads", "WhatsAppImages",
-    "tests", "coverage"
+    "tests", "coverage",
+    # .cache/ holds Puppeteer's Chrome binary (~680 MB) — downloaded at runtime by the app
+    ".cache",
 }
 API_EXCLUDE_FILES = {
     ".gitignore", "README-SETUP.md", ".babelrc", ".eslintignore", ".eslintrc.js",
-    ".prettierrc", "jest.config.js", "tsconfig.json", "tsconfig.tsbuildinfo",
-    "README.md", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-    ".env.example", "nodemon.json"
+    ".eslintrc.json", ".prettierrc", ".prettierignore", "jest.config.js",
+    "tsconfig.json", "tsconfig.tsbuildinfo", "README.md", "CHANGELOG.md",
+    "LICENSE", "LICENSE.header", "license-checker-config.json",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", ".yarnrc.yml",
+    ".env.example", "nodemon.json", ".npmignore", ".npmrc",
+    ".commitlintrc.json", ".dockerignore", ".release-it.yml",
+    "Dockerfile", "docker-compose.yml", "requests.http",
+    # swagger backup created during the API build — not needed at runtime
+    "swagger-backup.json",
 }
+# Subdirectory names to skip at ANY nesting depth inside api/
+# (e.g. dist/tests/, dist/types/ compiled by tsc)
+API_EXCLUDE_SUB_DIRS = {"tests", "types"}
 
 # -- Helpers -----------------------------------------------------------------
 
@@ -120,17 +131,26 @@ def run(cmd, cwd=None):
         print(f"\n[ERROR] Command failed with exit code {result.returncode}.")
         sys.exit(result.returncode)
 
-def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None):
-    """Yield (absolute_path, relative_path) for every file under root."""
+def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None, exclude_sub_dirs=None):
+    """Yield (absolute_path, relative_path) for every file under root.
+
+    exclude_top_dirs:  directory names excluded only at the root level.
+    exclude_sub_dirs:  directory names excluded at ANY nesting depth (e.g. dist/types/).
+    exclude_top_files: file names excluded only at the root level.
+    """
     exclude_top_dirs  = exclude_top_dirs  or set()
     exclude_top_files = exclude_top_files or set()
+    exclude_sub_dirs  = exclude_sub_dirs  or set()
     for dirpath, dirs, files in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
         top = rel_dir.split(os.sep)[0] if rel_dir != "." else ""
         if top in exclude_top_dirs:
             dirs.clear()
             continue
-        dirs[:] = [d for d in dirs if not (rel_dir == "." and d in exclude_top_dirs)]
+        dirs[:] = [d for d in dirs if not (
+            (rel_dir == "." and d in exclude_top_dirs) or
+            d in exclude_sub_dirs
+        )]
         for fname in files:
             if rel_dir == "." and fname in exclude_top_files:
                 continue
@@ -315,9 +335,10 @@ def assemble_staging():
     else:
         print(f"  [WARN] client/.env not found — skipping")
 
-    # node/ - portable Node.js runtime
+    # node/ - portable Node.js runtime (skip corepack — not used by WinZapp)
     node_dst   = os.path.join(STAGING_DIR, "node")
-    shutil.copytree(NODE_DIR, node_dst)
+    shutil.copytree(NODE_DIR, node_dst,
+                    ignore=shutil.ignore_patterns("corepack"))
     node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
     print(f"  -> node/  ({node_count} files)")
 
@@ -327,7 +348,8 @@ def assemble_staging():
     api_count = 0
     for abs_path, rel_path in walk_dir(API_DIR,
                                        exclude_top_dirs=API_EXCLUDE_DIRS,
-                                       exclude_top_files=API_EXCLUDE_FILES):
+                                       exclude_top_files=API_EXCLUDE_FILES,
+                                       exclude_sub_dirs=API_EXCLUDE_SUB_DIRS):
         dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(abs_path, dst)
