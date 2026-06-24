@@ -166,7 +166,7 @@ class MessageQueue:
                             msg.last_error = getattr(self.main_window, "_last_send_error", "") or ""
                         logging.warning("[MessageQueue] send failed for %s jid=%s attempt=%s/%s",
                                         msg.local_id, msg.jid, msg.fail_count, self._MAX_RETRIES)
-                        if (not retryable_failure) or msg.fail_count >= self._MAX_RETRIES:
+                        if msg.fail_count >= self._MAX_RETRIES:
                             logging.error("[MessageQueue] giving up on %s jid=%s after %s attempt(s). last_error=%s",
                                           msg.local_id, msg.jid, msg.fail_count, msg.last_error)
                             with self._lock:
