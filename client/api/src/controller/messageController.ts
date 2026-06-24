@@ -226,6 +226,22 @@ export async function sendFile(req: Request, res: Response) {
   const pathFile = path || base64 || req.file?.path;
   const msg = message || caption;
 
+  // Pre-resolve quoted message via page.evaluate (same rationale as sendVoice64)
+  let quotedMsg: any = quotedMessageId;
+  if (quotedMessageId) {
+    try {
+      const resolved = await req.client.page.evaluate(
+        (id: string) => (window as any).WPP?.chat?.getMessageById(id),
+        quotedMessageId
+      );
+      if (resolved && resolved.key) {
+        quotedMsg = resolved;
+      }
+    } catch {
+      // fall back to string ID
+    }
+  }
+
   try {
     const results: any = [];
     for (const contact of phone) {
@@ -233,7 +249,7 @@ export async function sendFile(req: Request, res: Response) {
         await req.client.sendFile(contact, pathFile, {
           filename: filename,
           caption: msg,
-          quotedMsg: quotedMessageId,
+          quotedMsg: quotedMsg,
           ...options,
         })
       );
@@ -348,7 +364,26 @@ export async function sendVoice64(req: Request, res: Response) {
         }
     }
    */
-  const { phone, base64Ptt, quotedMessageId } = req.body;
+  let { phone, base64Ptt, quotedMessageId } = req.body;
+
+  // Pre-resolve quoted message via page.evaluate — sendPttFromBase64's
+  // internal getMessageById can't always find messages in the in-memory
+  // cache (especially own messages where participant JID format may differ).
+  // WPP.chat.getMessageById queries the full store and succeeds more often.
+  let quotedMsg: any = quotedMessageId;
+  if (quotedMessageId) {
+    try {
+      const resolved = await req.client.page.evaluate(
+        (id: string) => (window as any).WPP?.chat?.getMessageById(id),
+        quotedMessageId
+      );
+      if (resolved && resolved.key) {
+        quotedMsg = resolved;
+      }
+    } catch {
+      // fall back to sending string ID — same behaviour as before
+    }
+  }
 
   try {
     const results: any = [];
@@ -359,7 +394,7 @@ export async function sendVoice64(req: Request, res: Response) {
           base64Ptt,
           'Voice Audio',
           '',
-          quotedMessageId
+          quotedMsg
         )
       );
     }
