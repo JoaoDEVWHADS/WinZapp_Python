@@ -463,16 +463,27 @@ export async function sendVoice64(req: Request, res: Response) {
     }
   }
 
+  const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`sendVoice64 timed out after ${ms}ms`)), ms)
+      ),
+    ]);
+
   try {
     const results: any = [];
     for (const contato of phone) {
       results.push(
-        await req.client.sendPttFromBase64(
-          contato,
-          base64Ptt,
-          'Voice Audio',
-          '',
-          quotedMsg
+        await withTimeout(
+          req.client.sendPttFromBase64(
+            contato,
+            base64Ptt,
+            'Voice Audio',
+            '',
+            quotedMsg
+          ),
+          120000
         )
       );
     }
