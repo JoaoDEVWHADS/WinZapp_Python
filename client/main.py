@@ -4234,7 +4234,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            response = requests.post(url, json=payload, headers=headers, timeout=180)
             if response.status_code in (200, 201):
                 self._wa_connected = True
                 try:
@@ -4260,7 +4260,7 @@ class MainWindow(wx.Frame):
                 logging.info("[send_audio_message] retrying %s without quoted message", remote_jid)
                 payload.pop("quotedMessageId", None)
                 try:
-                    response = requests.post(url, json=payload, headers=headers, timeout=30)
+                    response = requests.post(url, json=payload, headers=headers, timeout=180)
                     if response.status_code in (200, 201):
                         self._wa_connected = True
                         try:
