@@ -262,10 +262,9 @@ export async function sendFile(req: Request, res: Response) {
             if (!chat?.msgs) return;
             if (chat.msgs.get(msgId)) return;
             chat.msgs.add({
-              id: { id: msgId, remote: remoteJid, fromMe, participant },
-              body: '',
-              type: 'text',
-              t: Math.floor(Date.now() / 1000),
+              key: { remote: remoteJid, id: msgId, fromMe, participant },
+              message: { conversation: '' },
+              messageTimestamp: Math.floor(Date.now() / 1000),
             });
           },
           { remoteJid, msgId, fromMe, participant }
@@ -446,12 +445,13 @@ export async function sendVoice64(req: Request, res: Response) {
             if (!chat?.msgs) return;
             // Check if the message already exists
             if (chat.msgs.get(msgId)) return;
-            // Add a stub that WA-JS can find by key
+            // Add a stub matching WA-JS Message model structure.
+            // WA-JS expects key (not id at top-level) and message
+            // (not body/type).
             chat.msgs.add({
-              id: { id: msgId, remote: remoteJid, fromMe, participant },
-              body: '',
-              type: 'text',
-              t: Math.floor(Date.now() / 1000),
+              key: { remote: remoteJid, id: msgId, fromMe, participant },
+              message: { conversation: '' },
+              messageTimestamp: Math.floor(Date.now() / 1000),
             });
           },
           { remoteJid, msgId, fromMe, participant }
