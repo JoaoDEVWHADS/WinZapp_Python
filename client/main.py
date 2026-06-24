@@ -357,24 +357,16 @@ class MainWindow(wx.Frame):
         self._sync_autostart_registry()
 
 
-        # ── Auto-updater ──────────────────────────────────────────────────────
-        # Schedule the update checker on the event loop early so it runs even
-        # if language selection, terms acceptance, or pairing dialogs are shown (modal).
-        if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
-
-        # ── Language selection on first launch ─────────────────────────────────
-        # Show before everything else so the user can pick their language
-        # before any module installation or connection dialogs appear.
-        if not self.background_mode:
-            logging.info("MainWindow: Ensuring language selected...")
-            self._ensure_language_selected()
-
         #Initialize helper classes
         logging.info("MainWindow: Initializing Connect/I18n helpers...")
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
+
+        # ── Auto-updater ──────────────────────────────────────────────────────
+        # Schedule after i18n is ready so update dialogs don't crash.
+        if not self.background_mode:
+            wx.CallLater(2000, self._start_update_checker)
 
         # Terms of service – show once before anything else happens
         if not self.background_mode:
