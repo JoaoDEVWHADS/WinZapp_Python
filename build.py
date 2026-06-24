@@ -33,8 +33,8 @@ Before running this script you must prepare:
                   and extract its contents into client/node/ (inside the client folder).
                   Verify: client/node/node.exe must exist.
 
-  client/api/ - run setup_api.py to clone the Evolution API (honours the
-                EVOLUTION_TAG_VERSION variable in .env), then inside client/api/ run:
+  client/api/ - run setup_api.py to clone the WPPConnect Server (honours the
+                WPPCONNECT_TAG_VERSION variable in .env), then inside client/api/ run:
                   npm install embedded-postgres --save
                   npm install
                   npm run db:generate
@@ -342,7 +342,7 @@ def assemble_staging():
     node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
     print(f"  -> node/  ({node_count} files)")
 
-    # api/ - pre-built Evolution API (exclude runtime data directories)
+    # api/ - pre-built WPPConnect Server (exclude runtime and dev-only files)
     api_dst   = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0

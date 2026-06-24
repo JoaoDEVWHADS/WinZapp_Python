@@ -40,7 +40,7 @@ class Connect:
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
-    def _evolution_headers(self, use_global_key=False):
+    def _wpp_headers(self, use_global_key=False):
         """Return headers for WPPConnect Server API requests."""
         apikey = (
             self.main_window.wpp_api_key
@@ -60,7 +60,7 @@ class Connect:
         payload = {
             "waitQrCode": False
         }
-        headers = self._evolution_headers(use_global_key=True)
+        headers = self._wpp_headers(use_global_key=True)
 
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -89,7 +89,7 @@ class Connect:
         """Close all WPPConnect browser sessions except *keep_token*.
 
         Each failed / abandoned pairing attempt leaves a headless Chromium
-        process running (visible in the evolution.log as
+        process running (visible in wppconnect.log as
         '[session:client] Auto close remain: Xs').  Having two or more
         browsers initialising simultaneously eats CPU/RAM and causes the
         new session to miss the 60 s Auto Close window → ReadTimeout.
@@ -481,7 +481,7 @@ class Connect:
                 f":{self.main_window.wpp_port}/api/{self.main_window.token}/status-session"
             )
             try:
-                response = requests.get(url, headers=self._evolution_headers())
+                response = requests.get(url, headers=self._wpp_headers())
                 response_data = response.json()
                 qrcode_base64 = (
                     response_data.get("qrcode")
@@ -589,7 +589,7 @@ class Connect:
                 # will ignore new start-session requests, and the pairing code will never generate.
                 # We fire close-session and immediately set up the WebSocket in parallel to avoid
                 # the 2s blocking wait — the Node side handles the close asynchronously.
-                headers = self._evolution_headers(use_global_key=True)
+                headers = self._wpp_headers(use_global_key=True)
                 close_done = threading.Event()
 
                 def _close_and_signal():

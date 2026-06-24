@@ -210,7 +210,7 @@ class ApiSetupDialog(wx.Dialog):
         Extract the GitHub source ZIP into *api_dir*.
 
         GitHub archives wrap all content in a single top-level directory
-        (e.g. "evolution-api-main/" or "evolution-api-2.4.0-rc2/").
+        (e.g. "wppconnect-server-main/" or "wppconnect-server-2.10.0/").
         That prefix is stripped so files land directly in api_dir.
 
         Root-level entries matching _PRESERVE are skipped so our pre-included
@@ -223,7 +223,7 @@ class ApiSetupDialog(wx.Dialog):
 
                 # Detect the top-level directory from the first entry
                 first_name = members[0].filename if members else ""
-                top_dir    = first_name.split("/")[0] + "/"  # e.g. "evolution-api-main/"
+                top_dir    = first_name.split("/")[0] + "/"  # e.g. "wppconnect-server-main/"
 
                 for member in members:
                     if self._cancelled:

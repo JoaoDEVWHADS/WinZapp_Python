@@ -1049,7 +1049,7 @@ class ConversationsPanel(wx.Panel):
             msg_id = self._editing_message_id
             idx    = self._editing_message_index
 
-            # Call Evolution API to update the message
+            # Call WPPConnect API to update the message
             self.main_window.edit_message(remote_jid, msg_id, text)
 
             # Update local state
@@ -1186,7 +1186,7 @@ class ConversationsPanel(wx.Panel):
         message-sent sound, and refreshes the conversation list preview.
         real_id (the WhatsApp message ID returned by the API) replaces the local
         UUID in the virtual message's key so that media playback can later look
-        up the message in the Evolution API database.
+        up the message in the WPPConnect API database.
         """
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
@@ -1212,7 +1212,7 @@ class ConversationsPanel(wx.Panel):
                     if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
                         self._audio_positions[real_id] = self._audio_positions.pop(local_id)
                     # For audio messages, kick off background download now that
-                    # we have the real ID the Evolution API can look up.
+                    # we have the real ID the WPPConnect API can look up.
                     if msg.get("messageType") == "audioMessage":
                         import threading as _threading
                         _threading.Thread(
@@ -3339,7 +3339,7 @@ class ConversationsPanel(wx.Panel):
     def _get_message_content(self, msg) -> str:
         """
         Return the human-readable text for a message item in the list.
-        Field names match the Evolution API v2 / Baileys proto definitions.
+        Field names match the WPPConnect API v2 / Baileys proto definitions.
         """
         msg_type = msg.get("messageType", "conversation")
         msg_obj  = msg.get("message") or {}
@@ -3359,7 +3359,7 @@ class ConversationsPanel(wx.Panel):
             ext  = msg_obj.get("extendedTextMessage") or {}
             text = ext.get("text", "") or ""
             # Resolve @mentions: replace @{number} with @{display_name}.
-            # mentionedJid may live at the top-level contextInfo (Evolution API
+            # mentionedJid may live at the top-level contextInfo (WPPConnect API
             # normalises it there) or inside extendedTextMessage.contextInfo.
             ctx_top = msg.get("contextInfo") or {}
             ctx_msg = msg_obj.get("contextInfo") or {}
@@ -3763,12 +3763,12 @@ class ConversationsPanel(wx.Panel):
     def _get_context_info(self, msg) -> "dict | None":
         """Extract contextInfo from wherever it sits in the message hierarchy.
 
-        Evolution API's prepareMessage() merges extendedTextMessage.contextInfo
+        WPPConnect API's prepareMessage() merges extendedTextMessage.contextInfo
         into the top-level 'contextInfo' field before erasing the sub-object,
         so we check there first.  For audio/image/video replies the contextInfo
         stays inside the respective sub-message type.
         """
-        # Top-level contextInfo (Evolution API normalised text replies)
+        # Top-level contextInfo (WPPConnect API normalised text replies)
         top_ctx = msg.get("contextInfo")
         if isinstance(top_ctx, dict) and ("quotedMessage" in top_ctx or top_ctx.get("stanzaId")):
             return top_ctx
@@ -3962,7 +3962,7 @@ class ConversationsPanel(wx.Panel):
 
         For private chats the note comes from the _presence_cache (populated
         by presence.update WebSocket events) rather than from fetchProfile,
-        because the Evolution API's fetchProfile response does not include
+        because the WPPConnect API's fetchProfile response does not include
         lastSeen or online fields.
         """
         jid      = conversation.get("remoteJid", "")
@@ -3982,7 +3982,7 @@ class ConversationsPanel(wx.Panel):
         try:
             if jid.endswith("@g.us"):
                 data = mw.get_group_info(jid)
-                # "size" may be absent in some Evolution API builds; fall back to
+                # "size" may be absent in some WPPConnect API builds; fall back to
                 # counting the participants list which is always present.
                 participants = data.get("participants", [])
                 size = data.get("size") or len(participants)
@@ -4642,7 +4642,7 @@ class ConversationsPanel(wx.Panel):
             return
 
         if for_everyone:
-            # Delete for everyone via Evolution API
+            # Delete for everyone via WPPConnect API
             jid   = msg.get("key", {}).get("remoteJid", "") or (
                 self.conversation.get("remoteJid", "") if self.conversation else ""
             )
@@ -5264,7 +5264,7 @@ class ConversationsPanel(wx.Panel):
         ).start()
 
     def _do_send_reaction(self, msg_key: dict, emoji: str):
-        """Background: send reaction via Evolution API."""
+        """Background: send reaction via WPPConnect API."""
         jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         ok = self.main_window.send_reaction(jid, msg_key, emoji)
         if ok:
