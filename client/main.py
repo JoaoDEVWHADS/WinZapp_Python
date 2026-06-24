@@ -3986,18 +3986,12 @@ class MainWindow(wx.Frame):
                 raw_participant = getattr(self, "my_jid", "")
             
             if raw_participant:
-                phone_to_lid = getattr(self, "_phone_to_lid", {})
-                if raw_participant.endswith("@lid"):
-                    participant = raw_participant
-                else:
-                    norm_participant = self._normalize_jid(raw_participant)
-                    lid_jid = phone_to_lid.get(norm_participant, "")
-                    if lid_jid:
-                        participant = lid_jid
-                    elif norm_participant.endswith("@s.whatsapp.net"):
-                        participant = norm_participant.replace("@s.whatsapp.net", "@c.us")
-                    else:
-                        participant = norm_participant
+                participant = self._normalize_jid(raw_participant)
+                if participant.endswith("@lid"):
+                    lid_to_phone = getattr(self, "_lid_to_phone", {})
+                    phone = lid_to_phone.get(participant, "")
+                    if phone:
+                        participant = phone
                 serialized_id = f"{serialized_id}_{participant}"
                 
         return serialized_id

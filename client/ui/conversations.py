@@ -1197,19 +1197,24 @@ class ConversationsPanel(wx.Panel):
                 # get_base64_from_media can find the message in the DB later.
                 if real_id and isinstance(real_id, str):
                     msg.setdefault("key", {})["id"] = real_id
+                    # Ensure consistent clean ID for local file/identity
+                    clean_real_id = real_id
+                    if "_" in real_id:
+                        parts = real_id.split("_")
+                        clean_real_id = parts[2] if len(parts) > 2 else parts[-1]
                     # Rename the local audio file so we don't have to download it!
                     try:
                         voice_messages_dir = data_path("voice_messages")
                         old_file = os.path.join(voice_messages_dir, f"{local_id}.msv")
-                        new_file = os.path.join(voice_messages_dir, f"{real_id}.msv")
+                        new_file = os.path.join(voice_messages_dir, f"{clean_real_id}.msv")
                         if os.path.isfile(old_file) and not os.path.isfile(new_file):
                             os.rename(old_file, new_file)
                     except Exception as e:
                         print(f"[_mark_message_sent] failed to rename local audio: {e}")
                     if getattr(self, "_current_audio_id", None) == local_id:
-                        self._current_audio_id = real_id
+                        self._current_audio_id = clean_real_id
                     if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
-                        self._audio_positions[real_id] = self._audio_positions.pop(local_id)
+                        self._audio_positions[clean_real_id] = self._audio_positions.pop(local_id)
                     # For audio messages, kick off background download now that
                     # we have the real ID the Evolution API can look up.
                     if msg.get("messageType") == "audioMessage":
@@ -1768,7 +1773,7 @@ class ConversationsPanel(wx.Panel):
                 parts = msg_id.split("_")
                 clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
             self._toggle_playback(
-                msg_id, duration, msg,
+                clean_msg_id, duration, msg,
                 file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                 audio_ext=".ogg",
             )
@@ -1783,7 +1788,7 @@ class ConversationsPanel(wx.Panel):
                 parts = msg_id.split("_")
                 clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
             self._toggle_playback(
-                msg_id, duration, msg,
+                clean_msg_id, duration, msg,
                 file_path=data_path("media", f"{clean_msg_id}.wzmedia"),
                 audio_ext=".mp4",
             )
@@ -2514,7 +2519,11 @@ class ConversationsPanel(wx.Panel):
         m = self._sorted_messages[idx]
         if self._is_separator(m):
             return ""
-        return m.get("key", {}).get("id", "")
+        msg_id = m.get("key", {}).get("id", "")
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            return parts[2] if len(parts) > 2 else parts[-1]
+        return msg_id
 
     def _on_message_focused(self, event):
         idx = event.GetIndex()
@@ -2531,8 +2540,12 @@ class ConversationsPanel(wx.Panel):
         if self._current_audio_id is not None and self._audio_stream is not None:
             if 0 <= idx < len(self._sorted_messages):
                 m = self._sorted_messages[idx]
+                focused_id = m.get("key", {}).get("id", "")
+                if "_" in focused_id:
+                    parts = focused_id.split("_")
+                    focused_id = parts[2] if len(parts) > 2 else parts[-1]
                 if (not self._is_separator(m)
-                        and m.get("key", {}).get("id") == self._current_audio_id):
+                        and focused_id == self._current_audio_id):
                     self._show_audio_controls()
                 else:
                     self._hide_audio_controls()
@@ -3236,7 +3249,7 @@ class ConversationsPanel(wx.Panel):
                     parts = msg_id.split("_")
                     clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
                 self._toggle_playback(
-                    msg_id, duration, next_msg,
+                    clean_msg_id, duration, next_msg,
                     file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                     audio_ext=".ogg",
                 )

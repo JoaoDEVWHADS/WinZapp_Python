@@ -367,8 +367,15 @@ export async function checkConnectionSession(
 }
 
 async function _getMessageById(client: any, messageId: string) {
-  if (typeof client.getMessageById === 'function')
-    return await client.getMessageById(messageId);
+  if (typeof client.getMessageById === 'function') {
+    try {
+      return await client.getMessageById(messageId);
+    } catch {
+      // client.getMessageById may fail for messages not in the in-memory
+      // cache (e.g. own messages with mismatched participant JID format).
+      // Fall through to page.evaluate which queries the full store.
+    }
+  }
   const wpp = (client as any).page?.evaluate
     ? await (client as any).page.evaluate(
         (id: string) => (window as any).WPP?.chat?.getMessageById(id),
