@@ -250,7 +250,7 @@ export default class CreateSessionUtil {
     try {
       await client.isConnected();
 
-      const maxWaitMs = 120000;
+      const maxWaitMs = 600000;
       const pollMs = 2000;
       const startTime = Date.now();
       let mainReady = false;
