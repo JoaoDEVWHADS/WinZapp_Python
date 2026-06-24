@@ -4255,7 +4255,34 @@ class MainWindow(wx.Frame):
             err = f"HTTP {response.status_code}: {response.text[:300]}"
             logging.error("[send_audio_message] %s for %s", err, remote_jid)
             self._check_wa_connection_closed(response)
-            return {"ok": False, "error": err, "retry": False}
+            # If the first attempt failed with quoted message, retry without it
+            if quoted_id and ("Invalid quotedMsg" in response.text or response.status_code >= 500):
+                logging.info("[send_audio_message] retrying %s without quoted message", remote_jid)
+                payload.pop("quotedMessageId", None)
+                try:
+                    response = requests.post(url, json=payload, headers=headers, timeout=30)
+                    if response.status_code in (200, 201):
+                        self._wa_connected = True
+                        try:
+                            body = response.json()
+                            resp = body.get("response", {})
+                            if isinstance(resp, list) and len(resp) > 0:
+                                resp = resp[0]
+                            if isinstance(resp, dict):
+                                msg_id = resp.get("id")
+                                if isinstance(msg_id, dict):
+                                    msg_id = msg_id.get("_serialized", "")
+                                parts = msg_id.split("_") if msg_id else []
+                                clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                                return clean_id or True
+                            return True
+                        except Exception:
+                            return True
+                    err2 = f"HTTP {response.status_code}: {response.text[:300]}"
+                    logging.error("[send_audio_message] fallback also failed %s for %s", err2, remote_jid)
+                except Exception:
+                    pass
+            return {"ok": False, "error": err, "retry": True}
         except Exception as e:
             err = str(e)[:200]
             logging.error("[send_audio_message] exception for %s: %s", remote_jid, err)
