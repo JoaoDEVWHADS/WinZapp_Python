@@ -228,7 +228,6 @@ export async function sendFile(req: Request, res: Response) {
 
   // Resolve quoted message — same logic as sendVoice64
   let quotedMsg: any = quotedMessageId;
-  let quotedCtx: any = null;
   if (quotedMessageId) {
     try {
       const resolved = await req.client.page.evaluate(
@@ -239,7 +238,7 @@ export async function sendFile(req: Request, res: Response) {
         quotedMsg = resolved;
       }
     } catch {
-      // swallow — build contextInfo below
+      // swallow — inject stub below
     }
 
     if (typeof quotedMsg === 'string') {
@@ -247,7 +246,7 @@ export async function sendFile(req: Request, res: Response) {
       if (parts.length >= 3) {
         const fromMe = parts[0] === 'true';
         const remoteJid = parts[1];
-        const stanzaId = parts[2];
+        const msgId = parts[2];
         const participantRaw = parts.slice(3).join('_');
         const participant = participantRaw
           ? participantRaw
@@ -255,12 +254,23 @@ export async function sendFile(req: Request, res: Response) {
               .replace(/@lid/g, '@s.whatsapp.net')
           : undefined;
 
-        quotedCtx = {
-          stanzaId,
-          participant,
-          quotedMessage: { conversation: '' },
-        };
-        quotedMsg = undefined;
+        await req.client.page.evaluate(
+          ({ remoteJid, msgId, fromMe, participant }: any) => {
+            const wpp: any = (window as any).WPP;
+            const chat = wpp?.whatsapp?.ChatStore?.get(remoteJid);
+            if (!chat?.msgs) return;
+            if (chat.msgs.get(msgId)) return;
+            const stub = {
+              id: msgId,
+              key: { remote: remoteJid, id: msgId, fromMe, participant },
+              message: { conversation: '' },
+              messageTimestamp: Math.floor(Date.now() / 1000),
+            };
+            chat.msgs._byId[msgId] = stub;
+            chat.msgs.models.push(stub);
+          },
+          { remoteJid, msgId, fromMe, participant }
+        );
       }
     }
   }
@@ -269,11 +279,7 @@ export async function sendFile(req: Request, res: Response) {
     const results: any = [];
     for (const contact of phone) {
       const sendOpts: any = { ...options };
-      if (quotedCtx) {
-        sendOpts.contextInfo = quotedCtx;
-      } else {
-        sendOpts.quotedMsg = quotedMsg;
-      }
+      sendOpts.quotedMsg = quotedMsg;
       results.push(
         await req.client.sendFile(contact, pathFile, {
           filename: filename,
@@ -396,15 +402,14 @@ export async function sendVoice64(req: Request, res: Response) {
 
   // Resolve quoted message for reply.
   // sendPttFromBase64 internally calls getMessageById which fails when the
-  // quoted message is not in WA-JS's in-memory store.  We try
-  // WPP.chat.getMessageById first (broader search), and if that fails we
-  // bypass WA-JS's message lookup entirely by passing contextInfo directly
-  // in the send options instead of a quotedMsg reference.
+  // quoted message is not in WA-JS's in-memory store (common for older
+  // messages or messages from other participants in group chats).
   //
-  // contextInfo is a raw WhatsApp Web structure that sendFileMessage /
-  // prepareRawMessage use as-is when present in options.
+  // We try WPP.chat.getMessageById first (broader search).  If that fails,
+  // we construct a minimal message stub with the correct key and inject it
+  // into the chat's msgs collection before passing the string ID.
+  // WA-JS's MessageKey uses "remote" (not "remoteJid") internally.
   let quotedMsg: any = quotedMessageId;
-  let quotedCtx: any = null;
   if (quotedMessageId) {
     try {
       const resolved = await req.client.page.evaluate(
@@ -415,7 +420,7 @@ export async function sendVoice64(req: Request, res: Response) {
         quotedMsg = resolved;
       }
     } catch {
-      // swallow — build contextInfo below
+      // swallow — inject stub below
     }
 
     if (typeof quotedMsg === 'string') {
@@ -423,7 +428,7 @@ export async function sendVoice64(req: Request, res: Response) {
       if (parts.length >= 3) {
         const fromMe = parts[0] === 'true';
         const remoteJid = parts[1];
-        const stanzaId = parts[2];
+        const msgId = parts[2];
         const participantRaw = parts.slice(3).join('_');
         const participant = participantRaw
           ? participantRaw
@@ -431,13 +436,29 @@ export async function sendVoice64(req: Request, res: Response) {
               .replace(/@lid/g, '@s.whatsapp.net')
           : undefined;
 
-        quotedCtx = {
-          stanzaId,
-          participant,
-          quotedMessage: { conversation: '' },
-        };
-        // Clear quotedMsg so sendPttFromBase64 doesn't try to look it up
-        quotedMsg = undefined;
+        // Inject a stub into the chat's msg collection so WA-JS's
+        // internal getMessageById can find it.  Use 'remote' (internal
+        // WA-JS key field name, not 'remoteJid').
+        await req.client.page.evaluate(
+          ({ remoteJid, msgId, fromMe, participant }: any) => {
+            const wpp: any = (window as any).WPP;
+            const chat = wpp?.whatsapp?.ChatStore?.get(remoteJid);
+            if (!chat?.msgs) return;
+            if (chat.msgs.get(msgId)) return;
+            // Skip model creation — directly add a plain object to
+            // the collection's models array and index it so that
+            // getMessageById (which uses chat.msgs.get) finds it.
+            const stub = {
+              id: msgId,
+              key: { remote: remoteJid, id: msgId, fromMe, participant },
+              message: { conversation: '' },
+              messageTimestamp: Math.floor(Date.now() / 1000),
+            };
+            chat.msgs._byId[msgId] = stub;
+            chat.msgs.models.push(stub);
+          },
+          { remoteJid, msgId, fromMe, participant }
+        );
       }
     }
   }
@@ -451,7 +472,7 @@ export async function sendVoice64(req: Request, res: Response) {
           base64Ptt,
           'Voice Audio',
           '',
-          quotedCtx ? { contextInfo: quotedCtx } : quotedMsg
+          quotedMsg
         )
       );
     }
