@@ -1,4 +1,3 @@
-import ctypes
 import wx
 from core.i18n import LANGUAGE_NAMES
 

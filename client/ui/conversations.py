@@ -4032,7 +4032,7 @@ class ConversationsPanel(wx.Panel):
         i18n     = mw.i18n
         
         # Subscribe to presence updates for this conversation to receive typing/online events
-        mw.subscribe_presence(jid)
+        mw.presence_manager.subscribe_presence(jid)
 
         note = (
             mw._resolve_contact_name(conversation)
@@ -5331,7 +5331,7 @@ class ConversationsPanel(wx.Panel):
     def _do_send_reaction(self, msg_key: dict, emoji: str):
         """Background: send reaction via WPPConnect API."""
         jid = self.conversation.get("remoteJid", "") if self.conversation else ""
-        ok = self.main_window.send_reaction(jid, msg_key, emoji)
+        ok = self.main_window.message_send_service.send_reaction(jid, msg_key, emoji)
         if ok:
             # Apply optimistically — the WebSocket echo for own reactions is
             # suppressed in on_messages_upsert to avoid double-counting.

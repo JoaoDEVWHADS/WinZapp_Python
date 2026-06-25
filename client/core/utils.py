@@ -126,9 +126,4 @@ def format_number(string_number):
     # Generic international
     return f"+{cc} {local}" if local else f"+{cc}"
 
-def check_internet_connection(test_url="https://www.google.com", timeout=10):
-    try:
-        response = requests.get(test_url, timeout=timeout)
-        return True
-    except (requests.ConnectionError, requests.Timeout):
-        return False
+

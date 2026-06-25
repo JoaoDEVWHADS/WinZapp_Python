@@ -2,14 +2,12 @@ import os
 import sys
 import time
 import threading
-import socketio
 import wx
 import requests
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from app_paths import data_path, resource_path
 from traceback import format_exc
-import json
 import base64
 from io import BytesIO
 from countries import COUNTRIES
@@ -615,7 +613,8 @@ class Connect:
                 self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
                 if self.main_window.ws:
                     self.main_window.ws._phone_code_event.clear()
-                    self.main_window.ws._phone_code_value = ""
+                    with self.main_window.ws._phone_code_lock:
+                        self.main_window.ws._phone_code_value = ""
 
                 # Call /start-session in a background thread. This immediately registers the namespace on Node side.
                 url = (
@@ -631,7 +630,8 @@ class Connect:
                         # If the code came back inline (rare), unblock the wait loop.
                         inline_code = resp.json().get("phoneCode", "")
                         if inline_code and not ws_ref._phone_code_event.is_set():
-                            ws_ref._phone_code_value = str(inline_code)
+                            with ws_ref._phone_code_lock:
+                                ws_ref._phone_code_value = str(inline_code)
                             ws_ref._phone_code_event.set()
                     except Exception:
                         # Signal the event so the main thread doesn't wait forever.
@@ -647,7 +647,8 @@ class Connect:
 
                 # Wait up to 90 s for WPPConnect to emit the phoneCode via Socket.IO.
                 got_code = self.main_window.ws._phone_code_event.wait(timeout=90)
-                pairing_code = self.main_window.ws._phone_code_value if got_code else ""
+                with self.main_window.ws._phone_code_lock:
+                    pairing_code = self.main_window.ws._phone_code_value if got_code else ""
 
                 if pairing_code:
                     # Only now persist the token — pairing has actually started.

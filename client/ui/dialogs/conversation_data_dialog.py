@@ -19,7 +19,6 @@ import os
 import threading
 from datetime import datetime
 import wx
-import wx.adv
 from core.utils import format_number
 from app_paths import data_path
 

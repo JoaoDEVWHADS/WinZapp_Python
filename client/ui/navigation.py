@@ -1,9 +1,6 @@
 import os
 import sys
 import wx
-from traceback import format_exc
-from core.sound_system import SoundSystem
-from ui.conversations import ConversationsPanel
 
 
 class NavigationPanel(wx.Panel):
