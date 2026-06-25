@@ -941,6 +941,12 @@ class MainWindow(wx.Frame):
         # flag so _allow_ui_focus_changes(), _on_window_activate() and the
         # notification window_active check all work correctly from now on.
         self.background_mode = False
+        # ShowWindow via Win32 does NOT update wx's internal m_isShown flag, so
+        # IsShown() returns False even though the window is physically visible.
+        # Calling Show(True) syncs the flag without causing flicker (the window
+        # is already visible to Win32 so SW_SHOW is a no-op at the OS level).
+        if not self.IsShown():
+            self.Show(True)
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.add_chats_to_ui)
 
