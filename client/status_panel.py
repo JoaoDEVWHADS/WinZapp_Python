@@ -638,7 +638,7 @@ class StatusPanel(wx.Panel):
         }
 
         mw = self.main_window
-        ok = mw.send_reaction("status@broadcast", reaction_key, emoji)
+        ok = mw.message_send_service.send_reaction("status@broadcast", reaction_key, emoji)
         if ok:
             self._liked_statuses[status_id] = not is_liked
             i18n = mw.i18n

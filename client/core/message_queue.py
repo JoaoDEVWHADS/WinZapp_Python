@@ -120,7 +120,7 @@ class MessageQueue:
                             quoted=msg.quoted,
                         )
                     elif msg.contact_info:
-                        real_id = self.main_window.send_contact_attachment(
+                        real_id = self.main_window.message_send_service.send_contact_attachment(
                             msg.jid, msg.contact_info, quoted=msg.quoted
                         )
                     else:
@@ -155,7 +155,7 @@ class MessageQueue:
                         # Pass the real WhatsApp message ID so _mark_message_sent
                         # can update the virtual message's key.id for playback.
                         wx.CallAfter(
-                            self.main_window._on_message_sent,
+                            self.main_window.message_send_service._on_message_sent,
                             msg.local_id,
                             msg.audio_path,
                             real_id if isinstance(real_id, str) else None,
@@ -172,7 +172,7 @@ class MessageQueue:
                             with self._lock:
                                 self._pending.pop(msg.local_id, None)
                             wx.CallAfter(
-                                self.main_window._on_message_failed,
+                                self.main_window.message_send_service._on_message_failed,
                                 msg.local_id,
                                 msg.last_error,
                                 bool(msg.media_path),  # show dialog for media failures
@@ -187,7 +187,7 @@ class MessageQueue:
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
                         wx.CallAfter(
-                            self.main_window._on_message_failed,
+                            self.main_window.message_send_service._on_message_failed,
                             msg.local_id,
                             str(exc),
                             bool(msg.media_path),

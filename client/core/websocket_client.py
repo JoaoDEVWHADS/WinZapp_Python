@@ -1,9 +1,12 @@
 import threading
 import time
+import logging
 import socketio
 import wx
 import requests
 from core.i18n import I18n
+
+logger = logging.getLogger(__name__)
 
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
@@ -39,6 +42,7 @@ class WebSocketClient:
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
+        self._phone_code_lock = threading.Lock()
 
     def _clean_jid(self, jid_val):
         if not jid_val:
@@ -157,14 +161,14 @@ class WebSocketClient:
                         timeout=5,
                     )
                 except Exception:
-                    pass
+                    logger.error("Failed to close WPP session", exc_info=True)
             threading.Thread(target=_close, daemon=True).start()
 
         # Disconnect the socket (may already be disconnecting).
         try:
             self.sio.disconnect()
         except Exception:
-            pass
+            logger.error("Failed to disconnect socket", exc_info=True)
 
         # Redirect to pairing dialog.
         self.connect.show_connection_dial()
@@ -177,12 +181,12 @@ class WebSocketClient:
                 try:
                     self.connect.pairing_dial.Destroy()
                 except Exception:
-                    pass
+                    logger.error("Failed to destroy pairing dialog", exc_info=True)
             if hasattr(self.connect, 'connection_dial'):
                 try:
                     self.connect.connection_dial.Destroy()
                 except Exception:
-                    pass
+                    logger.error("Failed to destroy connection dialog", exc_info=True)
 
         wx.CallAfter(_close_dialogs)
 
@@ -210,7 +214,7 @@ class WebSocketClient:
                             self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
                             self.connect.pairing_code_field.SetValue(pairing_code)
                     except Exception:
-                        pass
+                        logger.error("Failed to update pairing code field", exc_info=True)
 
         wx.CallAfter(_update_ui)
 
@@ -328,26 +332,6 @@ class WebSocketClient:
         except Exception as e:
             print(f"[WebSocketClient] on_chats_update error: {e}")
 
-    def on_presence_update(self, info):
-        """
-        Handle presence.update — online/typing/last-seen changes for contacts.
-
-        WPPConnect wraps the Baileys payload as:
-          {"data": {"id": "55XXX@s.whatsapp.net",
-                    "presences": {"55XXX@s.whatsapp.net": {
-                        "lastKnownPresence": "available"|"unavailable"|"composing"|...,
-                        "lastSeen": <unix_ts>|null}}}}
-        """
-        try:
-            data      = info.get("data", {})
-            jid       = data.get("id", "")
-            presences = data.get("presences", {})
-            if not jid or not isinstance(presences, dict):
-                return
-            wx.CallAfter(self.main_window.on_presence_update, jid, presences)
-        except Exception as e:
-            print(f"[WebSocketClient] on_presence_update error: {e}")
-
     def on_wpp_presence_changed(self, info):
         """
         Handle WPPConnect onpresencechanged event.
@@ -410,70 +394,9 @@ class WebSocketClient:
                 }
 
             if presences:
-                wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
+                wx.CallAfter(self.main_window.presence_manager.on_presence_update, chat_jid, presences)
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
-
-    def on_contacts_update(self, info):
-        """
-        Handle contacts.update to keep contact names and pictures fresh.
-
-        WPPConnect v2 emits this event with "data" being either a single
-        contact dict or a list of contact dicts:
-          {"remoteJid": ..., "pushName": ..., "profilePicUrl": ..., "instanceId": ...}
-        New messages (1:1 and group) arrive via messages.upsert.
-        """
-        try:
-            data = info.get("data", [])
-            if isinstance(data, dict):
-                data = [data]
-            if not isinstance(data, list):
-                return
-            updated = False
-            for contact in data:
-                if not isinstance(contact, dict):
-                    continue
-                # Normalise @c.us → @s.whatsapp.net so the lookup matches the
-                # contacts dict, which always stores entries under the modern
-                # @s.whatsapp.net format.
-                jid = self.main_window._normalize_jid(contact.get("remoteJid", ""))
-                if not jid:
-                    continue
-                existing = self.main_window.contacts.get(jid)
-                # Bridge @lid JIDs to their canonical phone JID before giving up.
-                if existing is None and jid.endswith("@lid"):
-                    phone_jid = getattr(self.main_window, "_lid_to_phone", {}).get(jid, "")
-                    if phone_jid:
-                        existing = self.main_window.contacts.get(phone_jid)
-                        if existing is not None:
-                            jid = phone_jid
-                if existing is None:
-                    # Contact was absent from self.contacts (filtered out by
-                    # get_remote_contacts because it had no pushName in the DB
-                    # at sync time). If this event carries a name, create the
-                    # entry now so future lookups can find it.
-                    push = contact.get("pushName", "")
-                    if push:
-                        self.main_window.contacts[jid] = {
-                            "remoteJid": jid,
-                            "pushName": push,
-                            "profilePicUrl": contact.get("profilePicUrl") or "",
-                            "type": "contact",
-                            "isSaved": True,
-                        }
-                        updated = True
-                    continue
-                if contact.get("pushName"):
-                    existing["pushName"] = contact["pushName"]
-                    updated = True
-                if contact.get("profilePicUrl"):
-                    existing["profilePicUrl"] = contact["profilePicUrl"]
-            if updated:
-                # Refresh conversation names shown in the UI (debounced —
-                # contacts.update can fire in bursts for many contacts at once)
-                wx.CallAfter(self.main_window._schedule_set_chats)
-        except Exception as e:
-            print(f"[WebSocketClient] on_contacts_update error: {e}")
 
     # ── WPPConnect Event Handlers ─────────────────────────────────────────────
 
@@ -575,7 +498,7 @@ class WebSocketClient:
                     timeout=10,
                 )
             except Exception:
-                pass
+                logger.error("Failed to set WPP limit: %s", limit_type, exc_info=True)
 
     def on_wpp_status_find(self, data):
         try:
@@ -610,7 +533,8 @@ class WebSocketClient:
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
-                self._phone_code_value = str(code)
+                with self._phone_code_lock:
+                    self._phone_code_value = str(code)
                 self._phone_code_event.set()
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_phone_code error: {e}")

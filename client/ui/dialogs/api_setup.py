@@ -28,8 +28,6 @@ Modal result:
   wx.ID_CANCEL — user cancelled or an error occurred; caller should exit
 """
 
-import io
-import json
 import os
 import shutil
 import subprocess
