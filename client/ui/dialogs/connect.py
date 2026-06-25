@@ -474,7 +474,7 @@ class Connect:
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
 
             try:
-                self.main_window.connect_websocket()
+                self.main_window.connection_manager.connect_websocket()
             except Exception:
                 self.main_window.error_sound.play()
                 wx.MessageBox(self.i18n.t("websocket_failed_reconnect"), self.i18n.t("connection_error"), wx.OK | wx.ICON_WARNING)
@@ -531,7 +531,7 @@ class Connect:
     def reconnect_websocket(self):
         """Reconnects WebSocket for QR-CODE mode (instance already created)."""
         try:
-            self.main_window.connect_websocket()
+            self.main_window.connection_manager.connect_websocket()
         except Exception:
             self.main_window.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('websocket_init_failed')} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
@@ -649,7 +649,7 @@ class Connect:
 
                 # Connect the WebSocket
                 try:
-                    self.main_window.connect_websocket()
+                    self.main_window.connection_manager.connect_websocket()
                 except Exception:
                     pass
 
