@@ -3168,17 +3168,36 @@ class MainWindow(wx.Frame):
 
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid) or self._find_alt_jid_from_messages(chat)
             
-            resolved_name = self._resolve_contact_name(chat)
-            chat_push = get_valid_name(chat.get("pushName", ""))
-            msg_push = self.find_name_through_messages(chat)
-            chat_name_field = get_valid_name(chat.get("name", ""))
-            
-            name = (
-                resolved_name
-                or chat_push
-                or msg_push
-                or chat_name_field
-            )
+            is_group = jid.endswith("@g.us")
+        
+            if is_group:
+                # Grupo: priorizar nome do grupo (chat.get("name"))
+                group_name = chat.get("name", "")
+                if group_name and get_valid_name(group_name):
+                    name = group_name
+                else:
+                    # Fallback: nome do grupo a partir do pushName (que pode ser o nome do grupo em alguns casos)
+                    # Mas NÃO usar o pushName do participante
+                    chat_push = get_valid_name(chat.get("pushName", ""))
+                # msg_push é o nome do último participante que enviou mensagem - NÃO USAR PARA GRUPOS!
+                    chat_name_field = get_valid_name(chat.get("name", ""))
+                    
+                    name = (
+                        chat_push
+                        or chat_name_field
+                    )
+            else:
+                # Chat individual: usar a lógica existente
+                resolved_name = self._resolve_contact_name(chat)
+                chat_push = get_valid_name(chat.get("pushName", ""))
+                msg_push = self.find_name_through_messages(chat)
+                chat_name_field = get_valid_name(chat.get("name", ""))
+                
+                name = (
+                    resolved_name
+                    or chat_push
+                    or msg_push
+                    or chat_name_field            )
             
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
