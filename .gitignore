@@ -206,3 +206,5 @@ db.sqlite3-journal
 !/client/api/config.json
 
 
+# data
+data/

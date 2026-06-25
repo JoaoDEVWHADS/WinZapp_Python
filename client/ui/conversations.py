@@ -126,6 +126,10 @@ class ConversationsPanel(wx.Panel):
         self._pending_open_unread: int = 0
         # True while the separator was placed from the initial open (not from a live message)
         self._sep_from_open: bool = False
+        # One-shot timer: dismiss the separator 2 s after focus reaches it
+        self._unread_sep_dismiss_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_unread_sep_dismiss_timer,
+                  self._unread_sep_dismiss_timer)
 
         # ── Reaction tracking ───────────────────────────────────────────────
         # Maps original_msg_id → {emoji: count}
@@ -725,6 +729,8 @@ class ConversationsPanel(wx.Panel):
         self._sep_from_open = False
         self._first_unread_msg_id = None
         self._first_unread_count = 0
+        if self._unread_sep_dismiss_timer.IsRunning():
+            self._unread_sep_dismiss_timer.Stop()
         self._quoted_message = None
         self._reaction_map   = {}
         # Reset mention state for the new conversation
@@ -2527,6 +2533,26 @@ class ConversationsPanel(wx.Panel):
             else:
                 self._load_older_messages_from_server()
 
+        # Unread-separator dismiss logic:
+        # - Focus at or past the separator → start/restart the 2-s dismiss timer
+        # - Focus above the separator → cancel the timer (user scrolled back up)
+        if self._unread_sep_idx >= 0:
+            if idx >= self._unread_sep_idx:
+                # Mark as read immediately (first time focus arrives)
+                if not self._unread_sep_dismiss_timer.IsRunning():
+                    if self.conversation is not None:
+                        jid = self.conversation.get("remoteJid", "")
+                        if jid:
+                            threading.Thread(
+                                target=self.main_window.mark_conversation_as_read,
+                                args=(jid,),
+                                daemon=True,
+                            ).start()
+                    self._unread_sep_dismiss_timer.StartOnce(2000)
+            else:
+                # User scrolled back above the separator — cancel dismiss
+                self._unread_sep_dismiss_timer.Stop()
+
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
             if 0 <= idx < len(self._sorted_messages):
@@ -2537,6 +2563,34 @@ class ConversationsPanel(wx.Panel):
                 else:
                     self._hide_audio_controls()
         event.Skip()
+
+    def _on_unread_sep_dismiss_timer(self, event):
+        """Fired 2 s after focus reached the unread separator — remove it."""
+        self._dismiss_unread_separator()
+
+    def _dismiss_unread_separator(self):
+        """Remove the unread separator row without stealing focus."""
+        if self._unread_sep_idx < 0:
+            return
+        sep_idx = self._unread_sep_idx
+        focused = self.messages_list.GetFocusedItem()
+        self.messages_list.Freeze()
+        try:
+            self._sorted_messages.pop(sep_idx)
+            self.messages_list.DeleteItem(sep_idx)
+        finally:
+            self.messages_list.Thaw()
+        self._unread_sep_idx  = -1
+        self._sep_from_open   = False
+        self._first_unread_msg_id  = None
+        self._first_unread_count   = 0
+        # Restore the focused row (shifted by 1 if it was after the separator)
+        if focused > sep_idx:
+            focused -= 1
+        elif focused == sep_idx:
+            focused = max(0, sep_idx - 1)
+        if 0 <= focused < self.messages_list.GetItemCount():
+            self.messages_list.Focus(focused)
 
     def _load_older_messages_from_server(self):
         """Fetch older messages from server when the beginning of local history is reached."""
@@ -3198,9 +3252,14 @@ class ConversationsPanel(wx.Panel):
                 duration = (
                     (next_msg.get("message") or {}).get("audioMessage") or {}
                 ).get("seconds", 0) or 0
-                # Update list selection to the next audio
-                self.messages_list.Focus(next_idx)
-                self.messages_list.Select(next_idx, True)
+                # Only move list focus to the next audio if the user hasn't
+                # already scrolled past it — avoids disrupting reading when
+                # sequential audio plays in the background.
+                current_focus = self.messages_list.GetFocusedItem()
+                if current_focus < 0 or current_focus <= next_idx:
+                    self.messages_list.Focus(next_idx)
+                    self.messages_list.Select(next_idx, True)
+                    self.messages_list.EnsureVisible(next_idx)
                 clean_msg_id = msg_id
                 if "_" in msg_id:
                     parts = msg_id.split("_")
@@ -3413,7 +3472,10 @@ class ConversationsPanel(wx.Panel):
                 pct      = int(progress * 100)
                 prog_str = i18n.t("downloading_progress").format(pct=pct)
                 return f"{i18n.t('document')}, {filename}, {prog_str}"
-            return f"{i18n.t('document')}, {filename}, {size_str}"
+            parts = [i18n.t("document"), filename]
+            if size_str:
+                parts.append(size_str)
+            return ", ".join(parts)
 
         # ── Image ────────────────────────────────────────────────────────────
         if msg_type == "imageMessage":
@@ -5040,6 +5102,8 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.GetItemText(self._unread_sep_idx),
             interrupt=True,
         )
+        # mark_conversation_as_read is triggered by _on_message_focused which
+        # fires when Focus() is called above — no need to call it here again.
 
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 
@@ -5149,10 +5213,13 @@ class ConversationsPanel(wx.Panel):
                     out.append(line)
             return "\n".join(out)
 
-        dlg = wx.Dialog(
-            self.main_window,
+        # Use wx.Frame with parent=None so the window is completely independent:
+        # it appears in the taskbar, stays visible when Alt+Tab switches away from
+        # WinZapp, and never blocks the main window's input focus.
+        dlg = wx.Frame(
+            None,
             title=i18n.t("msg_text_title"),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            style=wx.DEFAULT_FRAME_STYLE | wx.FRAME_NO_TASKBAR,
             size=(480, 320),
         )
         panel = wx.Panel(dlg)
@@ -5168,8 +5235,6 @@ class ConversationsPanel(wx.Panel):
         dlg_sizer = wx.BoxSizer(wx.VERTICAL)
         dlg_sizer.Add(panel, 1, wx.EXPAND)
         dlg.SetSizer(dlg_sizer)
-        # Non-modal: self-destroy on close/Esc/button so the main window stays
-        # fully interactive while the popup is open.
         close_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Destroy())
         dlg.Bind(wx.EVT_CLOSE, lambda e: dlg.Destroy())
         dlg.Bind(
@@ -5177,7 +5242,7 @@ class ConversationsPanel(wx.Panel):
             lambda e: dlg.Destroy() if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip(),
         )
         text_ctrl.SetFocus()
-        dlg.CentreOnParent()
+        dlg.CentreOnScreen()
         dlg.Show()
 
     def _on_menu_react(self, msg: dict):

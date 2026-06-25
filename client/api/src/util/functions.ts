@@ -161,7 +161,27 @@ export async function callWebHook(
 export async function autoDownload(client: any, req: any, message: any) {
   try {
     if (message && (message['mimetype'] || message.isMedia || message.isMMS)) {
-      const buffer = await client.decryptFile(message);
+      // Skip if the CDN URL is missing or null — decryptFile crashes with
+      // ERR_INVALID_ARG_TYPE (Buffer.from(null)) or "missing critical data".
+      const mediaUrl = message.mediaUrl || message.clientUrl;
+      if (!mediaUrl) {
+        req.logger.warn(
+          `[autoDownload] Skipping media download: mediaUrl is null/missing (type=${message.type}, id=${message.id?.id || message.id})`
+        );
+        return;
+      }
+
+      let buffer: Buffer;
+      try {
+        buffer = await client.decryptFile(message);
+      } catch (decryptErr: any) {
+        req.logger.warn(
+          `[autoDownload] decryptFile failed, skipping (type=${message.type}): ${decryptErr?.message || decryptErr}`
+        );
+        return;
+      }
+      if (!buffer) return;
+
       if (
         req.serverOptions.webhook.uploadS3 ||
         req.serverOptions?.websocket?.uploadS3
