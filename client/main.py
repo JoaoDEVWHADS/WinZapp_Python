@@ -361,10 +361,10 @@ class MainWindow(wx.Frame):
 
         self.first_run.sync_autostart_registry()
 
-
         # ── Auto-updater ──────────────────────────────────────────────────────
-        # Schedule the update checker on the event loop early so it runs even
-        # if language selection, terms acceptance, or pairing dialogs are shown (modal).
+        # Initialize UpdateManager BEFORE wx.CallLater so the callback works
+        # even if modal dialogs (language, terms) process events before __init__ finishes.
+        self.update_manager = UpdateManager(self)
         if not self.background_mode:
             wx.CallLater(2000, self._start_update_checker)
 
@@ -491,7 +491,6 @@ class MainWindow(wx.Frame):
         self.group_service = GroupService(self)
         self.media_send_service = MediaSendService(self)
         self.message_edit_service = MessageEditService(self)
-        self.update_manager = UpdateManager(self)
         self.contact_service = ContactService(self)
         # Ensure session is active on WPPConnect Server before connecting WebSocket
         self.connection_manager.check_wa_connection_http()

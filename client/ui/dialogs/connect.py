@@ -365,6 +365,10 @@ class Connect:
         main_sizer.Add(self.quit_btn, 0, wx.ALL | wx.CENTER, 5)
         self.connection_dial.SetSizer(main_sizer)
 
+        # Guard: don't ShowModal if the wx event loop has already exited
+        # (e.g. during app shutdown), which would trigger a C++ assertion error.
+        if not wx.GetApp():
+            return
         self.connection_dial.ShowModal()
 
     def on_switch_to_phone(self, event):

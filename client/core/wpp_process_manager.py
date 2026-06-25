@@ -392,6 +392,8 @@ class WppProcessManager:
 
         Calls /close-session first so WPPConnect asks Puppeteer to
         browser.close() Chrome gracefully, preventing stale Chrome windows.
+        Then explicitly kills any remaining Chrome/Puppeteer processes to
+        free the userDataDir for the next session.
         """
         token = getattr(self.mw, "token", "")
         if token:
@@ -406,8 +408,8 @@ class WppProcessManager:
                     timeout=5,
                 )
                 time.sleep(2)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("_stop_wpp_server: close-session failed (%s)", e)
 
         proc = getattr(self.mw, "wpp_process", None)
         if proc and proc.poll() is None:
@@ -422,11 +424,27 @@ class WppProcessManager:
                     )
                 else:
                     proc.terminate()
+                time.sleep(1)
             except Exception:
                 try:
                     proc.terminate()
                 except Exception:
                     pass
+
+        # Kill any remaining Chrome/Puppeteer processes that still hold the
+        # userDataDir lock. Without this, the next session fails with:
+        # "The browser is already running for ... userDataDir/... Use a
+        # different userDataDir or stop the running browser first."
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "chrome.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                )
+            except Exception:
+                pass
 
     def ensure_wpp_running(self):
         """
