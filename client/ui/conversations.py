@@ -1,4 +1,5 @@
 import base64 as _b64
+import logging
 import mimetypes
 import os
 import re
@@ -27,6 +28,7 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
+    AccessibleMessagesList,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
@@ -299,6 +301,10 @@ class ConversationsPanel(wx.Panel):
 
         self.messages_list = wx.ListCtrl(self.conversation_panel, style=wx.LC_REPORT)
         self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
+        # Win32 ListView truncates item text (and its MSAA name) at ~259 chars.
+        # This custom accessible returns the full untruncated message text so
+        # screen readers announce long messages (and trailing URLs) completely.
+        self.messages_list.SetAccessible(AccessibleMessagesList(self))
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
@@ -750,14 +756,16 @@ class ConversationsPanel(wx.Panel):
         self.conversation = conversation
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
-        _display_jid = getattr(self.main_window, "_lid_to_phone", {}).get(_conv_jid, _conv_jid) if _conv_jid.endswith("@lid") else _conv_jid
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
             or conversation.get("name", "")
             or conversation.get("pushName", "")
             or self.main_window.find_jid_through_messages(conversation)
-            or format_number(_display_jid)
+            # Never display a raw @lid as a phone number; fall back to a
+            # placeholder when no phone mapping is known.
+            or self.main_window._format_jid_for_display(_conv_jid)
+            or self.main_window.i18n.t("unknown_contact")
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
@@ -1275,6 +1283,11 @@ class ConversationsPanel(wx.Panel):
         def _callback(in_data, frame_count, time_info, status):
             # Runs on PyAudio's internal callback thread.
             # list.append is atomic under the GIL — no explicit lock needed.
+            if status:
+                # paInputOverflow: the capture buffer filled before we drained
+                # it (CPU/GIL contention). Logged so choppy recordings are
+                # diagnosable; the larger frames_per_buffer below minimises it.
+                logging.debug("[audio] input stream status flag: %s", status)
             if not self._recording_paused:
                 self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
@@ -1295,7 +1308,10 @@ class ConversationsPanel(wx.Panel):
                     channels=ch,
                     format=pyaudio.paInt16,
                     input=True,
-                    frames_per_buffer=1024,
+                    # Larger buffer (~85 ms at 48 kHz) so the Python callback
+                    # can tolerate scheduling delays from background sync/media
+                    # threads without PortAudio dropping samples (choppy audio).
+                    frames_per_buffer=4096,
                     stream_callback=_callback,
                 )
                 stream.start_stream()
@@ -2534,8 +2550,10 @@ class ConversationsPanel(wx.Panel):
                 self._load_older_messages_from_server()
 
         # Unread-separator dismiss logic:
-        # - Focus at or past the separator → start/restart the 2-s dismiss timer
-        # - Focus above the separator → cancel the timer (user scrolled back up)
+        # - Focus at or past the separator → start the 2-s dismiss timer once.
+        # Once the timer is armed it is intentionally NOT cancelled when focus
+        # moves back above the separator, so the separator always disappears
+        # after the user has reached the unread region.
         if self._unread_sep_idx >= 0:
             if idx >= self._unread_sep_idx:
                 # Mark as read immediately (first time focus arrives)
@@ -2549,9 +2567,6 @@ class ConversationsPanel(wx.Panel):
                                 daemon=True,
                             ).start()
                     self._unread_sep_dismiss_timer.StartOnce(2000)
-            else:
-                # User scrolled back above the separator — cancel dismiss
-                self._unread_sep_dismiss_timer.Stop()
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
@@ -3555,7 +3570,7 @@ class ConversationsPanel(wx.Panel):
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                return "🚫 Mensagem apagada"
+                return "Mensagem apagada"
             return "⚙️ Mensagem do sistema"
 
         # ── Fallback ─────────────────────────────────────────────────────────

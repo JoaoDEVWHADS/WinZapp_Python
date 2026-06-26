@@ -7,6 +7,7 @@ WhatsApp JID via result_jid / result_name so the caller can navigate there.
 """
 
 import re
+import threading
 import wx
 
 
@@ -125,12 +126,23 @@ class NewContactDialog(wx.Dialog):
             "name":       full_name,
             "pushName":   full_name,
         }
-        if self._sync_check.GetValue():
+        sync_to_phone = self._sync_check.GetValue()
+        if sync_to_phone:
             entry["isSaved"] = True
         self._mw.contacts[jid] = entry
 
         # Persist to disk so the contact survives restarts
         self._mw._schedule_save()
+
+        # When requested, actually save the contact on WhatsApp / the device
+        # address book via the API (previously this only set a local flag, so
+        # nothing was ever synced to the phone). Done off the UI thread.
+        if sync_to_phone:
+            threading.Thread(
+                target=self._mw.save_contact_to_phone,
+                args=(phone, first, surname, True),
+                daemon=True,
+            ).start()
 
         self.result_jid  = jid
         self.result_name = full_name

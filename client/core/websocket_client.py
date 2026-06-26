@@ -4,6 +4,7 @@ import socketio
 import wx
 import requests
 from core.i18n import I18n
+from core.utils import looks_like_binary_blob, _slim_quoted_message
 
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
@@ -728,9 +729,15 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "image":
+            # NOTE: do NOT fall back to wpp_msg["body"] for the caption — for
+            # media messages WPPConnect puts the base64 JPEG thumbnail in `body`,
+            # which then showed up as raw base64 instead of the caption.
+            img_caption = wpp_msg.get("caption", "") or ""
+            if looks_like_binary_blob(img_caption):
+                img_caption = ""
             message_content = {
                 "imageMessage": {
-                    "caption": wpp_msg.get("caption", "") or wpp_msg.get("body", ""),
+                    "caption": img_caption,
                     "url": wpp_msg.get("clientUrl", ""),
                     "mimetype": wpp_msg.get("mimetype", "image/jpeg")
                 }
@@ -743,9 +750,12 @@ class WebSocketClient:
                 seconds_val = int(float(dur)) if dur else 0
             except Exception:
                 seconds_val = 0
+            vid_caption = wpp_msg.get("caption", "") or ""
+            if looks_like_binary_blob(vid_caption):
+                vid_caption = ""
             message_content = {
                 "videoMessage": {
-                    "caption": wpp_msg.get("caption", ""),
+                    "caption": vid_caption,
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
                     "url": wpp_msg.get("clientUrl", ""),
@@ -968,7 +978,13 @@ class WebSocketClient:
         ]
 
         if has_quote or mentioned_jids:
-            quoted_msg_payload = quoted_msg if isinstance(quoted_msg, dict) else {"conversation": quoted_body}
+            # Store only a slim quoted preview — never the full quoted message,
+            # whose thumbnail/mediaKey/directPath/hashes bloat messages.dat and
+            # slow conversation loading without ever being read by the UI.
+            if isinstance(quoted_msg, dict):
+                quoted_msg_payload = _slim_quoted_message(quoted_msg)
+            else:
+                quoted_msg_payload = {"conversation": (quoted_body or "")[:300]}
             context_info = {}
             if has_quote:
                 context_info["stanzaId"] = clean_quoted_id

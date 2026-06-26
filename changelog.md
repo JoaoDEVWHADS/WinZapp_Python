@@ -2,6 +2,31 @@
 
 All notable changes to this fork of WinZapp are documented in this file.
 
+# v0.16.0.0beta
+
+## Bug Fixes
+* **Reactions not sent:** `send_reaction` sent only the bare `key.id`, which `WPP.chat.getMessageById` cannot resolve. It now builds the full serialized id (`<fromMe>_<chatId>_<id>`, plus `_<participant>` for group/status messages), mirroring how deletes work.
+* **Delete for everyone:** Normalized the `phone` field to `@c.us` (it previously stayed `@s.whatsapp.net`, so `WPP.chat.deleteMessage` could not resolve the chat and the revoke silently no-opped). Also fixed the `delete-message` controller, which sent a `200` and then fell through to a `401` (missing `return` → `ERR_HTTP_HEADERS_SENT`, masking real failures).
+* **Document send fails with HTTP 500:** Transient `5xx` responses (notably WPPConnect's `ProtocolError: Promise was collected` on large uploads) and network/timeout errors are now retried by the message queue instead of being abandoned after a single attempt.
+* **Clear conversation did nothing:** The `cleared_chats` cutoff timestamp was written but never read, so the next history sync repopulated the chat. Cleared messages are now filtered out on both history sync and live re-delivery.
+* **Muted/pinned groups missing after pairing:** Switched chat collection from the deprecated `all-chats` (`WAPI.getAllChats`, which omits some chats) to the modern `list-chats` (`WPP.chat.list`), and now sync pin state from the server into `pinned_chats`.
+* **Garbage IDs in chat list:** Base64 thumbnail/binary blobs (e.g. `+0 /9j/4AAQSkZJRg...`) leaking from business-account name fields are now rejected at ingestion and display via `looks_like_binary_blob`.
+* **App freezing during sync / media download:** The bulk media pre-fetch fired a `wx.CallAfter` per 64 KB chunk per file across 6 workers (each an O(n) scan of the open conversation), flooding the UI thread. Bulk downloads no longer stream per-chunk progress, and the single completion refresh only fires for the conversation currently on screen.
+* **Long messages truncated in the message list:** Added a custom `wx.Accessible` for the messages list so screen readers receive the full message text, bypassing the native Win32 ListView ~259-char limit (previously only Alt+C revealed the full text / trailing links).
+* **Choppy voice recording:** Increased the PyAudio capture buffer (1024 → 4096 frames, ~85 ms) so the callback tolerates scheduling delays from background threads without PortAudio dropping samples; input-overflow status is now logged.
+* **Unread separator:** Removed the guard that cancelled the separator-dismiss timer when focus moved back above the counter — the separator now always disappears after the unread region is reached.
+* **Deleted messages:** Removed the 🚫 emoji prefix from deleted-message text inside conversations.
+
+## Performance & Storage
+* **Slow conversation open / messages.dat bloat:** WPPConnect stored the *entire* quoted message under `contextInfo.quotedMessage` (base64 thumbnail, mediaKey, directPath, deprecatedMms3Url, file hashes), none of which the UI reads — it dominated `messages.dat` and slowed every chat with replies. Quoted messages are now slimmed to a capped text preview + type marker at ingestion, with a one-time startup migration that prunes already-stored data (~23% smaller on a real cache).
+
+## Additional Bug Fixes
+* **@lid shown as a phone number:** When a name was unavailable, the chat list and conversation header fell back to `format_number(jid)` on a `@lid`, displaying the raw internal identifier as a wall of digits. A new `_format_jid_for_display` resolves `@lid → phone` when known and otherwise yields a generic placeholder — the raw `@lid` is never shown.
+* **Image/video caption showing raw base64:** The websocket normalizer fell back to `wpp_msg["body"]` for the caption, but for media messages `body` holds the base64 JPEG thumbnail. Captions now come only from the real caption field, with a binary-blob guard.
+* **"Sync contact to phone" did nothing:** Adding a contact only set a local `isSaved` flag and never called any API. Added an `add-new-contact` endpoint (`WPP.contact.save(..., {syncAddressBook})`) and wired the checkbox to it.
+
+---
+
 # V2026.06.21.1555
 
 ## Bug Fixes
