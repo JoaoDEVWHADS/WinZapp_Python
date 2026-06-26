@@ -133,11 +133,29 @@ def _slim_quoted_message(quoted):
     return slim
 
 
+# Heavy media fields that arrive from the API but are never read by the client:
+# media is (re)downloaded by message id via /get-media-by-message, and voice
+# notes live in the voice_messages folder — so urls, encryption keys, hashes and
+# waveforms are pure dead weight inside messages.dat. jpegThumbnail is kept
+# because the inline-thumbnail view uses it.
+_HEAVY_MEDIA_FIELDS = frozenset({
+    "url", "directPath", "mediaKey", "mediaKeyTimestamp", "deprecatedMms3Url",
+    "fileSha256", "fileEncSha256", "filehash", "encFilehash",
+    "thumbnailDirectPath", "thumbnailSha256", "thumbnailEncSha256",
+    "streamingSidecar", "waveform", "midQualityFileSha256",
+    "midQualityFileEncSha256", "scansSidecar", "scanLengths",
+    "firstScanSidecar", "firstScanLength", "rawMediaData", "body",
+})
+
+
 def prune_message_record(msg):
     """Strip stored bloat from a single message record (mutates and returns it).
 
-    Currently slims ``contextInfo.quotedMessage`` wherever it appears (top-level
-    and inside any message sub-type). Returns True if anything was changed.
+    - Slims ``contextInfo.quotedMessage`` wherever it appears.
+    - Removes heavy, never-read media fields (urls, mediaKey, hashes, waveform…)
+      from each message sub-type so audio/image/video records stay tiny.
+
+    Returns True if anything was changed.
     """
     if not isinstance(msg, dict):
         return False
@@ -159,6 +177,9 @@ def prune_message_record(msg):
         for sub in m.values():
             if isinstance(sub, dict):
                 _prune_ctx(sub.get("contextInfo"))
+                for k in _HEAVY_MEDIA_FIELDS & sub.keys():
+                    del sub[k]
+                    changed = True
     return changed
 
 

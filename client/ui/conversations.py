@@ -4083,7 +4083,9 @@ class ConversationsPanel(wx.Panel):
                     canonical = getattr(mw, "_lid_to_phone", {}).get(canonical, canonical)
                 presence = getattr(mw, "_presence_cache", {}).get(canonical, {})
                 lkp      = presence.get("lastKnownPresence", "")
-                last_seen = presence.get("lastSeen")
+                # Fall back to a direct last-seen fetch when no presence event
+                # has arrived yet (so the note isn't left without it).
+                last_seen = presence.get("lastSeen") or mw.get_last_seen(canonical)
                 if lkp in ("available", "composing", "recording"):
                     note = i18n.t("online_status")
                 elif last_seen:
@@ -4220,6 +4222,9 @@ class ConversationsPanel(wx.Panel):
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
+        # Refresh the conversations list immediately so the now-empty chat is
+        # removed, keeping focus on a neighbouring conversation.
+        self.main_window.set_chats()
 
     def _on_menu_delete_chat(self, jid: str):
         i18n = self.main_window.i18n
@@ -4719,12 +4724,24 @@ class ConversationsPanel(wx.Panel):
             return
 
         if for_everyone:
-            # Delete for everyone via WPPConnect API
-            jid   = msg.get("key", {}).get("remoteJid", "") or (
+            # Revoke for everyone via WPPConnect API (off the UI thread). The
+            # message key carries fromMe/participant so the server can build the
+            # correct serialized id and actually revoke it.
+            msg_key = msg.get("key", {})
+            jid = msg_key.get("remoteJid", "") or (
                 self.conversation.get("remoteJid", "") if self.conversation else ""
             )
-            from_me = msg.get("key", {}).get("fromMe", False)
-            self.main_window.delete_message_for_everyone(jid, msg_id, from_me)
+
+            def _revoke(k=dict(msg_key), j=jid):
+                ok = self.main_window.delete_message_for_everyone(j, k)
+                if not ok:
+                    wx.CallAfter(
+                        wx.MessageBox,
+                        i18n.t("delete_for_everyone_failed"),
+                        i18n.t("delete_message"),
+                        wx.OK | wx.ICON_WARNING,
+                    )
+            threading.Thread(target=_revoke, daemon=True).start()
 
         # Always delete locally
         self._sorted_messages.pop(index)

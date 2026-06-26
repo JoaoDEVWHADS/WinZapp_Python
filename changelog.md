@@ -4,6 +4,18 @@ All notable changes to this fork of WinZapp are documented in this file.
 
 # v0.16.0.0beta
 
+## Delete, Clearing, Hotkey & Conversation Data
+* **Delete for everyone still left the message for the group:** The revoke hardcoded a `true_` prefix and ignored the participant, so `WPP.chat.deleteMessage` either failed to find the message or fell back to a local-only delete (revoke only fires when the message resolves and is yours or you're a group admin). It now builds the correct serialized id (via the same serializer reactions use), checks the API result, and warns if the revoke truly failed.
+* **Clearing a conversation now updates the list immediately:** The now-empty chat is removed from the conversations list right away (its stale last-message/unread are cleared too), and keyboard focus lands on the neighbouring conversation instead of being lost.
+* **Global hotkey getting "stuck":** `restore_window` relied on a bare `SetForegroundWindow`, which silently fails under Windows' foreground-lock — the window stayed hidden and the hotkey seemed dead until a restart. Restore now uses the `AttachThreadInput` technique for a reliable bring-to-front, and the hotkey registers with `MOD_NOREPEAT`.
+* **Conversation data dialog showed "success":** It displayed the API result word as the contact's About text. About now comes from the dedicated `profile-status` endpoint, and **last seen** is fetched directly from `last-seen` (with the live presence cache as the primary source) so it actually appears in both the dialog and the data-button note.
+* **pt-PT:** "Biografia" → "Sobre".
+
+## Reaction Notifications & More
+* **No notification when someone reacts to your message:** The client never subscribed to the WPPConnect `onreactionmessage` event (and the API had it disabled), so reactions to your messages were silently dropped. Now subscribed and enabled (`config.json` `onReactionMessage: true`); reactions to *your* messages produce a notification like "Name (in Group): reacted with 👍 to: your message text". Only your own messages trigger it — never reactions to others' messages, nor your own reactions.
+* **NVDA repeating the focused conversation name while idle:** Presence bursts (online/offline toggles that don't change the row) rewrote the focused chat-list row's text unconditionally, making NVDA re-announce the conversation name over and over. The row is now only updated when its visible text actually changes.
+* **Audio/media bytes never bloat messages.dat:** Confirmed voice notes live only in `voice_messages/`; additionally, never-read media fields (urls, mediaKey, directPath, file hashes, waveform, `body`) are now stripped from every stored message — media is always re-fetched by message id. Combined with the quoted-message slimming this trims the real cache by ~24%.
+
 ## Bug Fixes
 * **Reactions not sent:** `send_reaction` sent only the bare `key.id`, which `WPP.chat.getMessageById` cannot resolve. It now builds the full serialized id (`<fromMe>_<chatId>_<id>`, plus `_<participant>` for group/status messages), mirroring how deletes work.
 * **Delete for everyone:** Normalized the `phone` field to `@c.us` (it previously stayed `@s.whatsapp.net`, so `WPP.chat.deleteMessage` could not resolve the chat and the revoke silently no-opped). Also fixed the `delete-message` controller, which sent a `200` and then fell through to a `401` (missing `return` → `ERR_HTTP_HEADERS_SENT`, masking real failures).

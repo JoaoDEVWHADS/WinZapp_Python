@@ -112,9 +112,15 @@ class _HotkeyManager:
                 ("pt",      _POINT),
             ]
 
-        if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk):
-            print(f"[HotkeyManager] RegisterHotKey failed: {kernel32.GetLastError()}")
-            return
+        # MOD_NOREPEAT (0x4000) suppresses the flood of WM_HOTKEY messages that
+        # holding the key down would otherwise generate.
+        _MOD_NOREPEAT = 0x4000
+        if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod | _MOD_NOREPEAT, self._vk):
+            # Some keyboard layouts / older Windows builds reject MOD_NOREPEAT;
+            # fall back to a plain registration so the hotkey still works.
+            if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk):
+                print(f"[HotkeyManager] RegisterHotKey failed: {kernel32.GetLastError()}")
+                return
 
         msg = _MSG()
         while not self._stop.is_set():
@@ -934,8 +940,29 @@ class MainWindow(wx.Frame):
         import ctypes
         hwnd = self.GetHandle()
         SW_RESTORE = 9
-        ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        user32 = ctypes.windll.user32
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        # SetForegroundWindow() alone silently fails when another application
+        # holds the foreground lock (Win32 foreground-stealing prevention). When
+        # that happened the window stayed hidden/behind and the global hotkey
+        # appeared "dead" until the app was restarted. Briefly attaching our
+        # input queue to the current foreground thread lifts the lock so the
+        # restore is reliable.
+        try:
+            kernel32 = ctypes.windll.kernel32
+            fg_hwnd = user32.GetForegroundWindow()
+            fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+            cur_thread = kernel32.GetCurrentThreadId()
+            attached = False
+            if fg_thread and fg_thread != cur_thread:
+                attached = bool(user32.AttachThreadInput(fg_thread, cur_thread, True))
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+            if attached:
+                user32.AttachThreadInput(fg_thread, cur_thread, False)
+        except Exception:
+            user32.SetForegroundWindow(hwnd)
         self._window_hidden = False
         # When started via --background the window was never shown; clear the
         # flag so _allow_ui_focus_changes(), _on_window_activate() and the
@@ -1077,10 +1104,12 @@ class MainWindow(wx.Frame):
             return
 
         # Reaction messages only update the live display of an existing message;
-        # they must not be added to records, unread counts, or notifications.
+        # they must not be added to records or unread counts. They DO, however,
+        # trigger a notification when someone reacts to one of *your* messages.
         if msg.get("messageType") == "reactionMessage":
             if hasattr(self, "conversations_panel"):
                 self.conversations_panel.on_incoming_message(remote_jid, msg)
+            self._maybe_notify_reaction(remote_jid, msg)
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
@@ -1278,6 +1307,94 @@ class MainWindow(wx.Frame):
         title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
             self.notification_manager.send(title, body, remote_jid)
+
+    def _reacted_message_preview(self, remote_jid: str, orig_id: str) -> str:
+        """Return a short text preview of the original message a reaction targets."""
+        if not orig_id:
+            return ""
+        from core.notification_manager import format_notification_body
+        candidates = [remote_jid, self._normalize_jid(remote_jid)]
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid)
+        phone = getattr(self, "_lid_to_phone", {}).get(remote_jid)
+        if lid:
+            candidates.append(lid)
+        if phone:
+            candidates.append(phone)
+        seen = set()
+        for cj in candidates:
+            if not cj or cj in seen:
+                continue
+            seen.add(cj)
+            chat = self.chats.get(cj)
+            if not chat:
+                continue
+            for r in chat.get("messages", {}).get("messages", {}).get("records", []):
+                if r.get("key", {}).get("id") == orig_id:
+                    try:
+                        return (format_notification_body(r, self, self.i18n) or "")[:120]
+                    except Exception:
+                        return ""
+        return ""
+
+    def _maybe_notify_reaction(self, remote_jid: str, msg: dict):
+        """
+        Notify when someone reacts to one of *your* messages.
+
+        Only fires for reactions by other people to messages you sent — never for
+        your own reactions, nor for reactions to other people's messages. Mirrors
+        the guards (age, mute, archive, master toggle) used for normal messages.
+        """
+        try:
+            reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+            emoji = (reaction.get("text") or "").strip()
+            if not emoji:
+                return  # empty emoji = reaction removed
+            key = msg.get("key", {})
+            if key.get("fromMe"):
+                return  # I reacted — don't notify myself
+            target_key = reaction.get("key") or {}
+            if not target_key.get("fromMe"):
+                return  # reaction to someone else's message — ignore
+
+            ts = msg.get("messageTimestamp")
+            if ts:
+                try:
+                    conn_time = getattr(self.ws, "_connect_time", time.time()) if self.ws else time.time()
+                    if int(ts) < conn_time - 60:
+                        return
+                except (TypeError, ValueError):
+                    pass
+
+            if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
+                return
+            if not self.settings.get("general", {}).get("notifications_enabled", True):
+                return
+
+            from core.notification_manager import format_notification_title
+
+            orig_text = self._reacted_message_preview(remote_jid, target_key.get("id", ""))
+            if orig_text:
+                body = self.i18n.t("notif_reaction_to_own").format(emoji=emoji, text=orig_text)
+            else:
+                body = self.i18n.t("notif_reaction").format(emoji=emoji)
+            title = format_notification_title(msg, self, self.i18n)
+
+            window_active = (
+                not getattr(self, "_window_hidden", False)
+                and self.IsShown()
+                and not self.IsIconized()
+                and self.IsActive()
+            )
+            if window_active:
+                self.message_foreground_sound.play()
+                self.output(f"{title}: {body}")
+                return
+            if not self.settings.get("general", {}).get("show_tray_icon", True):
+                return
+            if hasattr(self, "notification_manager"):
+                self.notification_manager.send(title, body, remote_jid)
+        except Exception:
+            logging.exception("[_maybe_notify_reaction] failed")
 
     def connect_websocket(self):
         """Connect to the WPPConnect Server WebSocket.
@@ -3915,6 +4032,9 @@ class MainWindow(wx.Frame):
                     if isinstance(wm, dict) and self.ws:
                         try:
                             normalized = self.ws._normalize_wpp_message(wm)
+                            # Strip never-read media bloat (urls/keys/hashes) and
+                            # slim quoted previews before storing.
+                            prune_message_record(normalized)
                             all_messages.append(normalized)
                         except Exception as e:
                             logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
@@ -4695,7 +4815,15 @@ class MainWindow(wx.Frame):
             label = self._presence_label_for_chat(chat_jid_norm, is_group)
             if label:
                 item_text += f" {label}"
-            lst.SetItem(idx, 0, item_text)
+            # Only touch the row when the visible text actually changes. Presence
+            # bursts (online/offline toggles that don't alter the row) otherwise
+            # rewrote the focused item's text repeatedly, making NVDA announce the
+            # conversation name over and over while the user sat idle on the list.
+            try:
+                if lst.GetItemText(idx, 0) != item_text:
+                    lst.SetItem(idx, 0, item_text)
+            except Exception:
+                lst.SetItem(idx, 0, item_text)
             break
 
     def on_presence_update(self, jid: str, presences: dict):
@@ -5417,10 +5545,79 @@ class MainWindow(wx.Frame):
                         # Trigger UI refresh and save mapped JIDs
                         wx.CallAfter(self._schedule_set_chats)
                         self.save_data(self.chats, self.contacts)
+                # The contact endpoint's top-level "status" is the API result
+                # ("success"), NOT the contact's About text. Fetch the real
+                # About/bio from the dedicated profile-status endpoint and expose
+                # it under a clean key the dialog can read without ambiguity.
+                res["aboutText"] = self.get_profile_about(jid)
+                res["lastSeenTs"] = self.get_last_seen(jid)
                 return res
         except Exception as e:
             logging.exception(f"[get_contact_profile] Error querying for {original_jid}: {e}")
         return {}
+
+    def get_last_seen(self, jid: str):
+        """Return a contact's last-seen Unix timestamp via /last-seen, or None.
+
+        More reliable than waiting for a presence.update event, which only fires
+        if the contact changes state after we subscribe. Returns None when the
+        contact hides last-seen or it is unavailable.
+        """
+        if not jid or jid.endswith("@lid") or jid.endswith("@g.us"):
+            return None
+        phone = jid.split("@")[0]
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/last-seen/{phone}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code not in (200, 201):
+                return None
+            resp = (r.json() or {}).get("response")
+            if isinstance(resp, dict):
+                resp = resp.get("t") or resp.get("lastSeen")
+            if isinstance(resp, bool) or resp in (None, 0):
+                return None
+            try:
+                ts = int(resp)
+            except (TypeError, ValueError):
+                return None
+            # WhatsApp sometimes returns timestamps in ms.
+            if ts > 1_000_000_000_000:
+                ts //= 1000
+            return ts if ts > 0 else None
+        except Exception:
+            return None
+
+    def get_profile_about(self, jid: str) -> str:
+        """Return a contact's WhatsApp About/bio text via /profile-status, or ''."""
+        if not jid or jid.endswith("@lid"):
+            return ""
+        phone = jid.replace("@s.whatsapp.net", "@c.us")
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/profile-status/{phone}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code not in (200, 201):
+                return ""
+            resp = (r.json() or {}).get("response")
+            # getStatus returns either a string or {id, status: "<about>"}.
+            if isinstance(resp, dict):
+                about = resp.get("status") or resp.get("about") or ""
+            else:
+                about = resp or ""
+            about = str(about).strip()
+            # Guard against the endpoint echoing an API status word.
+            if about.lower() in ("success", "error", "none", "null"):
+                return ""
+            return about
+        except Exception:
+            return ""
 
     def subscribe_presence(self, jid: str):
         """Subscribe to the presence of a contact or group to receive real-time presence updates."""
@@ -5677,6 +5874,11 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(jid)
         if chat:
             chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
+            # Also drop the last-message preview and unread badge so the now-empty
+            # conversation is filtered out of the list immediately (otherwise a
+            # stale lastMessage kept it visible).
+            chat["lastMessage"] = None
+            chat["unreadCount"] = 0
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
             self._schedule_save()
             self.save_settings()
@@ -5985,8 +6187,16 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def delete_message_for_everyone(self, remote_jid: str, message_id: str, from_me: bool):
-        """Delete a message for everyone via POST /api/session/delete-message."""
+    def delete_message_for_everyone(self, remote_jid: str, msg_key: dict) -> bool:
+        """Revoke a message for everyone via POST /api/session/delete-message.
+
+        Returns True only when the server confirms the revoke. WPP.chat.delete-
+        Message resolves the target through getMessageById, which needs the FULL
+        serialized id (`<fromMe>_<chatId>_<id>[_<participant>]`) — a hardcoded
+        `true_` prefix made it fail to find (and therefore not revoke) messages
+        that weren't your own, and revoke only fires when the message is yours or
+        you are a group admin.
+        """
         lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid_jid:
             remote_jid = lid_jid
@@ -5999,10 +6209,11 @@ class MainWindow(wx.Frame):
         # the same normalized form, otherwise WPP.chat.deleteMessage cannot
         # resolve the chat and the revoke silently no-ops.
         chat_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
-        full_id = f"true_{chat_jid}_{message_id}"
+        full_id = self._serialize_msg_id(chat_jid, msg_key)
 
         payload = {
             "phone":     chat_jid,
+            "isGroup":   chat_jid.endswith("@g.us"),
             "messageId": full_id,
             "onlyLocal": False,
         }
@@ -6011,9 +6222,15 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            requests.post(url, json=payload, headers=headers, timeout=15)
-        except Exception:
-            pass
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True
+            logging.error("[delete_for_everyone] HTTP %s for %s: %s",
+                          r.status_code, full_id, r.text[:300])
+            return False
+        except Exception as exc:
+            logging.error("[delete_for_everyone] exception for %s: %s", full_id, exc)
+            return False
 
     def _preview_sender_from_jid(self, jid: str) -> str:
         """
@@ -6459,6 +6676,17 @@ class MainWindow(wx.Frame):
             elif panel.conversation is not None:
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
+        elif (_lst_had_focus and focused_jid and displayed_chats
+              and focus_allowed):
+            # The previously focused chat is gone (e.g. it was just cleared and
+            # filtered out). Keep keyboard focus in the list by landing on
+            # whatever now occupies its slot instead of dropping focus entirely.
+            neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
+            if neighbor_idx < 0:
+                neighbor_idx = 0
+            panel.conversations_list.Focus(neighbor_idx)
+            panel.conversations_list.Select(neighbor_idx)
+            panel.conversations_list.EnsureVisible(neighbor_idx)
         elif getattr(self, "_initial_sync_running", False):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass

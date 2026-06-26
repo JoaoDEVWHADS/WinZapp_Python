@@ -17,7 +17,7 @@
     "listenAcks": true,
     "onPresenceChanged": true,
     "onParticipantsChanged": false,
-    "onReactionMessage": false,
+    "onReactionMessage": true,
     "onPollResponse": false,
     "onRevokedMessage": false,
     "onLabelUpdated": false,

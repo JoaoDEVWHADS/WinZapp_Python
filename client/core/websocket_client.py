@@ -35,6 +35,7 @@ class WebSocketClient:
         self.sio.on("status-find", self.on_wpp_status_find)
         self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
         self.sio.on("chats-update", self.on_chats_update)
+        self.sio.on("onreactionmessage", self.on_wpp_reaction)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -628,6 +629,79 @@ class WebSocketClient:
             self.on_messages_upsert({"data": normalized})
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_message_received error: {e}")
+
+    def on_wpp_reaction(self, data):
+        """Handle the 'onreactionmessage' Socket.IO event.
+
+        WPPConnect emits reactions on a dedicated channel (NOT received-message),
+        with the shape: {id, msgId, reactionText, timestamp, ...}.
+          - `msgId` is the serialized id of the *reacted-to* message
+            (`<fromMe>_<chatId>_<id>[_<participant>]`) — a `true_` prefix means
+            the reaction targets one of YOUR messages.
+          - `id` is the serialized id of the reaction itself; its `<fromMe>`
+            prefix tells whether YOU are the one reacting, and its trailing
+            participant (in groups) identifies the reactor.
+
+        We rebuild the Baileys-style reactionMessage structure the rest of the
+        app expects and route it through on_new_message, which updates the live
+        display and fires a notification when someone reacts to your message.
+        """
+        try:
+            if not isinstance(data, dict):
+                return
+            payload = data.get("response") if isinstance(data.get("response"), dict) else data
+            emoji = (payload.get("reactionText") or payload.get("text") or "").strip()
+            target_serialized = payload.get("msgId")
+            if isinstance(target_serialized, dict):
+                target_serialized = target_serialized.get("_serialized", "")
+            reaction_serialized = payload.get("id")
+            if isinstance(reaction_serialized, dict):
+                reaction_serialized = reaction_serialized.get("_serialized", "")
+            if not target_serialized:
+                return
+
+            def _split(serialized):
+                parts = str(serialized).split("_")
+                from_me = parts[0] == "true"
+                chat = self._clean_jid(parts[1]) if len(parts) > 1 else ""
+                clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else "")
+                participant = self._clean_jid(parts[3]) if len(parts) > 3 else ""
+                return from_me, chat, clean_id, participant
+
+            target_from_me, chat_jid, target_id, _ = _split(target_serialized)
+            reactor_from_me, r_chat, reaction_id, reactor_participant = _split(
+                reaction_serialized or ""
+            )
+            if reactor_from_me:
+                return  # own reaction — applied optimistically, ignore the echo
+            if not chat_jid:
+                chat_jid = r_chat
+
+            normalized = {
+                "key": {
+                    "remoteJid": chat_jid,
+                    "fromMe": False,
+                    "id": reaction_id,
+                },
+                "pushName": "",
+                "message": {
+                    "reactionMessage": {
+                        "text": emoji,
+                        "key": {
+                            "id": target_id,
+                            "fromMe": target_from_me,
+                            "remoteJid": chat_jid,
+                        },
+                    }
+                },
+                "messageType": "reactionMessage",
+                "messageTimestamp": payload.get("timestamp") or int(time.time()),
+            }
+            if reactor_participant:
+                normalized["key"]["participant"] = reactor_participant
+            wx.CallAfter(self.main_window.on_new_message, normalized)
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_reaction error: {e}")
 
     def on_wpp_ack(self, data):
         try:
