@@ -9,7 +9,7 @@ Opens a modal dialog showing WhatsApp-style information about a chat.
     – Participants    (wx.ListCtrl with name / phone / admin flag)
     – Media           (count of locally-stored media files)
 
-Profile / group data is fetched from the Evolution API in a background
+Profile / group data is fetched from the WPPConnect Server in a background
 thread after the dialog opens; the controls are updated via wx.CallAfter.
 Screen-reader accessibility is achieved through standard wxPython controls
 and proper label association — no visual-only information is presented.
@@ -112,9 +112,9 @@ class ConversationDataDialog(wx.Dialog):
         )
         outer.Add(self._info_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # "Add contact" — only shown when this JID is not already in contacts.
+        # "Add contact" — always shown for non-group chats.
         jid = self._jid
-        if not jid.endswith("@g.us") and jid not in self._mw.contacts:
+        if not jid.endswith("@g.us"):
             add_contact_btn = wx.Button(panel, label=self._i18n.t("add_contact"))
             add_contact_btn.Bind(wx.EVT_BUTTON, self._on_add_contact)
             outer.Add(add_contact_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
@@ -175,8 +175,27 @@ class ConversationDataDialog(wx.Dialog):
     def _fetch_data(self):
         if self._is_group:
             data = self._mw.get_group_info(self._jid)
+            participants = data.get("participants", [])
+            lid_jids_to_resolve = []
+            lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                p_jid = p.get("id", "")
+                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                    lid_jids_to_resolve.append(p_jid)
+            if lid_jids_to_resolve:
+                try:
+                    self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                except Exception:
+                    pass
             wx.CallAfter(self._populate_group, data)
         else:
+            if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
+                try:
+                    self._mw.resolve_lid_jids_via_api([self._jid])
+                except Exception:
+                    pass
             data = self._mw.get_contact_profile(self._jid)
             wx.CallAfter(self._populate_personal, data)
 
@@ -186,7 +205,10 @@ class ConversationDataDialog(wx.Dialog):
             return
         i18n  = self._i18n
         lines = []
-        name  = data.get("name") or self._name
+        # The API wraps the contact under "response"; the top-level "status" is
+        # the request result ("success"), not profile data — read from response.
+        cdata = data.get("response") if isinstance(data.get("response"), dict) else {}
+        name  = cdata.get("name") or cdata.get("formattedName") or data.get("name") or self._name
 
         # Resolve phone number: @lid JIDs are opaque device IDs, not phone
         # numbers — bridge them to the real phone JID via the reverse cache.
@@ -203,22 +225,25 @@ class ConversationDataDialog(wx.Dialog):
         if phone:
             lines.append(f"{i18n.t('phone_label')}: {phone}")
 
-        # fetchProfile returns {status: <bio/about text>} — not last-seen.
-        # Display it as the contact's WhatsApp "About" text.
-        about = str(data.get("status") or "").strip()
+        # About/bio text comes from the dedicated profile-status endpoint
+        # (exposed as "aboutText"). Never use the top-level "status", which is
+        # the API result word ("success").
+        about = str(data.get("aboutText") or "").strip()
         if about:
             lines.append(f"{i18n.t('about_label')}: {about}")
 
-        # Online / last-seen: read from the presence cache that is populated
-        # by presence.update WebSocket events.  The fetchProfile endpoint does
-        # not return these fields.
+        # Online / last-seen: prefer the live presence cache (populated by
+        # presence.update events); fall back to the last-seen fetched directly
+        # from the API (data["lastSeenTs"]) since presence events may not have
+        # arrived yet.
+        canonical = self._mw._normalize_jid(canonical)
         presence  = getattr(self._mw, "_presence_cache", {}).get(canonical, {})
         lkp       = presence.get("lastKnownPresence", "")
-        last_seen = presence.get("lastSeen")
+        last_seen = presence.get("lastSeen") or data.get("lastSeenTs")
+        from ui.conversations import _fmt_last_seen
         if lkp in ("available", "composing", "recording"):
             lines.append(i18n.t("online_status"))
-        elif lkp == "unavailable" and last_seen:
-            from ui.conversations import _fmt_last_seen
+        elif last_seen:
             ls_str = _fmt_last_seen(last_seen, i18n)
             if ls_str:
                 lines.append(ls_str)
@@ -260,19 +285,19 @@ class ConversationDataDialog(wx.Dialog):
             if not isinstance(p, dict):
                 continue
             p_jid   = p.get("id", "")
-            p_phone = format_number(p_jid)
-            # Resolve name: prefer address-book 'name', fall back to 'pushName'.
-            # Also bridge @lid JIDs to phone-number JIDs via the reverse cache.
-            contact = self._mw.contacts.get(p_jid)
-            if not contact and p_jid.endswith("@lid"):
+            
+            # Bridge @lid JIDs to phone-number JIDs via the reverse cache for correct phone display
+            display_phone_jid = p_jid
+            if p_jid.endswith("@lid"):
                 phone_jid = lid_to_phone.get(p_jid, "")
                 if phone_jid:
-                    contact  = self._mw.contacts.get(phone_jid)
-                    p_phone  = p_phone or format_number(phone_jid)
-            p_name = ""
-            if contact:
-                p_name = (contact.get("name") or contact.get("pushName") or "").strip()
-            if not p_name or p_name.isdigit():
+                    display_phone_jid = phone_jid
+            
+            p_phone = format_number(display_phone_jid) if not display_phone_jid.endswith("@lid") else display_phone_jid.rsplit("@", 1)[0]
+            # Resolve name: use the robust display name resolution method from MainWindow
+            # which checks contacts, chats, presence pushNames, and messages.
+            p_name = self._mw._resolve_jid_name(p_jid)
+            if not p_name or p_name == p_phone or p_name.isdigit() or p_name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 p_name = p_phone
             is_admin = "admin" if p.get("admin") else ""
             if is_admin and my_jid and (p_jid == my_jid or p_jid.split("@")[0] == my_jid.split("@")[0]):
@@ -299,11 +324,18 @@ class ConversationDataDialog(wx.Dialog):
                       .get("messages", {})
                       .get("records", [])
         )
+        def _has_media(m):
+            mid = m.get('key',{}).get('id','')
+            if "_" in mid:
+                parts = mid.split("_")
+                mid = parts[2] if len(parts) > 2 else parts[-1]
+            return os.path.isfile(data_path("media", f"{mid}.wzmedia"))
+
         media_count = sum(
             1 for m in records
             if m.get("messageType", "") in
                {"imageMessage", "videoMessage", "documentMessage", "stickerMessage"}
-            and os.path.isfile(data_path("media", f"{m.get('key',{}).get('id','')}.wzmedia"))
+            and _has_media(m)
         )
         self._media_label.SetLabel(
             i18n.t("media_count").format(count=media_count)
@@ -319,13 +351,27 @@ class ConversationDataDialog(wx.Dialog):
         dlg.Destroy()
 
     def _on_add_contact(self, event):
-        """Open NewContactDialog with the phone pre-filled from this chat's JID."""
+        """Open NewContactDialog pre-filled with phone and name from this chat."""
         from ui.dialogs.new_contact import NewContactDialog
-        dlg = NewContactDialog(self._mw, self, prefill_phone=format_number(self._jid))
+        # Split the display name into first / surname for the dialog fields.
+        parts   = self._name.split(None, 1) if self._name else []
+        p_name  = parts[0] if parts else ""
+        p_sur   = parts[1] if len(parts) > 1 else ""
+        # Resolve phone: use the phone JID even if this chat is indexed by LID.
+        jid = self._jid
+        lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+        if jid.endswith("@lid") and jid in lid_to_phone:
+            jid = lid_to_phone[jid]
+        dlg = NewContactDialog(
+            self._mw, self,
+            prefill_phone=format_number(jid),
+            prefill_name=p_name,
+            prefill_surname=p_sur,
+        )
         result = dlg.ShowModal()
         dlg.Destroy()
         if result == wx.ID_OK:
-            # Refresh the info panel so the new name is visible
+            # Refresh the info panel so the new name is visible.
             threading.Thread(target=self._fetch_data, daemon=True).start()
 
     def _on_add_to_group(self, event):

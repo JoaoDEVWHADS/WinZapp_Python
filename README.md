@@ -1,168 +1,99 @@
 # WinZapp
 
-> ** Work in progress — WinZapp is under active development.**
-> Features may be incomplete, unstable, or change without notice.
-> Use at your own risk in non-critical environments.
+WinZapp is a **free, self-hosted, open-source desktop WhatsApp client for Windows**, developed primarily with a focus on **accessibility for blind or low-vision users**.  
+It integrates seamlessly with screen readers (such as NVDA, JAWS, Narrator, and others) through the [accessible-output2](https://github.com/accessibleapps/accessible_output2) ecosystem, offering a fully keyboard-navigable interface using wxPython.
+
+The application runs in a hybrid manner:
+1. **Graphical Client:** Written in Python 3.13 + wxPython (responsible for the GUI, audio alerts, and screen-reading capabilities).
+2. **WPPConnect Server:** Running locally on Node.js, acting as the communication gateway.
 
 ---
 
-WinZapp is a **free, self-hosted, open-source WhatsApp desktop client for Windows**, built primarily with **accessibility in mind for blind users**.
-It integrates with screen readers (NVDA, JAWS, Narrator, and others) through
-[accessible-output2](https://github.com/accessibleapps/accessible_output2) and exposes a fully keyboard-navigable interface powered by [wxPython](https://wxpython.org/).
+## ✨ Key Features
 
-The application consists of two components that run side by side:
+### WPPConnect Server Integration
+* **API Framework:** Uses the WPPConnect Server backend with a compiled distribution. Startup launchers (`start.js`), configuration setup (`setup_api.py`), and Python controllers are all tuned for the WPPConnect stack.
+* **Port Uniformity:** Default API port is `6300` throughout client configurators and launcher scripts for reliable out-of-the-box local connections.
+* **Auto-install:** Node.js modules are downloaded and installed automatically on first run — no manual `npm install` needed by the end user.
 
-| Component | Technology | Role |
-|-----------|-----------|------|
-| **Client** | Python 3.13 + wxPython | Desktop GUI, audio, notifications |
-| **Evolution API** | Node.js (auto-downloaded) | Local WhatsApp gateway via WebSocket |
+### Auto-Updater
+* **Direct GitHub Integration:** Queries the GitHub Releases API directly to pull release notes and version info.
+* **Release of File Locks:** Resolves update-time access denied errors by scanning for processes bound to port **6300** (WPPConnect Server) and port **5433** (Postgres) and terminating them before overwriting client files.
 
-The Evolution API is downloaded and compiled automatically on first run — no manual Node.js setup is required by end users.
+### @lid JID Resolution & Cache
+* **Background Profile Resolution:** Background queries via `/contact/fetchProfile` map linked secondary device JIDs (`@lid`) to standard phone numbers and contact names, resolving blank list items.
+* **Encrypted JID Cache:** Local `_lid_to_phone` mappings encrypted and cached in the local database (`messages.dat`).
+* **Real-time Deduplication:** Merges messages and unread counts from `@lid` chats into standard `@s.whatsapp.net` chats on startup and on incoming events.
+* **Brazilian 9-Digit Interchangeability:** Matches and resolves Brazilian phone number JIDs with and without the 9th digit (e.g. 55XX9YYYYYYYY ↔ 55XXYYYYYYYY).
+
+### Accessibility Safeguards
+* **NVDA/JAWS Guards:** Virtual focus guards (`list_has_focus` and sync status checks) prevent screen readers from stuttering or entering announcement loops when rebuilding chat lists.
+* **Debounced Local Writes:** Thread-safe `_save_lock` with a 150 ms debounce prevents `messages.dat` corruption under bulk message loads.
+* **Silent Reconnection:** Socket.IO reconnection loop with silent status bar indicators for network glitches — no blocking popup dialogs.
+* **PTT Voice Note Controls:** Playback controls for voice notes directly within the conversation UI.
+* **Group Mentions:** `@mention` lists and `mentioned_jids` routing to WPPConnect's `/api/:session/send-mentioned` endpoint.
+
+### Logging
+* **Full Debug Tracing:** Persistent client logging under `logs/log.log` at `DEBUG` level, capturing HTTP headers, Socket.IO payloads, and thread exceptions.
 
 ---
 
-## Setting up a development environment
+## 💻 Development Environment
 
 ### Prerequisites
+* **Python 3.13** installed on the system.
+* **Git** for version control.
+* For local installer builds: **GCC** and **windres** (available via MSYS2).
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| **Python** | 3.13 | Install to `C:\python313` or any path; add to `PATH` |
-| **Visual Studio Build Tools** | 2022 | Required by Nuitka (C++ compiler). Install the **"Desktop development with C++"** workload via the VS Installer |
-| **Git** *(optional)* | any | Only needed to clone the repo |
-
-> Node.js does **not** need to be installed globally. The application bundles a portable Node.js runtime under `client/node/`.
-
-### Steps
+### Steps to Run Locally
 
 ```powershell
 # 1. Clone the repository
-git clone https://github.com/your-org/winzapp.git
-cd winzapp
+git clone https://github.com/gabrielhhaber/WinZapp_Python.git
+cd WinZapp_Python
 
-# 2. Create and activate a virtual environment
-py -3.13 -m venv venv
+# 2. Create and activate the virtual environment
+python -m venv venv
 .\venv\Scripts\Activate.ps1
 
-# 3. Install all Python dependencies
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Run the application in development mode
+# 4. Set up the WPPConnect Server (clones and configures client/api/)
+python setup_api.py
+
+# 5. Start the client in development mode
 cd client
-py main.py
-```
-
-On first launch the app will automatically:
-1. Download the **Evolution API** source from GitHub and compile it (this can take a few minutes).
-2. Prompt you to pair your WhatsApp account via a pairing code or QR code.
-
-Subsequent launches skip the setup and start in seconds.
-
-### Project layout (client/)
-
-```
-client/
-├── main.py                  # Entry point
-├── status_panel.py          # Status tab panel
-├── app_paths.py             # Path helpers (dev vs. compiled)
-├── version.py               # Version string
-├── requirements.txt         # (root) Python dependencies
-├── core/                    # Utilities, i18n, audio, networking
-├── ui/
-│   ├── conversations.py     # Main conversation panel
-│   ├── navigation.py        # Tab navigation
-│   ├── accessible.py        # Custom accessible wx controls
-│   └── dialogs/             # All modal dialogs
-├── languages/               # JSON translation files (pt-BR, en-US, es-ES)
-├── sounds/                  # OGG sound effects
-├── lib/                     # Bundled native libraries (BassAudio, etc.)
-├── api/                     # Evolution API source (auto-downloaded)
-└── node/                    # Bundled portable Node.js runtime
+python main.py
 ```
 
 ---
 
-## Building the executable (.exe)
+## 📦 Building
 
-WinZapp is compiled into a **single self-contained `.exe`** using
-[Nuitka](https://nuitka.net/) in `--onefile` mode.
-The resulting file bundles the entire Python runtime, all dependencies, the
-Evolution API, the bundled Node.js runtime, sounds, and language files.
+### Automated (recommended)
 
-### Additional prerequisites for building
+When a GitHub release is created, the [release workflow](.github/workflows/release.yml) automatically builds `WinZappInstaller.exe` and `WinZapp.zip` on GitHub's servers and attaches them to the release.
 
-In addition to the development prerequisites above:
-
-| Tool | Notes |
-|------|-------|
-| **Nuitka 4.0.8** | Already in `requirements.txt`; installed by `pip install -r requirements.txt` |
-| **Visual Studio Build Tools 2022** | Same C++ workload used for Nuitka compilation |
-| **Ordered Nuitka cache** *(optional)* | Speeds up incremental rebuilds significantly |
-
-### Build command
-
-Run from the repository root (with the virtualenv activated):
+To publish a new release (requires [GitHub CLI](https://cli.github.com/)):
 
 ```powershell
-cd client
-
-python -m nuitka `
-  --onefile `
-  --standalone `
-  --windows-console-mode=disable `
-  --enable-plugin=multiprocessing `
-  --windows-arch=x86_64 `
-  --onefile-tempdir-spec="{CACHE_DIR}\WinZapp" `
-  --onefile-windows-static-runtime `
-  --include-data-dir=languages=languages `
-  --include-data-dir=sounds=sounds `
-  --include-data-dir=lib=lib `
-  --include-data-dir=node=node `
-  --include-data-dir=api=api `
-  --output-dir=..\build `
-  --output-filename=WinZapp.exe `
-  main.py
+gh release create v1.2.3 --title "v1.2.3" --notes "Release notes here"
 ```
 
-> **Note:** The first build downloads Nuitka's C backend and compiles all
-> 880+ Python modules to C. Expect **10–30 minutes** on first run.
-> Subsequent builds are much faster thanks to Nuitka's incremental cache.
+### Local build (fallback)
 
-### What the build produces
+Requires MSYS2 with GCC/windres, the portable Node.js placed at `client/node/`, and the WPPConnect Server built at `client/api/dist/server.js`.
 
-```
-build/
-├── WinZapp.exe         ← final self-contained installer/launcher
-└── staging/            ← intermediate directory used during the build
-    ├── WinZapp.exe     ← inner extracted executable
-    ├── node/           ← bundled portable Node.js
-    ├── api/            ← bundled Evolution API
-    ├── languages/      ← translation files
-    ├── sounds/         ← sound effects
-    └── lib/            ← native libraries
+```powershell
+# With the virtual environment active and GCC/windres in PATH:
+python build.py
 ```
 
-The outer `build/WinZapp.exe` extracts itself to
-`%LOCALAPPDATA%\WinZapp\` on first run and then launches the inner
-executable from there on every subsequent start.
-
-### Compiler notes
-
-- Nuitka requires a **64-bit MSVC compiler** (`x64` target). Make sure the
-  `x64 Native Tools Command Prompt` or `vcvars64.bat` is in your environment,
-  or install the **"Desktop development with C++"** workload from the
-  Visual Studio Installer.
-- The build uses `--onefile-windows-static-runtime` so the resulting `.exe`
-  does not require the Visual C++ Redistributable to be installed on end-user
-  machines.
-- Python **3.13** must be used. Other versions are not tested and may produce
-  runtime errors with the bundled native extensions (wxPython, sounddevice,
-  sound-lib).
+The final files are generated in the `dist/` directory.
 
 ---
 
-## Disclaimer
+## 📄 License and Disclaimer
 
-WinZapp is **not** affiliated with, endorsed by, or officially supported by
-Meta Platforms, Inc. It relies on a reverse-engineered WhatsApp Web protocol
-implementation. Use responsibly and at your own risk.
+WinZapp is licensed under the GPL. It relies on reverse engineering of the WhatsApp Web protocol. Use of the software is at your own risk. This repository is not affiliated with, maintained, or sponsored by Meta Platforms, Inc.

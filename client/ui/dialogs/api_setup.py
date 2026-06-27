@@ -1,10 +1,10 @@
 """
-api_setup.py — WinZapp first-run Evolution API setup dialog.
+api_setup.py — WinZapp first-run WPPConnect Server setup dialog.
 
-Shown when api/dist/main.js is absent, meaning the Evolution API has not yet
+Shown when api/dist/main.js is absent, meaning the WPPConnect Server has not yet
 been downloaded and compiled.  Performs the full setup in a background thread:
 
-  1. Download the Evolution API source ZIP from GitHub (no git required)
+  1. Download the WPPConnect Server source ZIP from GitHub (no git required)
        • No tag  → branch main  archive
        • With tag → specific tag archive
   2. Extract into client/api/, preserving our pre-included files (start.js, .env)
@@ -17,8 +17,8 @@ Note: db:deploy / db:deploy:win are NOT run here.  Prisma migrations require
 a live PostgreSQL connection, which is only available at runtime.  The
 migrations are applied automatically by start.js every time the API starts.
 
-The EVOLUTION_TAG_VERSION variable in the root .env optionally pins a specific
-tag (e.g. "2.4.0-rc2").  When unset the latest main branch is downloaded.
+The WPPCONNECT_TAG_VERSION variable in the root .env optionally pins a specific
+tag.  When unset the latest main branch is downloaded.
 
 Uses only the standard library (zipfile, io, tempfile) plus the already-present
 requests package for the HTTP download — no git installation required.
@@ -44,34 +44,33 @@ from app_paths import resource_path
 
 # GitHub download URLs — no git required
 _REPO_ZIP_MAIN = (
-    "https://github.com/evolution-foundation/evolution-api"
+    "https://github.com/wppconnect-team/wppconnect-server"
     "/archive/refs/heads/main.zip"
 )
 _REPO_ZIP_TAG  = (
-    "https://github.com/evolution-foundation/evolution-api"
+    "https://github.com/wppconnect-team/wppconnect-server"
     "/archive/refs/tags/{tag}.zip"
 )
 
 # Root-level files whose pre-included content always takes precedence.
-_PRESERVE = {"start.js", ".env"}
+_PRESERVE = {"start.js", ".env", "config.json"}
 
 # Runtime state dirs/files that should survive a re-download.
-_KEEP_RUNTIME = {"pgdata", "instances", "store", "evolution.log"}
+_KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
 
 class ApiSetupDialog(wx.Dialog):
-    """Progress dialog for the full Evolution API download + build setup.
+    """Progress dialog for the WPPConnect Server download + build setup.
 
     Parameters
     ----------
     parent        : wx.Window
     title_override: str | None
         When provided, overrides the default hardcoded dialog title.
-        Used by the update flow to show a different title (e.g.
-        "WinZapp | Atualizando a Evolution API").
+        Used by the update flow to show a different title.
     forced_tag    : str | None
         When provided, this tag is used for the GitHub download instead
-        of reading EVOLUTION_TAG_VERSION from the .env file.  Used by
+        of reading WPPCONNECT_TAG_VERSION from the .env file.  Used by
         the update flow to pin the exact minimum-version tag.
     """
 
@@ -85,7 +84,7 @@ class ApiSetupDialog(wx.Dialog):
 
         self._proc        = None   # active npm subprocess (for kill on cancel)
         self._cancelled   = False
-        self._forced_tag  = forced_tag   # overrides .env EVOLUTION_TAG_VERSION
+        self._forced_tag  = forced_tag   # overrides .env WPPCONNECT_TAG_VERSION
 
         self._build_ui()
 
@@ -187,12 +186,12 @@ class ApiSetupDialog(wx.Dialog):
                     if total:
                         mb_total = total / (1024 * 1024)
                         self._set_status(
-                            f"Baixando Evolution API... "
+                            f"Baixando WPPConnect Server... "
                             f"{mb_down:.1f} MB / {mb_total:.1f} MB"
                         )
                     else:
                         self._set_status(
-                            f"Baixando Evolution API... {mb_down:.1f} MB"
+                            f"Baixando WPPConnect Server... {mb_down:.1f} MB"
                         )
         except Exception as exc:
             if not self._cancelled:
@@ -211,7 +210,7 @@ class ApiSetupDialog(wx.Dialog):
         Extract the GitHub source ZIP into *api_dir*.
 
         GitHub archives wrap all content in a single top-level directory
-        (e.g. "evolution-api-main/" or "evolution-api-2.4.0-rc2/").
+        (e.g. "wppconnect-server-main/" or "wppconnect-server-2.10.0/").
         That prefix is stripped so files land directly in api_dir.
 
         Root-level entries matching _PRESERVE are skipped so our pre-included
@@ -224,7 +223,7 @@ class ApiSetupDialog(wx.Dialog):
 
                 # Detect the top-level directory from the first entry
                 first_name = members[0].filename if members else ""
-                top_dir    = first_name.split("/")[0] + "/"  # e.g. "evolution-api-main/"
+                top_dir    = first_name.split("/")[0] + "/"  # e.g. "wppconnect-server-main/"
 
                 for member in members:
                     if self._cancelled:
@@ -272,10 +271,14 @@ class ApiSetupDialog(wx.Dialog):
         Run a subprocess and wait for it to finish.
         Returns (success: bool, stderr: str).
         """
+        import sys
+        creation_flags = 0
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags = subprocess.CREATE_NO_WINDOW
         try:
             self._proc = subprocess.Popen(
                 cmd, cwd=cwd, env=env,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=creation_flags,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
@@ -292,16 +295,37 @@ class ApiSetupDialog(wx.Dialog):
     # ── Background setup thread ───────────────────────────────────────────────
 
     def _run_setup(self):
-        node_exe = resource_path("node", "node.exe")
-        npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+        import sys
+        import shutil
+
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+            npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            npm_cmd  = [node_exe, npm_cli]
+            node_dir = resource_path("node")
+            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+        else:
+            local_node = resource_path("node", "node")
+            if os.path.isfile(local_node):
+                node_exe = local_node
+            else:
+                node_exe = shutil.which("node") or "node"
+            local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            if os.path.isfile(local_npm):
+                npm_cmd = [node_exe, local_npm]
+            else:
+                npm_cmd = [shutil.which("npm") or "npm"]
+            node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
         api_dir  = resource_path("api")
-        # Prepend the bundled node/ dir to PATH so that npm's internal
-        # sub-processes (lifecycle scripts, node-gyp, etc.) use the portable
-        # node.exe instead of whatever is (or isn't) on the system PATH.
-        node_dir = resource_path("node")
-        npm_env  = {**os.environ, "PATH": node_dir + os.pathsep + os.environ.get("PATH", "")}
-        # forced_tag (from update flow) takes precedence over the .env value
-        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("EVOLUTION_TAG_VERSION")
+        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        npm_env  = {
+            **os.environ,
+            "PATH": path_env,
+            "PUPPETEER_CACHE_DIR": puppeteer_cache
+        }
+        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
 
         try:
             # ── Step 1: download source ZIP ───────────────────────────────
@@ -350,36 +374,10 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 4: npm install embedded-postgres --save ──────────────
-            # Pin to the latest PostgreSQL 16 package.
-            # All embedded-postgres releases are labelled "beta" by the package
-            # author — that is simply their versioning convention, not an
-            # instability indicator.  The real issue is that PostgreSQL 18
-            # (npm @latest) enables data-page checksums by default for the
-            # first time; its initdb crashes with ACCESS_VIOLATION (0xC0000005)
-            # on certain Windows hardware during post-bootstrap initialization.
-            # PostgreSQL 16 has checksums DISABLED by default and its Windows
-            # binaries are production-hardened.
-            self._set_status("Adicionando embedded-postgres...")
-            ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "install", "embedded-postgres@16.13.0-beta.17",
-                 "--save", "--no-audit", "--no-fund"],
-                cwd=api_dir,
-                env=npm_env,
-            )
-            if not ok:
-                if not self._cancelled:
-                    wx.CallAfter(self._finish_error,
-                                 f"Falha ao instalar embedded-postgres:\n\n{err}")
-                return
-
-            if self._cancelled:
-                return
-
-            # ── Step 5: npm install ───────────────────────────────────────
+            # ── Step 4: npm install ───────────────────────────────────────
             self._set_status("Instalando dependências (npm install)...")
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
+                npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
                 env=npm_env,
             )
@@ -392,39 +390,27 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 6: npm run db:generate (only if the script exists) ───
-            pkg_json_path = os.path.join(api_dir, "package.json")
-            has_db_generate = False
-            try:
-                with open(pkg_json_path, encoding="utf-8") as f:
-                    pkg = json.load(f)
-                has_db_generate = "db:generate" in pkg.get("scripts", {})
-            except Exception:
-                pass
-
-            if has_db_generate:
-                self._set_status("Gerando cliente Prisma (db:generate)...")
-                db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
-                ok, err = self._run_subprocess(
-                    [node_exe, npm_cli, "run", "db:generate"],
-                    cwd=api_dir,
-                    env=db_env,
-                )
-                if not ok and not self._cancelled:
-                    wx.CallAfter(self._finish_error,
-                                 f"Falha em npm run db:generate:\n\n{err}")
-                    return
+            # ── Step 4.5: download chrome if using modern puppeteer ───────
+            self._set_status("Baixando executável do Chrome (puppeteer)...")
+            ok, err = self._run_subprocess(
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
+                cwd=api_dir,
+                env=npm_env,
+            )
+            # Do not fail hard if this step fails (e.g. offline setup where Chrome was pre-copied)
+            if not ok:
+                logging.warning(f"Failed to install Chrome browser via Puppeteer CLI: {err}")
 
             if self._cancelled:
                 return
 
-            # ── Step 7: npm run build ─────────────────────────────────────
+            # ── Step 5: npm run build ─────────────────────────────────────
             self._set_status(
-                "Compilando a Evolution API (npm run build) — "
+                "Compilando o WPPConnect Server (npm run build) — "
                 "isso pode levar alguns minutos..."
             )
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "run", "build"],
+                npm_cmd + ["run", "build"],
                 cwd=api_dir,
                 env=npm_env,
             )
@@ -446,13 +432,17 @@ class ApiSetupDialog(wx.Dialog):
     def _kill_proc_tree(self):
         """Kill the active npm process and all its spawned children."""
         if self._proc and self._proc.poll() is None:
+            import sys
             try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    self._proc.terminate()
             except Exception:
                 try:
                     self._proc.kill()
@@ -472,7 +462,7 @@ class ApiSetupDialog(wx.Dialog):
     def _finish_success(self):
         self._timer.Stop()
         wx.MessageBox(
-            "A Evolution API foi configurada com sucesso!\n\n"
+            "O WPPConnect Server foi configurado com sucesso!\n\n"
             "O WinZapp irá agora iniciar a API.",
             "Configuração concluída",
             wx.OK | wx.ICON_INFORMATION,
@@ -482,7 +472,7 @@ class ApiSetupDialog(wx.Dialog):
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
-        msg = "Ocorreu um erro durante a configuração da Evolution API."
+        msg = "Ocorreu um erro durante a configuração do WPPConnect Server."
         if details:
             msg = f"{msg}\n\n{details}"
         wx.MessageBox(msg, "Erro de configuração", wx.OK | wx.ICON_ERROR, self)

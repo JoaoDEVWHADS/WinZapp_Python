@@ -6,7 +6,7 @@ Lets the user create a new WhatsApp group by:
   2. Selecting participants from a saved-contact checklist (with search filter).
   3. Optionally adding an extra phone number not in the contacts list.
 
-Calls the Evolution API POST /group/create/{instance} endpoint.
+Calls the WPPConnect POST /api/{session}/create-group endpoint.
 """
 
 import re
@@ -67,7 +67,7 @@ class NewGroupDialog(wx.Dialog):
         contacts = self._mw.contacts
         for jid in known_jids:
             contact = contacts.get(jid, {})
-            name = contact.get("pushName") or jid
+            name = contact.get("name") or contact.get("pushName") or jid
             self._all_contact_labels.append(name)
             self._all_contact_jids.append(jid)
 

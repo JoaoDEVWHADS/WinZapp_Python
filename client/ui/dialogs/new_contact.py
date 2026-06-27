@@ -6,16 +6,21 @@ main_window.contacts so it appears in future searches, then returns the
 WhatsApp JID via result_jid / result_name so the caller can navigate there.
 """
 
+import logging
 import re
+import threading
 import wx
 
 
 class NewContactDialog(wx.Dialog):
     """Dialog for adding a new WhatsApp contact."""
 
-    def __init__(self, main_window, parent=None, prefill_phone: str = ""):
+    def __init__(self, main_window, parent=None, prefill_phone: str = "",
+                 prefill_name: str = "", prefill_surname: str = ""):
         self._mw = main_window
-        self._prefill_phone = prefill_phone
+        self._prefill_phone   = prefill_phone
+        self._prefill_name    = prefill_name
+        self._prefill_surname = prefill_surname
         i18n = main_window.i18n
         super().__init__(
             parent or main_window,
@@ -55,6 +60,11 @@ class NewContactDialog(wx.Dialog):
         sizer.Add(self._phone_field, 0,
                   wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
+        # Sync checkbox
+        self._sync_check = wx.CheckBox(panel, label=i18n.t("sync_contact_to_phone"))
+        self._sync_check.SetValue(True)
+        sizer.Add(self._sync_check, 0, wx.LEFT | wx.TOP, 10)
+
         # Buttons
         btn_sizer = wx.StdDialogButtonSizer()
         ok_btn     = wx.Button(panel, wx.ID_OK,     label=i18n.t("create_contact"))
@@ -71,6 +81,10 @@ class NewContactDialog(wx.Dialog):
 
         ok_btn.Bind(wx.EVT_BUTTON, self._on_add)
 
+        if self._prefill_name:
+            self._name_field.SetValue(self._prefill_name)
+        if self._prefill_surname:
+            self._surname_field.SetValue(self._prefill_surname)
         if self._prefill_phone:
             self._phone_field.SetValue(self._prefill_phone)
         self._name_field.SetFocus()
@@ -108,14 +122,31 @@ class NewContactDialog(wx.Dialog):
         jid       = phone + "@s.whatsapp.net"
 
         # Store locally so future searches find this contact
-        self._mw.contacts[jid] = {
+        entry = {
             "remoteJid":  jid,
             "name":       full_name,
             "pushName":   full_name,
         }
+        sync_to_phone = self._sync_check.GetValue()
+        if sync_to_phone:
+            entry["isSaved"] = True
+        self._mw.contacts[jid] = entry
 
-        # Persist to disk so the contact survives restarts
-        self._mw._schedule_save()
+        # Persist to SQLite so the contact survives restarts
+        try:
+            self._mw.db.upsert_contact(jid, entry)
+        except Exception:
+            logging.exception("[new_contact] Failed to persist contact")
+
+        # When requested, actually save the contact on WhatsApp / the device
+        # address book via the API (previously this only set a local flag, so
+        # nothing was ever synced to the phone). Done off the UI thread.
+        if sync_to_phone:
+            threading.Thread(
+                target=self._mw.save_contact_to_phone,
+                args=(phone, first, surname, True),
+                daemon=True,
+            ).start()
 
         self.result_jid  = jid
         self.result_name = full_name

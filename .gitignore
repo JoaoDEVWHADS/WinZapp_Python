@@ -25,6 +25,8 @@ client/logs/
 !/client/api/start.js
 !/client/api/.env
 !/client/api/package.json
+!/client/api/config.json
+!/client/api/.puppeteerrc.cjs
 
 # Evolution API runtime state (redundant with /api/* but explicit for clarity)
 /client/api/pgdata/
@@ -43,6 +45,7 @@ client/logs/
 __pycache__/
 *.py[codz]
 *$py.class
+node_modules/
 
 # C extensions
 *.so
@@ -194,3 +197,15 @@ db.sqlite3-journal
 !/api/.gitignore
 !/api/start.js
 !/api/.env
+!/client/api/src/util/functions.ts
+!/client/api/src/middleware/statusConnection.ts
+!/client/api/src/controller/deviceController.ts
+!/client/api/src/controller/messageController.ts
+!/client/api/src/controller/sessionController.ts
+!/client/api/src/util/createSessionUtil.ts
+!/client/api/src/config.ts
+!/client/api/config.json
+
+
+# data
+data/

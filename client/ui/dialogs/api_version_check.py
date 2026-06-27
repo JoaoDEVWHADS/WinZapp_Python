@@ -1,7 +1,7 @@
 """
-api_version_check.py — WinZapp Evolution API version check dialog.
+api_version_check.py — WinZapp WPPConnect Server version check dialog.
 
-Shown when the installed Evolution API version is below the minimum
+Shown when the installed WPPConnect Server version is below the minimum
 required by this build of WinZapp.  The user can choose to:
 
   RESULT_UPDATE   — update automatically (re-download + reinstall)
@@ -19,7 +19,7 @@ RESULT_CONTINUE = 3   # User chose to continue with the current version
 
 class ApiVersionOutdatedDialog(wx.Dialog):
     """
-    Dialog shown when the installed Evolution API is below the required minimum.
+    Dialog shown when the installed WPPConnect Server is below the required minimum.
 
     Parameters
     ----------

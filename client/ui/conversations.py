@@ -1,4 +1,5 @@
 import base64 as _b64
+import logging
 import mimetypes
 import os
 import re
@@ -27,8 +28,9 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
+    AccessibleMessagesList,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -126,6 +128,10 @@ class ConversationsPanel(wx.Panel):
         self._pending_open_unread: int = 0
         # True while the separator was placed from the initial open (not from a live message)
         self._sep_from_open: bool = False
+        # One-shot timer: dismiss the separator 2 s after focus reaches it
+        self._unread_sep_dismiss_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_unread_sep_dismiss_timer,
+                  self._unread_sep_dismiss_timer)
 
         # ── Reaction tracking ───────────────────────────────────────────────
         # Maps original_msg_id → {emoji: count}
@@ -295,6 +301,10 @@ class ConversationsPanel(wx.Panel):
 
         self.messages_list = wx.ListCtrl(self.conversation_panel, style=wx.LC_REPORT)
         self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
+        # Win32 ListView truncates item text (and its MSAA name) at ~259 chars.
+        # This custom accessible returns the full untruncated message text so
+        # screen readers announce long messages (and trailing URLs) completely.
+        self.messages_list.SetAccessible(AccessibleMessagesList(self))
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
@@ -701,6 +711,11 @@ class ConversationsPanel(wx.Panel):
             return
 
     def navigate_to_conversation(self, conversation):
+        if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
+            self.conversation = conversation
+            # Conversation already open — just focus the message input field.
+            wx.CallAfter(self.message_field.SetFocus)
+            return
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -718,6 +733,10 @@ class ConversationsPanel(wx.Panel):
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
+        self._first_unread_msg_id = None
+        self._first_unread_count = 0
+        if self._unread_sep_dismiss_timer.IsRunning():
+            self._unread_sep_dismiss_timer.Stop()
         self._quoted_message = None
         self._reaction_map   = {}
         # Reset mention state for the new conversation
@@ -741,9 +760,10 @@ class ConversationsPanel(wx.Panel):
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
             or conversation.get("name", "")
-            or conversation.get("pushName", "")
+            or ("" if _conv_jid.endswith("@g.us") else conversation.get("pushName", ""))
             or self.main_window.find_jid_through_messages(conversation)
-            or (format_number(_conv_jid) if not _conv_jid.endswith("@lid") else "")
+            or self.main_window._format_jid_for_display(_conv_jid)
+            or (self.main_window.i18n.t("unknown_group") if _conv_jid.endswith("@g.us") else self.main_window.i18n.t("unknown_contact"))
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
@@ -753,11 +773,27 @@ class ConversationsPanel(wx.Panel):
         self._conv_data_btn.SetLabel(
             i18n.t("group_data") if is_group else i18n.t("conversation_data")
         )
-        self._conv_data_btn.SetNote(self.conversation_name)
+        display_note = self.conversation_name
+        if not is_group and is_phone_like(display_note):
+            display_note = f"{i18n.t('phone_label')}: {display_note}"
+        self._conv_data_btn.SetNote(display_note)
 
-        self.message_label.SetLabel(
-            f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
-        )
+        is_channel = jid.endswith("@newsletter")
+        if is_channel:
+            self.message_field.Disable()
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self.message_label.SetLabel(i18n.t("channel_read_only"))
+        else:
+            self.message_field.Enable()
+            self.send_message_btn.Enable()
+            self.record_voice_message_btn.Enable()
+            self._add_attachment_btn.Enable()
+            self.message_label.SetLabel(
+                f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
+            )
+            
         if hasattr(self, "_remove_quote_btn"):
             self._remove_quote_btn.Hide()
         self.conversation_panel.Show()
@@ -783,6 +819,17 @@ class ConversationsPanel(wx.Panel):
                 args=(jid,),
                 daemon=True,
             ).start()
+        # Background: Fetch/Sync latest messages for this chat on-demand
+        def _fetch_messages_bg():
+            try:
+                self.main_window.sync_chat_messages(conversation)
+                if self.conversation and self.conversation.get("remoteJid") == jid:
+                    wx.CallAfter(self.populate_messages)
+            except Exception as e:
+                print(f"[navigate_to_conversation] background sync failed: {e}")
+
+        threading.Thread(target=_fetch_messages_bg, daemon=True).start()
+
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
@@ -820,8 +867,14 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.message_field.SetFocus)
 
     def preselect_messages(self):
-        self.messages_list.Focus(0)
-        self.messages_list.Select(0)
+        wx.CallAfter(self._do_preselect)
+
+    def _do_preselect(self):
+        count = self.messages_list.GetItemCount()
+        if count > 0:
+            self.messages_list.Focus(count - 1)
+            self.messages_list.Select(count - 1)
+            self.messages_list.EnsureVisible(count - 1)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -867,13 +920,12 @@ class ConversationsPanel(wx.Panel):
         # Intercept Esc and Enter when the mention suggestion list has focus so
         # they are handled here, before the accelerator table fires
         # close_conversation for Esc or any other panel-level binding.
-        if (hasattr(self, "_mention_panel") and self._mention_panel.IsShown()
-                and wx.Window.FindFocus() is self._mention_list):
+        if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
             if kc == wx.WXK_ESCAPE:
                 self._hide_mention_suggestions()
                 wx.CallAfter(self.message_field.SetFocus)
                 return  # do NOT Skip — blocks the Esc → close_conversation accelerator
-            if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if wx.Window.FindFocus() is self._mention_list and kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
                 idx = self._mention_list.GetSelection()
                 if 0 <= idx < len(self._mention_suggestions):
                     name, jid = self._mention_suggestions[idx]
@@ -1015,7 +1067,7 @@ class ConversationsPanel(wx.Panel):
             msg_id = self._editing_message_id
             idx    = self._editing_message_index
 
-            # Call Evolution API to update the message
+            # Call WPPConnect API to update the message
             self.main_window.edit_message(remote_jid, msg_id, text)
 
             # Update local state
@@ -1152,17 +1204,33 @@ class ConversationsPanel(wx.Panel):
         message-sent sound, and refreshes the conversation list preview.
         real_id (the WhatsApp message ID returned by the API) replaces the local
         UUID in the virtual message's key so that media playback can later look
-        up the message in the Evolution API database.
+        up the message in the WPPConnect API database.
         """
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
+                if msg.get("_ui_sent"):
+                    return  # Already marked sent on the UI, ignore to prevent duplicate sound and actions
+                msg["_ui_sent"] = True
                 msg["_local_pending"] = False
                 # Replace the local UUID with the real WhatsApp message ID so
                 # get_base64_from_media can find the message in the DB later.
                 if real_id and isinstance(real_id, str):
                     msg.setdefault("key", {})["id"] = real_id
+                    # Rename the local audio file so we don't have to download it!
+                    try:
+                        voice_messages_dir = data_path("voice_messages")
+                        old_file = os.path.join(voice_messages_dir, f"{local_id}.msv")
+                        new_file = os.path.join(voice_messages_dir, f"{real_id}.msv")
+                        if os.path.isfile(old_file) and not os.path.isfile(new_file):
+                            os.rename(old_file, new_file)
+                    except Exception as e:
+                        print(f"[_mark_message_sent] failed to rename local audio: {e}")
+                    if getattr(self, "_current_audio_id", None) == local_id:
+                        self._current_audio_id = real_id
+                    if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
+                        self._audio_positions[real_id] = self._audio_positions.pop(local_id)
                     # For audio messages, kick off background download now that
-                    # we have the real ID the Evolution API can look up.
+                    # we have the real ID the WPPConnect API can look up.
                     if msg.get("messageType") == "audioMessage":
                         import threading as _threading
                         _threading.Thread(
@@ -1219,6 +1287,11 @@ class ConversationsPanel(wx.Panel):
         def _callback(in_data, frame_count, time_info, status):
             # Runs on PyAudio's internal callback thread.
             # list.append is atomic under the GIL — no explicit lock needed.
+            if status:
+                # paInputOverflow: the capture buffer filled before we drained
+                # it (CPU/GIL contention). Logged so choppy recordings are
+                # diagnosable; the larger frames_per_buffer below minimises it.
+                logging.debug("[audio] input stream status flag: %s", status)
             if not self._recording_paused:
                 self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
@@ -1239,7 +1312,10 @@ class ConversationsPanel(wx.Panel):
                     channels=ch,
                     format=pyaudio.paInt16,
                     input=True,
-                    frames_per_buffer=1024,
+                    # Larger buffer (~85 ms at 48 kHz) so the Python callback
+                    # can tolerate scheduling delays from background sync/media
+                    # threads without PortAudio dropping samples (choppy audio).
+                    frames_per_buffer=4096,
                     stream_callback=_callback,
                 )
                 stream.start_stream()
@@ -1397,6 +1473,18 @@ class ConversationsPanel(wx.Panel):
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
+        # Immediately save a local copy of this voice message as local_id.msv
+        try:
+            voice_messages_dir = data_path("voice_messages")
+            os.makedirs(voice_messages_dir, exist_ok=True)
+            local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
+            with open(wav_path, "rb") as f_in:
+                wav_data = f_in.read()
+            with open(local_audio_path, "wb") as f_out:
+                f_out.write(encrypt(wav_data, self.main_window.key))
+        except Exception as e:
+            print(f"[_send_voice_message] failed to save local audio copy: {e}")
+
         # Enqueue for background upload.
         pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
@@ -1410,6 +1498,10 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetFocus()
 
     def close_conversation(self, event=None):
+        if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
+            self._hide_mention_suggestions()
+            self.message_field.SetFocus()
+            return
         if self._is_recording:
             self._stop_recording_stream()
             self._is_recording     = False
@@ -1596,7 +1688,11 @@ class ConversationsPanel(wx.Panel):
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
-        media_path = data_path("media", f"{msg_id}.wzmedia")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
         is_downloaded = os.path.isfile(media_path)
 
         if msg_type == "documentMessage":
@@ -1665,7 +1761,9 @@ class ConversationsPanel(wx.Panel):
 
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
-        self._do_activate_message(event.GetIndex())
+        idx = self.messages_list.GetFocusedItem()
+        if idx >= 0:
+            self._do_activate_message(idx)
 
     def _do_activate_message(self, index: int):
         """Core activation logic shared by Enter, double-click, and Space."""
@@ -1691,9 +1789,13 @@ class ConversationsPanel(wx.Panel):
 
         if msg_type == "audioMessage":
             duration = (msg_obj.get("audioMessage") or {}).get("seconds", 0) or 0
+            clean_msg_id = msg_id
+            if "_" in msg_id:
+                parts = msg_id.split("_")
+                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
             self._toggle_playback(
                 msg_id, duration, msg,
-                file_path=data_path("voice_messages", f"{msg_id}.msv"),
+                file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                 audio_ext=".ogg",
             )
 
@@ -1702,15 +1804,19 @@ class ConversationsPanel(wx.Panel):
             if video.get("gifPlayback"):
                 return  # GIFs have no audio track to play
             duration = video.get("seconds", 0) or 0
+            clean_msg_id = msg_id
+            if "_" in msg_id:
+                parts = msg_id.split("_")
+                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
             self._toggle_playback(
                 msg_id, duration, msg,
-                file_path=data_path("media", f"{msg_id}.wzmedia"),
+                file_path=data_path("media", f"{clean_msg_id}.wzmedia"),
                 audio_ext=".mp4",
             )
 
-        elif msg_type == "imageMessage":
-            # Enter on an image → open in default app
-            self._on_action_open(None)
+        elif msg_type in ("imageMessage", "documentMessage"):
+            # Enter on an image or document → open in default app
+            self._on_action_open(None, index=index)
 
     def on_messages_context_menu(self, event):
         index = self.messages_list.GetFirstSelected()
@@ -1778,6 +1884,16 @@ class ConversationsPanel(wx.Panel):
                 copy_item,
             )
 
+        # Copy file (only for image, video, document messages)
+        _MEDIA_TYPES = ("imageMessage", "videoMessage", "documentMessage")
+        if msg_type in _MEDIA_TYPES:
+            copy_file_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_file')}\tCtrl+C")
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_copy_file(m),
+                copy_file_item,
+            )
+
         # Reply (Alt+R)
         reply_item = menu.Append(wx.ID_ANY, f"{i18n.t('reply_message')}\tAlt+R")
         self.Bind(
@@ -1841,8 +1957,10 @@ class ConversationsPanel(wx.Panel):
             fwd_item,
         )
 
-        # Star (Ctrl+Shift+O)
-        star_item = menu.Append(wx.ID_ANY, f"{i18n.t('star_message')}\tCtrl+Shift+O")
+        # Star / Unstar (Ctrl+Shift+O)
+        is_starred = bool(msg.get("starred"))
+        star_label = i18n.t("unstar_message") if is_starred else i18n.t("star_message")
+        star_item = menu.Append(wx.ID_ANY, f"{star_label}\tCtrl+Shift+O")
         self.Bind(
             wx.EVT_MENU,
             lambda e, m=msg: self._on_menu_star(m),
@@ -1851,8 +1969,12 @@ class ConversationsPanel(wx.Panel):
 
         # Save As (media only, only when the file is already cached locally)
         _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
         if msg_type in _SAVEABLE and os.path.isfile(
-            data_path("media", f"{msg_id}.wzmedia")
+            data_path("media", f"{clean_msg_id}.wzmedia")
         ):
             menu.AppendSeparator()
             save_item = menu.Append(
@@ -2073,7 +2195,7 @@ class ConversationsPanel(wx.Panel):
         """Return (start_pos, query) when cursor is inside @word, else (None, None)."""
         text = self.message_field.GetValue()
         pos  = self.message_field.GetInsertionPoint()
-        i = pos - 1
+        i = min(pos - 1, len(text) - 1)
         while i >= 0:
             ch = text[i]
             if ch == "@":
@@ -2096,12 +2218,61 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
         q = query.lower()
 
-        # Individual participant matches
-        matches = [
-            (name, jid)
-            for name, jid in self._group_participants_cache
-            if not q or q in name.lower()
-        ]
+        # Collect JIDs of everyone who has sent at least one message in the current conversation
+        participants_who_sent_message = set()
+        for msg in getattr(self, "_sorted_messages", []):
+            if not isinstance(msg, dict):
+                continue
+            key = msg.get("key") or {}
+            p_jid = key.get("participant") or msg.get("participant")
+            if not p_jid and not msg.get("isGroupMsg", False):
+                p_jid = key.get("remoteJid")
+            if p_jid:
+                p_jid = self.main_window._normalize_jid(p_jid)
+                participants_who_sent_message.add(p_jid)
+                # Map alternate formats
+                phone_jid = getattr(self.main_window, "_lid_to_phone", {}).get(p_jid, "")
+                if phone_jid:
+                    participants_who_sent_message.add(phone_jid)
+                lid_jid = getattr(self.main_window, "_phone_to_lid", {}).get(p_jid, "")
+                if lid_jid:
+                    participants_who_sent_message.add(lid_jid)
+
+        def is_saved(jid):
+            local = jid.rsplit("@", 1)[0]
+            candidates = [jid]
+            if jid.endswith("@lid"):
+                phone = getattr(self.main_window, "_lid_to_phone", {}).get(jid, "")
+                if phone:
+                    candidates.append(phone)
+                    candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
+            elif jid.endswith("@s.whatsapp.net"):
+                candidates.append(local + "@c.us")
+                lid = getattr(self.main_window, "_phone_to_lid", {}).get(jid, "")
+                if lid:
+                    candidates.append(lid)
+            elif jid.endswith("@c.us"):
+                candidates.append(local + "@s.whatsapp.net")
+
+            for cjid in candidates:
+                c = self.main_window.contacts.get(cjid)
+                if c:
+                    if c.get("isMyContact") or c.get("isSaved") or c.get("syncToAddressbook"):
+                        return True
+                    name = (c.get("name") or "").strip()
+                    if name and not name.isdigit() and not is_phone_like(name):
+                        name_lower = name.lower()
+                        if "sem nome" not in name_lower and "unnamed" not in name_lower and name_lower not in ("no name", "unknown", "desconhecido"):
+                            return True
+            return False
+
+        # Individual participant matches filtered by rules:
+        # Show if contact is saved in contacts OR has sent a message in the group
+        matches = []
+        for name, jid in self._group_participants_cache:
+            norm_jid = self.main_window._normalize_jid(jid)
+            if not q or q in name.lower() or q in norm_jid:
+                matches.append((name, jid))
 
         # Sort: names that start with the query come first, then those that
         # contain it but don't start with it — both groups sorted alphabetically.
@@ -2257,6 +2428,20 @@ class ConversationsPanel(wx.Panel):
             data = self.main_window.get_group_info(jid)
             participants = data.get("participants", [])
             my_jid = getattr(self.main_window, "my_jid", "") or ""
+            mw_ref = self.main_window
+            
+            # Resolve any unknown @lid participant JIDs using API
+            lid_jids_to_resolve = []
+            lid_to_phone = getattr(mw_ref, "_lid_to_phone", {})
+            for p in participants:
+                if not isinstance(p, dict):
+                    continue
+                p_jid = p.get("id", "")
+                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                    lid_jids_to_resolve.append(p_jid)
+            if lid_jids_to_resolve:
+                mw_ref.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                
             cache = []
             for p in participants:
                 if not isinstance(p, dict):
@@ -2266,7 +2451,7 @@ class ConversationsPanel(wx.Panel):
                     continue
                 if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
                     continue  # skip self
-                name = self._get_participant_name(p_jid)
+                name = self._get_participant_name(p_jid, p)
                 cache.append((name, p_jid))
             cache.sort(key=lambda x: x[0].lower())
             wx.CallAfter(self._set_group_participants_cache, cache)
@@ -2361,8 +2546,33 @@ class ConversationsPanel(wx.Panel):
 
     def _on_message_focused(self, event):
         idx = event.GetIndex()
-        if idx == 0 and self._messages_offset > 0 and not self._is_loading_more:
-            self._load_more_messages()
+        if (
+            idx == 0
+            and not self._is_loading_more
+        ):
+            if self._messages_offset > 0:
+                self._load_more_messages()
+            else:
+                self._load_older_messages_from_server()
+
+        # Unread-separator dismiss logic:
+        # - Focus at or past the separator → start the 2-s dismiss timer once.
+        # Once the timer is armed it is intentionally NOT cancelled when focus
+        # moves back above the separator, so the separator always disappears
+        # after the user has reached the unread region.
+        if self._unread_sep_idx >= 0:
+            if idx >= self._unread_sep_idx:
+                # Mark as read immediately (first time focus arrives)
+                if not self._unread_sep_dismiss_timer.IsRunning():
+                    if self.conversation is not None:
+                        jid = self.conversation.get("remoteJid", "")
+                        if jid:
+                            threading.Thread(
+                                target=self.main_window.mark_conversation_as_read,
+                                args=(jid,),
+                                daemon=True,
+                            ).start()
+                    self._unread_sep_dismiss_timer.StartOnce(2000)
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
@@ -2373,8 +2583,106 @@ class ConversationsPanel(wx.Panel):
                     self._show_audio_controls()
                 else:
                     self._hide_audio_controls()
-
         event.Skip()
+
+    def _on_unread_sep_dismiss_timer(self, event):
+        """Fired 2 s after focus reached the unread separator — remove it."""
+        self._dismiss_unread_separator()
+
+    def _dismiss_unread_separator(self):
+        """Remove the unread separator row without stealing focus."""
+        if self._unread_sep_idx < 0:
+            return
+        sep_idx = self._unread_sep_idx
+        focused = self.messages_list.GetFocusedItem()
+        self.messages_list.Freeze()
+        try:
+            self._sorted_messages.pop(sep_idx)
+            self.messages_list.DeleteItem(sep_idx)
+        finally:
+            self.messages_list.Thaw()
+        self._unread_sep_idx  = -1
+        self._sep_from_open   = False
+        self._first_unread_msg_id  = None
+        self._first_unread_count   = 0
+        # Restore the focused row (shifted by 1 if it was after the separator)
+        if focused > sep_idx:
+            focused -= 1
+        elif focused == sep_idx:
+            focused = max(0, sep_idx - 1)
+        if 0 <= focused < self.messages_list.GetItemCount():
+            self.messages_list.Focus(focused)
+
+    def _load_older_messages_from_server(self):
+        """Fetch older messages from server when the beginning of local history is reached."""
+        if not self.conversation or not self._all_sorted_messages:
+            return
+        
+        # Get oldest non-separator message ID
+        oldest_msg = self._all_sorted_messages[0]
+        if oldest_msg.get("_type") == "unread_separator" and len(self._all_sorted_messages) > 1:
+            oldest_msg = self._all_sorted_messages[1]
+            
+        oldest_id = oldest_msg.get("key", {}).get("id", "")
+        if not oldest_id:
+            return
+
+        self._is_loading_more = True
+        
+        def _fetch():
+            try:
+                phone_jid = self.conversation.get("remoteJid", "")
+                fetched = self.main_window.fetch_older_messages(phone_jid, oldest_msg)
+                if fetched:
+                    wx.CallAfter(self._on_older_messages_loaded, fetched)
+                else:
+                    self._is_loading_more = False
+            except Exception as e:
+                print(f"[_load_older_messages_from_server] error: {e}")
+                self._is_loading_more = False
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_older_messages_loaded(self, fetched_messages):
+        """Prepend fetched history to UI message list."""
+        self._is_loading_more = False
+        if not fetched_messages:
+            return
+            
+        displayable = [
+            m for m in fetched_messages if self._is_displayable_message(m)
+        ]
+        if not displayable:
+            return
+            
+        # Sort displayable older messages
+        try:
+            displayable = sorted(
+                displayable, key=lambda m: self._extract_timestamp(m) or 0
+            )
+        except Exception:
+            pass
+            
+        n_new = len(displayable)
+        
+        self.messages_list.Freeze()
+        try:
+            self._all_sorted_messages = displayable + self._all_sorted_messages
+            self._sorted_messages     = displayable + self._sorted_messages
+            self._messages_offset     = 0
+            if self._unread_sep_idx >= 0:
+                self._unread_sep_idx += n_new
+                
+            self.messages_list.DeleteAllItems()
+            for msg in self._sorted_messages:
+                self.messages_list.Append((self._render_message_line(msg),))
+                
+            self.messages_list.Focus(n_new)
+            self.messages_list.Select(n_new, True)
+            self.messages_list.EnsureVisible(n_new)
+        finally:
+            self.messages_list.Thaw()
+
 
     def _load_more_messages(self):
         """Prepend the previous page of messages to the list."""
@@ -2536,10 +2844,42 @@ class ConversationsPanel(wx.Panel):
             daemon=True,
         ).start()
 
-    # ── Open / Save As ──────────────────────────────────────────────────────
+    def _open_file_safely(self, filepath: str):
+        """Open a file with the default associated program in the foreground.
+        Falls back to Windows 'openas' dialog if no program is associated."""
+        import sys
+        import os
+        import ctypes
+        if sys.platform == "win32":
+            try:
+                # SW_SHOW = 5
+                res = ctypes.windll.shell32.ShellExecuteW(None, "open", filepath, None, None, 5)
+                # ShellExecuteW returns <= 32 if failed
+                if res <= 32:
+                    if res == 31:  # SE_ERR_NOASSOC
+                        ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
+                    else:
+                        raise OSError(f"ShellExecuteW failed with code {res}")
+            except Exception:
+                try:
+                    ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
+                except Exception:
+                    os.startfile(filepath)
+        else:
+            if sys.platform == "darwin":
+                import subprocess
+                subprocess.call(["open", filepath])
+            else:
+                import subprocess
+                try:
+                    subprocess.call(["xdg-open", filepath])
+                except Exception:
+                    if hasattr(os, "startfile"):
+                        os.startfile(filepath)
 
-    def _on_action_open(self, event):
-        index = self.messages_list.GetFirstSelected()
+    def _on_action_open(self, event, index=None):
+        if index is None:
+            index = self.messages_list.GetFirstSelected()
         if index < 0 or index >= len(self._sorted_messages):
             return
         msg      = self._sorted_messages[index]
@@ -2561,7 +2901,11 @@ class ConversationsPanel(wx.Panel):
         else:
             return
 
-        media_path = data_path("media", f"{msg_id}.wzmedia")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
 
         def _run():
             if not os.path.isfile(media_path):
@@ -2578,7 +2922,7 @@ class ConversationsPanel(wx.Panel):
                 tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
                 tmp.write(content)
                 tmp.close()
-                wx.CallAfter(lambda: os.startfile(tmp.name))
+                wx.CallAfter(lambda: self._open_file_safely(tmp.name))
             except Exception as exc:
                 wx.CallAfter(
                     wx.MessageBox,
@@ -2625,7 +2969,11 @@ class ConversationsPanel(wx.Panel):
                 return
             save_path = dlg.GetPath()
 
-        media_path = data_path("media", f"{msg_id}.wzmedia")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
 
         def _run():
             if not os.path.isfile(media_path):
@@ -2740,21 +3088,32 @@ class ConversationsPanel(wx.Panel):
         if os.path.isfile(file_path):
             self._play_audio(msg_id, duration_seconds, file_path, audio_ext)
         else:
+            if not hasattr(self, "_downloading_audio_ids"):
+                self._downloading_audio_ids = set()
+            
+            if msg_id in self._downloading_audio_ids:
+                self.main_window.output(self.main_window.i18n.t("downloading"))
+                return
+
             self.main_window.output(self.main_window.i18n.t("downloading"))
+            self._downloading_audio_ids.add(msg_id)
 
             def _download_and_play():
-                msg_type = msg.get("messageType", "") if msg else ""
-                if msg_type == "audioMessage":
-                    if msg is not None:
-                        self.main_window.handle_audio_message(msg)
-                else:
-                    if msg is not None:
-                        self.main_window.handle_media_message(msg)
-                # Only play if the file was actually downloaded (non-empty)
-                if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
-                    wx.CallAfter(
-                        self._play_audio, msg_id, duration_seconds, file_path, audio_ext
-                    )
+                try:
+                    msg_type = msg.get("messageType", "") if msg else ""
+                    if msg_type == "audioMessage":
+                        if msg is not None:
+                            self.main_window.handle_audio_message(msg)
+                    else:
+                        if msg is not None:
+                            self.main_window.handle_media_message(msg)
+                    # Only play if the file was actually downloaded (non-empty)
+                    if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
+                        wx.CallAfter(
+                            self._play_audio, msg_id, duration_seconds, file_path, audio_ext
+                        )
+                finally:
+                    self._downloading_audio_ids.discard(msg_id)
 
             threading.Thread(target=_download_and_play, daemon=True).start()
 
@@ -2914,12 +3273,21 @@ class ConversationsPanel(wx.Panel):
                 duration = (
                     (next_msg.get("message") or {}).get("audioMessage") or {}
                 ).get("seconds", 0) or 0
-                # Update list selection to the next audio
-                self.messages_list.Focus(next_idx)
-                self.messages_list.Select(next_idx, True)
+                # Only move list focus to the next audio if the user hasn't
+                # already scrolled past it — avoids disrupting reading when
+                # sequential audio plays in the background.
+                current_focus = self.messages_list.GetFocusedItem()
+                if current_focus < 0 or current_focus <= next_idx:
+                    self.messages_list.Focus(next_idx)
+                    self.messages_list.Select(next_idx, True)
+                    self.messages_list.EnsureVisible(next_idx)
+                clean_msg_id = msg_id
+                if "_" in msg_id:
+                    parts = msg_id.split("_")
+                    clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
                 self._toggle_playback(
                     msg_id, duration, next_msg,
-                    file_path=data_path("voice_messages", f"{msg_id}.msv"),
+                    file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                     audio_ext=".ogg",
                 )
             break  # stop regardless (either play next or not)
@@ -3051,7 +3419,7 @@ class ConversationsPanel(wx.Panel):
     def _get_message_content(self, msg) -> str:
         """
         Return the human-readable text for a message item in the list.
-        Field names match the Evolution API v2 / Baileys proto definitions.
+        Field names match the WPPConnect API v2 / Baileys proto definitions.
         """
         msg_type = msg.get("messageType", "conversation")
         msg_obj  = msg.get("message") or {}
@@ -3071,33 +3439,41 @@ class ConversationsPanel(wx.Panel):
             ext  = msg_obj.get("extendedTextMessage") or {}
             text = ext.get("text", "") or ""
             # Resolve @mentions: replace @{number} with @{display_name}.
-            # mentionedJid may live at the top-level contextInfo (Evolution API
+            # mentionedJid may live at the top-level contextInfo (WPPConnect API
             # normalises it there) or inside extendedTextMessage.contextInfo.
+            ctx_top = msg.get("contextInfo") or {}
+            ctx_msg = msg_obj.get("contextInfo") or {}
+            ctx_ext = ext.get("contextInfo") or {}
             mentioned = (
-                (msg.get("contextInfo") or {}).get("mentionedJid")
-                or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
-                or ext.get("contextInfo", {}).get("mentionedJid")
+                ctx_top.get("mentionedJid") or ctx_top.get("mentionedJidList")
+                or ctx_msg.get("mentionedJid") or ctx_msg.get("mentionedJidList")
+                or ctx_ext.get("mentionedJid") or ctx_ext.get("mentionedJidList")
                 or []
             )
             for jid in mentioned:
                 mw_ref = self.main_window
-                _lid_map = getattr(mw_ref, "_lid_to_phone", {})
-                if jid.endswith("@lid"):
-                    phone_jid = _lid_map.get(jid, "")
-                    if phone_jid:
-                        phone = phone_jid.split("@")[0]
-                    else:
-                        # No mapping: use the local part of the @lid JID — this is
-                        # what the send path writes into the message text as @{local}.
-                        phone = jid.rsplit("@", 1)[0]
+                if mw_ref._is_self_jid(jid):
+                    name = "eu"
                 else:
-                    phone = jid.split("@")[0]
-                if not phone or f"@{phone}" not in text:
+                    name = self._get_participant_name(jid)
+                
+                # Check what pattern (LID local part or phone number) is used in the text
+                lid_local = jid.rsplit("@", 1)[0]
+                _lid_map = getattr(mw_ref, "_lid_to_phone", {})
+                phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
+                phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
+                
+                placeholder = None
+                if f"@{lid_local}" in text:
+                    placeholder = lid_local
+                elif phone and f"@{phone}" in text:
+                    placeholder = phone
+                    
+                if not placeholder:
                     continue
-                name = self._get_participant_name(jid)
-                jid_local = jid.rsplit("@", 1)[0]
-                if name and name != phone and name != jid_local and name != jid:
-                    text = text.replace(f"@{phone}", f"@{name}", 1)
+                    
+                if name and name != placeholder and name != jid:
+                    text = text.replace(f"@{placeholder}", f"@{name}", 1)
             return text
 
         # ── Audio ────────────────────────────────────────────────────────────
@@ -3117,7 +3493,10 @@ class ConversationsPanel(wx.Panel):
                 pct      = int(progress * 100)
                 prog_str = i18n.t("downloading_progress").format(pct=pct)
                 return f"{i18n.t('document')}, {filename}, {prog_str}"
-            return f"{i18n.t('document')}, {filename}, {size_str}"
+            parts = [i18n.t("document"), filename]
+            if size_str:
+                parts.append(size_str)
+            return ", ".join(parts)
 
         # ── Image ────────────────────────────────────────────────────────────
         if msg_type == "imageMessage":
@@ -3178,32 +3557,134 @@ class ConversationsPanel(wx.Panel):
             name    = contact.get("displayName") or ""
             return i18n.t("contact_message").format(name=name)
 
+        # ── Poll ─────────────────────────────────────────────────────────────
+        if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
+            poll = msg_obj.get("pollCreationMessage") or msg_obj.get("pollCreationMessageV2") or msg_obj.get("pollCreationMessageV3") or {}
+            name = poll.get("name") or ""
+            return f"📊 Enquete: {name}" if name else "📊 Enquete"
+
+        # ── Location ─────────────────────────────────────────────────────────
+        if msg_type in ("locationMessage", "liveLocationMessage"):
+            return "📍 Localização"
+
+        # ── Template ─────────────────────────────────────────────────────────
+        if msg_type == "templateMessage":
+            return "📝 Modelo"
+
+        # ── Revoked / Protocol Message ───────────────────────────────────────
+        if msg_type == "protocolMessage":
+            protocol = msg_obj.get("protocolMessage") or {}
+            p_type = protocol.get("type")
+            if p_type in (3, "REVOKE", "revoke"):
+                return "Mensagem apagada"
+            return "⚙️ Mensagem do sistema"
+
+        # ── Interactive / Button reply ───────────────────────────────────────
+        if msg_type == "buttonsResponseMessage":
+            btn = msg_obj.get("buttonsResponseMessage") or {}
+            text = btn.get("selectedDisplayText") or ""
+            return text or i18n.t("interactive_reply")
+
+        if msg_type == "listResponseMessage":
+            lst = msg_obj.get("listResponseMessage") or {}
+            title = lst.get("title", "")
+            reply = (lst.get("singleSelectReply") or {}).get("selectedRowId", "")
+            return title or reply or i18n.t("list_reply")
+
+        if msg_type == "interactiveMessage":
+            inter = msg_obj.get("interactiveMessage") or {}
+            body = (inter.get("body") or {}).get("text", "")
+            return body or i18n.t("interactive_message")
+
         # ── Fallback ─────────────────────────────────────────────────────────
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
         )
+
+    def _is_displayable_message(self, m) -> bool:
+        if not isinstance(m, dict):
+            return False
+        msg_type = m.get("messageType", "")
+
+        # Whitelist of user-visible/displayable message types
+        allowed_types = (
+            "conversation",
+            "extendedTextMessage",
+            "imageMessage",
+            "videoMessage",
+            "audioMessage",
+            "documentMessage",
+            "stickerMessage",
+            "contactMessage",
+            "locationMessage",
+            "liveLocationMessage",
+            "pollCreationMessage",
+            "buttonsMessage",
+            "listMessage",
+            "templateMessage",
+            "interactiveMessage",
+            "buttonsResponseMessage",
+            "listResponseMessage",
+            "protocolMessage",
+        )
+
+        if msg_type not in allowed_types:
+            return False
+
+        if msg_type == "protocolMessage":
+            # Only display if it's a revoke/delete message
+            protocol = (m.get("message") or {}).get("protocolMessage") or {}
+            p_type = protocol.get("type")
+            return p_type in (3, "REVOKE", "revoke")
+        return True
 
     def _map_status(self, msg) -> str:
         i18n = self.main_window.i18n
         # Locally-queued messages have their own pending status.
         if msg.get("_local_pending"):
             return i18n.t("status_pending")
+        if msg.get("_send_failed"):
+            return i18n.t("status_failed")
+
+        statuses = []
         updates = msg.get("MessageUpdate")
         if isinstance(updates, list) and updates:
-            statuses = []
             for u in updates:
                 if isinstance(u, dict):
                     st = u.get("status") or ""
                     statuses.append(str(st).upper())
-            for s in statuses:
-                if "READ" in s:
-                    return i18n.t("status_read")
-            for s in statuses:
-                if "DELIVERED" in s or "DELIVERY_ACK" in s:
-                    return i18n.t("status_delivered")
-            for s in statuses:
-                if "SENT" in s or "ACK" in s:
-                    return i18n.t("status_sent")
+        
+        # Fallback: check status directly on the message (2=sent, 3=delivered, 4=read, 5=played)
+        root_status = msg.get("status")
+        if root_status is not None:
+            statuses.append(str(root_status).upper())
+            
+        # Fallback: check ack directly on the message (WPPConnect format: 1=sent, 2=delivered, 3=read, 4=played)
+        root_ack = msg.get("ack")
+        if root_ack is not None:
+            status_map = {1: 2, 2: 3, 3: 4, 4: 5}
+            mapped_ack = status_map.get(root_ack, root_ack)
+            statuses.append(str(mapped_ack).upper())
+
+        from_me = msg.get("key", {}).get("fromMe", False)
+
+        for s in statuses:
+            if "PLAYED" in s or s == "5":
+                return i18n.t("status_played")
+
+        if not from_me:
+            # Received messages only show status if they were played
+            return ""
+
+        for s in statuses:
+            if "READ" in s or s == "4":
+                return i18n.t("status_read")
+        for s in statuses:
+            if "DELIVERED" in s or "DELIVERY_ACK" in s or s == "3":
+                return i18n.t("status_delivered")
+        for s in statuses:
+            if "SENT" in s or "ACK" in s or s == "2":
+                return i18n.t("status_sent")
         return ""
 
     def _sender_label(self, msg) -> str:
@@ -3252,14 +3733,22 @@ class ConversationsPanel(wx.Panel):
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
-                    n = (c.get("pushName") or "").strip()
+                    n = (c.get("name") or c.get("pushName") or "").strip()
                     if n and not n.isdigit() and not is_phone_like(n):
-                        return n
+                         n_lower = n.lower()
+                         if "sem nome" in n_lower or "unnamed" in n_lower or n_lower in ("no name", "unknown", "desconhecido"):
+                             pass
+                         else:
+                             return n
                 chat_obj = mw.chats.get(cjid)
                 if chat_obj:
                     cn = (chat_obj.get("name") or "").strip()
                     if cn and not cn.isdigit() and not is_phone_like(cn):
-                        return cn
+                        cn_lower = cn.lower()
+                        if "sem nome" in cn_lower or "unnamed" in cn_lower or cn_lower in ("no name", "unknown", "desconhecido"):
+                            pass
+                        else:
+                            return cn
             # Fallback: presence-learned pushName map
             for cjid in candidates:
                 pname = (ppm.get(cjid) or "").strip()
@@ -3327,6 +3816,35 @@ class ConversationsPanel(wx.Panel):
             return (quoted_msg.get("conversation") or "")
         if "extendedTextMessage" in quoted_msg:
             return ((quoted_msg.get("extendedTextMessage") or {}).get("text") or "")
+
+        # Support raw WPPConnect types and body/text keys
+        msg_type_raw = quoted_msg.get("type")
+        if msg_type_raw:
+            _wpp_type_map = {
+                "audio": "message_type_audio",
+                "ptt": "message_type_audio",
+                "image": "photo",
+                "video": "video",
+                "document": "document",
+                "sticker": "sticker",
+                "contact": "contact_label",
+            }
+            if msg_type_raw in _wpp_type_map:
+                cap = quoted_msg.get("caption") or quoted_msg.get("body") or ""
+                # Avoid displaying base64 thumbnails
+                if cap and not cap.startswith("data:") and not cap.startswith("/9j/"):
+                    label = i18n.t(_wpp_type_map[msg_type_raw])
+                    return f"{label[0].upper() + label[1:] if label else ''}: {cap}"
+                label = i18n.t(_wpp_type_map[msg_type_raw])
+                return label[0].upper() + label[1:] if label else ""
+
+        if "body" in quoted_msg:
+            body_val = quoted_msg.get("body") or ""
+            if not body_val.startswith("data:") and not body_val.startswith("/9j/"):
+                return body_val
+        if "text" in quoted_msg:
+            return (quoted_msg.get("text") or "")
+
         # Non-text types: return the localized type label (first letter upper)
         _type_map = [
             ("audioMessage",    "message_type_audio"),
@@ -3345,12 +3863,12 @@ class ConversationsPanel(wx.Panel):
     def _get_context_info(self, msg) -> "dict | None":
         """Extract contextInfo from wherever it sits in the message hierarchy.
 
-        Evolution API's prepareMessage() merges extendedTextMessage.contextInfo
+        WPPConnect API's prepareMessage() merges extendedTextMessage.contextInfo
         into the top-level 'contextInfo' field before erasing the sub-object,
         so we check there first.  For audio/image/video replies the contextInfo
         stays inside the respective sub-message type.
         """
-        # Top-level contextInfo (Evolution API normalised text replies)
+        # Top-level contextInfo (WPPConnect API normalised text replies)
         top_ctx = msg.get("contextInfo")
         if isinstance(top_ctx, dict) and ("quotedMessage" in top_ctx or top_ctx.get("stanzaId")):
             return top_ctx
@@ -3371,7 +3889,7 @@ class ConversationsPanel(wx.Panel):
                     return ctx
         return None
 
-    def _get_quoted_sender(self, ctx: dict) -> str:
+    def _get_quoted_sender(self, ctx: dict, msg: dict) -> str:
         """Resolve the display name of the quoted message sender from contextInfo."""
         mw   = self.main_window
         i18n = mw.i18n
@@ -3403,7 +3921,20 @@ class ConversationsPanel(wx.Panel):
                             or conv.get("pushName", "")
                             or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
                         )
-            return ""
+            # Fallback when the quoted message is not in local _sorted_messages:
+            # In a 1:1 chat, if I sent this reply, I am replying to the other party.
+            # If the other party sent this reply, they are replying to me ("você").
+            from_me = msg.get("key", {}).get("fromMe", False)
+            if from_me:
+                conv = self.conversation or {}
+                remote = conv.get("remoteJid", "")
+                return (
+                    mw._resolve_contact_name(conv)
+                    or conv.get("pushName", "")
+                    or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
+                )
+            else:
+                return i18n.t("sender_you")
 
         # Strip Baileys device suffix before contact lookup
         clean_p = _strip_dev(participant)
@@ -3412,20 +3943,32 @@ class ConversationsPanel(wx.Panel):
         if clean_p.endswith("@lid"):
             clean_p = getattr(mw, "_lid_to_phone", {}).get(clean_p, clean_p)
 
+        # Private (1:1) chat fallback: resolve to the other participant or "me"
+        # without contact lookup to handle unresolved @lid JIDs and digit-only pushNames.
+        conv = self.conversation or {}
+        remote = conv.get("remoteJid", "")
+        if remote and not remote.endswith("@g.us"):
+            p_phone = _phone_part(clean_p)
+            r_phone = _phone_part(remote)
+            my_jid = getattr(mw, "my_jid", "")
+            my_phone = _phone_part(my_jid) if my_jid else ""
+            if my_phone and p_phone == my_phone:
+                return i18n.t("sender_you")
+            elif p_phone == r_phone:
+                return (
+                    mw._resolve_contact_name(conv)
+                    or conv.get("pushName", "")
+                    or (format_number(remote) if not remote.endswith("@lid") else "")
+                )
+            else:
+                return i18n.t("sender_you")
+
         # Check if the quoted sender is "me" — strip device suffix from both sides
         my_jid = getattr(mw, "my_jid", "")
         if my_jid and _phone_part(clean_p) == _phone_part(my_jid):
             return i18n.t("sender_you")
 
-        contact = mw.contacts.get(clean_p) or mw.contacts.get(participant)
-        if contact:
-            name = (contact.get("pushName") or "").strip()
-            if name and not is_phone_like(name):
-                return name
-
-        if clean_p.endswith("@lid"):
-            return ""
-        return format_number(clean_p) or clean_p
+        return self._get_participant_name(clean_p)
 
     def _render_message_line(self, msg) -> str:
         """Produce the full display string for a single message row."""
@@ -3441,7 +3984,7 @@ class ConversationsPanel(wx.Panel):
 
         # Check for quoted/reply context
         ctx           = self._get_context_info(msg)
-        quoted_sender = self._get_quoted_sender(ctx) if ctx else ""
+        quoted_sender = self._get_quoted_sender(ctx, msg) if ctx else ""
 
         if quoted_sender:
             header = f"{sender}, {i18n.t('replying_to').format(name=quoted_sender)}"
@@ -3449,6 +3992,8 @@ class ConversationsPanel(wx.Panel):
             header = sender
 
         pieces = [f"{header}: {body}"]
+        if msg.get("starred"):
+            pieces[0] = f"★ {pieces[0]}"
         if time_str:
             pieces.append(f", {time_str}")
         if status:
@@ -3519,13 +4064,16 @@ class ConversationsPanel(wx.Panel):
 
         For private chats the note comes from the _presence_cache (populated
         by presence.update WebSocket events) rather than from fetchProfile,
-        because the Evolution API's fetchProfile response does not include
+        because the WPPConnect API's fetchProfile response does not include
         lastSeen or online fields.
         """
         jid      = conversation.get("remoteJid", "")
         mw       = self.main_window
         i18n     = mw.i18n
-        # Default note: resolved contact name, falling back to formatted number
+        
+        # Subscribe to presence updates for this conversation to receive typing/online events
+        mw.subscribe_presence(jid)
+
         note = (
             mw._resolve_contact_name(conversation)
             or mw.find_name_through_messages(conversation)
@@ -3533,23 +4081,36 @@ class ConversationsPanel(wx.Panel):
             or conversation.get("pushName", "")
             or format_number(jid)
         )
-
         try:
             if jid.endswith("@g.us"):
                 data = mw.get_group_info(jid)
-                # "size" may be absent in some Evolution API builds; fall back to
+                # "size" may be absent in some WPPConnect API builds; fall back to
                 # counting the participants list which is always present.
                 participants = data.get("participants", [])
                 size = data.get("size") or len(participants)
-                note = i18n.t("group_size").format(count=size)
+                group_name = (
+                    mw._resolve_contact_name(conversation)
+                    or mw.find_name_through_messages(conversation)
+                    or conversation.get("name", "")
+                    or conversation.get("pushName", "")
+                    or format_number(jid)
+                )
+                note = f"{group_name}, {i18n.t('group_size').format(count=size)}"
             else:
                 # Private chat: resolve the canonical JID for cache lookup
                 canonical = mw._normalize_jid(jid)
                 if canonical.endswith("@lid"):
+                    mapped = getattr(mw, "_lid_to_phone", {}).get(canonical)
+                    if not mapped:
+                        logging.info(f"[_fetch_and_update_profile] On-demand JID mapping missing for {canonical}. Triggering background query.")
+                        # Fetch profile in background to resolve JID mapping
+                        mw.get_contact_profile(canonical)
                     canonical = getattr(mw, "_lid_to_phone", {}).get(canonical, canonical)
                 presence = getattr(mw, "_presence_cache", {}).get(canonical, {})
                 lkp      = presence.get("lastKnownPresence", "")
-                last_seen = presence.get("lastSeen")
+                # Fall back to a direct last-seen fetch when no presence event
+                # has arrived yet (so the note isn't left without it).
+                last_seen = presence.get("lastSeen") or mw.get_last_seen(canonical)
                 if lkp in ("available", "composing", "recording"):
                     note = i18n.t("online_status")
                 elif last_seen:
@@ -3563,7 +4124,10 @@ class ConversationsPanel(wx.Panel):
             if (self.conversation is not None
                     and self.conversation.get("remoteJid") == jid):
                 try:
-                    self._conv_data_btn.SetNote(note)
+                    display_note = note
+                    if not jid.endswith("@g.us") and is_phone_like(display_note):
+                        display_note = f"{i18n.t('phone_label')}: {display_note}"
+                    self._conv_data_btn.SetNote(display_note)
                     self.conversation_panel.Layout()
                 except Exception:
                     pass
@@ -3602,7 +4166,10 @@ class ConversationsPanel(wx.Panel):
                 note = ls_str
 
         try:
-            self._conv_data_btn.SetNote(note)
+            display_note = note
+            if not jid.endswith("@g.us") and is_phone_like(display_note):
+                display_note = f"{i18n.t('phone_label')}: {display_note}"
+            self._conv_data_btn.SetNote(display_note)
             self.conversation_panel.Layout()
         except Exception:
             pass
@@ -3680,6 +4247,9 @@ class ConversationsPanel(wx.Panel):
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
+        # Refresh the conversations list immediately so the now-empty chat is
+        # removed, keeping focus on a neighbouring conversation.
+        self.main_window.set_chats()
 
     def _on_menu_delete_chat(self, jid: str):
         i18n = self.main_window.i18n
@@ -3773,6 +4343,71 @@ class ConversationsPanel(wx.Panel):
         else:
             self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
 
+    def _on_menu_copy_file(self, msg: dict):
+        """Decrypt media file and place it on the clipboard as a file object."""
+        msg_type = msg.get("messageType", "")
+        msg_obj  = msg.get("message") or {}
+        msg_id   = msg.get("key", {}).get("id", "")
+        if not msg_id:
+            return
+
+        if msg_type == "documentMessage":
+            ext = ""
+            doc = msg_obj.get("documentMessage") or {}
+            filename = doc.get("fileName", f"documento_{msg_id}")
+            if "." in filename:
+                ext = "." + filename.split(".")[-1]
+        elif msg_type == "imageMessage":
+            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
+            ext  = "." + (mime.split("/")[-1] if "/" in mime else "jpg")
+        elif msg_type == "videoMessage":
+            mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
+            ext  = "." + (mime.split("/")[-1] if "/" in mime else "mp4")
+        else:
+            return
+
+        media_path = data_path("media", f"{msg_id}.wzmedia")
+
+        def _run():
+            if not os.path.isfile(media_path):
+                wx.CallAfter(
+                    self.main_window.output, self.main_window.i18n.t("downloading")
+                )
+                try:
+                    self.main_window.handle_media_message(msg)
+                except Exception:
+                    return
+            try:
+                with open(media_path, "rb") as fh:
+                    content = decrypt_bytes(fh.read(), self.main_window.key)
+                
+                # Write decrypted content to a temp file
+                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                tmp.write(content)
+                tmp.close()
+                
+                # Copy the temporary file to clipboard (must run on the main thread)
+                def _to_clipboard(path=tmp.name):
+                    try:
+                        if wx.TheClipboard.Open():
+                            file_data = wx.FileDataObject()
+                            file_data.AddFile(path)
+                            wx.TheClipboard.SetData(file_data)
+                            wx.TheClipboard.Close()
+                            self.main_window.output(self.main_window.i18n.t("msg_copied"))
+                        else:
+                            self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+                    except Exception as e:
+                        print(f"[_to_clipboard] Clipboard error: {e}")
+                        self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+
+                wx.CallAfter(_to_clipboard)
+            except Exception as exc:
+                print(f"[_on_menu_copy_file] Error copying file: {exc}")
+                wx.CallAfter(self.main_window.output, self.main_window.i18n.t("msg_copy_error"))
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _on_menu_reply(self, msg: dict):
         """Enter reply mode: change field label, store quoted message, focus field."""
         self._quoted_message = msg
@@ -3795,6 +4430,8 @@ class ConversationsPanel(wx.Panel):
     def _get_participant_name(self, participant_jid: str, msg: dict | None = None) -> str:
         """Return a display name for a group participant."""
         mw = self.main_window
+        if mw._is_self_jid(participant_jid):
+            return mw.i18n.t("sender_you")
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
         ppm = getattr(mw, "_presence_pushname_map", {})
 
@@ -3818,7 +4455,7 @@ class ConversationsPanel(wx.Panel):
         for cjid in candidates:
             contact = mw.contacts.get(cjid)
             if contact:
-                name = (contact.get("pushName") or "").strip()
+                name = (contact.get("name") or contact.get("pushName") or "").strip()
                 if name and not name.isdigit() and not is_phone_like(name):
                     return name
             chat_obj = mw.chats.get(cjid)
@@ -3827,22 +4464,58 @@ class ConversationsPanel(wx.Panel):
                 if cn and not cn.isdigit() and not is_phone_like(cn):
                     return cn
         if msg is not None:
-            push = msg.get("pushName", "")
-            if push and not is_phone_like(push):
-                return push
+            for key_candidate in ("pushName", "pushname", "name", "displayName"):
+                push = msg.get(key_candidate, "")
+                if push and not push.isdigit() and not is_phone_like(push):
+                    return push
         # Fallback: presence-learned pushName map
         for cjid in candidates:
             pname = (ppm.get(cjid) or "").strip()
             if pname and not pname.isdigit() and not is_phone_like(pname):
                 return pname
+        # Fallback 2: scan sorted messages in the current conversation
+        for m in getattr(self, "_sorted_messages", []):
+            if not isinstance(m, dict):
+                continue
+            m_part = m.get("key", {}).get("participant") or m.get("participant")
+            if m_part:
+                m_part = mw._normalize_jid(m_part)
+                if m_part in candidates:
+                    push = m.get("pushName", "")
+                    if push and not push.isdigit() and not is_phone_like(push):
+                        return push
+        # Fallback 3: check self._group_participants_cache
+        for pname, p_jid in getattr(self, "_group_participants_cache", []):
+            if p_jid in candidates:
+                if pname and not pname.isdigit() and not is_phone_like(pname):
+                    return pname
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid
         phone = lid_to_phone.get(participant_jid, "")
+        if not phone and isinstance(msg, dict):
+            pn = msg.get("phoneNumber") or msg.get("pnJid")
+            if pn:
+                if isinstance(pn, dict):
+                    phone = pn.get("_serialized") or pn.get("id") or ""
+                else:
+                    phone = str(pn)
+                if phone:
+                    phone = mw._normalize_jid(phone)
+                    mw.register_jid_mapping(participant_jid, phone)
         if phone:
             return format_number(phone)
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]
+
+
+    def refresh_active_conversation_messages(self):
+        """Re-render all messages in the active message list (useful after background name/LID resolution)."""
+        if not self.conversation or not hasattr(self, "messages_list"):
+            return
+        for i, msg in enumerate(self._sorted_messages):
+            if not self._is_separator(msg):
+                self.messages_list.SetItemText(i, self._render_message_line(msg))
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
@@ -4017,6 +4690,7 @@ class ConversationsPanel(wx.Panel):
         current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if target_jid == current_jid:
             self._sorted_messages.append(virtual_msg)
+            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
@@ -4025,8 +4699,11 @@ class ConversationsPanel(wx.Panel):
         mw.set_chats()
 
     def _on_menu_star(self, msg: dict):
-        # Star not yet fully implemented — no-op for now
-        pass
+        msg["starred"] = not msg.get("starred")
+        jid = self.conversation.get("remoteJid", "")
+        if jid:
+            self.main_window._schedule_save()
+            self.populate_messages()
 
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
@@ -4076,12 +4753,24 @@ class ConversationsPanel(wx.Panel):
             return
 
         if for_everyone:
-            # Delete for everyone via Evolution API
-            jid   = msg.get("key", {}).get("remoteJid", "") or (
+            # Revoke for everyone via WPPConnect API (off the UI thread). The
+            # message key carries fromMe/participant so the server can build the
+            # correct serialized id and actually revoke it.
+            msg_key = msg.get("key", {})
+            jid = msg_key.get("remoteJid", "") or (
                 self.conversation.get("remoteJid", "") if self.conversation else ""
             )
-            from_me = msg.get("key", {}).get("fromMe", False)
-            self.main_window.delete_message_for_everyone(jid, msg_id, from_me)
+
+            def _revoke(k=dict(msg_key), j=jid):
+                ok = self.main_window.delete_message_for_everyone(j, k)
+                if not ok:
+                    wx.CallAfter(
+                        wx.MessageBox,
+                        i18n.t("delete_for_everyone_failed"),
+                        i18n.t("delete_message"),
+                        wx.OK | wx.ICON_WARNING,
+                    )
+            threading.Thread(target=_revoke, daemon=True).start()
 
         # Always delete locally
         self._sorted_messages.pop(index)
@@ -4096,7 +4785,12 @@ class ConversationsPanel(wx.Panel):
                 m for m in records
                 if m.get("key", {}).get("id") != msg_id
             ]
-            self.main_window._schedule_save()
+            try:
+                self.main_window.db.delete_message(
+                    self.conversation.get("remoteJid", ""), msg_id
+                )
+            except Exception:
+                logging.exception("[conversations] delete_message failed")
 
     def _on_accel_edit_message(self, event):
         """Alt+E: enter edit mode for the focused own text message."""
@@ -4320,7 +5014,11 @@ class ConversationsPanel(wx.Panel):
         msg = self._sorted_messages[index]
         if self._is_separator(msg):
             return
-        self._on_menu_copy_message(msg)
+        msg_type = msg.get("messageType", "")
+        if msg_type in ("imageMessage", "videoMessage", "documentMessage"):
+            self._on_menu_copy_file(msg)
+        else:
+            self._on_menu_copy_message(msg)
 
     def _on_accel_show_text_popup(self, event):
         """Alt+C: show focused message text in a popup dialog."""
@@ -4470,6 +5168,8 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.GetItemText(self._unread_sep_idx),
             interrupt=True,
         )
+        # mark_conversation_as_read is triggered by _on_message_focused which
+        # fires when Focus() is called above — no need to call it here again.
 
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 
@@ -4579,10 +5279,13 @@ class ConversationsPanel(wx.Panel):
                     out.append(line)
             return "\n".join(out)
 
-        dlg = wx.Dialog(
-            self.main_window,
+        # Use wx.Frame with parent=None so the window is completely independent:
+        # it appears in the taskbar, stays visible when Alt+Tab switches away from
+        # WinZapp, and never blocks the main window's input focus.
+        dlg = wx.Frame(
+            None,
             title=i18n.t("msg_text_title"),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            style=wx.DEFAULT_FRAME_STYLE | wx.FRAME_NO_TASKBAR,
             size=(480, 320),
         )
         panel = wx.Panel(dlg)
@@ -4598,8 +5301,6 @@ class ConversationsPanel(wx.Panel):
         dlg_sizer = wx.BoxSizer(wx.VERTICAL)
         dlg_sizer.Add(panel, 1, wx.EXPAND)
         dlg.SetSizer(dlg_sizer)
-        # Non-modal: self-destroy on close/Esc/button so the main window stays
-        # fully interactive while the popup is open.
         close_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Destroy())
         dlg.Bind(wx.EVT_CLOSE, lambda e: dlg.Destroy())
         dlg.Bind(
@@ -4607,7 +5308,7 @@ class ConversationsPanel(wx.Panel):
             lambda e: dlg.Destroy() if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip(),
         )
         text_ctrl.SetFocus()
-        dlg.CentreOnParent()
+        dlg.CentreOnScreen()
         dlg.Show()
 
     def _on_menu_react(self, msg: dict):
@@ -4694,7 +5395,7 @@ class ConversationsPanel(wx.Panel):
         ).start()
 
     def _do_send_reaction(self, msg_key: dict, emoji: str):
-        """Background: send reaction via Evolution API."""
+        """Background: send reaction via WPPConnect API."""
         jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         ok = self.main_window.send_reaction(jid, msg_key, emoji)
         if ok:
@@ -4750,8 +5451,11 @@ class ConversationsPanel(wx.Panel):
             rxn_key = f"_rxn_{orig_id}"
             if not any(r.get("key", {}).get("id") == rxn_key for r in records):
                 records.append(reaction_record)
+                try:
+                    self.main_window.db.insert_message(jid, reaction_record)
+                except Exception:
+                    logging.exception("[conversations] insert reaction failed")
 
-        self.main_window._schedule_save()
         self.main_window.set_chats()
 
     # ── Attachment handling ──────────────────────────────────────────────────
@@ -4969,18 +5673,22 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        _MAX_MEDIA_BYTES = 99 * 1024 * 1024
+        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
+        _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
+        _MAX_DOC_BYTES      = 1   * 1024 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
 
-            # Pre-check: reject files above the Evolution API 99 MB limit before
-            # creating any UI entry or queuing the send — this prevents silent failures.
+            is_doc    = media_type == "document"
+            max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
+            max_mb    = 1024 if is_doc else 70
+
             try:
-                if os.path.getsize(path) > _MAX_MEDIA_BYTES:
+                if os.path.getsize(path) > max_bytes:
                     wx.MessageBox(
-                        i18n.t("media_too_large").format(max_mb=99),
+                        i18n.t("media_too_large").format(max_mb=max_mb),
                         i18n.t("app_name"),
                         wx.OK | wx.ICON_ERROR,
                         self,
@@ -5015,6 +5723,7 @@ class ConversationsPanel(wx.Panel):
                     "quotedMessage": quoted.get("message") or {},
                 }
             self._sorted_messages.append(virtual_msg)
+            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
@@ -5218,7 +5927,7 @@ class ConversationsPanel(wx.Panel):
 
         # Exclude reaction messages — they must not affect index mapping
         displayable = [
-            m for m in messages_sorted if m.get("messageType", "") != "reactionMessage"
+            m for m in messages_sorted if self._is_displayable_message(m)
         ]
 
         # Insert unread separator before the first unread message.
@@ -5226,11 +5935,23 @@ class ConversationsPanel(wx.Panel):
         unread_count = self._pending_open_unread
         self._pending_open_unread = 0
         if unread_count > 0 and len(displayable) >= unread_count:
-            sep_pos = len(displayable) - unread_count
-            sep = {"_type": "unread_separator", "count": unread_count}
-            displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
-            self._unread_sep_idx = sep_pos
-            self._sep_from_open = True
+            first_unread_idx = len(displayable) - unread_count
+            first_unread_msg = displayable[first_unread_idx]
+            if isinstance(first_unread_msg, dict):
+                self._first_unread_msg_id = first_unread_msg.get("key", {}).get("id")
+                self._first_unread_count = unread_count
+
+        if getattr(self, "_first_unread_msg_id", None):
+            sep_pos = -1
+            for idx, msg in enumerate(displayable):
+                if isinstance(msg, dict) and msg.get("key", {}).get("id") == self._first_unread_msg_id:
+                    sep_pos = idx
+                    break
+            if sep_pos >= 0:
+                sep = {"_type": "unread_separator", "count": getattr(self, "_first_unread_count", 1)}
+                displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
+                self._unread_sep_idx = sep_pos
+                self._sep_from_open = True
 
         # ── Pagination: show only last N messages ────────────────────────────
         self._all_sorted_messages = displayable
@@ -5253,11 +5974,21 @@ class ConversationsPanel(wx.Panel):
         for msg in paginated:
             self.messages_list.Append((self._render_message_line(msg),))
 
-        # Make the unread separator visible (focus is set by navigate_to_conversation)
+        # Make the unread separator visible, or select and focus the last (newest) message by default
         if self._unread_sep_idx >= 0:
+            last = self.messages_list.GetItemCount() - 1
+            target_visible = min(self._unread_sep_idx + 3, last)
+            if target_visible >= 0:
+                self.messages_list.EnsureVisible(target_visible)
             self.messages_list.EnsureVisible(self._unread_sep_idx)
             self.messages_list.Focus(self._unread_sep_idx)
             self.messages_list.Select(self._unread_sep_idx)
+        else:
+            last = self.messages_list.GetItemCount() - 1
+            if last >= 0:
+                self.messages_list.EnsureVisible(last)
+                self.messages_list.Focus(last)
+                self.messages_list.Select(last)
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────

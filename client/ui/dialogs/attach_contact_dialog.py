@@ -70,7 +70,7 @@ class AttachContactDialog(wx.Dialog):
             self._list.Append((i18n.t("no_contacts"), ""))
         else:
             for jid, contact in contacts.items():
-                name = contact.get("pushName") or format_number(jid)
+                name = contact.get("name") or contact.get("pushName") or format_number(jid)
                 self._list.Append((name, format_number(jid)))
                 self._contacts_list.append({**contact, "remoteJid": jid})
             if self._list.GetItemCount() > 0:

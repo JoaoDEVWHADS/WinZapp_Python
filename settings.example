@@ -1,7 +1,7 @@
 {
     "connection": {
         "evolution_server": "http://127.0.0.1",
-        "evolution_port": 3417,
+        "evolution_port": 6300,
         "evolution_ws_server": "ws://127.0.0.1",
         "evolution_api_key": "MY_LICENSED_API_KEY"
     },

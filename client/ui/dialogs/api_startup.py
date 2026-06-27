@@ -1,7 +1,7 @@
 """
-api_startup.py — WinZapp Evolution API startup dialog.
+api_startup.py — WinZapp WPPConnect Server startup dialog.
 
-Displayed while the bundled Node / Evolution API process is starting.
+Displayed while the bundled Node / WPPConnect Server process is starting.
 A background thread polls the configured port every 500 ms for up to
 2 minutes.  The dialog has no Cancel button — starting the API is
 mandatory — but it closes itself automatically once the port is open
@@ -20,7 +20,7 @@ import wx
 
 
 class ApiStartupDialog(wx.Dialog):
-    """Indeterminate-progress dialog shown while Evolution API starts."""
+    """Indeterminate-progress dialog shown while WPPConnect Server starts."""
 
     _PULSE_MS        = 80     # gauge pulse interval
     _POLL_INTERVAL_S = 0.5    # how often to probe the port
@@ -73,15 +73,17 @@ class ApiStartupDialog(wx.Dialog):
     # ── Timer ──────────────────────────────────────────────────────────────
 
     def _on_pulse(self, _event):
-        self._gauge.Pulse()
+        if self:
+            self._gauge.Pulse()
 
     # ── Cancel ────────────────────────────────────────────────────────────
 
     def _on_cancel(self, _event):
         """User clicked Cancel — stop polling and close with CANCEL."""
         self._done = True
-        self._timer.Stop()
-        self.EndModal(wx.ID_CANCEL)
+        if self:
+            self._timer.Stop()
+            self.EndModal(wx.ID_CANCEL)
 
     # ── Prevent accidental close (Alt-F4) ─────────────────────────────────
 
@@ -98,24 +100,44 @@ class ApiStartupDialog(wx.Dialog):
                 return
             try:
                 with socket.create_connection(("127.0.0.1", self._port), timeout=1):
-                    wx.CallAfter(self._finish_success)
+                    if self:
+                        wx.CallAfter(self._finish_success)
                     return
             except OSError:
                 time.sleep(self._POLL_INTERVAL_S)
-        wx.CallAfter(self._finish_timeout)
+        if self:
+            wx.CallAfter(self._finish_timeout)
 
     # ── Completion callbacks (called on main thread via wx.CallAfter) ──────
 
     def _finish_success(self):
-        if self._done:
+        if not self or self._done:
+            return
+        if not self.IsModal():
+            wx.CallLater(50, self._finish_success)
             return
         self._done = True
         self._timer.Stop()
-        self.EndModal(wx.ID_OK)
+        try:
+            self.EndModal(wx.ID_OK)
+        except Exception:
+            self._done = False
+            if self:
+                self._timer.Start(self._PULSE_MS)
+                wx.CallLater(50, self._finish_success)
 
     def _finish_timeout(self):
-        if self._done:
+        if not self or self._done:
+            return
+        if not self.IsModal():
+            wx.CallLater(50, self._finish_timeout)
             return
         self._done = True
         self._timer.Stop()
-        self.EndModal(wx.ID_CANCEL)
+        try:
+            self.EndModal(wx.ID_CANCEL)
+        except Exception:
+            self._done = False
+            if self:
+                self._timer.Start(self._PULSE_MS)
+                wx.CallLater(50, self._finish_timeout)

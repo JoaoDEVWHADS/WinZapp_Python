@@ -63,7 +63,7 @@ class AddMemberDialog(wx.Dialog):
         for jid, contact in self._mw.contacts.items():
             if not jid or jid.endswith("@g.us"):
                 continue
-            name = contact.get("pushName") or format_number(jid)
+            name = contact.get("name") or contact.get("pushName") or format_number(jid)
             phone = format_number(jid)
             idx = self._list.GetItemCount()
             self._list.InsertItem(idx, name)
