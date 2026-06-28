@@ -359,11 +359,7 @@ class MainWindow(wx.Frame):
         self._sync_autostart_registry()
 
 
-        # ── Auto-updater ──────────────────────────────────────────────────────
-        # Schedule the update checker on the event loop early so it runs even
-        # if language selection, terms acceptance, or pairing dialogs are shown (modal).
-        if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
+
 
         # ── Language selection on first launch ─────────────────────────────────
         # Show before everything else so the user can pick their language
@@ -508,6 +504,11 @@ class MainWindow(wx.Frame):
         
         logging.info("MainWindow: Initializing User Interface...")
         self.init_UI()
+
+        # ── Auto-updater ──────────────────────────────────────────────────────
+        # Schedule the update checker on the event loop now that MainWindow is fully initialized.
+        if not self.background_mode:
+            wx.CallLater(2000, self._start_update_checker)
 
 
     def init_UI(self):
