@@ -5317,31 +5317,19 @@ class MainWindow(wx.Frame):
                     except Exception:
                         pass
 
-            # Speak via AO2 when a new composing/recording event starts in the open conversation
+            # Speak via AO2 only when a composing/recording event starts in the ACTIVE conversation.
+            # Events from other chats are intentionally silent to avoid interrupting the user.
             if new_lkp != old_lkp and new_lkp in ("composing", "recording"):
-                if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
-                    name = self._resolve_jid_name(canonical)
-                    if name:
-                        try:
-                            # Check language format key
-                            i18n_key = "typing_text" if new_lkp == "composing" else "recording_text"
-                            msg_text = self.i18n.t(i18n_key).format(name=name)
-                            
-                            if chat_jid_norm == conv_jid:
+                if chat_jid_norm == conv_jid:
+                    if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
+                        name = self._resolve_jid_name(canonical)
+                        if name:
+                            try:
+                                i18n_key = "typing_text" if new_lkp == "composing" else "recording_text"
+                                msg_text = self.i18n.t(i18n_key).format(name=name)
                                 self.speak_output.output(msg_text)
-                            else:
-                                if self.settings.get("general", {}).get("notifications_enabled", True):
-                                    window_active = (
-                                        not getattr(self, "_window_hidden", False)
-                                        and self.IsShown()
-                                        and not self.IsIconized()
-                                        and self.IsActive()
-                                    )
-                                    if window_active:
-                                        self.message_foreground_sound.play()
-                                        self.output(msg_text)
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
 
         # Persist the updated pushName map to settings (debounced via _schedule_save).
         if _ppm_updated:
