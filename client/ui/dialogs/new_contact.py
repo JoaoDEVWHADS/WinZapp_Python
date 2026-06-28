@@ -6,6 +6,7 @@ main_window.contacts so it appears in future searches, then returns the
 WhatsApp JID via result_jid / result_name so the caller can navigate there.
 """
 
+import logging
 import re
 import threading
 import wx
@@ -131,8 +132,21 @@ class NewContactDialog(wx.Dialog):
             entry["isSaved"] = True
         self._mw.contacts[jid] = entry
 
-        # Persist to disk so the contact survives restarts
-        self._mw._schedule_save()
+        # Persist to SQLite so the contact survives restarts
+        try:
+            self._mw.db.upsert_contact(jid, entry)
+        except Exception:
+            logging.exception("[new_contact] Failed to persist contact")
+
+        # When requested, actually save the contact on WhatsApp / the device
+        # address book via the API (previously this only set a local flag, so
+        # nothing was ever synced to the phone). Done off the UI thread.
+        if sync_to_phone:
+            threading.Thread(
+                target=self._mw.save_contact_to_phone,
+                args=(phone, first, surname, True),
+                daemon=True,
+            ).start()
 
         # When requested, actually save the contact on WhatsApp / the device
         # address book via the API (previously this only set a local flag, so

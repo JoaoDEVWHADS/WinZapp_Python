@@ -760,12 +760,10 @@ class ConversationsPanel(wx.Panel):
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
             or conversation.get("name", "")
-            or conversation.get("pushName", "")
+            or ("" if _conv_jid.endswith("@g.us") else conversation.get("pushName", ""))
             or self.main_window.find_jid_through_messages(conversation)
-            # Never display a raw @lid as a phone number; fall back to a
-            # placeholder when no phone mapping is known.
             or self.main_window._format_jid_for_display(_conv_jid)
-            or self.main_window.i18n.t("unknown_contact")
+            or (self.main_window.i18n.t("unknown_group") if _conv_jid.endswith("@g.us") else self.main_window.i18n.t("unknown_contact"))
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
@@ -869,8 +867,14 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.message_field.SetFocus)
 
     def preselect_messages(self):
-        self.messages_list.Focus(0)
-        self.messages_list.Select(0)
+        wx.CallAfter(self._do_preselect)
+
+    def _do_preselect(self):
+        count = self.messages_list.GetItemCount()
+        if count > 0:
+            self.messages_list.Focus(count - 1)
+            self.messages_list.Select(count - 1)
+            self.messages_list.EnsureVisible(count - 1)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -1953,8 +1957,10 @@ class ConversationsPanel(wx.Panel):
             fwd_item,
         )
 
-        # Star (Ctrl+Shift+O)
-        star_item = menu.Append(wx.ID_ANY, f"{i18n.t('star_message')}\tCtrl+Shift+O")
+        # Star / Unstar (Ctrl+Shift+O)
+        is_starred = bool(msg.get("starred"))
+        star_label = i18n.t("unstar_message") if is_starred else i18n.t("star_message")
+        star_item = menu.Append(wx.ID_ANY, f"{star_label}\tCtrl+Shift+O")
         self.Bind(
             wx.EVT_MENU,
             lambda e, m=msg: self._on_menu_star(m),
@@ -3573,6 +3579,23 @@ class ConversationsPanel(wx.Panel):
                 return "Mensagem apagada"
             return "⚙️ Mensagem do sistema"
 
+        # ── Interactive / Button reply ───────────────────────────────────────
+        if msg_type == "buttonsResponseMessage":
+            btn = msg_obj.get("buttonsResponseMessage") or {}
+            text = btn.get("selectedDisplayText") or ""
+            return text or i18n.t("interactive_reply")
+
+        if msg_type == "listResponseMessage":
+            lst = msg_obj.get("listResponseMessage") or {}
+            title = lst.get("title", "")
+            reply = (lst.get("singleSelectReply") or {}).get("selectedRowId", "")
+            return title or reply or i18n.t("list_reply")
+
+        if msg_type == "interactiveMessage":
+            inter = msg_obj.get("interactiveMessage") or {}
+            body = (inter.get("body") or {}).get("text", "")
+            return body or i18n.t("interactive_message")
+
         # ── Fallback ─────────────────────────────────────────────────────────
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
@@ -3969,6 +3992,8 @@ class ConversationsPanel(wx.Panel):
             header = sender
 
         pieces = [f"{header}: {body}"]
+        if msg.get("starred"):
+            pieces[0] = f"★ {pieces[0]}"
         if time_str:
             pieces.append(f", {time_str}")
         if status:
@@ -4665,6 +4690,7 @@ class ConversationsPanel(wx.Panel):
         current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if target_jid == current_jid:
             self._sorted_messages.append(virtual_msg)
+            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
@@ -4673,8 +4699,11 @@ class ConversationsPanel(wx.Panel):
         mw.set_chats()
 
     def _on_menu_star(self, msg: dict):
-        # Star not yet fully implemented — no-op for now
-        pass
+        msg["starred"] = not msg.get("starred")
+        jid = self.conversation.get("remoteJid", "")
+        if jid:
+            self.main_window._schedule_save()
+            self.populate_messages()
 
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
@@ -4756,7 +4785,12 @@ class ConversationsPanel(wx.Panel):
                 m for m in records
                 if m.get("key", {}).get("id") != msg_id
             ]
-            self.main_window._schedule_save()
+            try:
+                self.main_window.db.delete_message(
+                    self.conversation.get("remoteJid", ""), msg_id
+                )
+            except Exception:
+                logging.exception("[conversations] delete_message failed")
 
     def _on_accel_edit_message(self, event):
         """Alt+E: enter edit mode for the focused own text message."""
@@ -5417,8 +5451,11 @@ class ConversationsPanel(wx.Panel):
             rxn_key = f"_rxn_{orig_id}"
             if not any(r.get("key", {}).get("id") == rxn_key for r in records):
                 records.append(reaction_record)
+                try:
+                    self.main_window.db.insert_message(jid, reaction_record)
+                except Exception:
+                    logging.exception("[conversations] insert reaction failed")
 
-        self.main_window._schedule_save()
         self.main_window.set_chats()
 
     # ── Attachment handling ──────────────────────────────────────────────────
@@ -5686,6 +5723,7 @@ class ConversationsPanel(wx.Panel):
                     "quotedMessage": quoted.get("message") or {},
                 }
             self._sorted_messages.append(virtual_msg)
+            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:

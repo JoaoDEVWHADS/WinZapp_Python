@@ -35,6 +35,7 @@ class WebSocketClient:
         self.sio.on("status-find", self.on_wpp_status_find)
         self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
         self.sio.on("chats-update", self.on_chats_update)
+        self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
@@ -456,20 +457,30 @@ class WebSocketClient:
                     # entry now so future lookups can find it.
                     push = contact.get("pushName", "")
                     if push:
-                        self.main_window.contacts[jid] = {
+                        entry = {
                             "remoteJid": jid,
                             "pushName": push,
                             "profilePicUrl": contact.get("profilePicUrl") or "",
                             "type": "contact",
                             "isSaved": True,
                         }
+                        self.main_window.contacts[jid] = entry
                         updated = True
+                        try:
+                            self.main_window.db.upsert_contact(jid, entry)
+                        except Exception:
+                            pass
                     continue
                 if contact.get("pushName"):
                     existing["pushName"] = contact["pushName"]
                     updated = True
                 if contact.get("profilePicUrl"):
                     existing["profilePicUrl"] = contact["profilePicUrl"]
+                if updated and hasattr(self.main_window, "db"):
+                    try:
+                        self.main_window.db.upsert_contact(jid, existing)
+                    except Exception:
+                        pass
             if updated:
                 # Refresh conversation names shown in the UI (debounced —
                 # contacts.update can fire in bursts for many contacts at once)

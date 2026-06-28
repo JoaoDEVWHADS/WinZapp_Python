@@ -49,6 +49,7 @@ client/ui/__pycache__/
 client/ui/dialogs/__pycache__/
 *.py[codz]
 *$py.class
+node_modules/
 
 # C extensions
 *.so

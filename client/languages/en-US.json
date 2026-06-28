@@ -129,6 +129,7 @@
     "mark_as_read": "Mark as read",
     "mark_as_unread": "Mark as unread",
     "mute_chat": "Mute",
+    "muted": "muted",
     "mute_1h": "1 hour",
     "mute_3h": "3 hours",
     "mute_8h": "8 hours",
@@ -166,6 +167,7 @@
     "delete_message": "Delete message",
     "forward_message": "Forward",
     "star_message": "Star",
+    "unstar_message": "Unstar",
     "contact_label": "Contact",
     "converse": "Chat",
     "group_overview_tab": "Overview",
@@ -419,5 +421,8 @@
     "mention_no_suggestions": "No mention suggestions",
     "mention_all_keyword": "all",
     "mention_all_label": "@all — Mention everyone",
-    "channel_read_only": "This channel is read-only"
+    "channel_read_only": "This channel is read-only",
+    "interactive_reply": "interactive reply",
+    "list_reply": "list selection",
+    "interactive_message": "interactive message"
 }

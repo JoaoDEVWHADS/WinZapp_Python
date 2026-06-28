@@ -129,6 +129,7 @@
     "mark_as_read": "Marcar como lida",
     "mark_as_unread": "Marcar como não lida",
     "mute_chat": "Silenciar",
+    "muted": "silenciado",
     "mute_1h": "1 hora",
     "mute_3h": "3 horas",
     "mute_8h": "8 horas",
@@ -166,6 +167,7 @@
     "delete_message": "Apagar mensagem",
     "forward_message": "Encaminhar",
     "star_message": "Favoritar",
+    "unstar_message": "Desfavoritar",
     "contact_label": "Contato",
     "converse": "Conversar",
     "group_overview_tab": "Visão geral",
@@ -419,5 +421,8 @@
     "mention_no_suggestions": "Sem sugestões de menção",
     "mention_all_keyword": "todos",
     "mention_all_label": "@todos — Mencionar todos",
-    "channel_read_only": "Este canal é de apenas leitura"
+    "channel_read_only": "Este canal é de apenas leitura",
+    "interactive_reply": "Resposta interativa",
+    "list_reply": "Resposta de lista",
+    "interactive_message": "Mensagem interativa"
 }
