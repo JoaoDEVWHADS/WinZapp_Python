@@ -107,6 +107,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
 
     bat = (
         "@echo off\n"
+        "chcp 65001 >NUL\n"
         ":WAIT\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
         "if not errorlevel 1 (\n"
