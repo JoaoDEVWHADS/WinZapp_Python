@@ -210,6 +210,26 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
     def Append(self, entry_tuple):
         self.AppendItem([entry_tuple[0]])
 
+    def InsertItem(self, pos, text):
+        """DataViewListCtrl only supports append, so we rebuild the list to insert at pos."""
+        count = self.GetItemCount()
+        values = [self.GetValue(i, 0) for i in range(count)]
+        values.insert(pos, text)
+        self.DeleteAllItems()
+        for v in values:
+            self.AppendItem([v])
+        return pos
+
+    def DeleteItem(self, row):
+        """DataViewListCtrl has no native delete-by-row, so we rebuild the list."""
+        count = self.GetItemCount()
+        if row < 0 or row >= count:
+            return
+        values = [self.GetValue(i, 0) for i in range(count) if i != row]
+        self.DeleteAllItems()
+        for v in values:
+            self.AppendItem([v])
+
     def GetFocusedItem(self):
         return self.GetSelectedRow()
 
