@@ -211,24 +211,47 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
         self.AppendItem([entry_tuple[0]])
 
     def InsertItem(self, pos, text):
-        """DataViewListCtrl only supports append, so we rebuild the list to insert at pos."""
+        """DataViewListCtrl only supports append, so we rebuild the list to insert at pos.
+        Saves and restores the selected row (adjusted for the insertion) to prevent cursor jumping."""
         count = self.GetItemCount()
+        selected = self.GetSelectedRow()
         values = [self.GetValue(i, 0) for i in range(count)]
         values.insert(pos, text)
         self.DeleteAllItems()
         for v in values:
             self.AppendItem([v])
+        # Restore selection: shift down if the insertion was at or before it
+        if selected != wx.NOT_FOUND:
+            restored = selected + 1 if pos <= selected else selected
+            self.SelectRow(restored)
+            item = self.RowToItem(restored)
+            if item.IsOk():
+                super().EnsureVisible(item)
         return pos
 
     def DeleteItem(self, row):
-        """DataViewListCtrl has no native delete-by-row, so we rebuild the list."""
+        """DataViewListCtrl has no native delete-by-row, so we rebuild the list.
+        Saves and restores the selected row (adjusted for the deletion) to prevent cursor jumping."""
         count = self.GetItemCount()
         if row < 0 or row >= count:
             return
+        selected = self.GetSelectedRow()
         values = [self.GetValue(i, 0) for i in range(count) if i != row]
         self.DeleteAllItems()
         for v in values:
             self.AppendItem([v])
+        # Restore selection: shift up if deleted row was before it; clamp if same row deleted
+        if selected != wx.NOT_FOUND and len(values) > 0:
+            if selected > row:
+                restored = selected - 1
+            elif selected == row:
+                restored = max(0, row - 1)
+            else:
+                restored = selected
+            self.SelectRow(restored)
+            item = self.RowToItem(restored)
+            if item.IsOk():
+                super().EnsureVisible(item)
 
     def GetFocusedItem(self):
         return self.GetSelectedRow()
