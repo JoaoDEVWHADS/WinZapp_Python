@@ -1180,14 +1180,15 @@ class MainWindow(wx.Frame):
                 pending_msg["key"]["id"] = msg_id
                 pending_msg["messageTimestamp"] = msg.get("messageTimestamp", pending_msg["messageTimestamp"])
                 
-                # Remove any existing record with the same real ID (e.g. from API sync)
-                # to prevent duplicates when the API-fetched copy and the virtual
-                # pending copy end up in records simultaneously.
+                # Remove any existing record with the same real ID (e.g. from API
+                # sync) *including* pending_msg itself (its key was just updated
+                # to msg_id), then re-append it at the end.  The old filter kept
+                # pending_msg via `r is pending_msg`, which left it in the list
+                # AND then appended it again — creating a duplicate entry.
                 if msg_id:
                     records[:] = [r for r in records
-                                  if r.get("key", {}).get("id") != msg_id
-                                  or r is pending_msg]
-                    records.append(pending_msg)
+                                  if r.get("key", {}).get("id") != msg_id]
+                records.append(pending_msg)
                 
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
@@ -4822,8 +4823,8 @@ class MainWindow(wx.Frame):
         """
         Build the full serialized WhatsApp message ID expected by WPPConnect
         (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
-        needs `<fromMe>_<chatId>_<id>` and, for messages other people sent in a
-        group, a trailing `_<participant>`.
+        needs `<fromMe>_<chatId>_<id>` and, for group messages, a trailing
+        `_<participant>` — including for our own group messages (`fromMe=True`).
         """
         msg_id = msg_key.get("id", "")
         if not msg_id:
@@ -4834,16 +4835,15 @@ class MainWindow(wx.Frame):
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
         chat = (remote_jid or "").replace("@s.whatsapp.net", "@c.us")
-        # Messages other people sent in a group (or on status@broadcast) carry a
-        # participant in their serialized id; 1-on-1 keys have no participant.
-        if not from_me:
-            participant = (
-                msg_key.get("participant")
-                or msg_key.get("remoteJidAlt")
-                or ""
-            ).replace("@s.whatsapp.net", "@c.us")
-            if participant:
-                return f"{prefix}_{chat}_{msg_id}_{participant}"
+        # Group messages always carry the sender's JID in the serialized id,
+        # even for our own messages (fromMe=True).  1-on-1 keys have no participant.
+        participant = (
+            msg_key.get("participant")
+            or (msg_key.get("remoteJidAlt") if not from_me else "")
+            or ""
+        ).replace("@s.whatsapp.net", "@c.us")
+        if participant:
+            return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
 
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
@@ -6492,34 +6492,28 @@ class MainWindow(wx.Frame):
         if lid_jid:
             remote_jid = lid_jid
 
-        # Find the message in records to see if we have a participant JID
-        participant = ""
+        # Find the message key in records to get participant (needed for groups).
+        msg_key = {"id": message_id, "fromMe": True}
         chat = self.chats.get(remote_jid)
         if chat:
             records = chat.get("messages", {}).get("messages", {}).get("records", [])
             for r in records:
                 if r.get("key", {}).get("id") == message_id:
-                    participant = r.get("key", {}).get("participant", "")
+                    msg_key = r.get("key", {})
                     break
+        # Fall back to our own JID as participant for group messages when the
+        # record wasn't found (so _serialize_msg_id can build the correct 4-part ID).
+        if remote_jid.endswith("@g.us") and not msg_key.get("participant"):
+            my_jid = getattr(self, "my_jid", "")
+            if my_jid:
+                msg_key = dict(msg_key)
+                msg_key["participant"] = my_jid
 
+        full_id = self._serialize_msg_id(remote_jid, msg_key)
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/edit-message"
         )
-        if remote_jid.endswith("@g.us"):
-            if participant:
-                participant_clean = participant.replace("@s.whatsapp.net", "@c.us")
-                full_id = f"true_{remote_jid}_{message_id}_{participant_clean}"
-            else:
-                my_jid = getattr(self, "my_jid", "")
-                if my_jid:
-                    my_jid_clean = my_jid.replace("@s.whatsapp.net", "@c.us")
-                    full_id = f"true_{remote_jid}_{message_id}_{my_jid_clean}"
-                else:
-                    full_id = f"true_{remote_jid}_{message_id}"
-        else:
-            full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
-        
         payload = {
             "id":      full_id,
             "newText": new_text,
@@ -6529,9 +6523,12 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            requests.post(url, json=payload, headers=headers, timeout=15)
-        except Exception:
-            pass
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code not in (200, 201):
+                logging.error("[edit_message] HTTP %s for %s: %s",
+                              r.status_code, full_id, r.text[:300])
+        except Exception as exc:
+            logging.error("[edit_message] exception for %s: %s", full_id, exc)
 
     def delete_message_for_everyone(self, remote_jid: str, msg_key: dict) -> bool:
         """Revoke a message for everyone via POST /api/session/delete-message.

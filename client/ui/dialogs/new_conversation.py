@@ -164,8 +164,10 @@ class NewConversationDialog(wx.Dialog):
         mw = self._mw
         # Normalize the JID (@c.us → @s.whatsapp.net) then reuse the existing
         # chat entry when one is present to avoid a duplicate sidebar entry.
+        # Chats may be stored under either @c.us or @s.whatsapp.net depending on
+        # which format WPPConnect used when the event arrived, so check both.
         norm_jid = mw._normalize_jid(jid)
-        existing = mw.chats.get(norm_jid)
+        existing = mw.chats.get(norm_jid) or mw.chats.get(jid)
         if existing is None:
             chat["remoteJid"] = norm_jid
             mw.chats[norm_jid] = chat

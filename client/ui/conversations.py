@@ -1234,6 +1234,18 @@ class ConversationsPanel(wx.Panel):
         UUID in the virtual message's key so that media playback can later look
         up the message in the WPPConnect API database.
         """
+        # Panel-level guard: survive _sorted_messages rebuilds that replace dict
+        # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
+        _played = getattr(self, "_played_sent_local_ids", None)
+        if _played is None:
+            self._played_sent_local_ids: set = set()
+            _played = self._played_sent_local_ids
+        if local_id in _played:
+            return
+        _played.add(local_id)
+        if len(_played) > 500:
+            _played.clear()
+
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 if msg.get("_ui_sent"):
