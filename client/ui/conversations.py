@@ -96,6 +96,9 @@ class ConversationsPanel(wx.Panel):
         # on the wrong conversation's message list.
         self._audio_conv_jid: str = ""
 
+        # ── Typing status state ─────────────────────────────────────────────
+        self._is_typing = False
+
         # ── Voice recording state ───────────────────────────────────────────
         self._is_recording         = False
         self._recording_paused     = False
@@ -710,12 +713,25 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             return
 
+    def _stop_typing_for_current_conversation(self):
+        """Stop typing/recording status for the currently open conversation, if active."""
+        if self._is_typing and self.conversation is not None:
+            jid = self.conversation.get("remoteJid", "")
+            if jid and not jid.endswith("@newsletter"):
+                self.main_window.send_typing_status(jid, False, jid.endswith("@g.us"))
+            self._is_typing = False
+        if self._is_recording and self.conversation is not None:
+            jid = self.conversation.get("remoteJid", "")
+            if jid and not jid.endswith("@newsletter"):
+                self.main_window.send_recording_status(jid, False, jid.endswith("@g.us"))
+
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
             # Conversation already open — just focus the message input field.
             wx.CallAfter(self.message_field.SetFocus)
             return
+        self._stop_typing_for_current_conversation()
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -812,6 +828,9 @@ class ConversationsPanel(wx.Panel):
             args=(conversation,),
             daemon=True,
         ).start()
+        # Subscribe to presence events for this contact so last-seen and typing
+        # indicators arrive via onpresencechanged Socket.IO events.
+        self.main_window.subscribe_presence(jid)
         # Background: cache group participants for @mention suggestions
         if is_group:
             threading.Thread(
@@ -913,6 +932,15 @@ class ConversationsPanel(wx.Panel):
         else:
             self.send_message_btn.Hide()
             self.record_voice_message_btn.Show()
+        # Sync typing status with WPPConnect (only on state transitions)
+        if self.conversation is not None:
+            jid = self.conversation.get("remoteJid", "")
+            if jid and not jid.endswith("@newsletter"):
+                is_group = jid.endswith("@g.us")
+                now_typing = bool(msg.strip())
+                if now_typing != self._is_typing:
+                    self._is_typing = now_typing
+                    self.main_window.send_typing_status(jid, now_typing, is_group)
         self._on_text_changed_mention_check()
 
     def _on_conversation_char_hook(self, event):
@@ -1334,6 +1362,11 @@ class ConversationsPanel(wx.Panel):
 
         self._is_recording = True
 
+        # Notify contacts that the user is recording audio
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+
         # UI: play sound, swap buttons, focus the configured recording action.
         self.main_window.voicemsg_startrecording_sound.play()
         self.send_message_btn.Hide()
@@ -1387,6 +1420,10 @@ class ConversationsPanel(wx.Panel):
         self._is_recording     = False
         self._recording_paused = False
         self._recording_frames = []
+        # Notify contacts that recording stopped
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
         self._hide_voice_panel()
         self.message_field.SetFocus()
 
@@ -1407,6 +1444,10 @@ class ConversationsPanel(wx.Panel):
         self._stop_recording_stream()
         self._is_recording     = False
         self._recording_paused = False
+        # Notify contacts that recording stopped
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
 
         frames = self._recording_frames
         self._recording_frames = []
@@ -1502,6 +1543,7 @@ class ConversationsPanel(wx.Panel):
             self._hide_mention_suggestions()
             self.message_field.SetFocus()
             return
+        self._stop_typing_for_current_conversation()
         if self._is_recording:
             self._stop_recording_stream()
             self._is_recording     = False
@@ -4242,7 +4284,7 @@ class ConversationsPanel(wx.Panel):
             self,
         ) != wx.YES:
             return
-        self.main_window.clear_chat_messages_local(jid)
+        self.main_window.clear_chat(jid)
         # Refresh messages list if this conversation is open
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
@@ -4262,7 +4304,7 @@ class ConversationsPanel(wx.Panel):
             return
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self.close_conversation()
-        self.main_window.delete_chat_local(jid)
+        self.main_window.delete_chat(jid)
 
     def _on_menu_leave_group(self, jid: str):
         i18n = self.main_window.i18n

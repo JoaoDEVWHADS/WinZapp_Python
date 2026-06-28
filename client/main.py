@@ -5828,24 +5828,19 @@ class MainWindow(wx.Frame):
             return ""
 
     def subscribe_presence(self, jid: str):
-        """Subscribe to the presence of a contact or group to receive real-time presence updates."""
-        if not jid:
+        """Subscribe to presence events for a contact via WPPConnect API (non-blocking)."""
+        if not jid or jid.endswith("@newsletter"):
             return
-        is_group = jid.endswith("@g.us")
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "phone": jid,
-            "isGroup": is_group
-        }
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=10)
-            logging.info(f"[subscribe_presence] Subscribed to presence for {jid}. Status: {r.status_code}")
-        except Exception as e:
-            logging.error(f"[subscribe_presence] Error subscribing to presence for {jid}: {e}")
+        def _api():
+            is_group = jid.endswith("@g.us")
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                requests.post(url, json={"phone": phone, "isGroup": is_group}, headers=headers, timeout=10)
+            except Exception:
+                pass
+        threading.Thread(target=_api, daemon=True).start()
 
     def start_background_lid_resolution(self):
         def _resolve_lids():
@@ -6098,6 +6093,70 @@ class MainWindow(wx.Frame):
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
             self._schedule_save()
             self.save_settings()
+
+    def delete_chat(self, jid: str):
+        """Delete chat locally and sync to WPPConnect API."""
+        self.delete_chat_local(jid)
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                r = requests.post(url, json={"phone": [phone]}, headers=headers, timeout=10)
+                if not r.ok:
+                    logging.warning("[delete_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
+            except Exception as exc:
+                logging.warning("[delete_chat] Request failed for %s: %s", jid, exc)
+        threading.Thread(target=_api, daemon=True).start()
+
+    def clear_chat(self, jid: str):
+        """Clear chat messages locally and sync to WPPConnect API."""
+        self.clear_chat_messages_local(jid)
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                r = requests.post(url, json={"phone": [phone]}, headers=headers, timeout=10)
+                if not r.ok:
+                    logging.warning("[clear_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
+            except Exception as exc:
+                logging.warning("[clear_chat] Request failed for %s: %s", jid, exc)
+        threading.Thread(target=_api, daemon=True).start()
+
+    def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
+        """Notify WPPConnect that the user started or stopped typing."""
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/typing"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                requests.post(
+                    url,
+                    json={"phone": phone, "value": value, "isGroup": is_group},
+                    headers=headers,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_api, daemon=True).start()
+
+    def send_recording_status(self, jid: str, value: bool, is_group: bool = False):
+        """Notify WPPConnect that the user started or stopped recording audio."""
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/recording"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                requests.post(
+                    url,
+                    json={"phone": phone, "duration": 0, "value": value, "isGroup": is_group},
+                    headers=headers,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_api, daemon=True).start()
 
     def _is_cleared_message(self, jid: str, msg: dict) -> bool:
         """
