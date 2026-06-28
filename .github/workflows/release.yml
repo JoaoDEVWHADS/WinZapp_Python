@@ -82,15 +82,23 @@ jobs:
           ./venv/Scripts/python -m pip install --upgrade pip
           ./venv/Scripts/pip install -r requirements.txt
 
-      - name: Configurar MSYS2 (para gcc e windres)
+      - name: Configurar MSYS2 (para gcc, windres e opus)
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
-          install: mingw-w64-ucrt-x86_64-gcc
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-opus
 
       - name: Adicionar MSYS2 GCC ao Path do Windows
         run: echo "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Copiar DLL do libopus para client/lib
+        run: |
+          New-Item -ItemType Directory -Force client\lib | Out-Null
+          Copy-Item "C:\msys64\ucrt64\bin\libopus-0.dll" "client\lib\libopus-0.dll"
 
       - name: Cache Node.js Portátil
         id: cache-node
