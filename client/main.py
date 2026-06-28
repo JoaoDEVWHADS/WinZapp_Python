@@ -395,7 +395,8 @@ class MainWindow(wx.Frame):
             self.wpp_port = 6300
         self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
         self.wpp_api_key   = conn.get("wpp_api_key",   "wz-local-api-key")
-        logging.info("MainWindow: WPPConnect config - server=%s, port=%s", self.wpp_server, self.wpp_port)
+        self.wpp_custom_api = conn.get("wpp_custom_api", False)
+        logging.info("MainWindow: WPPConnect config - server=%s, port=%s, custom_api=%s", self.wpp_server, self.wpp_port, self.wpp_custom_api)
 
         #Set basic variables
         self.chats = {}
@@ -406,18 +407,33 @@ class MainWindow(wx.Frame):
         # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
         self._ui_ready_event = threading.Event()
 
-        # Check and install API modules if needed (first run only)
-        logging.info("MainWindow: Checking/installing API modules...")
-        self.ensure_api_modules_installed()
+        # Check if we should ask the user to choose between local and custom/remote API (first run)
+        self._check_api_type_first_run()
 
-        # Check that the installed WPPConnect Server meets the minimum required version
-        logging.info("MainWindow: Checking WPPConnect Server version...")
-        self.ensure_wpp_version()
-
-        # Start local WPPConnect Server (if bundled)
+        # Handle API execution configuration
         self.wpp_process = None
-        logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
-        self.ensure_wpp_running()
+        if self.wpp_custom_api:
+            # Delete local node_modules to free space as requested
+            node_modules_path = resource_path("api", "node_modules")
+            if os.path.isdir(node_modules_path):
+                logging.info("MainWindow: Custom API enabled. Cleaning local node_modules...")
+                try:
+                    import shutil
+                    shutil.rmtree(node_modules_path, ignore_errors=True)
+                except Exception as e:
+                    logging.error("MainWindow: Failed to clean local node_modules: %s", e)
+        else:
+            # Check and install API modules if needed (first run only)
+            logging.info("MainWindow: Checking/installing API modules...")
+            self.ensure_api_modules_installed()
+
+            # Check that the installed WPPConnect Server meets the minimum required version
+            logging.info("MainWindow: Checking WPPConnect Server version...")
+            self.ensure_wpp_version()
+
+            # Start local WPPConnect Server (if bundled)
+            logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
+            self.ensure_wpp_running()
 
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
         if not self.background_mode:
@@ -1801,9 +1817,13 @@ class MainWindow(wx.Frame):
     # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
     def _is_wpp_running(self):
-        """Return True if the WPPConnect is already listening on the configured port."""
+        """Return True if the WPPConnect is already listening on the configured server/port."""
+        import urllib.parse
         try:
-            with _socket.create_connection(("127.0.0.1", self.wpp_port), timeout=1):
+            parsed = urllib.parse.urlparse(self.wpp_server)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or self.wpp_port
+            with _socket.create_connection((host, port), timeout=1):
                 return True
         except OSError:
             return False
@@ -2145,7 +2165,58 @@ class MainWindow(wx.Frame):
         self.settings.setdefault("general", {})["language"] = lang
         self.save_settings()
 
-    # ── First-run / autostart ─────────────────────────────────────────────────
+    def _check_api_type_first_run(self):
+        """
+        Check if we need to ask the user to choose between local and custom/remote API on first launch.
+        """
+        if self.background_mode:
+            return
+
+        gen = self.settings.get("general", {})
+        if gen.get("api_type_first_run_asked", False):
+            return
+
+        msg = self.i18n.t("api_type_ask_message")
+        title = self.i18n.t("api_type_ask_title")
+
+        result = wx.MessageBox(
+            msg,
+            title,
+            wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION,
+        )
+
+        if result == wx.YES:
+            # User wants local API (default)
+            self.settings.setdefault("connection", {})["wpp_custom_api"] = False
+            self.wpp_custom_api = False
+            self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
+            self.save_settings()
+        elif result == wx.NO:
+            # User wants to specify a custom/remote API
+            self.settings.setdefault("connection", {})["wpp_custom_api"] = True
+            self.wpp_custom_api = True
+            self.save_settings()
+
+            # Open settings dialog on the Connection tab (index 2)
+            from ui.dialogs.settings_dialog import SettingsDialog
+            dlg = SettingsDialog(self)
+            dlg._notebook.SetSelection(2)
+            settings_res = dlg.ShowModal()
+            dlg.Destroy()
+
+            if settings_res == wx.ID_OK:
+                # Successfully configured! Mark as asked.
+                self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
+                self.save_settings()
+            else:
+                # User cancelled or closed settings dialog. Roll back and exit.
+                self.settings.setdefault("connection", {})["wpp_custom_api"] = False
+                self.wpp_custom_api = False
+                self.save_settings()
+                sys.exit(0)
+        else:
+            # User cancelled or closed the question box. Exit.
+            sys.exit(0)
 
     def _check_first_run(self):
         """
