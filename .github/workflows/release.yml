@@ -31,33 +31,23 @@ jobs:
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-opus
 
-      # Locate the UCRT64 bin directory dynamically (no hard-coded MSYS2 path).
-      # Searching for gcc.exe is more reliable than assuming C:\msys64 — the
-      # runner layout can vary between GitHub-hosted runner image versions.
-      - name: Add MSYS2 UCRT64 bin to Windows PATH
-        run: |
-          $candidates = @(
-            "C:\msys64\ucrt64\bin",
-            "C:\msys2\ucrt64\bin",
-            "C:\tools\msys64\ucrt64\bin",
-            "C:\tools\msys2\ucrt64\bin"
-          )
-          $ucrt64bin = $candidates | Where-Object { Test-Path "$_\gcc.exe" } | Select-Object -First 1
-          if (-not $ucrt64bin) {
-            Write-Error "MSYS2 UCRT64 bin not found (gcc.exe missing in all candidate paths)."
-            exit 1
-          }
-          Write-Host "Found MSYS2 UCRT64 bin: $ucrt64bin"
-          echo $ucrt64bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      # Copy libopus-0.dll using the MSYS2 shell so that /ucrt64/bin/ is always
-      # the correct path regardless of where MSYS2 is installed on Windows.
-      - name: Copy libopus-0.dll to client/lib
+      # Use the MSYS2 shell to resolve /ucrt64/bin to its real Windows path via
+      # cygpath — this avoids hard-coding C:\msys64 which can vary by runner
+      # image.  The resolved path is stored in $GITHUB_OUTPUT for the next step.
+      # libopus-0.dll is also copied here using MSYS2-internal paths.
+      - name: Export UCRT64 bin path and copy libopus-0.dll
+        id: ucrt64
         shell: msys2 {0}
         run: |
+          echo "bin=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_OUTPUT"
           mkdir -p client/lib
           cp /ucrt64/bin/libopus-0.dll client/lib/libopus-0.dll
-          echo "Copied libopus-0.dll: $(stat -c%s client/lib/libopus-0.dll) bytes"
+          echo "libopus-0.dll: $(stat -c%s client/lib/libopus-0.dll) bytes"
+
+      # Add the UCRT64 bin directory (resolved above) to the Windows PATH so that
+      # gcc and windres are available when build.py runs in PowerShell.
+      - name: Add MSYS2 UCRT64 bin to Windows PATH
+        run: echo "${{ steps.ucrt64.outputs.bin }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
