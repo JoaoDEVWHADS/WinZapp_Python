@@ -50,6 +50,9 @@ import shutil
 import subprocess
 import zipfile
 import argparse
+import io
+import tarfile
+import urllib.request
 
 # -- Paths -------------------------------------------------------------------
 
@@ -97,9 +100,13 @@ SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
 # libopus-0.dll — required by client/core/ogg_opus.py for OGG Opus encoding.
-# Searches client/lib/ first, then MSYS2, then system PATH (Chocolatey, vcpkg,
-# conda, manual installs), then common Chocolatey / scoop directories.
-def _find_opus_dll():
+# libopus is a native C library (NOT a Python package).  On Windows it ships
+# with MSYS2 (mingw-w64-ucrt-x86_64-opus) or can be installed via Chocolatey /
+# vcpkg.  build.py searches common locations; if not found it auto-downloads the
+# DLL from the MSYS2 package mirror and saves it to client/lib/.
+
+def _find_opus_dll_on_disk():
+    """Search known filesystem locations for libopus-0.dll / opus.dll."""
     candidates = [
         os.path.join(CLIENT_DIR, "lib", "libopus-0.dll"),
         os.path.join(CLIENT_DIR, "lib", "opus.dll"),
@@ -110,13 +117,119 @@ def _find_opus_dll():
         r"C:\ProgramData\chocolatey\bin\libopus-0.dll", # Chocolatey
         r"C:\ProgramData\scoop\shims\libopus-0.dll",    # Scoop
     ]
-    # Also search every directory on PATH for the DLL
-    path_env = os.environ.get("PATH", "")
-    for path_dir in path_env.split(os.pathsep):
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
         if path_dir:
             candidates.append(os.path.join(path_dir, "libopus-0.dll"))
             candidates.append(os.path.join(path_dir, "opus.dll"))
     return next((p for p in candidates if os.path.isfile(p)), None)
+
+
+def _download_opus_dll():
+    """Download libopus-0.dll from the MSYS2 package mirror.
+
+    Uses the MSYS2 packages API to find the latest package URL, then downloads
+    and extracts the DLL from the .tar.zst archive into client/lib/.
+    Requires the ``zstandard`` package (already in requirements.txt).
+    """
+    dst_dir = os.path.join(CLIENT_DIR, "lib")
+    dst     = os.path.join(dst_dir, "libopus-0.dll")
+
+    print("  [opus] libopus-0.dll not found locally — downloading from MSYS2...")
+
+    try:
+        import zstandard  # already in requirements.txt
+    except ImportError:
+        print("  [WARN] 'zstandard' package not installed; cannot auto-download libopus.")
+        print("         Run: venv\\Scripts\\pip install zstandard")
+        return None
+
+    # Query the MSYS2 package API to discover the download URL for the latest
+    # opus package in the UCRT64 repository.
+    api_url = (
+        "https://packages.msys2.org/api/packages/ucrt64/"
+        "mingw-w64-ucrt-x86_64-opus"
+    )
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "WinZapp-build"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            import json
+            info = json.loads(resp.read())
+        # The API returns a list; pick the first (most recent).
+        entry = info[0] if isinstance(info, list) else info
+        pkg_filename = entry.get("filename") or entry.get("name") or ""
+        pkg_url = (
+            entry.get("url")
+            or entry.get("download_url")
+            or (
+                f"https://mirror.msys2.org/mingw/ucrt64/{pkg_filename}"
+                if pkg_filename else ""
+            )
+        )
+    except Exception as exc:
+        # API query failed — fall back to a pinned version URL.
+        print(f"  [opus] MSYS2 API unavailable ({exc}); using pinned version 1.5.2.")
+        pkg_url = (
+            "https://mirror.msys2.org/mingw/ucrt64/"
+            "mingw-w64-ucrt-x86_64-opus-1.5.2-1-any.pkg.tar.zst"
+        )
+
+    if not pkg_url:
+        print("  [WARN] Could not determine libopus package URL.")
+        return None
+
+    print(f"  [opus] Downloading {pkg_url} ...")
+    try:
+        req = urllib.request.Request(pkg_url, headers={"User-Agent": "WinZapp-build"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            pkg_data = resp.read()
+    except Exception as exc:
+        print(f"  [WARN] Download failed: {exc}")
+        return None
+
+    # The .pkg.tar.zst archive is a zstd-compressed tar.
+    # Inside, the DLL lives at  ucrt64/bin/libopus-0.dll
+    print("  [opus] Extracting libopus-0.dll ...")
+    try:
+        dctx = zstandard.ZstdDecompressor()
+        with dctx.stream_reader(io.BytesIO(pkg_data)) as zst_reader:
+            with tarfile.open(fileobj=zst_reader) as tar:
+                dll_member = next(
+                    (m for m in tar.getmembers()
+                     if m.name.endswith("/libopus-0.dll") or m.name == "libopus-0.dll"),
+                    None,
+                )
+                if dll_member is None:
+                    print("  [WARN] libopus-0.dll not found inside the package.")
+                    return None
+                f = tar.extractfile(dll_member)
+                os.makedirs(dst_dir, exist_ok=True)
+                with open(dst, "wb") as out:
+                    out.write(f.read())
+    except Exception as exc:
+        print(f"  [WARN] Extraction failed: {exc}")
+        return None
+
+    print(f"  [opus] Saved to {dst}")
+    return dst
+
+
+def _find_opus_dll():
+    """Find or auto-download libopus-0.dll for bundling."""
+    found = _find_opus_dll_on_disk()
+    if found:
+        return found
+    # Not found locally — attempt auto-download.
+    downloaded = _download_opus_dll()
+    if downloaded:
+        return downloaded
+    print(
+        "  [WARN] libopus-0.dll not found and auto-download failed.\n"
+        "         Voice messages will not work in the built app.\n"
+        "         To fix: install MSYS2 and run:\n"
+        "           pacman -S mingw-w64-ucrt-x86_64-opus\n"
+        "         Or copy libopus-0.dll to client/lib/libopus-0.dll"
+    )
+    return None
 
 OPUS_DLL = _find_opus_dll()
 
