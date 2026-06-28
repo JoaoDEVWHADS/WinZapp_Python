@@ -1,6 +1,7 @@
 import os
 import sys
 import wx
+import wx.dataview
 
 
 class AccessibleSearchInConversation(wx.Accessible):
@@ -169,9 +170,8 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
     by utilizing the generic wxWindowNR backend, exactly like Easygram does.
     """
     def __init__(self, parent, style=0):
-        import wx.dataview as dv
-        super().__init__(parent, style=dv.DV_ROW_LINES | dv.DV_SINGLE)
-        self.Bind(dv.EVT_DATAVIEW_COLUMN_HEADER_CLICK, self._on_header_click)
+        super().__init__(parent, style=wx.dataview.DV_ROW_LINES | wx.dataview.DV_SINGLE)
+        self.Bind(wx.dataview.EVT_DATAVIEW_COLUMN_HEADER_CLICK, self._on_header_click)
 
     def _on_header_click(self, event):
         event.Veto()
@@ -222,20 +222,19 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
             column.SetTitle(listItem.GetText())
 
     def Bind(self, event_type, handler, *args, **kwargs):
-        import wx.dataview as dv
         if event_type == wx.EVT_LIST_ITEM_ACTIVATED:
             def _on_activated(evt):
                 row = self.ItemToRow(evt.GetItem())
                 if row != wx.NOT_FOUND:
                     handler(MockListEvent(row))
-            super().Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, _on_activated, *args, **kwargs)
+            super().Bind(wx.dataview.EVT_DATAVIEW_ITEM_ACTIVATED, _on_activated, *args, **kwargs)
 
         elif event_type in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_LIST_ITEM_FOCUSED):
             def _on_selected(evt):
                 row = self.ItemToRow(evt.GetItem())
                 if row != wx.NOT_FOUND:
                     handler(MockListEvent(row))
-            super().Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, _on_selected, *args, **kwargs)
+            super().Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, _on_selected, *args, **kwargs)
 
         else:
             super().Bind(event_type, handler, *args, **kwargs)
