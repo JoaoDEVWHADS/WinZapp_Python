@@ -136,6 +136,11 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_TIMER, self._on_unread_sep_dismiss_timer,
                   self._unread_sep_dismiss_timer)
 
+        # One-shot timer: debounce speech to prevent lag/duplication during rapid scrolling
+        self._speech_debounce_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_speech_debounce, self._speech_debounce_timer)
+        self._pending_speech_text: str = ""
+
         # ── Reaction tracking ───────────────────────────────────────────────
         # Maps original_msg_id → {emoji: count}
         self._reaction_map: dict = {}
@@ -2637,14 +2642,22 @@ class ConversationsPanel(wx.Panel):
                     self._show_audio_controls()
                 else:
                     self._hide_audio_controls()
-        # Speak the full untruncated message text to bypass the Windows MSAA 512-character limit.
+        # Debounce the speech announcement to bypass the Windows MSAA 512-character limit.
+        # This prevents duplication and blocks the main thread from lagging during rapid scrolling.
         if 0 <= idx < len(self._sorted_messages):
             msg = self._sorted_messages[idx]
             if not self._is_separator(msg):
-                texto_completo = self._render_message_line(msg)
-                self.main_window.output(texto_completo, interrupt=True)
+                self._pending_speech_text = self._render_message_line(msg)
+                if self._speech_debounce_timer.IsRunning():
+                    self._speech_debounce_timer.Stop()
+                self._speech_debounce_timer.StartOnce(180) # 180ms debounce
 
         event.Skip()
+
+    def _on_speech_debounce(self, event):
+        """Fired 180ms after focus stopped moving - speak the full untruncated message text."""
+        if self._pending_speech_text:
+            self.main_window.output(self._pending_speech_text, interrupt=True)
 
     def _on_unread_sep_dismiss_timer(self, event):
         """Fired 2 s after focus reached the unread separator — remove it."""
