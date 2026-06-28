@@ -71,7 +71,20 @@ def _dll_search_paths() -> "list[str]":
             os.path.join(lib_dir, "opus.dll"),
         ]
 
-    # Last resort: system PATH (MSYS2, Chocolatey, manual installs)
+    # Well-known MSYS2 installation roots (user may not have ucrt64/bin in PATH).
+    # Try both common install locations and both ucrt64 / mingw64 sub-systems.
+    for _msys2_root in (
+        r"C:\msys64",
+        r"C:\msys2",
+        r"C:\Program Files\msys64",
+        r"C:\Program Files (x86)\msys64",
+        r"C:\tools\msys64",
+    ):
+        for _sub in ("ucrt64", "mingw64", "mingw32", "usr"):
+            candidates.append(os.path.join(_msys2_root, _sub, "bin", "libopus-0.dll"))
+            candidates.append(os.path.join(_msys2_root, _sub, "bin", "opus.dll"))
+
+    # Last resort: system PATH (Chocolatey, vcpkg, manual installs)
     candidates += ["libopus-0.dll", "libopus.dll", "opus.dll"]
     return candidates
 

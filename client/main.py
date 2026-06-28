@@ -1095,7 +1095,7 @@ class MainWindow(wx.Frame):
                 ppm = getattr(self, "_presence_pushname_map", {})
                 if ppm.get(sender_jid) != push:
                     ppm[sender_jid] = push
-                    self._schedule_save()
+                    self._schedule_save(contacts_dirty=True)
 
         # Extract mapping and mentions from incoming messages
         self._extract_lid_mapping(msg)
@@ -1197,7 +1197,7 @@ class MainWindow(wx.Frame):
                 if hasattr(self, "conversations_panel"):
                     wx.CallAfter(self.conversations_panel._mark_message_sent, local_id, real_id=msg_id)
                 
-                self._schedule_save()
+                self._schedule_save(dirty_jid=remote_jid)
                 self._schedule_set_chats()
                 return
 
@@ -1233,7 +1233,7 @@ class MainWindow(wx.Frame):
                 chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
 
         # ── Persist in background — debounced so rapid bursts produce one write ─
-        self._schedule_save()
+        self._schedule_save(dirty_jid=remote_jid)
 
         # ── Update conversation list UI (debounced to avoid rapid rebuilds) ───
         self._schedule_set_chats()
@@ -3312,17 +3312,58 @@ class MainWindow(wx.Frame):
                 )
 
     def _do_save(self):
-        """Timer callback: persist current self.chats / self.contacts."""
-        self.save_data(self.chats, self.contacts)
+        """Timer callback: incrementally persist dirty chats and contacts.
 
-    def _schedule_save(self):
-        """Debounce save_data: coalesce rapid calls into one write after 150 ms.
-
-        Replaces bare ``threading.Thread(target=self.save_data, ...).start()``
-        calls so that a burst of incoming messages (e.g. 50 messages arriving
-        during a group sync) triggers exactly ONE disk write instead of 50
-        concurrent threads all racing to overwrite messages.dat.
+        Uses targeted upsert_chat() / upsert_contacts_batch() instead of the
+        old save_data() full dump.  This avoids re-encrypting every message
+        blob on every save — the dominant source of idle CPU usage.
         """
+        # ── 1. Dirty chats ────────────────────────────────────────────────────
+        dirty_chats: set[str] = set(getattr(self, "_dirty_jids_for_save", None) or set())
+        self._dirty_jids_for_save = set()
+
+        # If no specific dirty tracking, fall back to saving all chat metadata
+        # (still much cheaper than import_from_dict: no message blob encryption).
+        jids_to_save = dirty_chats if dirty_chats else list(self.chats.keys())
+        for jid in jids_to_save:
+            chat = self.chats.get(jid)
+            if not chat:
+                continue
+            try:
+                self.db.upsert_chat(jid, chat)
+            except Exception as exc:
+                logging.warning("[_do_save] upsert_chat %s: %s", jid, exc)
+
+        # ── 2. Contacts (only when explicitly marked dirty) ───────────────────
+        if getattr(self, "_contacts_dirty_for_save", False):
+            self._contacts_dirty_for_save = False
+            try:
+                self.db.upsert_contacts_batch(dict(self.contacts))
+            except Exception as exc:
+                logging.warning("[_do_save] upsert_contacts_batch: %s", exc)
+
+    def _schedule_save(
+        self,
+        dirty_jid: "str | None" = None,
+        contacts_dirty: bool = False,
+    ) -> None:
+        """Debounce DB saves into one write per burst.
+
+        Parameters
+        ----------
+        dirty_jid :
+            JID of the specific chat that changed.  When supplied, only that
+            chat is written to the DB (fast).  When omitted, all chat metadata
+            is saved (slower but still far cheaper than a full import_from_dict).
+        contacts_dirty :
+            Set to True to also flush self.contacts to the contacts table.
+        """
+        if dirty_jid:
+            if not hasattr(self, "_dirty_jids_for_save"):
+                self._dirty_jids_for_save = set()
+            self._dirty_jids_for_save.add(dirty_jid)
+        if contacts_dirty:
+            self._contacts_dirty_for_save = True
         with self._save_timer_lock:
             if self._save_timer is not None:
                 self._save_timer.cancel()
@@ -5189,6 +5230,9 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(normalized)
         if chat is None:
             return
+        old_count = int(chat.get("unreadCount") or 0)
+        if old_count == unread_count:
+            return  # no actual change — skip expensive rebuild + save
         # The server sometimes counts own (fromMe) messages as unread. Correct
         # for that by inspecting the tail of the locally-stored message list.
         if unread_count > 0:
@@ -5210,8 +5254,7 @@ class MainWindow(wx.Frame):
         if old_count == 0 and unread_count > 0:
             return
         chat["unreadCount"] = unread_count
-        # Persist — debounced so rapid chats.update bursts produce one write.
-        self._schedule_save()
+        self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
 
     def on_chat_archive_update(self, jid: str, archived: bool):
@@ -6909,6 +6952,29 @@ class MainWindow(wx.Frame):
                     arch_lst.SetItemState(arch_focused_idx, 0, wx.LIST_STATE_FOCUSED)
                 except Exception:
                     pass
+
+        # ── Content fingerprint: skip full rebuild when nothing visible changed ──
+        # This prevents NVDA from re-reading the current item on every socket
+        # event and eliminates idle CPU from constant DeleteAllItems() calls.
+        _fp_rows: list[tuple] = []
+        for _i, _chat in enumerate(full_chats):
+            _jid  = _chat.get("remoteJid", "")
+            _nm   = full_names[_i] if _i < len(full_names) else ""
+            _unrd = int(_chat.get("unreadCount") or 0)
+            _lid  = ((_chat.get("lastMessage") or {}).get("key") or {}).get("id", "")
+            if conv_filter == "unread" and _unrd == 0:
+                continue
+            if conv_filter == "groups" and not _jid.endswith("@g.us"):
+                continue
+            if conv_filter == "individual" and _jid.endswith("@g.us"):
+                continue
+            if search and search not in _nm.lower():
+                continue
+            _fp_rows.append((_jid, _nm, _unrd, _lid))
+        _fp = hash((conv_filter, search, tuple(_fp_rows)))
+        if _fp == getattr(self, "_chats_ui_fp", None):
+            return  # visible list unchanged — skip expensive rebuild
+        self._chats_ui_fp = _fp
 
         focus_allowed = self._allow_ui_focus_changes()
         _lst_had_focus = (wx.Window.FindFocus() is lst)
