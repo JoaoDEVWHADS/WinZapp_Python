@@ -12,8 +12,9 @@ In PyInstaller onefile mode:
   All bundled assets are extracted to sys._MEIPASS.
 
 In PyInstaller onedir mode:
-  - Assets live in _internal/ next to the exe.
-  - sys._MEIPASS is NOT set; paths are relative to sys.executable.
+  - sys._MEIPASS -> <exe_dir>/_internal  (Python runtime; NOT where external assets live)
+  - sys.executable  -> the exe inside <exe_dir>
+  External assets (sounds/, languages/, node/, api/, lib/) live in <exe_dir>, NOT in _internal.
 """
 
 import os
@@ -36,10 +37,23 @@ def _outer_exe_dir() -> str:
 def _get_base_dir() -> str:
     """Return the base directory for read-only assets.
 
-    In PyInstaller onefile mode assets are extracted to sys._MEIPASS (temp).
-    In all other frozen modes they live next to the exe (_outer_exe_dir).
+    PyInstaller onefile: all assets are extracted to sys._MEIPASS (a temp dir
+      that is NOT a subdirectory of the exe's directory).
+
+    PyInstaller onedir: Python runtime goes into _internal/ (= sys._MEIPASS),
+      but external assets (sounds/, languages/, node/, api/, lib/) live next to
+      the exe — i.e. in the *parent* of sys._MEIPASS.  We detect this case by
+      checking whether sys._MEIPASS is a direct child of the exe directory.
+
+    Nuitka onefile / dev mode: no sys._MEIPASS; use _outer_exe_dir().
     """
     if hasattr(sys, "_MEIPASS"):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        meipass_parent = os.path.dirname(os.path.abspath(sys._MEIPASS))
+        if os.path.normcase(meipass_parent) == os.path.normcase(exe_dir):
+            # onedir: _MEIPASS == <exe_dir>/_internal — external assets are in exe_dir
+            return exe_dir
+        # onefile: _MEIPASS is a temp extraction dir — everything is there
         return sys._MEIPASS
     return _outer_exe_dir()
 

@@ -239,6 +239,7 @@ def pyinstaller_compile():
         "windows_toasts",
         "winrt",
         "pyaudio",
+        "aiosqlite",
     ]
 
     cmd = [
