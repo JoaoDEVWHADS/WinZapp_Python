@@ -19,8 +19,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # GCC and windres are required by build.py to compile the C installer/uninstaller.
-      # UCRT64 binaries land in C:\msys64\ucrt64\bin which we add to PATH below.
+      # GCC and windres (from UCRT64 binutils) are required by build.py to compile
+      # the C installer/uninstaller.  The opus package provides libopus-0.dll.
       - name: Set up MSYS2 (GCC + windres + opus)
         uses: msys2/setup-msys2@v2
         with:
@@ -31,15 +31,19 @@ jobs:
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-opus
 
-      - name: Add MSYS2 UCRT64 bin to PATH
-        run: echo "C:/msys64/ucrt64/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      # libopus-0.dll is installed by MSYS2 above; copy it to client/lib/ so
-      # build.py can find and bundle it without extra configuration.
-      - name: Copy libopus DLL to client/lib
+      # Use the MSYS2 shell so we can reference /ucrt64/bin/ without
+      # hard-coding the Windows path to the MSYS2 installation.
+      # 1. cygpath resolves /ucrt64/bin to the real Windows path and writes it
+      #    into GITHUB_PATH so that gcc/windres are found by build.py (PowerShell).
+      # 2. Copy libopus-0.dll to client/lib/ — the first location build.py
+      #    checks, so no download or PATH search is needed.
+      - name: Add UCRT64 bin to PATH and copy libopus-0.dll to client/lib
+        shell: msys2 {0}
         run: |
-          New-Item -ItemType Directory -Force client\lib | Out-Null
-          Copy-Item "C:\msys64\ucrt64\bin\libopus-0.dll" "client\lib\libopus-0.dll"
+          cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
+          mkdir -p client/lib
+          cp /ucrt64/bin/libopus-0.dll client/lib/libopus-0.dll
+          echo "libopus-0.dll size: $(stat -c%s client/lib/libopus-0.dll) bytes"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -105,6 +109,30 @@ jobs:
       # Runs all 8 build steps: PyInstaller → staging → C installer/uninstaller → ZIP.
       - name: Build WinZapp
         run: venv\Scripts\python.exe build.py
+
+      # Sanity-check that the portable ZIP contains the expected directories.
+      # A missing sounds/ or lib/ entry means the staging step silently failed.
+      - name: Verify dist/WinZapp.zip contents
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist\WinZapp.zip")
+          try {
+            $entries = $zip.Entries | ForEach-Object { $_.FullName }
+            $hasSounds   = ($entries | Where-Object { $_ -like "WinZapp/sounds/*" }).Count -gt 0
+            $hasLib      = ($entries | Where-Object { $_ -like "WinZapp/lib/bass.dll" }).Count -gt 0
+            $hasOpus     = ($entries | Where-Object { $_ -like "WinZapp/lib/libopus-0.dll" }).Count -gt 0
+            $hasExe      = ($entries | Where-Object { $_ -eq   "WinZapp/WinZapp.exe" }).Count -gt 0
+            Write-Host "WinZapp.exe : $hasExe"
+            Write-Host "sounds/*    : $hasSounds"
+            Write-Host "lib/bass.dll: $hasLib"
+            Write-Host "lib/libopus : $hasOpus"
+            if (-not ($hasSounds -and $hasLib -and $hasOpus -and $hasExe)) {
+              Write-Error "dist/WinZapp.zip is missing required entries — build failed."
+              exit 1
+            }
+          } finally {
+            $zip.Dispose()
+          }
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

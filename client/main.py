@@ -14,7 +14,7 @@ import atexit
 import ctypes
 import ctypes.wintypes
 from accessible_output2 import outputs
-from core.sound_system import SoundSystem, Sound
+from core.sound_system import SoundSystem, Sound, load_sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages
@@ -2424,27 +2424,27 @@ class MainWindow(wx.Frame):
             t.start()
 
     def load_sounds(self):
-        self.startup_sound = Sound(self.sound_system, "startup.ogg")
-        self.error_sound = Sound(self.sound_system, "error.ogg")
-        self.qrcode_loaded_sound = Sound(self.sound_system, "qrcode_loaded.ogg")
-        self.waiting_pairing_sound = Sound(self.sound_system, "waiting_pairing.ogg")
-        self.pairing_code_updated_sound = Sound(self.sound_system, "pairing_code_updated.ogg")
-        self.connected_sound = Sound(self.sound_system, "connected.ogg")
-        self.synchronizing_sound = Sound(self.sound_system, "synchronizing.ogg")
-        self.sync_complete_sound = Sound(self.sound_system, "sync_complete.ogg")
-        self.offline_mode_sound = Sound(self.sound_system, "offline_mode.ogg")
+        self.startup_sound = load_sound(self.sound_system, "startup.ogg")
+        self.error_sound = load_sound(self.sound_system, "error.ogg")
+        self.qrcode_loaded_sound = load_sound(self.sound_system, "qrcode_loaded.ogg")
+        self.waiting_pairing_sound = load_sound(self.sound_system, "waiting_pairing.ogg")
+        self.pairing_code_updated_sound = load_sound(self.sound_system, "pairing_code_updated.ogg")
+        self.connected_sound = load_sound(self.sound_system, "connected.ogg")
+        self.synchronizing_sound = load_sound(self.sound_system, "synchronizing.ogg")
+        self.sync_complete_sound = load_sound(self.sound_system, "sync_complete.ogg")
+        self.offline_mode_sound = load_sound(self.sound_system, "offline_mode.ogg")
         # Voice recording sounds
-        self.voicemsg_startrecording_sound  = Sound(self.sound_system, "voicemsg_startrecording.ogg")
-        self.voicemsg_pauserecording_sound  = Sound(self.sound_system, "voicemsg_pauserecording.ogg")
-        self.voicemsg_discard_sound         = Sound(self.sound_system, "voicemsg_discard.ogg")
-        self.voicemsg_send_sound            = Sound(self.sound_system, "voicemsg_send.ogg")
+        self.voicemsg_startrecording_sound  = load_sound(self.sound_system, "voicemsg_startrecording.ogg")
+        self.voicemsg_pauserecording_sound  = load_sound(self.sound_system, "voicemsg_pauserecording.ogg")
+        self.voicemsg_discard_sound         = load_sound(self.sound_system, "voicemsg_discard.ogg")
+        self.voicemsg_send_sound            = load_sound(self.sound_system, "voicemsg_send.ogg")
         # Background notification sound
-        self.message_background_sound       = Sound(self.sound_system, "message_background.ogg")
+        self.message_background_sound       = load_sound(self.sound_system, "message_background.ogg")
         # Foreground notification sounds
-        self.message_current_sound          = Sound(self.sound_system, "message_current.ogg")
-        self.message_foreground_sound       = Sound(self.sound_system, "message_foreground.ogg")
+        self.message_current_sound          = load_sound(self.sound_system, "message_current.ogg")
+        self.message_foreground_sound       = load_sound(self.sound_system, "message_foreground.ogg")
         # Message sent confirmation sound
-        self.message_sent_sound             = Sound(self.sound_system, "message_sent.ogg")
+        self.message_sent_sound             = load_sound(self.sound_system, "message_sent.ogg")
 
     def retrieve_token(self):
         token = self.settings.get("privateinfo", {}).get("WA_token", "").strip()
