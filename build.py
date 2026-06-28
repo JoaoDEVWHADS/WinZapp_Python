@@ -96,6 +96,17 @@ SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
+# libopus-0.dll — required by client/core/ogg_opus.py for OGG Opus encoding.
+# The build searches for it in client/lib/ first, then the MSYS2 UCRT64 location
+# (set up by the GitHub Actions workflow / local MSYS2 installation).
+_OPUS_SEARCH = [
+    os.path.join(CLIENT_DIR, "lib", "libopus-0.dll"),
+    os.path.join(CLIENT_DIR, "lib", "opus.dll"),
+    r"C:\msys64\ucrt64\bin\libopus-0.dll",   # MSYS2 UCRT64 (CI + local devs)
+    r"C:\msys64\mingw64\bin\libopus-0.dll",  # MSYS2 MinGW64 fallback
+]
+OPUS_DLL = next((p for p in _OPUS_SEARCH if os.path.isfile(p)), None)
+
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {
     "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
@@ -199,6 +210,15 @@ def check_tools():
             "         npm run build"
         )
 
+    if OPUS_DLL:
+        print(f"  [opus] libopus found: {OPUS_DLL}")
+    else:
+        print(
+            "  [WARN] libopus-0.dll not found — voice messages will fail in the built app.\n"
+            "         Install MSYS2 and run: pacman -S mingw-w64-ucrt-x86_64-opus\n"
+            "         Or copy libopus-0.dll to client/lib/"
+        )
+
     if missing:
         print("\n[ERROR] Missing required tools or pre-built assets:")
         for m in missing:
@@ -257,7 +277,7 @@ def pyinstaller_compile():
 
     cmd += ["--paths", CLIENT_DIR]
 
-    # In onefile mode, embed external resources as --add-data
+    # In onefile mode, embed external resources as --add-data / --add-binary
     if ONEFILE:
         add_data_pairs = [
             (NODE_DIR, "node"),
@@ -276,6 +296,10 @@ def pyinstaller_compile():
         for src, dst in add_data_pairs:
             if os.path.exists(src):
                 cmd += ["--add-data", f"{src};{dst}"]
+
+        # libopus DLL must be bundled as a binary so ctypes can load it at runtime
+        if OPUS_DLL:
+            cmd += ["--add-binary", f"{OPUS_DLL};lib"]
 
     cmd.append(os.path.join(CLIENT_DIR, "main.py"))
 
@@ -332,7 +356,14 @@ def assemble_staging():
                 shutil.copy2(os.path.join(AO2_LIB, fname),
                              os.path.join(lib_dir, fname))
                 dll_count += 1
-    print(f"  -> lib/  ({dll_count} DLLs)")
+    # libopus for OGG Opus encoding (client/core/ogg_opus.py)
+    if OPUS_DLL:
+        shutil.copy2(OPUS_DLL, os.path.join(lib_dir, "libopus-0.dll"))
+        dll_count += 1
+        print(f"  -> lib/libopus-0.dll")
+    else:
+        print("  [WARN] libopus-0.dll not found — voice message encoding will fail")
+    print(f"  -> lib/  ({dll_count} DLLs total)")
 
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
     shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))

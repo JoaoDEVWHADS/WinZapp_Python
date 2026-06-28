@@ -4683,87 +4683,35 @@ class MainWindow(wx.Frame):
             logging.error("[send_text_message] exception for %s: %s", remote_jid, err)
             return {"ok": False, "error": err, "retry": True}
 
-    @staticmethod
-    def _find_api_ffmpeg() -> str:
-        """Locate ffmpeg binary: bundled npm package first, then system PATH."""
-        import glob as _glob
-        import shutil
-        # @ffmpeg-installer/ffmpeg places the actual binary inside a platform-
-        # specific sub-package (e.g. @ffmpeg-installer/win32-x64/bin/ffmpeg.exe),
-        # NOT in @ffmpeg-installer/ffmpeg/bin/. Glob the entire scope so we find
-        # it regardless of which platform sub-package npm installed.
-        installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
-        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
-        if hits:
-            return hits[0]
-        # Fallback: ffmpeg on the system PATH (user-installed)
-        system_ffmpeg = shutil.which("ffmpeg")
-        if system_ffmpeg:
-            return system_ffmpeg
-        return None
-
-    def _convert_wav_to_ogg(self, wav_path: str) -> str | None:
-        """
-        Convert a WAV file to OGG/Opus using the bundled ffmpeg binary.
-        Returns the path to the new .ogg file, or None on failure.
-        """
-        ffmpeg = self._find_api_ffmpeg()
-        if not ffmpeg or not os.path.isfile(ffmpeg):
-            logging.warning("[audio] ffmpeg not found — sending WAV (may fail). Searched: %s",
-                            resource_path("api", "node_modules", "@ffmpeg-installer", "ffmpeg", "bin"))
-            return None
-        ogg_path = wav_path + ".ogg"
-        try:
-            result = subprocess.run(
-                [ffmpeg, "-y", "-i", wav_path,
-                 "-ac", "1",
-                 "-c:a", "libopus", "-b:a", "64k",
-                 "-vbr", "on", "-compression_level", "10",
-                 ogg_path],
-                capture_output=True,
-                timeout=60,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if result.returncode == 0 and os.path.isfile(ogg_path) and os.path.getsize(ogg_path) > 0:
-                logging.debug("[audio] WAV→OGG conversion succeeded: %s", ogg_path)
-                return ogg_path
-            logging.error("[audio] ffmpeg WAV→OGG failed (rc=%s): %s",
-                          result.returncode,
-                          (result.stderr or b"").decode("utf-8", errors="replace")[-800:])
-        except Exception as exc:
-            logging.error("[audio] ffmpeg conversion exception: %s", exc)
-        return None
-
     def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
         """
-        Base64-encode a WAV/audio file and send it as a PTT voice message via the
-        WPPConnect Server API. Uses /api/{session}/send-voice-base64.
-        WAV is converted to OGG/Opus first (WhatsApp PTT requirement).
+        Encode a recorded WAV file to OGG Opus via libopus (pure Python, no
+        FFmpeg) and send it as a PTT voice message using /send-voice-base64.
         """
+        from core.ogg_opus import encode_wav_to_ogg_opus
+
         remote_jid = self._resolve_jid_for_send(remote_jid)
-        # Convert WAV to OGG/Opus — WhatsApp only accepts OGG Opus for PTT.
-        ogg_path  = self._convert_wav_to_ogg(wav_path)
-        send_path = ogg_path if ogg_path else wav_path
-        mime      = "data:audio/ogg;codecs=opus;base64," if ogg_path else "data:audio/wav;base64,"
 
         try:
-            with open(send_path, "rb") as fh:
-                audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            with open(wav_path, "rb") as fh:
+                wav_bytes = fh.read()
         except Exception as exc:
-            logging.error("[send_audio_message] failed to read audio file %s: %s", send_path, exc)
+            logging.error("[send_audio_message] cannot read WAV %s: %s", wav_path, exc)
             return {"ok": False, "error": str(exc)[:200], "retry": False}
-        finally:
-            if ogg_path and os.path.isfile(ogg_path):
-                try:
-                    os.unlink(ogg_path)
-                except Exception:
-                    pass
+
+        try:
+            ogg_bytes = encode_wav_to_ogg_opus(wav_bytes)
+        except Exception as exc:
+            logging.error("[send_audio_message] OGG Opus encoding failed: %s", exc)
+            return {"ok": False, "error": str(exc)[:200], "retry": False}
+
+        audio_b64 = base64.b64encode(ogg_bytes).decode("utf-8")
 
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-voice-base64"
         quoted_id = self._serialize_quoted_id(quoted) if quoted else None
         payload = {
             "phone": [remote_jid],
-            "base64Ptt": f"{mime}{audio_b64}",
+            "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
             "isGroup": remote_jid.endswith("@g.us"),
         }
         if quoted_id:
