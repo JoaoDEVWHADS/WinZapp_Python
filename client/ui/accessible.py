@@ -151,3 +151,91 @@ class AccessibleAudioSlider(wx.Accessible):
             total_str = panel._format_duration(panel._audio_stream_duration)
             return (wx.ACC_OK, f"{current_str} {i18n.t('of')} {total_str}")
         return (wx.ACC_OK, "")
+
+
+class MockListEvent:
+    def __init__(self, index):
+        self._index = index
+    def GetIndex(self):
+        return self._index
+    def Skip(self):
+        pass
+
+
+class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
+    """
+    Subclass of wx.dataview.DataViewListCtrl that mimics the wx.ListCtrl API.
+    Used to bypass the native Windows SysListView32 512-character screen reader limitation
+    by utilizing the generic wxWindowNR backend, exactly like Easygram does.
+    """
+    def __init__(self, parent, style=0):
+        import wx.dataview as dv
+        super().__init__(parent, style=dv.DV_ROW_LINES | dv.DV_SINGLE)
+        self.Bind(dv.EVT_DATAVIEW_COLUMN_HEADER_CLICK, self._on_header_click)
+
+    def _on_header_click(self, event):
+        event.Veto()
+
+    def InsertColumn(self, col, heading, format=0, width=-1):
+        self.AppendTextColumn(heading, width=width)
+
+    def GetItemCount(self):
+        return super().GetItemCount()
+
+    def Focus(self, row):
+        item = self.RowToItem(row)
+        if item.IsOk():
+            self.SelectRow(row)
+
+    def Select(self, row, select=True):
+        if select:
+            self.SelectRow(row)
+        else:
+            self.UnselectRow(row)
+
+    def EnsureVisible(self, row):
+        item = self.RowToItem(row)
+        if item.IsOk():
+            super().EnsureVisible(item)
+
+    def SetItemText(self, row, col_or_text, text=None):
+        if text is None:
+            self.SetValue(col_or_text, row, 0)
+        else:
+            self.SetValue(text, row, col_or_text)
+
+    def GetItemText(self, row, col=0):
+        return self.GetValue(row, col)
+
+    def Append(self, entry_tuple):
+        self.AppendItem([entry_tuple[0]])
+
+    def GetFocusedItem(self):
+        return self.GetSelectedRow()
+
+    def GetFirstSelected(self):
+        return self.GetSelectedRow()
+
+    def SetColumn(self, col, listItem):
+        column = self.GetColumn(col)
+        if column:
+            column.SetTitle(listItem.GetText())
+
+    def Bind(self, event_type, handler, *args, **kwargs):
+        import wx.dataview as dv
+        if event_type == wx.EVT_LIST_ITEM_ACTIVATED:
+            def _on_activated(evt):
+                row = self.ItemToRow(evt.GetItem())
+                if row != wx.NOT_FOUND:
+                    handler(MockListEvent(row))
+            super().Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, _on_activated, *args, **kwargs)
+
+        elif event_type in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_LIST_ITEM_FOCUSED):
+            def _on_selected(evt):
+                row = self.ItemToRow(evt.GetItem())
+                if row != wx.NOT_FOUND:
+                    handler(MockListEvent(row))
+            super().Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, _on_selected, *args, **kwargs)
+
+        else:
+            super().Bind(event_type, handler, *args, **kwargs)
