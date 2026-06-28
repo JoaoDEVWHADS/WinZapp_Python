@@ -2637,6 +2637,13 @@ class ConversationsPanel(wx.Panel):
                     self._show_audio_controls()
                 else:
                     self._hide_audio_controls()
+        # Speak the full untruncated message text to bypass the Windows MSAA 512-character limit.
+        if 0 <= idx < len(self._sorted_messages):
+            msg = self._sorted_messages[idx]
+            if not self._is_separator(msg):
+                texto_completo = self._render_message_line(msg)
+                self.main_window.output(texto_completo, interrupt=True)
+
         event.Skip()
 
     def _on_unread_sep_dismiss_timer(self, event):
