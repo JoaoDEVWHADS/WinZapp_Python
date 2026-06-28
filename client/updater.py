@@ -444,16 +444,25 @@ class UpdateChecker:
         )
 
     def _show_update_dialog(self, remote_version: str):
-        parent = wx.GetActiveWindow() or self._mw
-        dlg    = UpdateDialog(parent, remote_version, self._mw)
-        result = dlg.ShowModal()
-        dlg.Destroy()
+        app = wx.GetApp()
+        old_exit = True
+        if app:
+            old_exit = app.GetExitOnFrameDelete()
+            app.SetExitOnFrameDelete(False)
+        try:
+            parent = wx.GetActiveWindow() or self._mw
+            dlg    = UpdateDialog(parent, remote_version, self._mw)
+            result = dlg.ShowModal()
+            dlg.Destroy()
 
-        if result == wx.ID_YES:
-            self._do_install(remote_version)
-        else:
-            # User said No — retry in 3 hours
-            self._schedule_retry()
+            if result == wx.ID_YES:
+                self._do_install(remote_version)
+            else:
+                # User said No — retry in 3 hours
+                self._schedule_retry()
+        finally:
+            if app:
+                app.SetExitOnFrameDelete(old_exit)
 
     def _do_install(self, new_version: str):
         while True:
