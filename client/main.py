@@ -2895,24 +2895,34 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
-        # Retry up to 3 times with increasing timeouts for transient server load
+        # Retry up to 3 times with a fixed timeout and a short sleep between
+        # attempts so we don't hammer the API server during startup.
+        _RETRY_SLEEP = 5   # seconds between retries
+        _TIMEOUT     = 30  # seconds per request
         last_error = None
         for attempt in range(3):
             try:
-                timeout = 30 * (attempt + 1)
-                response = requests.post(url, json={}, headers=headers, timeout=timeout)
+                response = requests.post(url, json={}, headers=headers, timeout=_TIMEOUT)
                 if response.status_code not in (200, 201):
-                    logging.error(f"[get_remote_chats] API error {response.status_code}: {response.text[:200]}")
+                    logging.error(
+                        "[get_remote_chats] API error %s (attempt %d/3): %s",
+                        response.status_code, attempt + 1, response.text[:200],
+                    )
                     if attempt < 2:
-                        logging.info(f"[get_remote_chats] Retrying ({attempt + 1}/3)...")
+                        logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
+                        time.sleep(_RETRY_SLEEP)
                         continue
                     return chats
                 try:
                     body = response.json()
                 except Exception as json_err:
-                    logging.error(f"[get_remote_chats] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
+                    logging.error(
+                        "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
+                        attempt + 1, json_err, response.text[:200],
+                    )
                     if attempt < 2:
-                        logging.info(f"[get_remote_chats] Retrying ({attempt + 1}/3)...")
+                        logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
+                        time.sleep(_RETRY_SLEEP)
                         continue
                     return chats
 
@@ -3052,6 +3062,14 @@ class MainWindow(wx.Frame):
                             if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
                                 continue
                             chats[jid][k] = v
+                        # WPPConnect may return the group name only in "subject".
+                        # If the existing entry still has no name, pull it from subject.
+                        if jid.endswith("@g.us") and not chats[jid].get("name"):
+                            subj = chats[jid].get("subject", "")
+                            if subj:
+                                chats[jid]["name"] = subj
+                                self._group_name_cache = getattr(self, "_group_name_cache", {})
+                                self._group_name_cache[jid] = subj
 
                 # Sync mute and pin state from server into local settings
                 muted_chats = self.settings.setdefault("muted_chats", {})
@@ -3081,18 +3099,20 @@ class MainWindow(wx.Frame):
                 return chats
             except Exception as e:
                 last_error = e
-                logging.warning(f"[get_remote_chats] Attempt {attempt + 1}/3 failed: {e}")
+                logging.warning("[get_remote_chats] Attempt %d/3 failed: %s", attempt + 1, e)
                 if attempt < 2:
+                    time.sleep(_RETRY_SLEEP)
                     continue
             else:
                 break
 
         if last_error:
-            self.error_sound.play()
-            wx.MessageBox(
+            wx.CallAfter(self.error_sound.play)
+            wx.CallAfter(
+                wx.MessageBox,
                 f"{self.i18n.t('chat_retrieval_failed')} {last_error}",
                 self.i18n.t("error").format(app_name=self.app_name),
-                wx.OK | wx.ICON_ERROR, self
+                wx.OK | wx.ICON_ERROR,
             )
 
     def normalize_chats(self, chats):
@@ -3507,7 +3527,9 @@ class MainWindow(wx.Frame):
             is_group = jid.endswith("@g.us")
         
             if is_group:
-                name = get_valid_name(chat.get("name", ""))
+                # Check both "name" and "subject" — WPPConnect uses either field
+                # depending on API version; prefer "name", fall back to "subject".
+                name = get_valid_name(chat.get("name", "") or chat.get("subject", ""))
                 if not name:
                     cached = getattr(self, "_group_name_cache", {}).get(jid, "")
                     if cached:
