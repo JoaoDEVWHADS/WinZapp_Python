@@ -2479,7 +2479,7 @@ class ConversationsPanel(wx.Panel):
         try:
             data = self.main_window.get_group_info(jid)
             participants = data.get("participants", [])
-            logging.debug(f"[mention] get_group_info({jid}) → {len(participants)} participants")
+            logging.info(f"[mention] get_group_info({jid}) → {len(participants)} participants")
             my_jid = getattr(self.main_window, "my_jid", "") or ""
             mw_ref = self.main_window
             
@@ -2507,7 +2507,7 @@ class ConversationsPanel(wx.Panel):
                 name = self._get_participant_name(p_jid, p)
                 cache.append((name, p_jid))
             cache.sort(key=lambda x: x[0].lower())
-            logging.debug(f"[mention] cache built: {[n for n,_ in cache]}")
+            logging.info(f"[mention] cache built: {[n for n,_ in cache]}")
             wx.CallAfter(self._set_group_participants_cache, cache)
         except Exception as e:
             logging.error(f"[mention] _fetch_group_participants error: {e}", exc_info=True)
