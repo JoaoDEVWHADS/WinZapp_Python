@@ -7420,9 +7420,8 @@ def setup_logging():
         # Remove any handler added by a prior basicConfig call
         for h in root.handlers[:]:
             root.removeHandler(h)
-            h.close()
         root.addHandler(handler)
-        root.setLevel(logging.WARNING)
+        root.setLevel(logging.INFO)
 
         # Silence very noisy third-party libraries
         for _lib in ("urllib3", "requests", "socketio", "engineio",
