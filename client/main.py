@@ -7423,6 +7423,8 @@ def setup_logging():
         for h in root.handlers[:]:
             root.removeHandler(h)
         root.addHandler(handler)
+        # Set logging level to INFO to expose auto-updater, settings validation,
+        # and startup logs. Noisy dependencies are silenced at ERROR level below.
         root.setLevel(logging.INFO)
 
         # Silence very noisy third-party libraries
