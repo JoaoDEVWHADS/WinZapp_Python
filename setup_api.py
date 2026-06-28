@@ -179,10 +179,105 @@ def main():
     print()
     print("[OK] WPPConnect Server ready at client/api/")
     print()
-    print("Next steps — build the API before running build.py:")
-    print(f"  cd {CLIENT_API_DIR}")
-    print("  npm install")
-    print("  npm run build")
+
+    # Platform-specific installations
+    is_windows = sys.platform == "win32"
+
+    # 1. Automating Node dependency installation and build
+    print("[INFO] Automating Node.js dependency installation and compilation...")
+    try:
+        # Determine node/npm command
+        # On Windows, check if portable node exists in client/node/node.exe
+        node_bin = "node"
+        npm_bin = "npm"
+        if is_windows:
+            win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
+            if os.path.isfile(win_node):
+                node_bin = win_node
+                # Try to locate npm CLI
+                win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
+                if os.path.isfile(win_npm):
+                    npm_bin = win_npm
+
+        # Run npm install
+        print("[INFO] Running npm install...")
+        if npm_bin.endswith("npm-cli.js"):
+            _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+        else:
+            _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+
+        # Download Chromium (Puppeteer postinstall)
+        print("[INFO] Downloading Chromium (Puppeteer)...")
+        install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
+        if os.path.isfile(install_js):
+            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+        else:
+            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
+            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+
+        # Run npm run build
+        print("[INFO] Compiling WPPConnect Server...")
+        if npm_bin.endswith("npm-cli.js"):
+            _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+        else:
+            _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+
+        print("[OK] WPPConnect Server dependencies installed and built successfully.")
+
+    except Exception as e:
+        print(f"[ERROR] Node.js dependencies installation/build failed: {e}")
+        print("Please resolve the error above or install manually by running:")
+        print(f"  cd {CLIENT_API_DIR}")
+        print("  npm install")
+        print("  npm run build")
+
+    # 2. Linux OS dependencies installation (Debian/Ubuntu)
+    if not is_windows:
+        print("\n[INFO] Detecting Linux OS and installing system dependencies for Chromium...")
+        # Check if apt-get is available
+        import shutil
+        if shutil.which("apt-get"):
+            # Check if running as root or has sudo
+            try:
+                getuid = os.getuid
+            except AttributeError:
+                getuid = lambda: -1
+            is_root = getuid() == 0
+            apt_cmd = ["apt-get", "update"]
+            install_cmd = [
+                "apt-get", "install", "-y", "--no-install-recommends",
+                "libnss3", "libatk1.0-0", "libatk-bridge2.0-0", "libcups2",
+                "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1",
+                "libxrandr2", "libgbm1", "libasound2", "libpango-1.0-0",
+                "libpangocairo-1.0-0", "libxshmfence1"
+            ]
+            if not is_root:
+                if shutil.which("sudo"):
+                    print("[INFO] Requesting root privileges via sudo for apt-get...")
+                    apt_cmd = ["sudo"] + apt_cmd
+                    install_cmd = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive"] + install_cmd
+                else:
+                    print("[WARNING] Not running as root and sudo is not available. Please install system dependencies manually:")
+                    print("  apt-get update && apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libpangocairo-1.0-0 libxshmfence1")
+                    apt_cmd = None
+
+            if apt_cmd:
+                try:
+                    # Set noninteractive environment variable
+                    os.environ["DEBIAN_FRONTEND"] = "noninteractive"
+                    print("[INFO] Updating package lists...")
+                    subprocess.run(apt_cmd, check=True)
+                    print("[INFO] Installing system libraries for Chrome/Puppeteer...")
+                    subprocess.run(install_cmd, check=True)
+                    print("[OK] Linux system dependencies for Chromium installed successfully!")
+                except Exception as e:
+                    print(f"[WARNING] Failed to automatically install system packages: {e}")
+                    print("Please install them manually using:")
+                    print("  sudo apt-get update && sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libpangocairo-1.0-0 libxshmfence1")
+        else:
+            print("[INFO] Package manager apt-get not found (non-Debian/Ubuntu system).")
+            print("Please ensure your system has all required Chromium dependencies installed:")
+            print("https://pptr.dev/troubleshooting#chrome-headless-doesnt-launch-on-unix")
 
 
 if __name__ == "__main__":
