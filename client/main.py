@@ -5612,8 +5612,17 @@ class MainWindow(wx.Frame):
         if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
             return
             
-        # Guard against corrupt self-mappings
-        if self._is_self_jid(lid_jid) or self._is_self_jid(phone_jid):
+        # Guard against corrupt self-mappings.
+        # Special case: if lid_jid is definitively our own LID (my_lid), we know
+        # phone_jid is also ours — phone number format differences can make
+        # _is_self_jid() return False for the phone side even when they match.
+        _my_lid = getattr(self, "my_lid", "")
+        if _my_lid and lid_jid == _my_lid:
+            # User's own LID→phone mapping: always valid, update my_jid if format differs.
+            if not self._is_self_jid(phone_jid):
+                logging.info(f"[LID Mapping] Updating my_jid to {phone_jid} (format differs from {getattr(self, 'my_jid', '')})")
+                self.my_jid = phone_jid
+        elif self._is_self_jid(lid_jid) or self._is_self_jid(phone_jid):
             if not (self._is_self_jid(lid_jid) and self._is_self_jid(phone_jid)):
                 logging.warning(f"[LID Mapping] Blocked corrupt self-mapping attempt: {lid_jid} <-> {phone_jid}")
                 return
@@ -6202,10 +6211,19 @@ class MainWindow(wx.Frame):
                 logging.warning("[clear_chat] Request failed for %s: %s", jid, exc)
         threading.Thread(target=_api, daemon=True).start()
 
+    def _resolve_jid_for_chat_state(self, jid: str) -> str:
+        """Resolve @lid to phone JID and convert to @c.us for WPPConnect chat-state endpoints."""
+        resolved = jid
+        if resolved.endswith("@lid"):
+            resolved = getattr(self, "_lid_to_phone", {}).get(resolved, resolved)
+        return resolved.replace("@s.whatsapp.net", "@c.us")
+
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
         """Notify WPPConnect that the user started or stopped typing."""
         def _api():
-            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            phone = self._resolve_jid_for_chat_state(jid)
+            if phone.endswith("@lid"):
+                return  # unresolved @lid — skip silently
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/typing"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
@@ -6222,7 +6240,9 @@ class MainWindow(wx.Frame):
     def send_recording_status(self, jid: str, value: bool, is_group: bool = False):
         """Notify WPPConnect that the user started or stopped recording audio."""
         def _api():
-            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            phone = self._resolve_jid_for_chat_state(jid)
+            if phone.endswith("@lid"):
+                return  # unresolved @lid — skip silently
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/recording"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
@@ -6896,7 +6916,7 @@ class MainWindow(wx.Frame):
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                content = "🚫 Mensagem apagada"
+                content = "Mensagem apagada"
             else:
                 content = "⚙️ Mensagem do sistema"
         else:
@@ -6941,6 +6961,95 @@ class MainWindow(wx.Frame):
             parts.append(time_str)
         return " ".join(parts)
 
+    def _refresh_archived_chats_in_ui(self, arch_focused_jid: "str | None" = None):
+        """Update the archived conversations list using SetItem when possible.
+
+        Avoids DeleteAllItems() when JID order/count is unchanged so the
+        archived panel's scroll position and focus are preserved.
+        """
+        if not hasattr(self, "archived_conversations_panel"):
+            return
+        panel = self.archived_conversations_panel
+        arch_full_chats = list(getattr(panel, '_all_chats_list', panel.chats_list))
+        arch_full_names = list(getattr(panel, '_all_chat_names', panel.chat_names))
+        arch_lst = panel.conversations_list
+
+        new_arch_chats: list = []
+        new_arch_names: list = []
+        new_arch_texts: list = []
+        for i, chat in enumerate(arch_full_chats):
+            name = arch_full_names[i] if i < len(arch_full_names) else ""
+            unread = int(chat.get("unreadCount") or 0)
+            unread_str = (
+                f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+                if unread > 0 else ""
+            )
+            preview = self._last_msg_preview(chat)
+            item_text = name + unread_str
+            if item_text and preview:
+                item_text += f" {preview}"
+            new_arch_chats.append(chat)
+            new_arch_names.append(name)
+            new_arch_texts.append(item_text)
+
+        new_arch_jids = [c.get("remoteJid", "") for c in new_arch_chats]
+        _arch_displayed_jids = getattr(panel, '_displayed_jids', None)
+
+        if (
+            _arch_displayed_jids is not None
+            and _arch_displayed_jids == new_arch_jids
+            and arch_lst.GetItemCount() == len(new_arch_jids)
+        ):
+            for idx, new_text in enumerate(new_arch_texts):
+                try:
+                    if arch_lst.GetItemText(idx, 0) != new_text:
+                        arch_lst.SetItem(idx, 0, new_text)
+                except Exception:
+                    arch_lst.SetItem(idx, 0, new_text)
+            panel.chats_list = new_arch_chats
+            panel.chat_names = new_arch_names
+            return
+
+        arch_list_has_focus = (wx.Window.FindFocus() == arch_lst)
+        arch_fi = arch_lst.GetFocusedItem()
+        if arch_fi != -1:
+            try:
+                arch_lst.SetItemState(arch_fi, 0, wx.LIST_STATE_FOCUSED)
+            except Exception:
+                pass
+        arch_lst.DeleteAllItems()
+        for item_text in new_arch_texts:
+            arch_lst.Append((item_text,))
+        panel.chats_list = new_arch_chats
+        panel.chat_names = new_arch_names
+        panel._displayed_jids = new_arch_jids
+
+        if new_arch_chats:
+            target_idx = -1
+            if arch_focused_jid:
+                for i, chat in enumerate(new_arch_chats):
+                    if chat.get("remoteJid") == arch_focused_jid:
+                        target_idx = i
+                        break
+            if target_idx != -1:
+                if arch_list_has_focus and arch_lst.GetFocusedItem() != target_idx:
+                    arch_lst.Focus(target_idx)
+                if not arch_lst.IsSelected(target_idx):
+                    arch_lst.Select(target_idx)
+                arch_lst.EnsureVisible(target_idx)
+            elif not getattr(self, "_initial_sync_running", False):
+                last_jid = getattr(panel, "_last_open_jid", "")
+                target_idx = 0
+                if last_jid:
+                    for i, chat in enumerate(new_arch_chats):
+                        if chat.get("remoteJid") == last_jid:
+                            target_idx = i
+                            break
+                if arch_list_has_focus:
+                    arch_lst.Focus(target_idx)
+                arch_lst.Select(target_idx)
+                arch_lst.EnsureVisible(target_idx)
+
     def add_chats_to_ui(self):
         """Rebuild the conversations list from the current chats data.
 
@@ -6959,25 +7068,14 @@ class MainWindow(wx.Frame):
         full_names = list(getattr(self.conversations_panel, '_all_chat_names',
                                   self.conversations_panel.chat_names))
 
-        displayed_chats: list = []
-        displayed_names: list = []
-
         lst = self.conversations_panel.conversations_list
-        # Recover the focused JID that _apply_chat_lists() preserved before it
-        # overwrote chats_list with the new reordered list.  Using focused_idx
-        # directly against the (now-updated) chats_list would map to the wrong
-        # chat after any reordering and send focus to the beginning.
+
+        # Save focused JID before any potential modification (used by both paths).
         focused_idx = lst.GetFocusedItem()
         focused_jid = getattr(self.conversations_panel, '_preserved_focused_jid', None)
         self.conversations_panel._preserved_focused_jid = None  # consume
         if focused_jid is None and focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
             focused_jid = self.conversations_panel.chats_list[focused_idx].get("remoteJid")
-        if focused_idx != -1:
-            try:
-                # Clear focus state from this item before deleting to prevent NVDA COMError/freeze
-                lst.SetItemState(focused_idx, 0, wx.LIST_STATE_FOCUSED)
-            except Exception:
-                pass
 
         # Save currently focused archived chat JID if archived panel is present
         arch_focused_jid = None
@@ -6988,15 +7086,8 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel._preserved_focused_jid = None  # consume
             if arch_focused_jid is None and arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
                 arch_focused_jid = self.archived_conversations_panel.chats_list[arch_focused_idx].get("remoteJid")
-            if arch_focused_idx != -1:
-                try:
-                    arch_lst.SetItemState(arch_focused_idx, 0, wx.LIST_STATE_FOCUSED)
-                except Exception:
-                    pass
 
-        # ── Content fingerprint: skip full rebuild when nothing visible changed ──
-        # This prevents NVDA from re-reading the current item on every socket
-        # event and eliminates idle CPU from constant DeleteAllItems() calls.
+        # ── Content fingerprint: skip rebuild when nothing visible changed ──
         _fp_rows: list[tuple] = []
         for _i, _chat in enumerate(full_chats):
             _jid  = _chat.get("remoteJid", "")
@@ -7014,60 +7105,103 @@ class MainWindow(wx.Frame):
             _fp_rows.append((_jid, _nm, _unrd, _lid))
         _fp = hash((conv_filter, search, tuple(_fp_rows)))
         if _fp == getattr(self, "_chats_ui_fp", None):
-            return  # visible list unchanged — skip expensive rebuild
+            return  # visible list unchanged — skip rebuild entirely
         self._chats_ui_fp = _fp
 
+        # Pre-compute the new display list (filtering + item text) so we can
+        # choose between a lightweight SetItem path and a full rebuild.
+        def _build_item_text(chat, name):
+            chat_jid = chat.get("remoteJid", "")
+            unread = int(chat.get("unreadCount") or 0)
+            unread_str = (
+                f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+                if unread > 0 else ""
+            )
+            preview = self._last_msg_preview(chat)
+            text = name + unread_str
+            if preview:
+                text += f" {preview}"
+            chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
+            if chat_jid_norm:
+                presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
+                if presence_label:
+                    text += f" {presence_label}"
+            if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
+                text += f" ({self.i18n.t('muted')})"
+            return text
+
+        displayed_chats: list = []
+        displayed_names: list = []
+        new_item_texts: list = []
+        for i, chat in enumerate(full_chats):
+            name     = full_names[i]
+            chat_jid = chat.get("remoteJid", "")
+            if conv_filter == 'unread' and int(chat.get("unreadCount") or 0) == 0:
+                continue
+            if conv_filter == 'groups' and not chat_jid.endswith("@g.us"):
+                continue
+            if conv_filter == 'individual' and chat_jid.endswith("@g.us"):
+                continue
+            if search and search not in name.lower():
+                continue
+            displayed_chats.append(chat)
+            displayed_names.append(name)
+            new_item_texts.append(_build_item_text(chat, name))
+
+        # ── SetItem path: same JIDs in same order — only text may have changed ──
+        # Avoids DeleteAllItems() entirely, keeping scroll position and focus intact.
+        # NOTE: chats_list was already overwritten by _apply_chat_lists before this
+        # function runs, so we track what's truly rendered via _displayed_jids.
+        new_jids = [c.get("remoteJid", "") for c in displayed_chats]
+        _displayed_jids = getattr(self.conversations_panel, '_displayed_jids', None)
+        if (
+            _displayed_jids is not None
+            and _displayed_jids == new_jids
+            and lst.GetItemCount() == len(new_jids)
+        ):
+            for idx, new_text in enumerate(new_item_texts):
+                try:
+                    if lst.GetItemText(idx, 0) != new_text:
+                        lst.SetItem(idx, 0, new_text)
+                except Exception:
+                    lst.SetItem(idx, 0, new_text)
+            self.conversations_panel.chats_list = displayed_chats
+            self.conversations_panel.chat_names = displayed_names
+            # _displayed_jids stays the same (JIDs didn't change)
+            # Refresh archived panel via the same SetItem logic
+            if hasattr(self, "archived_conversations_panel"):
+                self._refresh_archived_chats_in_ui(arch_focused_jid)
+            return
+
+        # ── Full rebuild path: JID order or count changed ────────────────────
         focus_allowed = self._allow_ui_focus_changes()
         _lst_had_focus = (wx.Window.FindFocus() is lst)
+        if focused_idx != -1:
+            try:
+                # Clear focus state before DeleteAllItems to prevent NVDA COMError/freeze
+                lst.SetItemState(focused_idx, 0, wx.LIST_STATE_FOCUSED)
+            except Exception:
+                pass
+        if hasattr(self, "archived_conversations_panel"):
+            if arch_focused_idx != -1:
+                try:
+                    self.archived_conversations_panel.conversations_list.SetItemState(
+                        arch_focused_idx, 0, wx.LIST_STATE_FOCUSED
+                    )
+                except Exception:
+                    pass
         lst.Freeze()
         try:
             lst.DeleteAllItems()
-            for i, chat in enumerate(full_chats):
-                name     = full_names[i]
-                chat_jid = chat.get("remoteJid", "")
-                # ── Conversation filter ───────────────────────────────────────
-                if conv_filter == 'unread' and int(chat.get("unreadCount") or 0) == 0:
-                    continue
-                if conv_filter == 'groups' and not chat_jid.endswith("@g.us"):
-                    continue
-                if conv_filter == 'individual' and chat_jid.endswith("@g.us"):
-                    continue
-                # ── Search filter ─────────────────────────────────────────────
-                if search and search not in name.lower():
-                    continue
-                unread = int(chat.get("unreadCount") or 0)
-                if unread > 0:
-                    unread_str = (
-                        f" {unread} "
-                        + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
-                    )
-                else:
-                    unread_str = ""
-                preview = self._last_msg_preview(chat)
-                item_text = name + unread_str
-                if preview:
-                    item_text += f" {preview}"
-                # Show typing/recording indicator when any participant is active
-                chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
-                if chat_jid_norm:
-                    presence_label = self._presence_label_for_chat(
-                        chat_jid_norm, chat_jid_norm.endswith("@g.us")
-                    )
-                    if presence_label:
-                        item_text += f" {presence_label}"
-                # Show mute indicator
-                if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
-                    item_text += f" ({self.i18n.t('muted')})"
+            for item_text in new_item_texts:
                 lst.Append((item_text,))
-                displayed_chats.append(chat)
-                displayed_names.append(name)
         finally:
             lst.Thaw()
 
-        # Keep backing lists in sync with exactly what is displayed so that
-        # on_conversation_selected_by_index(idx) always maps correctly.
+        # Keep backing lists in sync with exactly what is displayed.
         self.conversations_panel.chats_list = displayed_chats
         self.conversations_panel.chat_names = displayed_names
+        self.conversations_panel._displayed_jids = new_jids
 
         # Restore selection / focus after DeleteAllItems() clears everything.
         # Prefer the previously focused item if it is still in the list to prevent jumping.
@@ -7146,61 +7280,7 @@ class MainWindow(wx.Frame):
 
         # Also refresh the archived panel if present
         if hasattr(self, "archived_conversations_panel"):
-            panel = self.archived_conversations_panel
-            arch_full_chats = list(getattr(panel, '_all_chats_list', panel.chats_list))
-            arch_full_names = list(getattr(panel, '_all_chat_names', panel.chat_names))
-            arch_displayed_chats: list = []
-            arch_displayed_names: list = []
-            panel.conversations_list.DeleteAllItems()
-            for i, chat in enumerate(arch_full_chats):
-                name = arch_full_names[i]
-                unread = int(chat.get("unreadCount") or 0)
-                if unread > 0:
-                    unread_str = (
-                        f" {unread} "
-                        + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
-                    )
-                else:
-                    unread_str = ""
-                preview = self._last_msg_preview(chat)
-                item_text = name + unread_str
-                if preview:
-                    item_text += f" {preview}"
-                panel.conversations_list.Append((item_text,))
-                arch_displayed_chats.append(chat)
-                arch_displayed_names.append(name)
-            panel.chats_list = arch_displayed_chats
-            panel.chat_names = arch_displayed_names
-            
-            arch_list_has_focus = (wx.Window.FindFocus() == panel.conversations_list)
-            
-            # Keep focus on archived panel too
-            if arch_displayed_chats:
-                target_idx = -1
-                if arch_focused_jid:
-                    for i, chat in enumerate(arch_displayed_chats):
-                        if chat.get("remoteJid") == arch_focused_jid:
-                            target_idx = i
-                            break
-                if target_idx != -1:
-                    if arch_list_has_focus:
-                        if panel.conversations_list.GetFocusedItem() != target_idx:
-                            panel.conversations_list.Focus(target_idx)
-                    if not panel.conversations_list.IsSelected(target_idx):
-                        panel.conversations_list.Select(target_idx)
-                    panel.conversations_list.EnsureVisible(target_idx)
-                elif not getattr(self, "_initial_sync_running", False):
-                    last_jid   = getattr(panel, "_last_open_jid", "")
-                    target_idx = 0
-                    if last_jid:
-                        for i, chat in enumerate(arch_displayed_chats):
-                            if chat.get("remoteJid") == last_jid:
-                                target_idx = i
-                                break
-                    if arch_list_has_focus:
-                        panel.conversations_list.Focus(target_idx)
-                    panel.conversations_list.Select(target_idx)
-                    panel.conversations_list.EnsureVisible(target_idx)
+            self._refresh_archived_chats_in_ui(arch_focused_jid)
 
     def generate_secret_key(self):
         key_file = data_path("secret.key")

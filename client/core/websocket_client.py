@@ -384,6 +384,9 @@ class WebSocketClient:
                     return "available"
                 if s == "offline":
                     return "unavailable"
+                # WPPConnect/WhatsApp Web uses "typing" where Baileys uses "composing"
+                if s == "typing":
+                    return "composing"
                 return s
 
             timestamp = info.get("t")
@@ -471,11 +474,12 @@ class WebSocketClient:
                         except Exception:
                             pass
                     continue
-                if contact.get("pushName"):
+                if contact.get("pushName") and contact["pushName"] != existing.get("pushName"):
                     existing["pushName"] = contact["pushName"]
                     updated = True
-                if contact.get("profilePicUrl"):
+                if contact.get("profilePicUrl") and contact["profilePicUrl"] != existing.get("profilePicUrl"):
                     existing["profilePicUrl"] = contact["profilePicUrl"]
+                    updated = True
                 if updated and hasattr(self.main_window, "db"):
                     try:
                         self.main_window.db.upsert_contact(jid, existing)

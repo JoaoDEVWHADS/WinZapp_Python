@@ -140,12 +140,14 @@ def _setup_argtypes(lib: "ctypes.CDLL") -> None:
 
 
 def _ctl_set(lib, enc, request: int, value: int) -> None:
-    lib.opus_encoder_ctl(enc, ctypes.c_int(request), ctypes.c_int(value))
+    # Wrap enc in c_void_p so ctypes doesn't try to fit a 64-bit pointer into
+    # a 32-bit c_int when argtypes is None (variadic function).
+    lib.opus_encoder_ctl(ctypes.c_void_p(enc), ctypes.c_int(request), ctypes.c_int(value))
 
 
 def _ctl_get(lib, enc, request: int) -> int:
     val = ctypes.c_int(0)
-    lib.opus_encoder_ctl(enc, ctypes.c_int(request), ctypes.byref(val))
+    lib.opus_encoder_ctl(ctypes.c_void_p(enc), ctypes.c_int(request), ctypes.byref(val))
     return val.value
 
 
