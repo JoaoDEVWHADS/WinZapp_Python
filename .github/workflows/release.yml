@@ -20,8 +20,9 @@ jobs:
         uses: actions/checkout@v4
 
       # GCC and windres (from UCRT64 binutils) are required by build.py to compile
-      # the C installer/uninstaller.  The opus package provides libopus-0.dll.
-      - name: Set up MSYS2 (GCC + windres + opus)
+      # the C installer/uninstaller.  libopus-0.dll is committed to client/lib/
+      # so no opus package is needed here.
+      - name: Set up MSYS2 (GCC + windres)
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -29,25 +30,12 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
-            mingw-w64-ucrt-x86_64-opus
 
-      # Use the MSYS2 shell to resolve /ucrt64/bin to its real Windows path via
-      # cygpath — this avoids hard-coding C:\msys64 which can vary by runner
-      # image.  The resolved path is stored in $GITHUB_OUTPUT for the next step.
-      # libopus-0.dll is also copied here using MSYS2-internal paths.
-      - name: Export UCRT64 bin path and copy libopus-0.dll
-        id: ucrt64
-        shell: msys2 {0}
-        run: |
-          echo "bin=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_OUTPUT"
-          mkdir -p client/lib
-          cp /ucrt64/bin/libopus-0.dll client/lib/libopus-0.dll
-          echo "libopus-0.dll: $(stat -c%s client/lib/libopus-0.dll) bytes"
-
-      # Add the UCRT64 bin directory (resolved above) to the Windows PATH so that
-      # gcc and windres are available when build.py runs in PowerShell.
+      # cygpath resolves /ucrt64/bin to the real Windows path regardless of
+      # where the runner installed MSYS2 (avoids hard-coding C:\msys64).
       - name: Add MSYS2 UCRT64 bin to Windows PATH
-        run: echo "${{ steps.ucrt64.outputs.bin }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: msys2 {0}
+        run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
