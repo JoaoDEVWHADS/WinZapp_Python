@@ -6095,9 +6095,12 @@ class MainWindow(wx.Frame):
         }
         try:
             r = requests.get(url, headers=headers, timeout=10)
+            logging.info(f"[get_group_info] status={r.status_code} for {jid}")
             if r.status_code in (200, 201):
                 res_data = r.json() or {}
-                return res_data.get("response", {})
+                response = res_data.get("response") or {}
+                logging.info(f"[get_group_info] response type={type(response).__name__} keys={list(response.keys()) if isinstance(response, dict) else response}")
+                return response if isinstance(response, dict) else {}
         except Exception as e:
             logging.error(f"[get_group_info] error: {e}")
         return {}
