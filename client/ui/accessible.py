@@ -212,9 +212,11 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
 
     def InsertItem(self, pos, text):
         """DataViewListCtrl only supports append, so we rebuild the list to insert at pos.
-        Saves and restores the selected row (adjusted for the insertion) to prevent cursor jumping."""
+        Saves and restores the selected row and OS-level focus to prevent cursor jumping and
+        focus loss when a new message arrives while the user is navigating with arrow keys."""
         count = self.GetItemCount()
         selected = self.GetSelectedRow()
+        had_focus = self.HasFocus()
         values = [self.GetValue(i, 0) for i in range(count)]
         values.insert(pos, text)
         self.DeleteAllItems()
@@ -227,15 +229,19 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
             item = self.RowToItem(restored)
             if item.IsOk():
                 super().EnsureVisible(item)
+        if had_focus:
+            self.SetFocus()
         return pos
 
     def DeleteItem(self, row):
         """DataViewListCtrl has no native delete-by-row, so we rebuild the list.
-        Saves and restores the selected row (adjusted for the deletion) to prevent cursor jumping."""
+        Saves and restores the selected row and OS-level focus to prevent cursor jumping and
+        focus loss when the unread separator is dismissed."""
         count = self.GetItemCount()
         if row < 0 or row >= count:
             return
         selected = self.GetSelectedRow()
+        had_focus = self.HasFocus()
         values = [self.GetValue(i, 0) for i in range(count) if i != row]
         self.DeleteAllItems()
         for v in values:
@@ -252,6 +258,8 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
             item = self.RowToItem(restored)
             if item.IsOk():
                 super().EnsureVisible(item)
+        if had_focus:
+            self.SetFocus()
 
     def GetFocusedItem(self):
         return self.GetSelectedRow()
