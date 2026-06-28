@@ -52,7 +52,7 @@ jobs:
         run: |
           python -m venv venv
           venv\Scripts\pip install --upgrade pip --quiet
-          venv\Scripts\pip install -r requirements.txt --quiet
+          venv\Scripts\pip install -r requirements-dev.txt --quiet
           venv\Scripts\pip install pyinstaller --quiet
 
       # Cache node_modules to avoid re-downloading hundreds of packages on every run.
