@@ -671,7 +671,7 @@ class MainWindow(wx.Frame):
                 "",
                 "Agradecimentos especiais:",
                 "Wendrill Aksenow Brandão: pela tradução do programa WinZapp para Português de Portugal.",
-                Juan Mathews Rebelo Santos, João Jorge e Gustavo Barrios: principais colaboradores.
+                "Juan Mathews Rebelo Santos, João Jorge e Gustavo Barrios: principais colaboradores."
                 "Fabiano Ferreira, Tadeu Junior, Wagner Soares da Silva, Eduardo Ferreira, Elias Junior e todos da comunidade que ajudaram, seja testando, implementando melhorias ou dando sugestões / relatórios de bugs.",
                 "",
                 f"Versão atual: {__version__}.",
