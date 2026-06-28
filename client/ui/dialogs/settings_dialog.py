@@ -251,14 +251,35 @@ class SettingsDialog(wx.Dialog):
         self._conn_page = wx.Panel(self._notebook)
         conn_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        conn_sizer.Add(
-            wx.StaticText(self._conn_page, label=i18n.t("wpp_port_label")),
-            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        self._custom_api_check = wx.CheckBox(
+            self._conn_page, label=i18n.t("connection_custom_api_label")
         )
+        conn_sizer.Add(self._custom_api_check, 0, wx.ALL, 8)
+
+        self._server_label = wx.StaticText(self._conn_page, label=i18n.t("connection_server_label"))
+        conn_sizer.Add(self._server_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._server_field = wx.TextCtrl(self._conn_page, style=wx.TE_DONTWRAP)
+        conn_sizer.Add(self._server_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._ws_server_label = wx.StaticText(self._conn_page, label=i18n.t("connection_ws_server_label"))
+        conn_sizer.Add(self._ws_server_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._ws_server_field = wx.TextCtrl(self._conn_page, style=wx.TE_DONTWRAP)
+        conn_sizer.Add(self._ws_server_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._port_label = wx.StaticText(self._conn_page, label=i18n.t("wpp_port_label"))
+        conn_sizer.Add(self._port_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
         self._port_field = wx.TextCtrl(self._conn_page, style=wx.TE_DONTWRAP)
         conn_sizer.Add(self._port_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._api_key_label = wx.StaticText(self._conn_page, label=i18n.t("connection_api_key_label"))
+        conn_sizer.Add(self._api_key_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._api_key_field = wx.TextCtrl(self._conn_page, style=wx.TE_DONTWRAP)
+        conn_sizer.Add(self._api_key_field, 0, wx.EXPAND | wx.ALL, 8)
+
         self._conn_page.SetSizer(conn_sizer)
         self._notebook.AddPage(self._conn_page, i18n.t("tab_connection"))
+
+        self._custom_api_check.Bind(wx.EVT_CHECKBOX, self._on_custom_api_toggle)
 
         # ── Audio playback tab ───────────────────────────────────────────────
         self._audio_page = wx.Panel(self._notebook)
@@ -351,7 +372,31 @@ class SettingsDialog(wx.Dialog):
         else:
             self._voice_focus_send_rb.SetValue(True)
 
+        conn = self.main_window.settings.get("connection", {})
+        custom_api = conn.get("wpp_custom_api", False)
+        self._custom_api_check.SetValue(custom_api)
+
+        server = conn.get("wpp_server", "http://127.0.0.1")
+        self._server_field.SetValue(server)
+
+        ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
+        self._ws_server_field.SetValue(ws_server)
+
         self._port_field.SetValue(str(self.main_window.wpp_port))
+
+        api_key = conn.get("wpp_api_key", "wz-local-api-key")
+        self._api_key_field.SetValue(api_key)
+
+        self._update_fields_state()
+
+    def _update_fields_state(self):
+        is_custom = self._custom_api_check.GetValue()
+        self._server_field.Enable(is_custom)
+        self._ws_server_field.Enable(is_custom)
+        self._api_key_field.Enable(is_custom)
+
+    def _on_custom_api_toggle(self, event):
+        self._update_fields_state()
 
         saved_speed = self.main_window.settings.get("audio_playback", {}).get("audio_default_speed", 1.0)
         try:
@@ -391,6 +436,28 @@ class SettingsDialog(wx.Dialog):
             )
             self._port_field.SetFocus()
             return False
+
+        if self._custom_api_check.GetValue():
+            server_str = self._server_field.GetValue().strip()
+            ws_server_str = self._ws_server_field.GetValue().strip()
+            if not server_str:
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_server_url"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                self._server_field.SetFocus()
+                return False
+            if not ws_server_str:
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_ws_server_url"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                self._ws_server_field.SetFocus()
+                return False
         return True
 
     def _apply_values(self) -> bool:
@@ -423,10 +490,26 @@ class SettingsDialog(wx.Dialog):
             "voice_record_focus"
         ] = voice_record_focus
 
-        # Port
+        # Connection settings
+        custom_api = self._custom_api_check.GetValue()
+        self.main_window.settings.setdefault("connection", {})["wpp_custom_api"] = custom_api
+        self.main_window.wpp_custom_api = custom_api
+
+        server = self._server_field.GetValue().strip()
+        self.main_window.settings.setdefault("connection", {})["wpp_server"] = server
+        self.main_window.wpp_server = server
+
+        ws_server = self._ws_server_field.GetValue().strip()
+        self.main_window.settings.setdefault("connection", {})["wpp_ws_server"] = ws_server
+        self.main_window.wpp_ws_server = ws_server
+
         port = int(self._port_field.GetValue().strip())
         self.main_window.settings.setdefault("connection", {})["wpp_port"] = port
         self.main_window.wpp_port = port
+
+        api_key = self._api_key_field.GetValue().strip()
+        self.main_window.settings.setdefault("connection", {})["wpp_api_key"] = api_key
+        self.main_window.wpp_api_key = api_key
 
         # Sounds
         self.main_window.settings.setdefault("general", {})["sounds_enabled"] = (
@@ -530,6 +613,11 @@ class SettingsDialog(wx.Dialog):
         self._cancel_btn.SetLabel(i18n.t("cancel"))
         self._apply_btn.SetLabel(i18n.t("apply"))
         self._audio_speed_label.SetLabel(i18n.t("audio_speed_label"))
+        self._custom_api_check.SetLabel(i18n.t("connection_custom_api_label"))
+        self._server_label.SetLabel(i18n.t("connection_server_label"))
+        self._ws_server_label.SetLabel(i18n.t("connection_ws_server_label"))
+        self._port_label.SetLabel(i18n.t("wpp_port_label"))
+        self._api_key_label.SetLabel(i18n.t("connection_api_key_label"))
         # Regenerate speed labels — decimal separator may have changed with language
         cur_sel = self._audio_speed_combo.GetSelection()
         self._audio_speed_combo.Clear()
