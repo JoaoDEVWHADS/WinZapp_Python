@@ -760,6 +760,8 @@ class MainWindow(wx.Frame):
 
     def _apply_global_hotkey(self):
         """Register (or unregister) the global hotkey from settings."""
+        if not hasattr(self, "_hotkey_manager"):
+            return
         if self._hotkey_manager is not None:
             self._hotkey_manager.stop()
             self._hotkey_manager = None
@@ -2093,6 +2095,8 @@ class MainWindow(wx.Frame):
 
     def apply_language_changes(self):
         """Refresh all visible translatable text after a language change."""
+        if not hasattr(self, "navigation_panel"):
+            return
         self.navigation_panel.refresh_labels()
         self.conversations_panel.refresh_labels()
         if hasattr(self, "archived_conversations_panel"):
