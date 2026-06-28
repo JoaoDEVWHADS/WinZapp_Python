@@ -409,7 +409,7 @@ class MainWindow(wx.Frame):
         # Handle API execution configuration
         self.wpp_process = None
         if self.wpp_custom_api:
-            # Delete local node_modules to free space as requested
+            # Delete local node_modules and Puppeteer cache (Chrome) to free space
             node_modules_path = resource_path("api", "node_modules")
             if os.path.isdir(node_modules_path):
                 logging.info("MainWindow: Custom API enabled. Cleaning local node_modules...")
@@ -418,6 +418,15 @@ class MainWindow(wx.Frame):
                     shutil.rmtree(node_modules_path, ignore_errors=True)
                 except Exception as e:
                     logging.error("MainWindow: Failed to clean local node_modules: %s", e)
+
+            puppeteer_cache_path = resource_path("api", ".cache")
+            if os.path.isdir(puppeteer_cache_path):
+                logging.info("MainWindow: Custom API enabled. Cleaning local Puppeteer cache...")
+                try:
+                    import shutil
+                    shutil.rmtree(puppeteer_cache_path, ignore_errors=True)
+                except Exception as e:
+                    logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
         else:
             # Check and install API modules if needed (first run only)
             logging.info("MainWindow: Checking/installing API modules...")
