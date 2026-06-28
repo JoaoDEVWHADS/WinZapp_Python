@@ -97,15 +97,28 @@ SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
 # libopus-0.dll — required by client/core/ogg_opus.py for OGG Opus encoding.
-# The build searches for it in client/lib/ first, then the MSYS2 UCRT64 location
-# (set up by the GitHub Actions workflow / local MSYS2 installation).
-_OPUS_SEARCH = [
-    os.path.join(CLIENT_DIR, "lib", "libopus-0.dll"),
-    os.path.join(CLIENT_DIR, "lib", "opus.dll"),
-    r"C:\msys64\ucrt64\bin\libopus-0.dll",   # MSYS2 UCRT64 (CI + local devs)
-    r"C:\msys64\mingw64\bin\libopus-0.dll",  # MSYS2 MinGW64 fallback
-]
-OPUS_DLL = next((p for p in _OPUS_SEARCH if os.path.isfile(p)), None)
+# Searches client/lib/ first, then MSYS2, then system PATH (Chocolatey, vcpkg,
+# conda, manual installs), then common Chocolatey / scoop directories.
+def _find_opus_dll():
+    candidates = [
+        os.path.join(CLIENT_DIR, "lib", "libopus-0.dll"),
+        os.path.join(CLIENT_DIR, "lib", "opus.dll"),
+        r"C:\msys64\ucrt64\bin\libopus-0.dll",         # MSYS2 UCRT64 (CI + local)
+        r"C:\msys64\mingw64\bin\libopus-0.dll",         # MSYS2 MinGW64
+        r"C:\msys2\ucrt64\bin\libopus-0.dll",           # alternate MSYS2 root
+        r"C:\msys2\mingw64\bin\libopus-0.dll",
+        r"C:\ProgramData\chocolatey\bin\libopus-0.dll", # Chocolatey
+        r"C:\ProgramData\scoop\shims\libopus-0.dll",    # Scoop
+    ]
+    # Also search every directory on PATH for the DLL
+    path_env = os.environ.get("PATH", "")
+    for path_dir in path_env.split(os.pathsep):
+        if path_dir:
+            candidates.append(os.path.join(path_dir, "libopus-0.dll"))
+            candidates.append(os.path.join(path_dir, "opus.dll"))
+    return next((p for p in candidates if os.path.isfile(p)), None)
+
+OPUS_DLL = _find_opus_dll()
 
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {

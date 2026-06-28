@@ -3694,6 +3694,26 @@ class MainWindow(wx.Frame):
     def _apply_chat_lists(self, main_chats, main_names, arch_chats, arch_names):
         """Apply sorted chat lists to panels and refresh UI. Must run on main thread."""
         self.chat_names = main_names
+
+        # Save focused JIDs from the CURRENT (old) displayed lists BEFORE
+        # overwriting chats_list.  add_chats_to_ui() maps focused_idx (from
+        # the live ListCtrl) against chats_list to recover the JID — but
+        # chats_list is about to be replaced with a reordered copy, so
+        # focused_idx would point to the wrong chat after the assignment.
+        _panel = self.conversations_panel
+        _fi = _panel.conversations_list.GetFocusedItem()
+        _panel._preserved_focused_jid = (
+            _panel.chats_list[_fi].get("remoteJid")
+            if 0 <= _fi < len(_panel.chats_list) else None
+        )
+        if hasattr(self, "archived_conversations_panel"):
+            _ap = self.archived_conversations_panel
+            _afi = _ap.conversations_list.GetFocusedItem()
+            _ap._preserved_focused_jid = (
+                _ap.chats_list[_afi].get("remoteJid")
+                if 0 <= _afi < len(_ap.chats_list) else None
+            )
+
         # _all_chats_list / _all_chat_names always hold the full sorted list.
         # add_chats_to_ui() reads these to apply search / filter, then writes
         # back to chats_list / chat_names so indices stay consistent.
@@ -6943,11 +6963,16 @@ class MainWindow(wx.Frame):
         displayed_names: list = []
 
         lst = self.conversations_panel.conversations_list
-        # Save currently focused chat JID before clearing the list to preserve user focus
+        # Recover the focused JID that _apply_chat_lists() preserved before it
+        # overwrote chats_list with the new reordered list.  Using focused_idx
+        # directly against the (now-updated) chats_list would map to the wrong
+        # chat after any reordering and send focus to the beginning.
         focused_idx = lst.GetFocusedItem()
-        focused_jid = None
-        if focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
+        focused_jid = getattr(self.conversations_panel, '_preserved_focused_jid', None)
+        self.conversations_panel._preserved_focused_jid = None  # consume
+        if focused_jid is None and focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
             focused_jid = self.conversations_panel.chats_list[focused_idx].get("remoteJid")
+        if focused_idx != -1:
             try:
                 # Clear focus state from this item before deleting to prevent NVDA COMError/freeze
                 lst.SetItemState(focused_idx, 0, wx.LIST_STATE_FOCUSED)
@@ -6959,8 +6984,11 @@ class MainWindow(wx.Frame):
         if hasattr(self, "archived_conversations_panel"):
             arch_lst = self.archived_conversations_panel.conversations_list
             arch_focused_idx = arch_lst.GetFocusedItem()
-            if arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
+            arch_focused_jid = getattr(self.archived_conversations_panel, '_preserved_focused_jid', None)
+            self.archived_conversations_panel._preserved_focused_jid = None  # consume
+            if arch_focused_jid is None and arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
                 arch_focused_jid = self.archived_conversations_panel.chats_list[arch_focused_idx].get("remoteJid")
+            if arch_focused_idx != -1:
                 try:
                     arch_lst.SetItemState(arch_focused_idx, 0, wx.LIST_STATE_FOCUSED)
                 except Exception:
