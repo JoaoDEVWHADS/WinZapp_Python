@@ -28,7 +28,6 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
-    AccessibleMessagesList,
     CompatDataViewListCtrl,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
