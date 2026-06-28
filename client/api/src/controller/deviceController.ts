@@ -848,11 +848,11 @@ export async function deleteMessage(req: Request, res: Response) {
       deleteMediaInDevice
     );
     if (result) {
-      res
+      return res
         .status(200)
         .json({ status: 'success', response: { message: 'Message deleted' } });
     }
-    res.status(401).json({
+    return res.status(401).json({
       status: 'error',
       response: { message: 'Error unknown on delete message' },
     });
@@ -2210,6 +2210,80 @@ export async function getVotes(req: Request, res: Response) {
     res
       .status(500)
       .json({ status: 'error', message: 'Error on get votes', error: error });
+  }
+}
+export async function addNewContact(req: Request, res: Response) {
+  /**
+   * #swagger.tags = ["Contact"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.requestBody = {
+      required: true,
+      "@content": {
+        "application/json": {
+          schema: {
+            type: "object",
+            properties: {
+              phone: { type: "string" },
+              name: { type: "string" },
+              surname: { type: "string" },
+              syncToAddressbook: { type: "boolean" },
+            }
+          },
+          examples: {
+            "Default": {
+              value: {
+                phone: "5521999999999",
+                name: "John",
+                surname: "Doe",
+                syncToAddressbook: true,
+              }
+            },
+          }
+        }
+      }
+     }
+   */
+  const { phone, name, surname, syncToAddressbook } = req.body;
+  if (!phone || !name) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'phone and name are required',
+    });
+  }
+  const contactId = `${`${phone}`.replace(/\D/g, '')}@c.us`;
+  try {
+    // The wppconnect lib does not wrap WPP.contact.save, so evaluate it on the
+    // page directly. syncAddressBook=true asks WhatsApp to persist the contact
+    // to the device address book.
+    await (req.client as any).page.evaluate(
+      ({ contactId, firstName, lastName, sync }: any) =>
+        (window as any).WPP.contact.save(contactId, firstName, {
+          lastName: lastName,
+          syncAddressBook: sync,
+        }),
+      {
+        contactId,
+        firstName: name,
+        lastName: surname || '',
+        sync: syncToAddressbook !== false,
+      }
+    );
+    res
+      .status(200)
+      .json({ status: 'success', response: { message: 'Contact saved' } });
+  } catch (e) {
+    req.logger.error(e);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on add new contact',
+      error: `${e}`,
+    });
   }
 }
 export async function chatWoot(req: Request, res: Response): Promise<any> {

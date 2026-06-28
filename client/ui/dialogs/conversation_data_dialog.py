@@ -205,7 +205,10 @@ class ConversationDataDialog(wx.Dialog):
             return
         i18n  = self._i18n
         lines = []
-        name  = data.get("name") or self._name
+        # The API wraps the contact under "response"; the top-level "status" is
+        # the request result ("success"), not profile data — read from response.
+        cdata = data.get("response") if isinstance(data.get("response"), dict) else {}
+        name  = cdata.get("name") or cdata.get("formattedName") or data.get("name") or self._name
 
         # Resolve phone number: @lid JIDs are opaque device IDs, not phone
         # numbers — bridge them to the real phone JID via the reverse cache.
@@ -222,22 +225,25 @@ class ConversationDataDialog(wx.Dialog):
         if phone:
             lines.append(f"{i18n.t('phone_label')}: {phone}")
 
-        # fetchProfile returns {status: <bio/about text>} — not last-seen.
-        # Display it as the contact's WhatsApp "About" text.
-        about = str(data.get("status") or "").strip()
+        # About/bio text comes from the dedicated profile-status endpoint
+        # (exposed as "aboutText"). Never use the top-level "status", which is
+        # the API result word ("success").
+        about = str(data.get("aboutText") or "").strip()
         if about:
             lines.append(f"{i18n.t('about_label')}: {about}")
 
-        # Online / last-seen: read from the presence cache that is populated
-        # by presence.update WebSocket events.  The fetchProfile endpoint does
-        # not return these fields.
+        # Online / last-seen: prefer the live presence cache (populated by
+        # presence.update events); fall back to the last-seen fetched directly
+        # from the API (data["lastSeenTs"]) since presence events may not have
+        # arrived yet.
+        canonical = self._mw._normalize_jid(canonical)
         presence  = getattr(self._mw, "_presence_cache", {}).get(canonical, {})
         lkp       = presence.get("lastKnownPresence", "")
-        last_seen = presence.get("lastSeen")
+        last_seen = presence.get("lastSeen") or data.get("lastSeenTs")
+        from ui.conversations import _fmt_last_seen
         if lkp in ("available", "composing", "recording"):
             lines.append(i18n.t("online_status"))
-        elif lkp == "unavailable" and last_seen:
-            from ui.conversations import _fmt_last_seen
+        elif last_seen:
             ls_str = _fmt_last_seen(last_seen, i18n)
             if ls_str:
                 lines.append(ls_str)

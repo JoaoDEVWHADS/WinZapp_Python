@@ -4,6 +4,7 @@ import socketio
 import wx
 import requests
 from core.i18n import I18n
+from core.utils import looks_like_binary_blob, _slim_quoted_message
 
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
@@ -34,6 +35,8 @@ class WebSocketClient:
         self.sio.on("status-find", self.on_wpp_status_find)
         self.sio.on("onpresencechanged", self.on_wpp_presence_changed)
         self.sio.on("chats-update", self.on_chats_update)
+        self.sio.on("messages.update", self.on_messages_update)
+        self.sio.on("onreactionmessage", self.on_wpp_reaction)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
@@ -454,20 +457,30 @@ class WebSocketClient:
                     # entry now so future lookups can find it.
                     push = contact.get("pushName", "")
                     if push:
-                        self.main_window.contacts[jid] = {
+                        entry = {
                             "remoteJid": jid,
                             "pushName": push,
                             "profilePicUrl": contact.get("profilePicUrl") or "",
                             "type": "contact",
                             "isSaved": True,
                         }
+                        self.main_window.contacts[jid] = entry
                         updated = True
+                        try:
+                            self.main_window.db.upsert_contact(jid, entry)
+                        except Exception:
+                            pass
                     continue
                 if contact.get("pushName"):
                     existing["pushName"] = contact["pushName"]
                     updated = True
                 if contact.get("profilePicUrl"):
                     existing["profilePicUrl"] = contact["profilePicUrl"]
+                if updated and hasattr(self.main_window, "db"):
+                    try:
+                        self.main_window.db.upsert_contact(jid, existing)
+                    except Exception:
+                        pass
             if updated:
                 # Refresh conversation names shown in the UI (debounced —
                 # contacts.update can fire in bursts for many contacts at once)
@@ -628,6 +641,79 @@ class WebSocketClient:
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_message_received error: {e}")
 
+    def on_wpp_reaction(self, data):
+        """Handle the 'onreactionmessage' Socket.IO event.
+
+        WPPConnect emits reactions on a dedicated channel (NOT received-message),
+        with the shape: {id, msgId, reactionText, timestamp, ...}.
+          - `msgId` is the serialized id of the *reacted-to* message
+            (`<fromMe>_<chatId>_<id>[_<participant>]`) — a `true_` prefix means
+            the reaction targets one of YOUR messages.
+          - `id` is the serialized id of the reaction itself; its `<fromMe>`
+            prefix tells whether YOU are the one reacting, and its trailing
+            participant (in groups) identifies the reactor.
+
+        We rebuild the Baileys-style reactionMessage structure the rest of the
+        app expects and route it through on_new_message, which updates the live
+        display and fires a notification when someone reacts to your message.
+        """
+        try:
+            if not isinstance(data, dict):
+                return
+            payload = data.get("response") if isinstance(data.get("response"), dict) else data
+            emoji = (payload.get("reactionText") or payload.get("text") or "").strip()
+            target_serialized = payload.get("msgId")
+            if isinstance(target_serialized, dict):
+                target_serialized = target_serialized.get("_serialized", "")
+            reaction_serialized = payload.get("id")
+            if isinstance(reaction_serialized, dict):
+                reaction_serialized = reaction_serialized.get("_serialized", "")
+            if not target_serialized:
+                return
+
+            def _split(serialized):
+                parts = str(serialized).split("_")
+                from_me = parts[0] == "true"
+                chat = self._clean_jid(parts[1]) if len(parts) > 1 else ""
+                clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else "")
+                participant = self._clean_jid(parts[3]) if len(parts) > 3 else ""
+                return from_me, chat, clean_id, participant
+
+            target_from_me, chat_jid, target_id, _ = _split(target_serialized)
+            reactor_from_me, r_chat, reaction_id, reactor_participant = _split(
+                reaction_serialized or ""
+            )
+            if reactor_from_me:
+                return  # own reaction — applied optimistically, ignore the echo
+            if not chat_jid:
+                chat_jid = r_chat
+
+            normalized = {
+                "key": {
+                    "remoteJid": chat_jid,
+                    "fromMe": False,
+                    "id": reaction_id,
+                },
+                "pushName": "",
+                "message": {
+                    "reactionMessage": {
+                        "text": emoji,
+                        "key": {
+                            "id": target_id,
+                            "fromMe": target_from_me,
+                            "remoteJid": chat_jid,
+                        },
+                    }
+                },
+                "messageType": "reactionMessage",
+                "messageTimestamp": payload.get("timestamp") or int(time.time()),
+            }
+            if reactor_participant:
+                normalized["key"]["participant"] = reactor_participant
+            wx.CallAfter(self.main_window.on_new_message, normalized)
+        except Exception as e:
+            print(f"[WebSocketClient] on_wpp_reaction error: {e}")
+
     def on_wpp_ack(self, data):
         try:
             if not isinstance(data, dict):
@@ -728,9 +814,15 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "image":
+            # NOTE: do NOT fall back to wpp_msg["body"] for the caption — for
+            # media messages WPPConnect puts the base64 JPEG thumbnail in `body`,
+            # which then showed up as raw base64 instead of the caption.
+            img_caption = wpp_msg.get("caption", "") or ""
+            if looks_like_binary_blob(img_caption):
+                img_caption = ""
             message_content = {
                 "imageMessage": {
-                    "caption": wpp_msg.get("caption", "") or wpp_msg.get("body", ""),
+                    "caption": img_caption,
                     "url": wpp_msg.get("clientUrl", ""),
                     "mimetype": wpp_msg.get("mimetype", "image/jpeg")
                 }
@@ -743,9 +835,12 @@ class WebSocketClient:
                 seconds_val = int(float(dur)) if dur else 0
             except Exception:
                 seconds_val = 0
+            vid_caption = wpp_msg.get("caption", "") or ""
+            if looks_like_binary_blob(vid_caption):
+                vid_caption = ""
             message_content = {
                 "videoMessage": {
-                    "caption": wpp_msg.get("caption", ""),
+                    "caption": vid_caption,
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
                     "url": wpp_msg.get("clientUrl", ""),
@@ -968,7 +1063,13 @@ class WebSocketClient:
         ]
 
         if has_quote or mentioned_jids:
-            quoted_msg_payload = quoted_msg if isinstance(quoted_msg, dict) else {"conversation": quoted_body}
+            # Store only a slim quoted preview — never the full quoted message,
+            # whose thumbnail/mediaKey/directPath/hashes bloat messages.dat and
+            # slow conversation loading without ever being read by the UI.
+            if isinstance(quoted_msg, dict):
+                quoted_msg_payload = _slim_quoted_message(quoted_msg)
+            else:
+                quoted_msg_payload = {"conversation": (quoted_body or "")[:300]}
             context_info = {}
             if has_quote:
                 context_info["stanzaId"] = clean_quoted_id

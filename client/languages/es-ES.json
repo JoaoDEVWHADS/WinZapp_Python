@@ -129,6 +129,7 @@
     "mark_as_read": "Marcar como leída",
     "mark_as_unread": "Marcar como no leída",
     "mute_chat": "Silenciar",
+    "muted": "silenciado",
     "mute_1h": "1 hora",
     "mute_3h": "3 horas",
     "mute_8h": "8 horas",
@@ -166,6 +167,7 @@
     "delete_message": "Eliminar mensaje",
     "forward_message": "Reenviar",
     "star_message": "Destacar",
+    "unstar_message": "Quitar destacado",
     "contact_label": "Contacto",
     "converse": "Chatear",
     "group_overview_tab": "Resumen",
@@ -189,6 +191,7 @@
     "files_selected": "{count} archivo(s) seleccionado(s)",
     "delete_for_me": "Eliminar para mí",
     "delete_for_everyone": "Eliminar para todos",
+    "delete_for_everyone_failed": "No se pudo eliminar el mensaje para todos. Puede ser demasiado antiguo o no tienes permiso.",
     "edit_message": "Editar",
     "cancel_edit": "Cancelar edición",
     "sounds_label": "Activar &sonidos del programa",
@@ -205,6 +208,7 @@
     "notif_in_group": "{participant} en {group}",
     "notif_location": "Ubicación",
     "notif_reaction": "Reaccionó con {emoji}",
+    "notif_reaction_to_own": "reaccionó con {emoji} a: {text}",
     "notif_replied_to_you": "Respondió a ti",
     "notif_mentioned_you": "Te mencionó",
     "notif_mentioned_all": "Mencionó a todos",
@@ -417,5 +421,8 @@
     "mention_no_suggestions": "Sin sugerencias de mención",
     "mention_all_keyword": "todos",
     "mention_all_label": "@todos — Mencionar a todos",
-    "channel_read_only": "Este canal es de solo lectura"
+    "channel_read_only": "Este canal es de solo lectura",
+    "interactive_reply": "respuesta interactiva",
+    "list_reply": "selección de lista",
+    "interactive_message": "mensaje interactivo"
 }

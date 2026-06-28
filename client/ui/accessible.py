@@ -105,6 +105,38 @@ class AccessibleNewConversationButton(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+N")
 
 
+class AccessibleMessagesList(wx.Accessible):
+    """
+    Custom accessible for the conversation messages ListCtrl.
+
+    The native Win32 ListView control truncates each item's text to ~259
+    characters, both visually and in the MSAA name exposed to screen readers.
+    Long messages (e.g. a paragraph ending in a URL) therefore got cut off and
+    could only be read in full through the Alt+C popup.  This accessible returns
+    the complete, untruncated rendered text for each row so the screen reader
+    always announces the whole message.
+    """
+
+    def __init__(self, conversations_panel):
+        super().__init__()
+        self._panel = conversations_panel
+
+    def GetName(self, childId):
+        # childId 0 is the control itself; rows are 1-based.
+        if childId == 0:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        panel = self._panel
+        msgs = getattr(panel, "_sorted_messages", None)
+        idx = childId - 1
+        if not msgs or idx < 0 or idx >= len(msgs):
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        try:
+            text = panel._render_message_line(msgs[idx])
+        except Exception:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        return (wx.ACC_OK, text)
+
+
 class AccessibleAudioSlider(wx.Accessible):
     def __init__(self, conversations_panel):
         super().__init__()

@@ -129,6 +129,7 @@
     "mark_as_read": "Mark as read",
     "mark_as_unread": "Mark as unread",
     "mute_chat": "Mute",
+    "muted": "muted",
     "mute_1h": "1 hour",
     "mute_3h": "3 hours",
     "mute_8h": "8 hours",
@@ -166,6 +167,7 @@
     "delete_message": "Delete message",
     "forward_message": "Forward",
     "star_message": "Star",
+    "unstar_message": "Unstar",
     "contact_label": "Contact",
     "converse": "Chat",
     "group_overview_tab": "Overview",
@@ -189,6 +191,7 @@
     "files_selected": "{count} file(s) selected",
     "delete_for_me": "Delete for me",
     "delete_for_everyone": "Delete for everyone",
+    "delete_for_everyone_failed": "The message could not be deleted for everyone. It may be too old or you may not have permission.",
     "edit_message": "Edit",
     "cancel_edit": "Cancel editing",
     "sounds_label": "Enable &program sounds",
@@ -205,6 +208,7 @@
     "notif_in_group": "{participant} in {group}",
     "notif_location": "Location",
     "notif_reaction": "Reacted with {emoji}",
+    "notif_reaction_to_own": "reacted with {emoji} to: {text}",
     "notif_replied_to_you": "Replied to you",
     "notif_mentioned_you": "Mentioned you",
     "notif_mentioned_all": "Mentioned everyone",
@@ -417,5 +421,8 @@
     "mention_no_suggestions": "No mention suggestions",
     "mention_all_keyword": "all",
     "mention_all_label": "@all — Mention everyone",
-    "channel_read_only": "This channel is read-only"
+    "channel_read_only": "This channel is read-only",
+    "interactive_reply": "interactive reply",
+    "list_reply": "list selection",
+    "interactive_message": "interactive message"
 }

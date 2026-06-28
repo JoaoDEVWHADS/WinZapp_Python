@@ -24,7 +24,9 @@
       "PowerShell(cd C:\\\\WinZapp; Add-Type -AssemblyName System.IO.Compression.FileSystem; $z = [System.IO.Compression.ZipFile]::OpenRead\\(\"dist\\\\WinZapp.zip\"\\); $z.Entries | Sort-Object FullName | Select-Object -First 25 | ForEach-Object { $_.FullName }; Write-Host \"--- Total: $\\($z.Entries.Count\\) entries\"; $z.Dispose\\(\\))",
       "Bash(Get-ChildItem -Path \"C:\\\\WinZapp\" -Recurse -Depth 3 -Directory)",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "Bash(Sort-Object)"
+      "Bash(Sort-Object)",
+      "Read(//c/msys64/ucrt64/bin/**)",
+      "Read(//c/msys64/mingw64/bin/**)"
     ]
   }
 }

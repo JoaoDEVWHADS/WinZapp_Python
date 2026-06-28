@@ -17,7 +17,8 @@ from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages
+from core.database_bridge import DatabaseBridge
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
 import wx
@@ -112,9 +113,15 @@ class _HotkeyManager:
                 ("pt",      _POINT),
             ]
 
-        if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk):
-            print(f"[HotkeyManager] RegisterHotKey failed: {kernel32.GetLastError()}")
-            return
+        # MOD_NOREPEAT (0x4000) suppresses the flood of WM_HOTKEY messages that
+        # holding the key down would otherwise generate.
+        _MOD_NOREPEAT = 0x4000
+        if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod | _MOD_NOREPEAT, self._vk):
+            # Some keyboard layouts / older Windows builds reject MOD_NOREPEAT;
+            # fall back to a plain registration so the hotkey still works.
+            if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk):
+                print(f"[HotkeyManager] RegisterHotKey failed: {kernel32.GetLastError()}")
+                return
 
         msg = _MSG()
         while not self._stop.is_set():
@@ -665,7 +672,8 @@ class MainWindow(wx.Frame):
                 "",
                 "Agradecimentos especiais:",
                 "Wendrill Aksenow Brandão: pela tradução do programa WinZapp para Português de Portugal.",
-                "Fabiano Ferreira, Tadeu Junior, Wagner Soares da Silva, Ruan Matews Rebelo Santos e todos da comunidade que ajudaram, seja testando, implementando melhorias ou dando sugestões / relatórios de bugs.",
+                "Juan Mathews Rebelo Santos, João Jorge e Gustavo Barrios: principais colaboradores."
+                "Fabiano Ferreira, Tadeu Junior, Wagner Soares da Silva, Eduardo Ferreira, Elias Junior e todos da comunidade que ajudaram, seja testando, implementando melhorias ou dando sugestões / relatórios de bugs.",
                 "",
                 f"Versão atual: {__version__}.",
                 "Licenciado sob a licença GNU Lesser General Public License V3 (GPLV3).",
@@ -935,8 +943,29 @@ class MainWindow(wx.Frame):
         import ctypes
         hwnd = self.GetHandle()
         SW_RESTORE = 9
-        ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        user32 = ctypes.windll.user32
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        # SetForegroundWindow() alone silently fails when another application
+        # holds the foreground lock (Win32 foreground-stealing prevention). When
+        # that happened the window stayed hidden/behind and the global hotkey
+        # appeared "dead" until the app was restarted. Briefly attaching our
+        # input queue to the current foreground thread lifts the lock so the
+        # restore is reliable.
+        try:
+            kernel32 = ctypes.windll.kernel32
+            fg_hwnd = user32.GetForegroundWindow()
+            fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+            cur_thread = kernel32.GetCurrentThreadId()
+            attached = False
+            if fg_thread and fg_thread != cur_thread:
+                attached = bool(user32.AttachThreadInput(fg_thread, cur_thread, True))
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+            if attached:
+                user32.AttachThreadInput(fg_thread, cur_thread, False)
+        except Exception:
+            user32.SetForegroundWindow(hwnd)
         self._window_hidden = False
         # When started via --background the window was never shown; clear the
         # flag so _allow_ui_focus_changes(), _on_window_activate() and the
@@ -968,6 +997,11 @@ class MainWindow(wx.Frame):
         if self._update_checker is not None:
             self._update_checker.stop()
         self._stop_wpp_server()
+        if hasattr(self, "db") and self.db is not None:
+            try:
+                self.db.close()
+            except Exception:
+                pass
         try:
             wx.GetApp().ExitMainLoop()
         except Exception:
@@ -1062,7 +1096,7 @@ class MainWindow(wx.Frame):
                 ppm = getattr(self, "_presence_pushname_map", {})
                 if ppm.get(sender_jid) != push:
                     ppm[sender_jid] = push
-                    self._schedule_save()
+                    self._schedule_save(contacts_dirty=True)
 
         # Extract mapping and mentions from incoming messages
         self._extract_lid_mapping(msg)
@@ -1078,10 +1112,12 @@ class MainWindow(wx.Frame):
             return
 
         # Reaction messages only update the live display of an existing message;
-        # they must not be added to records, unread counts, or notifications.
+        # they must not be added to records or unread counts. They DO, however,
+        # trigger a notification when someone reacts to one of *your* messages.
         if msg.get("messageType") == "reactionMessage":
             if hasattr(self, "conversations_panel"):
                 self.conversations_panel.on_incoming_message(remote_jid, msg)
+            self._maybe_notify_reaction(remote_jid, msg)
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
@@ -1111,10 +1147,11 @@ class MainWindow(wx.Frame):
 
         # ── Ensure the chat record exists ─────────────────────────────────────
         if remote_jid not in self.chats:
+            push_name = "" if remote_jid.endswith("@g.us") else msg.get("pushName", "")
             self.chats[remote_jid] = {
                 "remoteJid":   remote_jid,
                 "unreadCount": 0,
-                "pushName":    msg.get("pushName", ""),
+                "pushName":    push_name,
                 "messages":    {"messages": {
                     "records":     [],
                     "total":       0,
@@ -1144,6 +1181,16 @@ class MainWindow(wx.Frame):
                 pending_msg["key"]["id"] = msg_id
                 pending_msg["messageTimestamp"] = msg.get("messageTimestamp", pending_msg["messageTimestamp"])
                 
+                # Remove any existing record with the same real ID (e.g. from API
+                # sync) *including* pending_msg itself (its key was just updated
+                # to msg_id), then re-append it at the end.  The old filter kept
+                # pending_msg via `r is pending_msg`, which left it in the list
+                # AND then appended it again — creating a duplicate entry.
+                if msg_id:
+                    records[:] = [r for r in records
+                                  if r.get("key", {}).get("id") != msg_id]
+                records.append(pending_msg)
+                
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
                     if len(self._own_sent_ids) > 500:
@@ -1152,7 +1199,7 @@ class MainWindow(wx.Frame):
                 if hasattr(self, "conversations_panel"):
                     wx.CallAfter(self.conversations_panel._mark_message_sent, local_id, real_id=msg_id)
                 
-                self._schedule_save()
+                self._schedule_save(dirty_jid=remote_jid)
                 self._schedule_set_chats()
                 return
 
@@ -1161,6 +1208,12 @@ class MainWindow(wx.Frame):
                 if existing.get("key", {}).get("id") == msg_id:
                     return  # already stored
 
+        # Ignore stale re-deliveries of messages the user already cleared.
+        if self._is_cleared_message(remote_jid, msg):
+            return
+
+        # Slim any bloated quoted-message payload before persisting.
+        prune_message_record(msg)
         records.append(msg)
 
         # ── Update unread count (only for messages we received) ───────────────
@@ -1182,7 +1235,7 @@ class MainWindow(wx.Frame):
                 chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
 
         # ── Persist in background — debounced so rapid bursts produce one write ─
-        self._schedule_save()
+        self._schedule_save(dirty_jid=remote_jid)
 
         # ── Update conversation list UI (debounced to avoid rapid rebuilds) ───
         self._schedule_set_chats()
@@ -1274,6 +1327,94 @@ class MainWindow(wx.Frame):
         if hasattr(self, "notification_manager"):
             self.notification_manager.send(title, body, remote_jid)
 
+    def _reacted_message_preview(self, remote_jid: str, orig_id: str) -> str:
+        """Return a short text preview of the original message a reaction targets."""
+        if not orig_id:
+            return ""
+        from core.notification_manager import format_notification_body
+        candidates = [remote_jid, self._normalize_jid(remote_jid)]
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid)
+        phone = getattr(self, "_lid_to_phone", {}).get(remote_jid)
+        if lid:
+            candidates.append(lid)
+        if phone:
+            candidates.append(phone)
+        seen = set()
+        for cj in candidates:
+            if not cj or cj in seen:
+                continue
+            seen.add(cj)
+            chat = self.chats.get(cj)
+            if not chat:
+                continue
+            for r in chat.get("messages", {}).get("messages", {}).get("records", []):
+                if r.get("key", {}).get("id") == orig_id:
+                    try:
+                        return (format_notification_body(r, self, self.i18n) or "")[:120]
+                    except Exception:
+                        return ""
+        return ""
+
+    def _maybe_notify_reaction(self, remote_jid: str, msg: dict):
+        """
+        Notify when someone reacts to one of *your* messages.
+
+        Only fires for reactions by other people to messages you sent — never for
+        your own reactions, nor for reactions to other people's messages. Mirrors
+        the guards (age, mute, archive, master toggle) used for normal messages.
+        """
+        try:
+            reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+            emoji = (reaction.get("text") or "").strip()
+            if not emoji:
+                return  # empty emoji = reaction removed
+            key = msg.get("key", {})
+            if key.get("fromMe"):
+                return  # I reacted — don't notify myself
+            target_key = reaction.get("key") or {}
+            if not target_key.get("fromMe"):
+                return  # reaction to someone else's message — ignore
+
+            ts = msg.get("messageTimestamp")
+            if ts:
+                try:
+                    conn_time = getattr(self.ws, "_connect_time", time.time()) if self.ws else time.time()
+                    if int(ts) < conn_time - 60:
+                        return
+                except (TypeError, ValueError):
+                    pass
+
+            if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
+                return
+            if not self.settings.get("general", {}).get("notifications_enabled", True):
+                return
+
+            from core.notification_manager import format_notification_title
+
+            orig_text = self._reacted_message_preview(remote_jid, target_key.get("id", ""))
+            if orig_text:
+                body = self.i18n.t("notif_reaction_to_own").format(emoji=emoji, text=orig_text)
+            else:
+                body = self.i18n.t("notif_reaction").format(emoji=emoji)
+            title = format_notification_title(msg, self, self.i18n)
+
+            window_active = (
+                not getattr(self, "_window_hidden", False)
+                and self.IsShown()
+                and not self.IsIconized()
+                and self.IsActive()
+            )
+            if window_active:
+                self.message_foreground_sound.play()
+                self.output(f"{title}: {body}")
+                return
+            if not self.settings.get("general", {}).get("show_tray_icon", True):
+                return
+            if hasattr(self, "notification_manager"):
+                self.notification_manager.send(title, body, remote_jid)
+        except Exception:
+            logging.exception("[_maybe_notify_reaction] failed")
+
     def connect_websocket(self):
         """Connect to the WPPConnect Server WebSocket.
 
@@ -1349,16 +1490,103 @@ class MainWindow(wx.Frame):
         dist_server  = resource_path("api",  "dist", "server.js")
         node_modules = resource_path("api",  "node_modules")
 
-        # Node.js is mandatory — without it neither npm nor the API can run.
+        # Node.js is mandatory — auto-download portable version if missing.
         if not os.path.isfile(node_exe):
-            wx.MessageBox(
-                "O Node.js não foi encontrado.\n\n"
-                "Este arquivo é essencial para o funcionamento do WinZapp. "
-                "Por favor, instale o Node.js no sistema ou reinstale o programa.",
-                "Node.js não encontrado",
-                wx.OK | wx.ICON_ERROR,
-            )
-            sys.exit(1)
+            if self.background_mode:
+                logging.error("[ensure_api_modules_installed] Node.js not found and cannot show download dialog in background mode")
+                sys.exit(0)
+            logging.info("[ensure_api_modules_installed] Node.js not found — downloading portable version...")
+            from ui.dialogs.node_download import NodeDownloadDialog
+            dlg = NodeDownloadDialog(self)
+            result = dlg.ShowModal()
+            dlg.Destroy()
+            if result != wx.ID_OK:
+                sys.exit(1)
+            # Re-resolve path after download
+            if sys.platform == "win32":
+                node_exe = resource_path("node", "node.exe")
+            # If still missing after download, abort
+            if not os.path.isfile(node_exe):
+                logging.error("[ensure_api_modules_installed] Node.js download failed — node.exe still missing")
+                sys.exit(1)
+
+        # Detect and clean legacy node_modules from WPPConnect to force a clean install of WPPConnect
+        wpp_marker = os.path.join(node_modules, "@wppconnect-team")
+        if os.path.isdir(node_modules) and not os.path.isdir(wpp_marker):
+            logging.info("[ensure_api_modules_installed] Legacy node_modules detected. Cleaning for WPPConnect...")
+            try:
+                import shutil
+                shutil.rmtree(node_modules, ignore_errors=True)
+            except Exception as e:
+                logging.error("[ensure_api_modules_installed] Failed to remove legacy node_modules: %s", e)
+
+        # ── Check for new required packages in an existing node_modules ──────
+        # When we add a new npm dependency (e.g. @ffmpeg-installer/ffmpeg) the
+        # user's node_modules is already installed from a previous run, so the
+        # normal "node_modules absent" gate never fires.  We compare a list of
+        # required package markers and run `npm install` silently in the
+        # background if any are missing — no dialog needed.
+        _REQUIRED_MARKERS = [
+            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
+            os.path.join(node_modules, "@babel", "runtime"),
+        ]
+        if os.path.isfile(dist_server) and os.path.isdir(node_modules):
+            missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
+            if missing:
+                logging.info(
+                    "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
+                    missing,
+                )
+                if sys.platform == "win32":
+                    node_exe = resource_path("node", "node.exe")
+                    npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                    npm_cmd  = [node_exe, npm_cli]
+                    node_dir = resource_path("node")
+                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+                else:
+                    local_node = resource_path("node", "node")
+                    if os.path.isfile(local_node):
+                        node_exe = local_node
+                    else:
+                        node_exe = shutil.which("node") or "node"
+                    local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+                    if os.path.isfile(local_npm):
+                        npm_cmd = [node_exe, local_npm]
+                    else:
+                        npm_cmd = [shutil.which("npm") or "npm"]
+                    node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
+                npm_env  = {
+                    **os.environ,
+                    "PATH": path_env,
+                    "PUPPETEER_CACHE_DIR": resource_path("api", ".cache", "puppeteer"),
+                }
+                api_dir  = resource_path("api")
+                creation_flags = 0
+                if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                    creation_flags = subprocess.CREATE_NO_WINDOW
+
+                try:
+                    proc = subprocess.Popen(
+                        npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
+                        cwd=api_dir,
+                        env=npm_env,
+                        creationflags=creation_flags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                    )
+                    _, stderr_bytes = proc.communicate()
+                    if proc.returncode != 0:
+                        logging.error(
+                            "[ensure_api_modules_installed] npm install failed: %s",
+                            (stderr_bytes or b"").decode("utf-8", errors="replace"),
+                        )
+                    else:
+                        logging.info("[ensure_api_modules_installed] npm install completed OK")
+                except Exception as exc:
+                    logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
+            return
 
         # Detect and clean legacy node_modules from WPPConnect to force a clean install of WPPConnect
         wpp_marker = os.path.join(node_modules, "@wppconnect-team")
@@ -2265,6 +2493,15 @@ class MainWindow(wx.Frame):
         self.key = self.retrieve_secret_key()
         self.create_basic_files()
 
+        # Initialise DatabaseBridge (async→sync bridge)
+        self.db = DatabaseBridge(data_path("messages.db"), self.key)
+        # Run migration from messages.dat → SQLite if needed
+        try:
+            if self.db.run_migration():
+                logging.info("[startup] Migration from messages.dat to SQLite completed")
+        except Exception as exc:
+            logging.error("[startup] Migration failed: %s", exc)
+
         #Get Local Chats
         self.chats = self.get_chats()
         self._load_local_lid_cache()
@@ -2274,6 +2511,15 @@ class MainWindow(wx.Frame):
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
+        self._clean_contacts_cached()
+        # One-time migration: slim bloated quoted-message payloads already stored
+        # in messages.dat by older versions (full thumbnails / mediaKeys / URLs),
+        # which made conversations with many replies slow to open. Runs now that
+        # chats, contacts and the LID caches are all loaded, so the debounced
+        # save persists the complete record set.
+        if prune_chats_messages(self.chats):
+            logging.info("[startup] pruned bloated quoted-message data from messages.dat")
+            self._schedule_save()
         self.scan_all_cached_messages_for_mentions()
         self.connected_sound.play()
         # Reset per-session sync guard so on_messages_set() can start a fresh
@@ -2412,6 +2658,11 @@ class MainWindow(wx.Frame):
         # ── Start background resolving of unknown LIDs ──────────────────
         self.start_background_lid_resolution()
 
+        # Show the contact list immediately from get_remote_chats() metadata
+        # (name, pushName, unreadCount) so the user is not staring at a blank
+        # screen while the per-chat message sync runs below.
+        wx.CallAfter(self.set_chats)
+
         # ── Phase 1: sync all messages ────────────────────────────────────
         self.sync_remote_chats()
 
@@ -2490,6 +2741,11 @@ class MainWindow(wx.Frame):
             def _probe_and_start() -> bool:
                 """Probe the API for existing chats; start sync and return True if found."""
                 if _already_syncing():
+                    # Sync is already running or completed — clear "preparing" status
+                    # if it was left visible because the sync finished before this
+                    # fallback thread checked in.
+                    if getattr(self, "_sync_completed", False) and not self.background_mode:
+                        wx.CallAfter(self._set_status, "")
                     return True
                 try:
                     url = (
@@ -2552,7 +2808,14 @@ class MainWindow(wx.Frame):
         if msg_id and any(m.get("key", {}).get("id") == msg_id for m in bucket):
             return  # deduplicate
         bucket.append(msg)
-        self._schedule_save()
+        # Persist the status update directly instead of going through _schedule_save()
+        # (which would fall back to writing all chats when no dirty_jid is set).
+        def _save_status():
+            try:
+                self.db.upsert_status_update(participant, msg)
+            except Exception as exc:
+                logging.warning("[_store_status_update] DB write failed: %s", exc)
+        threading.Thread(target=_save_status, daemon=True).start()
         # Refresh the Status tab if it is currently visible
         try:
             if hasattr(self, "navigation_panel"):
@@ -2564,7 +2827,7 @@ class MainWindow(wx.Frame):
 
     def clear_local_data(self):
         """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
-        logging.info("[clear_local_data] Clearing all local caches, media, and messages.dat...")
+        logging.info("[clear_local_data] Clearing all local caches, media, and database...")
         self.chats = {}
         self.contacts = {}
         self._status_updates = {}
@@ -2593,16 +2856,12 @@ class MainWindow(wx.Frame):
         else:
             self._resolving_lids = set()
             
-        messages_file = data_path("messages.dat")
         try:
-            key = getattr(self, "key", None)
-            if key is None:
-                key = self.retrieve_secret_key()
-            with open(messages_file, "wb") as f:
-                f.write(encrypt_json({"chats": {}, "contacts": {}}, key))
-            logging.info("[clear_local_data] Reset messages.dat successfully.")
+            if hasattr(self, "db") and self.db is not None:
+                self.db.save_full_state({"chats": {}, "contacts": {}})
+                logging.info("[clear_local_data] Database cleared successfully.")
         except Exception as e:
-            logging.error(f"[clear_local_data] Failed to reset messages.dat: {e}")
+            logging.error(f"[clear_local_data] Failed to clear database: {e}")
             
         # Clear local downloaded media files to prevent cross-account leakage
         for subdir in ("media", "voice_messages"):
@@ -2624,12 +2883,6 @@ class MainWindow(wx.Frame):
         data_dir = data_path("")
         os.makedirs(data_dir, exist_ok=True)
 
-        #Create empty messages.dat if not exists
-        messages_file = data_path("messages.dat")
-        if not os.path.isfile(messages_file):
-            with open(messages_file, "wb") as f:
-                f.write(encrypt_json({"chats": {}, "contacts": {}}, self.key))
-
         #Create media/voice message directories
         os.makedirs(data_path("media"), exist_ok=True)
         os.makedirs(data_path("voice_messages"), exist_ok=True)
@@ -2648,165 +2901,243 @@ class MainWindow(wx.Frame):
         sys.stdout = open(stdout_log, "a")
 
     def get_chats(self):
-        messages_file = data_path("messages.dat")
         try:
-            with open(messages_file, "rb") as f:
-                encrypted_data = f.read()
-                if encrypted_data:
-                    decrypted_data = decrypt_json(encrypted_data, self.key)
-                    return decrypted_data.get("chats", {})
-                else:
-                    return {}
+            return self.db.get_chats()
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             return {}
 
     def get_remote_chats(self, chats):
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/all-chats"
+        # Use the modern `list-chats` endpoint (WPP.chat.list) instead of the
+        # deprecated `all-chats` (legacy WAPI.getAllChats). The legacy call omits
+        # some chats — notably muted or pinned groups — so those never got
+        # collected on pairing. An empty POST body returns every chat.
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/list-chats"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code not in (200, 201):
-                logging.error(f"[get_remote_chats] API error {response.status_code}: {response.text[:200]}")
-                return chats
+
+        # Retry up to 3 times with a fixed timeout and a short sleep between
+        # attempts so we don't hammer the API server during startup.
+        _RETRY_SLEEP = 5   # seconds between retries
+        _TIMEOUT     = 30  # seconds per request
+        last_error = None
+        for attempt in range(3):
             try:
-                body = response.json()
-            except Exception as json_err:
-                logging.error(f"[get_remote_chats] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
-                return chats
-            response_data = body.get("response", []) if isinstance(body, dict) else []
-            if not isinstance(response_data, list):
-                response_data = []
-
-            # Traduzir as chaves do WPPConnect (remoteJid)
-            for chat in response_data:
-                if not isinstance(chat, dict):
-                    continue
-                wpp_id = chat.get("id")
-                jid_str = wpp_id.get("_serialized") if isinstance(wpp_id, dict) else wpp_id
-                if jid_str:
-                    chat["remoteJid"] = jid_str.replace("@c.us", "@s.whatsapp.net")
-            # Diagnostic log to inspect chat keys
-            lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
-            if lid_chats:
-                logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
-                logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
-
-            for chat in response_data:
-                if not isinstance(chat, dict):
-                    continue
-                jid = self._normalize_jid(chat.get("remoteJid", ""))
-                
-                # Try to extract JID mapping from lastMessage if present
-                last_msg = chat.get("lastMessage")
-                if isinstance(last_msg, dict):
-                    key = last_msg.get("key")
-                    if isinstance(key, dict):
-                        remote = key.get("remoteJid", "")
-                        alt = key.get("remoteJidAlt", "")
-                        if remote and alt:
-                            if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
-                                if not hasattr(self, "_lid_to_phone"):
-                                    self._lid_to_phone = {}
-                                if not hasattr(self, "_phone_to_lid"):
-                                    self._phone_to_lid = {}
-                                if self._lid_to_phone.get(remote) != alt:
-                                    self._lid_to_phone[remote] = alt
-                                    self._phone_to_lid[alt] = remote
-                                    logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
-                            elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
-                                if not hasattr(self, "_lid_to_phone"):
-                                    self._lid_to_phone = {}
-                                if not hasattr(self, "_phone_to_lid"):
-                                    self._phone_to_lid = {}
-                                if self._lid_to_phone.get(alt) != remote:
-                                    self._lid_to_phone[alt] = remote
-                                    self._phone_to_lid[remote] = alt
-                                    logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
-
-                # Skip status@broadcast — statuses are shown in the Status tab
-                if not jid or jid.endswith("@broadcast"):
-                    continue
-                # Populate/update self.contacts from chat name metadata
-                if jid and not jid.endswith("@g.us"):
-                    name = chat.get("name")
-                    pushName = chat.get("pushName")
-                    if jid not in self.contacts:
-                        self.contacts[jid] = {"id": jid, "remoteJid": jid}
-                    if name:
-                        self.contacts[jid]["name"] = name
-                    if pushName:
-                        self.contacts[jid]["pushName"] = pushName
-                    
-                    phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
-                    if phone_jid:
-                        if phone_jid not in self.contacts:
-                            self.contacts[phone_jid] = {"id": phone_jid, "remoteJid": phone_jid}
-                        if name:
-                            self.contacts[phone_jid]["name"] = name
-                        if pushName:
-                            self.contacts[phone_jid]["pushName"] = pushName
-                            
-                    lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
-                    if lid_jid:
-                        if lid_jid not in self.contacts:
-                            self.contacts[lid_jid] = {"id": lid_jid, "remoteJid": lid_jid}
-                        if name:
-                            self.contacts[lid_jid]["name"] = name
-                        if pushName:
-                            self.contacts[lid_jid]["pushName"] = pushName
-
-                # If this is a @lid JID and we already have the canonical
-                # @s.whatsapp.net entry (from the _lid_to_phone cache built at
-                # startup), skip the @lid entirely — it's a duplicate.
-                if jid.endswith("@lid"):
-                    phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
-                    if phone_jid and phone_jid in chats:
+                response = requests.post(url, json={}, headers=headers, timeout=_TIMEOUT)
+                if response.status_code not in (200, 201):
+                    logging.error(
+                        "[get_remote_chats] API error %s (attempt %d/3): %s",
+                        response.status_code, attempt + 1, response.text[:200],
+                    )
+                    if attempt < 2:
+                        logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
+                        time.sleep(_RETRY_SLEEP)
                         continue
-                if jid not in chats:
-                    if "messages" not in chat:
-                        chat["messages"] = {"messages": {"records": []}}
-                    chat["remoteJid"] = jid
-                    chats[jid] = chat
-                else:
-                    # Chat already in local cache: refresh metadata from the
-                    # server without overwriting local messages or the normalised
-                    # remoteJid.
-                    for k, v in chat.items():
-                        if k in ("messages", "remoteJid"):
-                            continue
-                        # Don't let a stale server unreadCount re-mark a
-                        # conversation the user already read locally.
-                        # mark_conversation_as_read() sets it to 0 in-memory
-                        # and notifies the server, but the server may not have
-                        # propagated the change yet when this sync runs.
-                        if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
-                            continue
-                        chats[jid][k] = v
-            # Sync mute state from server into local settings (server is source of truth).
-            muted_chats = self.settings.setdefault("muted_chats", {})
-            now = int(time.time())
-            for chat in response_data:
-                if not isinstance(chat, dict):
-                    continue
-                jid = chat.get("remoteJid", "")
-                if not jid:
-                    continue
-                mute_expiry = chat.get("muteExpiration", 0)
-                if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
-                    muted_chats[jid] = int(mute_expiry)
-                elif jid in muted_chats:
-                    del muted_chats[jid]
+                    return chats
+                try:
+                    body = response.json()
+                except Exception as json_err:
+                    logging.error(
+                        "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
+                        attempt + 1, json_err, response.text[:200],
+                    )
+                    if attempt < 2:
+                        logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
+                        time.sleep(_RETRY_SLEEP)
+                        continue
+                    return chats
 
-            self.save_data(chats, self.contacts)
-            return chats
-        except Exception as e:
-            self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
+                # list-chats returns the array directly; tolerate the legacy
+                # {"response": [...]} envelope too in case of a mixed deployment.
+                if isinstance(body, list):
+                    response_data = body
+                elif isinstance(body, dict):
+                    response_data = body.get("response", [])
+                else:
+                    response_data = []
+                if not isinstance(response_data, list):
+                    response_data = []
+
+                # Traduzir as chaves do WPPConnect (remoteJid)
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    wpp_id = chat.get("id")
+                    jid_str = wpp_id.get("_serialized") if isinstance(wpp_id, dict) else wpp_id
+                    if jid_str:
+                        chat["remoteJid"] = jid_str.replace("@c.us", "@s.whatsapp.net")
+
+                # Diagnostic log to inspect chat keys
+                lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
+                if lid_chats:
+                    logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
+                    logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
+
+                deleted = set(self.settings.get("deleted_chats", []))
+                cleared = self.settings.get("cleared_chats", {})
+
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    jid = self._normalize_jid(chat.get("remoteJid", ""))
+
+                    # Try to extract JID mapping from lastMessage if present
+                    last_msg = chat.get("lastMessage")
+                    if isinstance(last_msg, dict):
+                        key = last_msg.get("key")
+                        if isinstance(key, dict):
+                            remote = key.get("remoteJid", "")
+                            alt = key.get("remoteJidAlt", "")
+                            if remote and alt:
+                                if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
+                                    if not hasattr(self, "_lid_to_phone"):
+                                        self._lid_to_phone = {}
+                                    if not hasattr(self, "_phone_to_lid"):
+                                        self._phone_to_lid = {}
+                                    if self._lid_to_phone.get(remote) != alt:
+                                        self._lid_to_phone[remote] = alt
+                                        self._phone_to_lid[alt] = remote
+                                        logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
+                                elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                                    if not hasattr(self, "_lid_to_phone"):
+                                        self._lid_to_phone = {}
+                                    if not hasattr(self, "_phone_to_lid"):
+                                        self._phone_to_lid = {}
+                                    if self._lid_to_phone.get(alt) != remote:
+                                        self._lid_to_phone[alt] = remote
+                                        self._phone_to_lid[remote] = alt
+                                        logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
+
+                    # Skip status@broadcast — statuses are shown in the Status tab
+                    if not jid or jid.endswith("@broadcast"):
+                        continue
+                    # Populate/update self.contacts from chat name metadata
+                    if jid and not jid.endswith("@g.us"):
+                        name = chat.get("name")
+                        pushName = chat.get("pushName")
+                        if looks_like_binary_blob(name):
+                            name = None
+                        if looks_like_binary_blob(pushName):
+                            pushName = None
+                        if jid not in self.contacts:
+                            self.contacts[jid] = {"id": jid, "remoteJid": jid}
+                        if name:
+                            self.contacts[jid]["name"] = name
+                        if pushName:
+                            self.contacts[jid]["pushName"] = pushName
+
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                        if phone_jid:
+                            if phone_jid not in self.contacts:
+                                self.contacts[phone_jid] = {"id": phone_jid, "remoteJid": phone_jid}
+                            if name:
+                                self.contacts[phone_jid]["name"] = name
+                            if pushName:
+                                self.contacts[phone_jid]["pushName"] = pushName
+
+                        lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
+                        if lid_jid:
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {"id": lid_jid, "remoteJid": lid_jid}
+                            if name:
+                                self.contacts[lid_jid]["name"] = name
+                            if pushName:
+                                self.contacts[lid_jid]["pushName"] = pushName
+
+                    if jid.endswith("@lid"):
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                        if phone_jid and phone_jid in chats:
+                            continue
+                    if jid in deleted:
+                        continue
+                    if jid.endswith("@lid"):
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                        if phone_jid and phone_jid in deleted:
+                            continue
+                    if not jid.endswith("@lid"):
+                        lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
+                        if lid_jid and lid_jid in deleted:
+                            continue
+                    if jid in cleared:
+                        continue
+                    if jid not in chats:
+                        if "messages" not in chat:
+                            chat["messages"] = {"messages": {"records": []}}
+                        chat["remoteJid"] = jid
+                        if jid.endswith("@g.us"):
+                            name = chat.get("name") or chat.get("subject") or ""
+                            if not name or name.strip() == "":
+                                name = getattr(self, "_group_name_cache", {}).get(jid, "")
+                                if not name or name.strip() == "":
+                                    name = self._fill_group_name(jid)
+                            chat["name"] = name
+                        chats[jid] = chat
+                    else:
+                        for k, v in chat.items():
+                            if k in ("messages", "remoteJid"):
+                                continue
+                            if k == "pushName" and jid.endswith("@g.us"):
+                                continue
+                            if k == "name" and jid.endswith("@g.us") and not v:
+                                v = chat.get("subject", "")
+                            if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
+                                continue
+                            chats[jid][k] = v
+                        # WPPConnect may return the group name only in "subject".
+                        # If the existing entry still has no name, pull it from subject.
+                        if jid.endswith("@g.us") and not chats[jid].get("name"):
+                            subj = chats[jid].get("subject", "")
+                            if subj:
+                                chats[jid]["name"] = subj
+                                self._group_name_cache = getattr(self, "_group_name_cache", {})
+                                self._group_name_cache[jid] = subj
+
+                # Sync mute and pin state from server into local settings
+                muted_chats = self.settings.setdefault("muted_chats", {})
+                pinned_chats = self.settings.setdefault("pinned_chats", [])
+                now = int(time.time())
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    raw_jid = chat.get("remoteJid", "")
+                    if not raw_jid:
+                        continue
+                    jid = self._normalize_jid(raw_jid)
+                    if "muteExpiration" in chat:
+                        mute_expiry = chat["muteExpiration"]
+                        if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
+                            muted_chats[jid] = int(mute_expiry)
+                        elif jid in muted_chats:
+                            del muted_chats[jid]
+                    is_pinned = bool(chat.get("pin")) or chat.get("pinned") is True
+                    if is_pinned:
+                        if jid not in pinned_chats:
+                            pinned_chats.append(jid)
+                    elif jid in pinned_chats:
+                        pinned_chats.remove(jid)
+
+                self.save_data(chats, self.contacts)
+                return chats
+            except Exception as e:
+                last_error = e
+                logging.warning("[get_remote_chats] Attempt %d/3 failed: %s", attempt + 1, e)
+                if attempt < 2:
+                    time.sleep(_RETRY_SLEEP)
+                    continue
+            else:
+                break
+
+        if last_error:
+            wx.CallAfter(self.error_sound.play)
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{self.i18n.t('chat_retrieval_failed')} {last_error}",
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_ERROR,
+            )
 
     def normalize_chats(self, chats):
         settings_changed = False
@@ -2941,28 +3272,54 @@ class MainWindow(wx.Frame):
 
         return chats
 
-    def save_data(self, chats, contacts):
-        """Write encrypted chat+contact data to disk.
+    def _fill_group_name(self, jid: str) -> str:
+        """Fetch group info from API and cache the name.
 
-        Protected by _save_lock so concurrent callers (background threads)
-        never write the same file at the same time, which would corrupt it.
+        Called lazily when a group has no cached name. Returns the group
+        name or empty string on failure.
+        """
+        try:
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-info/{jid}"
+            headers = {"Authorization": f"Bearer {self.token}"}
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.ok:
+                body = resp.json()
+                info = body.get("response", body) if isinstance(body, dict) else {}
+                name = info.get("name") or info.get("subject", "")
+                if name:
+                    if not hasattr(self, "_group_name_cache"):
+                        self._group_name_cache = {}
+                    self._group_name_cache[jid] = name
+                    return name
+        except Exception:
+            pass
+        return ""
+
+    def save_data(self, chats, contacts):
+        """Write chat+contact data to SQLite via DatabaseBridge.
+
+        Protected by _save_lock so concurrent callers never write at the
+        same time.  Replaces the old messages.dat blob with a transactional
+        full-state import.
         """
         with self._save_lock:
-            messages_file = data_path("messages.dat")
             try:
                 lid_to_phone = getattr(self, "_lid_to_phone", {})
                 unresolvable_lids = list(getattr(self, "_unresolvable_lids", set()))
                 unresolvable_names = list(getattr(self, "_unresolvable_names", set()))
-                encrypted_data = encrypt_json({
-                    "chats": chats,
-                    "contacts": contacts,
-                    "lid_to_phone": lid_to_phone,
+                # Incremental upsert — never clear the DB during normal saves.
+                # Full-clear is only used by clear_local_data() for account reset.
+                self.db.save_full_state({
+                    "chats": dict(chats),
+                    "contacts": dict(contacts),
+                    "lid_to_phone": dict(lid_to_phone),
                     "unresolvable_lids": unresolvable_lids,
                     "unresolvable_names": unresolvable_names,
-                    "status_updates": getattr(self, "_status_updates", {})
-                }, self.key)
-                with open(messages_file, "wb") as f:
-                    f.write(encrypted_data)
+                    "status_updates": {
+                        k: list(v) for k, v in
+                        getattr(self, "_status_updates", {}).items()
+                    }
+                }, clear_first=False)
             except Exception:
                 self.error_sound.play()
                 wx.CallAfter(
@@ -2973,17 +3330,58 @@ class MainWindow(wx.Frame):
                 )
 
     def _do_save(self):
-        """Timer callback: persist current self.chats / self.contacts."""
-        self.save_data(self.chats, self.contacts)
+        """Timer callback: incrementally persist dirty chats and contacts.
 
-    def _schedule_save(self):
-        """Debounce save_data: coalesce rapid calls into one write after 150 ms.
-
-        Replaces bare ``threading.Thread(target=self.save_data, ...).start()``
-        calls so that a burst of incoming messages (e.g. 50 messages arriving
-        during a group sync) triggers exactly ONE disk write instead of 50
-        concurrent threads all racing to overwrite messages.dat.
+        Uses targeted upsert_chat() / upsert_contacts_batch() instead of the
+        old save_data() full dump.  This avoids re-encrypting every message
+        blob on every save — the dominant source of idle CPU usage.
         """
+        # ── 1. Dirty chats ────────────────────────────────────────────────────
+        dirty_chats: set[str] = set(getattr(self, "_dirty_jids_for_save", None) or set())
+        self._dirty_jids_for_save = set()
+
+        # Only save explicitly dirty chats.  The old "save all as fallback"
+        # behaviour wrote every chat on every unrelated event (e.g. mark-as-read,
+        # status updates), causing 1-second DB writes even during idle operation.
+        for jid in dirty_chats:
+            chat = self.chats.get(jid)
+            if not chat:
+                continue
+            try:
+                self.db.upsert_chat(jid, chat)
+            except Exception as exc:
+                logging.warning("[_do_save] upsert_chat %s: %s", jid, exc)
+
+        # ── 2. Contacts (only when explicitly marked dirty) ───────────────────
+        if getattr(self, "_contacts_dirty_for_save", False):
+            self._contacts_dirty_for_save = False
+            try:
+                self.db.upsert_contacts_batch(dict(self.contacts))
+            except Exception as exc:
+                logging.warning("[_do_save] upsert_contacts_batch: %s", exc)
+
+    def _schedule_save(
+        self,
+        dirty_jid: "str | None" = None,
+        contacts_dirty: bool = False,
+    ) -> None:
+        """Debounce DB saves into one write per burst.
+
+        Parameters
+        ----------
+        dirty_jid :
+            JID of the specific chat that changed.  When supplied, only that
+            chat is written to the DB (fast).  When omitted, all chat metadata
+            is saved (slower but still far cheaper than a full import_from_dict).
+        contacts_dirty :
+            Set to True to also flush self.contacts to the contacts table.
+        """
+        if dirty_jid:
+            if not hasattr(self, "_dirty_jids_for_save"):
+                self._dirty_jids_for_save = set()
+            self._dirty_jids_for_save.add(dirty_jid)
+        if contacts_dirty:
+            self._contacts_dirty_for_save = True
         with self._save_timer_lock:
             if self._save_timer is not None:
                 self._save_timer.cancel()
@@ -2993,41 +3391,53 @@ class MainWindow(wx.Frame):
             t.start()
 
     def _load_local_lid_cache(self):
-        messages_file = data_path("messages.dat")
         try:
-            if os.path.exists(messages_file):
-                with open(messages_file, "rb") as f:
-                    encrypted_data = f.read()
-                    if encrypted_data:
-                        decrypted_data = decrypt_json(encrypted_data, self.key)
-                        self._lid_to_phone = decrypted_data.get("lid_to_phone", {})
-                        self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
-                        self._unresolvable_lids = set(decrypted_data.get("unresolvable_lids", []))
-                        self._unresolvable_names = set(decrypted_data.get("unresolvable_names", []))
-                        self._status_updates = decrypted_data.get("status_updates", {})
-                        logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} LIDs, {len(self._unresolvable_names)} names, and status updates for {len(self._status_updates)} participants.")
-                        return
+            self._lid_to_phone = self.db.get_lid_mappings()
+            self._phone_to_lid = {v: k for k, v in self._lid_to_phone.items()}
+            lids, names = self.db.get_unresolvable_lids()
+            self._unresolvable_lids = lids
+            self._unresolvable_names = names
+            self._status_updates = self.db.get_status_updates()
+            logging.info(f"[LID Cache] Loaded {len(self._lid_to_phone)} JID mappings, {len(self._unresolvable_lids)} LIDs, {len(self._unresolvable_names)} names, and status updates for {len(self._status_updates)} participants.")
+            return
         except Exception as e:
-            logging.error(f"[LID Cache] Error loading JID mappings from cache: {e}")
+            logging.error(f"[LID Cache] Error loading JID mappings from database: {e}")
         self._lid_to_phone = {}
         self._phone_to_lid = {}
         self._unresolvable_lids = set()
         self._unresolvable_names = set()
 
     def get_contacts(self):
-        messages_file = data_path("messages.dat")
         try:
-            with open(messages_file, "rb") as f:
-                encrypted_data = f.read()
-                if encrypted_data:
-                    decrypted_data = decrypt_json(encrypted_data, self.key)
-                    return decrypted_data.get("contacts", {})
-                else:
-                    return {}
+            return self.db.get_contacts()
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('contact_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             return {}
+
+    @staticmethod
+    def _is_bad_contact_name(name: str) -> bool:
+        if not name or not isinstance(name, str):
+            return True
+        name = name.strip()
+        if not name or name.isdigit() or is_phone_like(name) or looks_like_binary_blob(name):
+            return True
+        val_lower = name.lower()
+        return "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido")
+
+    def _clean_contacts_cached(self):
+        changed = False
+        for jid, contact in list(self.contacts.items()):
+            for field in ("name", "pushName"):
+                val = contact.get(field)
+                if self._is_bad_contact_name(val):
+                    if field in contact:
+                        del contact[field]
+                        changed = True
+            if not contact.get("name") and not contact.get("pushName"):
+                contact["name"] = ""
+        if changed and hasattr(self, "db"):
+            self.db.upsert_contacts_batch(self.contacts)
 
     def get_remote_contacts(self):
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/all-contacts"
@@ -3075,9 +3485,13 @@ class MainWindow(wx.Frame):
             for contact in filtered_contacts:
                 jid = self._normalize_jid(contact.get("remoteJid") or contact.get("id", ""))
                 if jid and not jid.endswith("@g.us") and not jid.endswith("@broadcast"):
-                    name = contact.get("name") or contact.get("pushName") or "Contato sem nome"
+                    name = contact.get("name") or contact.get("pushName") or ""
+                    if not name or name == "Contato sem nome" or is_phone_like(name):
+                        name = ""
                     contact = dict(contact)
                     contact["remoteJid"] = jid
+                    contact["name"] = name
+                    contact["pushName"] = name
                     
                     if jid not in self.contacts:
                         logging.info(f"[get_remote_contacts] Adding contact: {name} ({jid})")
@@ -3152,12 +3566,19 @@ class MainWindow(wx.Frame):
             if jid in deleted:
                 continue
                 
-            # Filter out contacts/chats with no messages, no unread messages, and not pinned
-            records = chat.get("messages", {}).get("messages", {}).get("records", [])
-            last_msg = chat.get("lastMessage")
-            unread = int(chat.get("unreadCount", 0) or 0)
+            records   = chat.get("messages", {}).get("messages", {}).get("records", [])
+            last_msg  = chat.get("lastMessage")
+            unread    = int(chat.get("unreadCount", 0) or 0)
             is_pinned = jid in pinned
-            if not records and not last_msg and unread == 0 and not is_pinned:
+            # Skip chats with absolutely no content AND no identity.
+            # We do NOT skip based on missing messages alone: during and just
+            # after sync many valid chats have empty records but still carry a
+            # name/pushName from the WPPConnect list-chats response.
+            has_content  = bool(records or last_msg or unread > 0 or is_pinned)
+            name_hint    = (chat.get("name") or chat.get("pushName") or
+                            chat.get("subject") or "").strip()
+            has_identity = bool(name_hint and not name_hint.isdigit() and len(name_hint) > 1)
+            if not has_content and not has_identity:
                 continue
                 
             def get_valid_name(val):
@@ -3166,6 +3587,8 @@ class MainWindow(wx.Frame):
                 val = val.strip()
                 if not val or val.isdigit() or is_phone_like(val):
                     return ""
+                if looks_like_binary_blob(val):
+                    return ""
                 val_lower = val.lower()
                 if "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido"):
                     return ""
@@ -3173,14 +3596,28 @@ class MainWindow(wx.Frame):
 
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid) or self._find_alt_jid_from_messages(chat)
             
-            resolved_name = self._resolve_contact_name(chat)
-            chat_push = get_valid_name(chat.get("pushName", ""))
-            msg_push = self.find_name_through_messages(chat)
-            chat_name_field = get_valid_name(chat.get("name", ""))
-            
-            if jid.endswith("@g.us"):
-                name = chat_name_field
+            is_group = jid.endswith("@g.us")
+        
+            if is_group:
+                # Check both "name" and "subject" — WPPConnect uses either field
+                # depending on API version; prefer "name", fall back to "subject".
+                name = get_valid_name(chat.get("name", "") or chat.get("subject", ""))
+                if not name:
+                    cached = getattr(self, "_group_name_cache", {}).get(jid, "")
+                    if cached:
+                        name = cached
+                    else:
+                        fetched = self._fill_group_name(jid)
+                        if fetched:
+                            chat["name"] = fetched
+                            name = fetched
             else:
+                # Chat individual: usar a lógica existente
+                resolved_name = self._resolve_contact_name(chat)
+                chat_push = get_valid_name(chat.get("pushName", ""))
+                msg_push = self.find_name_through_messages(chat)
+                chat_name_field = get_valid_name(chat.get("name", ""))
+                
                 name = (
                     resolved_name
                     or chat_push
@@ -3192,14 +3629,23 @@ class MainWindow(wx.Frame):
                 if jid.endswith("@g.us"):
                     name = self.i18n.t("unknown_group")
                 else:
-                    if phone_jid:
+                    if phone_jid and not phone_jid.endswith("@lid"):
                         name = format_number(phone_jid)
                     else:
                         msg_jid_num = self.find_jid_through_messages(chat)
                         if msg_jid_num:
                             name = msg_jid_num
+                        elif self._format_jid_for_display(jid):
+                            name = self._format_jid_for_display(jid)
+                        elif jid.endswith("@lid"):
+                            # Unresolved @lid: show placeholder, never format as phone
+                            name = self.i18n.t("unknown_contact")
                         else:
-                            name = format_number(jid)
+                            numeric = jid.split("@")[0].split(":")[0]
+                            if numeric.isdigit():
+                                name = format_number(numeric)
+                            else:
+                                name = self.i18n.t("unknown_contact")
             
             # Detailed logging for name resolution debugging
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
@@ -3233,7 +3679,7 @@ class MainWindow(wx.Frame):
                 t = int(m.get("messageTimestamp", 0) or 0)
                 if t > ts:
                     ts = t
-            return ts
+            return ts if ts else 1
 
         def _sort_key(pair):
             c, n = pair
@@ -3254,6 +3700,26 @@ class MainWindow(wx.Frame):
     def _apply_chat_lists(self, main_chats, main_names, arch_chats, arch_names):
         """Apply sorted chat lists to panels and refresh UI. Must run on main thread."""
         self.chat_names = main_names
+
+        # Save focused JIDs from the CURRENT (old) displayed lists BEFORE
+        # overwriting chats_list.  add_chats_to_ui() maps focused_idx (from
+        # the live ListCtrl) against chats_list to recover the JID — but
+        # chats_list is about to be replaced with a reordered copy, so
+        # focused_idx would point to the wrong chat after the assignment.
+        _panel = self.conversations_panel
+        _fi = _panel.conversations_list.GetFocusedItem()
+        _panel._preserved_focused_jid = (
+            _panel.chats_list[_fi].get("remoteJid")
+            if 0 <= _fi < len(_panel.chats_list) else None
+        )
+        if hasattr(self, "archived_conversations_panel"):
+            _ap = self.archived_conversations_panel
+            _afi = _ap.conversations_list.GetFocusedItem()
+            _ap._preserved_focused_jid = (
+                _ap.chats_list[_afi].get("remoteJid")
+                if 0 <= _afi < len(_ap.chats_list) else None
+            )
+
         # _all_chats_list / _all_chat_names always hold the full sorted list.
         # add_chats_to_ui() reads these to apply search / filter, then writes
         # back to chats_list / chat_names so indices stay consistent.
@@ -3301,7 +3767,11 @@ class MainWindow(wx.Frame):
             return
         def _bg():
             try:
-                self._build_lid_to_phone_cache()
+                # _build_lid_to_phone_cache() is intentionally NOT called here.
+                # It scans every message in every chat (O(total_messages)) and is
+                # too expensive to run on every WebSocket event.  The cache is
+                # maintained incrementally by _extract_lid_mapping() on each new
+                # message, and rebuilt in full only at startup (set_chats calls).
                 result = self._compute_chat_lists()
                 wx.CallAfter(self._apply_chat_lists, *result)
             except Exception as e:
@@ -3621,6 +4091,22 @@ class MainWindow(wx.Frame):
                 return remote
         return None
 
+    def _format_jid_for_display(self, jid: str) -> str:
+        """
+        Format a JID as a phone number for display, resolving @lid to its mapped
+        phone number when known. A raw @lid (an internal 15+ digit identifier)
+        must NEVER be shown as a phone number, so when no mapping exists this
+        returns "" and the caller falls back to a generic placeholder.
+        """
+        if not jid:
+            return ""
+        if jid.endswith("@lid"):
+            phone = getattr(self, "_lid_to_phone", {}).get(jid, "")
+            return format_number(phone) if phone else ""
+        if jid.endswith("@g.us"):
+            return ""
+        return format_number(jid)
+
     def _resolve_contact_name(self, chat):
         """
         Return the saved contact name (contact.pushName) for a private chat, or None.
@@ -3641,7 +4127,7 @@ class MainWindow(wx.Frame):
                 val = c.get(field)
                 if val and isinstance(val, str):
                     val = val.strip()
-                    if val and not val.isdigit() and not is_phone_like(val):
+                    if val and not val.isdigit() and not is_phone_like(val) and not looks_like_binary_blob(val):
                         # Reject placeholder names (e.g. "Contato sem nome")
                         val_lower = val.lower()
                         if "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido"):
@@ -3774,13 +4260,20 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
-        for chat in list(self.chats.values()):
-            try:
-                self.sync_chat_messages(chat.copy())
-            except Exception:
-                # Log but continue — one failed chat must not abort the others
-                jid = chat.get("remoteJid", "?")
-                print(f"[sync_remote_chats] failed to sync {jid}, continuing")
+        chats = list(self.chats.values())
+        if not chats:
+            return
+        # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
+        # concurrent requests fine; cap at 6 workers to avoid overloading it.
+        max_workers = min(6, len(chats))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in chats}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception as exc:
+                    jid = futs[fut].get("remoteJid", "?")
+                    logging.warning("[sync_remote_chats] failed for %s: %s", jid, exc)
 
     def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
@@ -3835,46 +4328,90 @@ class MainWindow(wx.Frame):
         }
 
         all_messages = []
-        try:
-            logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid}")
-            response = requests.get(url, headers=headers, timeout=30)
-            logging.info(f"[sync_chat_messages] URL: {url} returned status: {response.status_code}")
-            if response.status_code in (200, 201):
-                body = response.json()
-                wpp_messages = body.get("response", []) if isinstance(body, dict) else []
-                logging.info(f"[sync_chat_messages] Fetched {len(wpp_messages)} messages from API for {remote_jid}")
-                if not isinstance(wpp_messages, list):
-                    wpp_messages = []
-                for wm in wpp_messages:
-                    if isinstance(wm, dict) and self.ws:
-                        try:
-                            normalized = self.ws._normalize_wpp_message(wm)
-                            all_messages.append(normalized)
-                        except Exception as e:
-                            logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
-            else:
-                logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
-        except Exception as e:
-            logging.error(f"[sync_chat_messages] failed to get messages for {remote_jid}: {e}")
+        api_ok = False
+        # Skip API call entirely if session is known disconnected
+        if getattr(self, "_wa_connected", False):
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid} (attempt {attempt+1}/{max_retries})")
+                    response = requests.get(url, headers=headers, timeout=30)
+                    logging.info(f"[sync_chat_messages] URL: {url} returned status: {response.status_code}")
+                    if response.status_code in (200, 201):
+                        body = response.json()
+                        wpp_messages = body.get("response", []) if isinstance(body, dict) else []
+                        logging.info(f"[sync_chat_messages] Fetched {len(wpp_messages)} messages from API for {remote_jid}")
+                        if not isinstance(wpp_messages, list):
+                            wpp_messages = []
+                        for wm in wpp_messages:
+                            if isinstance(wm, dict) and self.ws:
+                                try:
+                                    normalized = self.ws._normalize_wpp_message(wm)
+                                    prune_message_record(normalized)
+                                    all_messages.append(normalized)
+                                except Exception as e:
+                                    logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
+                        api_ok = True
+                        break
+                    elif response.status_code == 404 and (
+                        "sess" in response.text.lower() and "n" in response.text.lower() and
+                        "ativa" in response.text.lower()
+                    ):
+                        logging.warning(f"[sync_chat_messages] Session not active for {remote_jid}, retry {attempt+1}/{max_retries}")
+                        continue
+                    else:
+                        logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
+                        break
+                except Exception as e:
+                    logging.error(f"[sync_chat_messages] failed to get messages for {remote_jid}: {e}")
+                    break
+        else:
+            logging.info(f"[sync_chat_messages] Session disconnected, using cached messages for {remote_jid}")
+
+        # Drop messages the user cleared (older than the clear-chat cutoff) so a
+        # cleared conversation does not silently repopulate on the next sync.
+        if all_messages:
+            all_messages = [m for m in all_messages
+                            if not self._is_cleared_message(remote_jid, m)]
 
         # After fetching, update chat messages
-        if all_messages:
-            for msg in all_messages:
-                self._extract_lid_mapping(msg)
-            # Preserve any messages received via WebSocket during this sync that
-            # the API hasn't indexed yet (they arrived after the API snapshot).
-            local_chat    = self.chats.get(remote_jid, {})
-            local_records = (local_chat.get("messages", {})
-                             .get("messages", {})
-                             .get("records", []))
-            if local_records:
-                api_ids = {r.get("key", {}).get("id") for r in all_messages}
-                extra   = [r for r in local_records
-                           if r.get("key", {}).get("id") and
-                              r.get("key", {}).get("id") not in api_ids]
-                if extra:
-                    all_messages = all_messages + extra
+        for msg in all_messages:
+            self._extract_lid_mapping(msg)
+        # Preserve any messages received via WebSocket during this sync that
+        # the API hasn't indexed yet (they arrived after the API snapshot).
+        local_chat    = self.chats.get(remote_jid, {})
+        local_records = (local_chat.get("messages", {})
+                         .get("messages", {})
+                         .get("records", []))
+        if local_records:
+            api_ids = {r.get("key", {}).get("id") for r in all_messages}
+            extra   = [r for r in local_records
+                       if r.get("key", {}).get("id") and
+                          r.get("key", {}).get("id") not in api_ids]
+            if extra:
+                all_messages = all_messages + extra
 
+        # Deduplicate: when the same message exists as both an API copy (real
+        # WhatsApp ID) and a pending virtual copy (local UUID), keep the API
+        # version and drop the pending one.  The hash-set approach below ensures
+        # the first occurrence (API) survives, removing the pending dup.
+        seen = set()
+        deduped = []
+        for m in all_messages:
+            mid = m.get("key", {}).get("id", "")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            deduped.append(m)
+        all_messages = deduped
+
+        # Update records: accept API data only when it actually returned some
+        # messages, or fall back to preserving whatever we have in memory.
+        # An empty API response (200 OK with no messages) must NOT wipe the
+        # cached records, otherwise conversations appear empty after sync.
+        has_records = bool(chat.get("messages", {}).get("messages", {}).get("records"))
+        if api_ok and all_messages:
             if "messages" not in chat:
                 chat["messages"] = {}
             chat["messages"]["messages"] = {
@@ -3883,12 +4420,25 @@ class MainWindow(wx.Frame):
                 "currentPage": 1,
                 "records": all_messages
             }
+        elif not has_records:
+            if "messages" not in chat:
+                chat["messages"] = {}
 
-        if chat.get("messages", {}) and chat["messages"] != self.chats.get(remote_jid, {}).get("messages", {}): #update only if necessary
-            self.chats[remote_jid] = chat
-            if not getattr(self, "_initial_sync_running", False):
-                wx.CallAfter(self._schedule_set_chats)
-            self.save_data(self.chats, self.contacts)
+        self.chats[remote_jid] = chat
+
+        if not getattr(self, "_initial_sync_running", False):
+            wx.CallAfter(self._schedule_set_chats)
+
+        # Incremental DB save: write only this chat + its messages.
+        # This replaces the old save_data(self.chats, ...) call which dumped the
+        # ENTIRE state (O(N) writes per chat → O(N²) total during bulk sync).
+        try:
+            self.db.upsert_chat(remote_jid, chat)
+            if all_messages:
+                self.db.insert_messages_batch(remote_jid, all_messages)
+        except Exception as exc:
+            logging.warning("[sync_chat_messages] incremental DB save failed for %s: %s",
+                            remote_jid, exc)
 
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
     # to download older media causes the WPPConnect to enter a 5-second retry
@@ -3915,6 +4465,18 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
 
+    def _is_conversation_open_for(self, msg) -> bool:
+        """True if msg belongs to the conversation currently shown on screen."""
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or getattr(cp, "conversation", None) is None:
+            return False
+        open_jid = cp.conversation.get("remoteJid", "")
+        if not open_jid:
+            return False
+        key = msg.get("key", {})
+        msg_jid = self._normalize_jid(key.get("remoteJid", ""))
+        return msg_jid == self._normalize_jid(open_jid)
+
     def sync_if_media(self, msg, timeout=60):
         """Download media for a single message during the background sync phase."""
         message_type = msg.get("messageType", "")
@@ -3937,11 +4499,16 @@ class MainWindow(wx.Frame):
             if message_type == "audioMessage":
                 self.handle_audio_message(msg, timeout=timeout)
             else:
-                conv = self.conversations_panel
-                def _prog(p, mid=msg_id):
-                    wx.CallAfter(conv.update_message_download_progress, mid, p)
-                self.handle_media_message(msg, progress_callback=_prog, timeout=timeout)
-                if msg_id:
+                # Bulk background sync: download WITHOUT per-chunk progress
+                # callbacks. Streaming 64 KB chunks across 6 workers used to fire
+                # a wx.CallAfter per chunk per file — tens of thousands of UI
+                # events, each doing an O(n) scan of the open conversation —
+                # which froze the app while media downloaded. Only refresh the
+                # row once, and only when its chat is the conversation currently
+                # on screen.
+                self.handle_media_message(msg, progress_callback=None, timeout=timeout)
+                if msg_id and self._is_conversation_open_for(msg):
+                    conv = self.conversations_panel
                     wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
         except MediaExpiredError:
             if msg_id:
@@ -4235,87 +4802,35 @@ class MainWindow(wx.Frame):
             logging.error("[send_text_message] exception for %s: %s", remote_jid, err)
             return {"ok": False, "error": err, "retry": True}
 
-    @staticmethod
-    def _find_api_ffmpeg() -> str:
-        """Locate ffmpeg binary: bundled npm package first, then system PATH."""
-        import glob as _glob
-        import shutil
-        # @ffmpeg-installer/ffmpeg places the actual binary inside a platform-
-        # specific sub-package (e.g. @ffmpeg-installer/win32-x64/bin/ffmpeg.exe),
-        # NOT in @ffmpeg-installer/ffmpeg/bin/. Glob the entire scope so we find
-        # it regardless of which platform sub-package npm installed.
-        installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
-        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
-        if hits:
-            return hits[0]
-        # Fallback: ffmpeg on the system PATH (user-installed)
-        system_ffmpeg = shutil.which("ffmpeg")
-        if system_ffmpeg:
-            return system_ffmpeg
-        return None
-
-    def _convert_wav_to_ogg(self, wav_path: str) -> str | None:
-        """
-        Convert a WAV file to OGG/Opus using the bundled ffmpeg binary.
-        Returns the path to the new .ogg file, or None on failure.
-        """
-        ffmpeg = self._find_api_ffmpeg()
-        if not ffmpeg or not os.path.isfile(ffmpeg):
-            logging.warning("[audio] ffmpeg not found — sending WAV (may fail). Searched: %s",
-                            resource_path("api", "node_modules", "@ffmpeg-installer", "ffmpeg", "bin"))
-            return None
-        ogg_path = wav_path + ".ogg"
-        try:
-            result = subprocess.run(
-                [ffmpeg, "-y", "-i", wav_path,
-                 "-ac", "1",
-                 "-c:a", "libopus", "-b:a", "64k",
-                 "-vbr", "on", "-compression_level", "10",
-                 ogg_path],
-                capture_output=True,
-                timeout=60,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if result.returncode == 0 and os.path.isfile(ogg_path) and os.path.getsize(ogg_path) > 0:
-                logging.debug("[audio] WAV→OGG conversion succeeded: %s", ogg_path)
-                return ogg_path
-            logging.error("[audio] ffmpeg WAV→OGG failed (rc=%s): %s",
-                          result.returncode,
-                          (result.stderr or b"").decode("utf-8", errors="replace")[-800:])
-        except Exception as exc:
-            logging.error("[audio] ffmpeg conversion exception: %s", exc)
-        return None
-
     def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
         """
-        Base64-encode a WAV/audio file and send it as a PTT voice message via the
-        WPPConnect Server API. Uses /api/{session}/send-voice-base64.
-        WAV is converted to OGG/Opus first (WhatsApp PTT requirement).
+        Encode a recorded WAV file to OGG Opus via libopus (pure Python, no
+        FFmpeg) and send it as a PTT voice message using /send-voice-base64.
         """
+        from core.ogg_opus import encode_wav_to_ogg_opus
+
         remote_jid = self._resolve_jid_for_send(remote_jid)
-        # Convert WAV to OGG/Opus — WhatsApp only accepts OGG Opus for PTT.
-        ogg_path  = self._convert_wav_to_ogg(wav_path)
-        send_path = ogg_path if ogg_path else wav_path
-        mime      = "data:audio/ogg;codecs=opus;base64," if ogg_path else "data:audio/wav;base64,"
 
         try:
-            with open(send_path, "rb") as fh:
-                audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            with open(wav_path, "rb") as fh:
+                wav_bytes = fh.read()
         except Exception as exc:
-            logging.error("[send_audio_message] failed to read audio file %s: %s", send_path, exc)
+            logging.error("[send_audio_message] cannot read WAV %s: %s", wav_path, exc)
             return {"ok": False, "error": str(exc)[:200], "retry": False}
-        finally:
-            if ogg_path and os.path.isfile(ogg_path):
-                try:
-                    os.unlink(ogg_path)
-                except Exception:
-                    pass
+
+        try:
+            ogg_bytes = encode_wav_to_ogg_opus(wav_bytes)
+        except Exception as exc:
+            logging.error("[send_audio_message] OGG Opus encoding failed: %s", exc)
+            return {"ok": False, "error": str(exc)[:200], "retry": False}
+
+        audio_b64 = base64.b64encode(ogg_bytes).decode("utf-8")
 
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-voice-base64"
         quoted_id = self._serialize_quoted_id(quoted) if quoted else None
         payload = {
             "phone": [remote_jid],
-            "base64Ptt": f"{mime}{audio_b64}",
+            "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
             "isGroup": remote_jid.endswith("@g.us"),
         }
         if quoted_id:
@@ -4352,25 +4867,58 @@ class MainWindow(wx.Frame):
             logging.error("[send_audio_message] exception for %s: %s", remote_jid, err)
             return {"ok": False, "error": err, "retry": True}
 
+    def _serialize_msg_id(self, remote_jid: str, msg_key: dict) -> str:
+        """
+        Build the full serialized WhatsApp message ID expected by WPPConnect
+        (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
+        needs `<fromMe>_<chatId>_<id>` and, for group messages, a trailing
+        `_<participant>` — including for our own group messages (`fromMe=True`).
+        """
+        msg_id = msg_key.get("id", "")
+        if not msg_id:
+            return ""
+        # A serialized id may already have been stored as the key id.
+        if msg_id.startswith(("true_", "false_")):
+            return msg_id
+        from_me = bool(msg_key.get("fromMe", False))
+        prefix = "true" if from_me else "false"
+        chat = (remote_jid or "").replace("@s.whatsapp.net", "@c.us")
+        # Group messages always carry the sender's JID in the serialized id,
+        # even for our own messages (fromMe=True).  1-on-1 keys have no participant.
+        participant = (
+            msg_key.get("participant")
+            or (msg_key.get("remoteJidAlt") if not from_me else "")
+            or ""
+        ).replace("@s.whatsapp.net", "@c.us")
+        if participant:
+            return f"{prefix}_{chat}_{msg_id}_{participant}"
+        return f"{prefix}_{chat}_{msg_id}"
+
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
         """Send a reaction to a message via the WPPConnect Server API."""
+        # Resolve the @lid chat to its phone JID the same way deletes do, so the
+        # serialized id matches the chat WPPConnect actually has loaded.
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/react-message"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
         payload = {
-            "msgId": msg_key.get("id", ""),
+            "msgId": self._serialize_msg_id(remote_jid, msg_key),
             "reaction": emoji
         }
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
-                print(f"[send_reaction] HTTP {response.status_code}: {response.text[:500]}")
+                logging.error("[send_reaction] HTTP %s: %s",
+                              response.status_code, response.text[:500])
                 return False
             return True
         except Exception as exc:
-            print(f"[send_reaction] exception: {exc}")
+            logging.error("[send_reaction] exception: %s", exc)
             return False
 
     def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None):
@@ -4572,7 +5120,15 @@ class MainWindow(wx.Frame):
             label = self._presence_label_for_chat(chat_jid_norm, is_group)
             if label:
                 item_text += f" {label}"
-            lst.SetItem(idx, 0, item_text)
+            # Only touch the row when the visible text actually changes. Presence
+            # bursts (online/offline toggles that don't alter the row) otherwise
+            # rewrote the focused item's text repeatedly, making NVDA announce the
+            # conversation name over and over while the user sat idle on the list.
+            try:
+                if lst.GetItemText(idx, 0) != item_text:
+                    lst.SetItem(idx, 0, item_text)
+            except Exception:
+                lst.SetItem(idx, 0, item_text)
             break
 
     def on_presence_update(self, jid: str, presences: dict):
@@ -4722,6 +5278,9 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(normalized)
         if chat is None:
             return
+        old_count = int(chat.get("unreadCount") or 0)
+        if old_count == unread_count:
+            return  # no actual change — skip expensive rebuild + save
         # The server sometimes counts own (fromMe) messages as unread. Correct
         # for that by inspecting the tail of the locally-stored message list.
         if unread_count > 0:
@@ -4737,9 +5296,13 @@ class MainWindow(wx.Frame):
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
             return
+        # Never resurrect unread count for a conversation the user already read
+        # locally (mark_conversation_as_read set it to 0). The server may still
+        # carry a stale unread count from before the read-ack arrived.
+        if old_count == 0 and unread_count > 0:
+            return
         chat["unreadCount"] = unread_count
-        # Persist — debounced so rapid chats.update bursts produce one write.
-        self._schedule_save()
+        self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
 
     def on_chat_archive_update(self, jid: str, archived: bool):
@@ -4943,50 +5506,36 @@ class MainWindow(wx.Frame):
             pass
 
     def mark_conversation_as_read(self, remote_jid: str, force: bool = False):
-        """Mark conversation as read locally and notify WPPConnect.
-
-        WPPConnect's sendSeen only needs the chat JID — no message key required.
-        The HTTP call runs in a background thread to avoid blocking the UI.
-        """
+        """Mark conversation as read locally and notify WPPConnect."""
         chat = self.chats.get(remote_jid)
         if chat is None:
             return
 
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
-        self._schedule_save()
+        self._schedule_save(dirty_jid=remote_jid)
         wx.CallAfter(self._schedule_set_chats)
 
         if unread == 0 and not force:
             return
 
-        # Resolve LID if available, otherwise format to @c.us for WPPConnect
-        target_phone = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if not target_phone:
-            if remote_jid.endswith("@s.whatsapp.net"):
-                target_phone = remote_jid.split("@")[0] + "@c.us"
-            else:
-                target_phone = remote_jid
+        if remote_jid.endswith("@g.us"):
+            return
+
+        target_phone = remote_jid
+        if remote_jid.endswith("@s.whatsapp.net"):
+            target_phone = remote_jid.rsplit("@", 1)[0] + "@c.us"
 
         def _do_api():
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
-            headers = {
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-            }
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                resp = requests.post(
-                    url,
-                    json={"phone": [target_phone]},
-                    headers=headers,
-                    timeout=10,
-                )
+                resp = requests.post(url, json={"phone": [target_phone]}, headers=headers, timeout=10)
                 if not resp.ok:
                     logging.warning("[mark_as_read] API error %s for %s: %s",
                                     resp.status_code, target_phone, resp.text[:200])
             except Exception as exc:
                 logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
-
         threading.Thread(target=_do_api, daemon=True).start()
 
     def mark_conversation_as_unread(self, remote_jid: str):
@@ -5294,30 +5843,94 @@ class MainWindow(wx.Frame):
                         # Trigger UI refresh and save mapped JIDs
                         wx.CallAfter(self._schedule_set_chats)
                         self.save_data(self.chats, self.contacts)
+                # The contact endpoint's top-level "status" is the API result
+                # ("success"), NOT the contact's About text. Fetch the real
+                # About/bio from the dedicated profile-status endpoint and expose
+                # it under a clean key the dialog can read without ambiguity.
+                res["aboutText"] = self.get_profile_about(jid)
+                res["lastSeenTs"] = self.get_last_seen(jid)
                 return res
         except Exception as e:
             logging.exception(f"[get_contact_profile] Error querying for {original_jid}: {e}")
         return {}
 
-    def subscribe_presence(self, jid: str):
-        """Subscribe to the presence of a contact or group to receive real-time presence updates."""
-        if not jid:
-            return
-        is_group = jid.endswith("@g.us")
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
+    def get_last_seen(self, jid: str):
+        """Return a contact's last-seen Unix timestamp via /last-seen, or None.
+
+        More reliable than waiting for a presence.update event, which only fires
+        if the contact changes state after we subscribe. Returns None when the
+        contact hides last-seen or it is unavailable.
+        """
+        if not jid or jid.endswith("@lid") or jid.endswith("@g.us"):
+            return None
+        phone = jid.split("@")[0]
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/last-seen/{phone}"
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "phone": jid,
-            "isGroup": is_group
+            "Content-Type": "application/json",
         }
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=10)
-            logging.info(f"[subscribe_presence] Subscribed to presence for {jid}. Status: {r.status_code}")
-        except Exception as e:
-            logging.error(f"[subscribe_presence] Error subscribing to presence for {jid}: {e}")
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code not in (200, 201):
+                return None
+            resp = (r.json() or {}).get("response")
+            if isinstance(resp, dict):
+                resp = resp.get("t") or resp.get("lastSeen")
+            if isinstance(resp, bool) or resp in (None, 0):
+                return None
+            try:
+                ts = int(resp)
+            except (TypeError, ValueError):
+                return None
+            # WhatsApp sometimes returns timestamps in ms.
+            if ts > 1_000_000_000_000:
+                ts //= 1000
+            return ts if ts > 0 else None
+        except Exception:
+            return None
+
+    def get_profile_about(self, jid: str) -> str:
+        """Return a contact's WhatsApp About/bio text via /profile-status, or ''."""
+        if not jid or jid.endswith("@lid"):
+            return ""
+        phone = jid.replace("@s.whatsapp.net", "@c.us")
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/profile-status/{phone}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code not in (200, 201):
+                return ""
+            resp = (r.json() or {}).get("response")
+            # getStatus returns either a string or {id, status: "<about>"}.
+            if isinstance(resp, dict):
+                about = resp.get("status") or resp.get("about") or ""
+            else:
+                about = resp or ""
+            about = str(about).strip()
+            # Guard against the endpoint echoing an API status word.
+            if about.lower() in ("success", "error", "none", "null"):
+                return ""
+            return about
+        except Exception:
+            return ""
+
+    def subscribe_presence(self, jid: str):
+        """Subscribe to presence events for a contact via WPPConnect API (non-blocking)."""
+        if not jid or jid.endswith("@newsletter"):
+            return
+        def _api():
+            is_group = jid.endswith("@g.us")
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                requests.post(url, json={"phone": phone, "isGroup": is_group}, headers=headers, timeout=10)
+            except Exception:
+                pass
+        threading.Thread(target=_api, daemon=True).start()
 
     def start_background_lid_resolution(self):
         def _resolve_lids():
@@ -5545,6 +6158,14 @@ class MainWindow(wx.Frame):
         lst = self.settings.setdefault("deleted_chats", [])
         if jid not in lst:
             lst.append(jid)
+        if jid.endswith("@s.whatsapp.net"):
+            lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
+            if lid_jid and lid_jid not in lst:
+                lst.append(lid_jid)
+        elif jid.endswith("@lid"):
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+            if phone_jid and phone_jid not in lst:
+                lst.append(phone_jid)
         self.save_settings()
         self.chats.pop(jid, None)
         self._schedule_save()
@@ -5554,9 +6175,97 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(jid)
         if chat:
             chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
+            # Also drop the last-message preview and unread badge so the now-empty
+            # conversation is filtered out of the list immediately (otherwise a
+            # stale lastMessage kept it visible).
+            chat["lastMessage"] = None
+            chat["unreadCount"] = 0
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
-            self._schedule_save()
+            self._schedule_save(dirty_jid=jid)
             self.save_settings()
+
+    def delete_chat(self, jid: str):
+        """Delete chat locally and sync to WPPConnect API."""
+        self.delete_chat_local(jid)
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                r = requests.post(url, json={"phone": [phone]}, headers=headers, timeout=10)
+                if not r.ok:
+                    logging.warning("[delete_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
+            except Exception as exc:
+                logging.warning("[delete_chat] Request failed for %s: %s", jid, exc)
+        threading.Thread(target=_api, daemon=True).start()
+
+    def clear_chat(self, jid: str):
+        """Clear chat messages locally and sync to WPPConnect API."""
+        self.clear_chat_messages_local(jid)
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                r = requests.post(url, json={"phone": [phone]}, headers=headers, timeout=10)
+                if not r.ok:
+                    logging.warning("[clear_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
+            except Exception as exc:
+                logging.warning("[clear_chat] Request failed for %s: %s", jid, exc)
+        threading.Thread(target=_api, daemon=True).start()
+
+    def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
+        """Notify WPPConnect that the user started or stopped typing."""
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/typing"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                requests.post(
+                    url,
+                    json={"phone": phone, "value": value, "isGroup": is_group},
+                    headers=headers,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_api, daemon=True).start()
+
+    def send_recording_status(self, jid: str, value: bool, is_group: bool = False):
+        """Notify WPPConnect that the user started or stopped recording audio."""
+        def _api():
+            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/recording"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            try:
+                requests.post(
+                    url,
+                    json={"phone": phone, "duration": 0, "value": value, "isGroup": is_group},
+                    headers=headers,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_api, daemon=True).start()
+
+    def _is_cleared_message(self, jid: str, msg: dict) -> bool:
+        """
+        True if `msg` predates the user's last "clear chat" action for `jid`.
+
+        Clearing a conversation records a cutoff timestamp in
+        settings["cleared_chats"]. Without consulting it, the next history sync
+        (or a WebSocket re-delivery) would simply repopulate the chat, making the
+        clear appear to do nothing. Messages received after the clear have a
+        newer timestamp and are kept.
+        """
+        cutoff = self.settings.get("cleared_chats", {}).get(jid)
+        if not cutoff:
+            return False
+        try:
+            ts = int(msg.get("messageTimestamp", 0) or 0)
+        except (ValueError, TypeError):
+            return False
+        return bool(ts) and ts < cutoff
 
     # ── Pin ───────────────────────────────────────────────────────────────────
 
@@ -5569,6 +6278,7 @@ class MainWindow(wx.Frame):
             lst.append(jid)
         self.save_settings()
         wx.CallAfter(self.set_chats)
+        self._sync_pin_to_server(jid, pinned=True)
 
     def unpin_chat(self, jid: str):
         lst = self.settings.setdefault("pinned_chats", [])
@@ -5576,6 +6286,32 @@ class MainWindow(wx.Frame):
             lst.remove(jid)
         self.save_settings()
         wx.CallAfter(self.set_chats)
+        self._sync_pin_to_server(jid, pinned=False)
+
+    def _sync_pin_to_server(self, jid: str, pinned: bool):
+        def _do():
+            try:
+                api_jid = jid
+                if api_jid.endswith("@s.whatsapp.net"):
+                    api_jid = api_jid.rsplit("@", 1)[0] + "@c.us"
+                url = (f"{self.wpp_server}:{self.wpp_port}"
+                       f"/api/{self.token}/pin-chat")
+                payload = {
+                    "phone": [api_jid],
+                    "state": "true" if pinned else "false",
+                    "isGroup": jid.endswith("@g.us"),
+                }
+                resp = requests.post(
+                    url, json=payload,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=10,
+                )
+                if not resp.ok:
+                    logging.warning("[pin_chat] API error %s for %s: %s",
+                                    resp.status_code, api_jid, resp.text[:200])
+            except Exception:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── Group ─────────────────────────────────────────────────────────────────
 
@@ -5666,10 +6402,12 @@ class MainWindow(wx.Frame):
         # Authorization only — Content-Type is set automatically by requests
         # when using files= (multipart/form-data with correct boundary).
         headers = {"Authorization": f"Bearer {self.token}"}
+        phone_val = remote_jid.rsplit("@", 1)[0] if remote_jid.endswith("@g.us") else remote_jid
         data = {
-            "phone":    remote_jid,
+            "phone":    [phone_val],
             "filename": filename,
             "caption":  caption,
+            "isGroup":  remote_jid.endswith("@g.us"),
         }
         if quoted:
             quoted_id = self._serialize_quoted_id(quoted)
@@ -5688,21 +6426,21 @@ class MainWindow(wx.Frame):
                     timeout=timeout,
                 )
             if r.status_code in (200, 201):
-                try:
-                    body = r.json()
-                    resp = body.get("response", body)
-                    if isinstance(resp, list) and resp:
-                        resp = resp[0]
-                    if isinstance(resp, dict):
-                        msg_id = resp.get("id")
-                        if isinstance(msg_id, dict):
-                            msg_id = msg_id.get("_serialized", "")
-                        if msg_id:
-                            parts = msg_id.split("_")
-                            return parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
-                    return True
-                except Exception:
-                    return True
+                body = r.json()
+                resp = body.get("response", body)
+                if isinstance(resp, list) and resp:
+                    resp = resp[0]
+                msg_id = ""
+                if isinstance(resp, dict):
+                    msg_id = resp.get("id") or resp.get("key", {}).get("id") or ""
+                    if isinstance(msg_id, dict):
+                        msg_id = msg_id.get("_serialized", "")
+                    if msg_id:
+                        parts = msg_id.split("_")
+                        msg_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                if msg_id:
+                    return msg_id
+                return {"ok": True, "error": "ID not found in response"}
             err = f"HTTP {r.status_code}"
             try:
                 body = r.json()
@@ -5714,25 +6452,62 @@ class MainWindow(wx.Frame):
                     err = f"{err}: {r.text[:200]}"
             logging.error("[send_media] %s for %s (%s, %.1f MB): %s",
                           err, remote_jid, filename, file_size / (1024*1024), r.text[:300])
-            return {"ok": False, "error": err, "retry": False}
+            # 5xx responses are transient server/puppeteer hiccups — notably the
+            # WPPConnect "ProtocolError: Promise was collected" that strikes large
+            # uploads under load. Retry those; treat 4xx as permanent.
+            retryable = r.status_code >= 500
+            return {"ok": False, "error": err, "retry": retryable}
         except Exception as exc:
+            # Timeouts and connection errors are transient — let the queue retry.
             logging.error("[send_media] request exception for %s (%s): %s", remote_jid, filename, exc)
-            return {"ok": False, "error": str(exc)[:200], "retry": False}
+            return {"ok": False, "error": str(exc)[:200], "retry": True}
+
+    def save_contact_to_phone(self, phone: str, name: str,
+                              surname: str = "", sync: bool = True) -> bool:
+        """
+        Save a contact to WhatsApp (and, when sync is True, to the device
+        address book) via the WPPConnect add-new-contact endpoint, which calls
+        WPP.contact.save(..., {syncAddressBook}). Returns True on success.
+        """
+        digits = "".join(c for c in str(phone) if c.isdigit())
+        if not digits or not name:
+            return False
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/add-new-contact"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "phone":             digits,
+            "name":              name,
+            "surname":           surname or "",
+            "syncToAddressbook": bool(sync),
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=20)
+            if r.status_code in (200, 201):
+                return True
+            logging.error("[save_contact_to_phone] HTTP %s: %s",
+                          r.status_code, r.text[:300])
+            return False
+        except Exception as exc:
+            logging.error("[save_contact_to_phone] exception: %s", exc)
+            return False
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
         remote_jid = self._resolve_jid_for_send(remote_jid)
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
+        is_group = remote_jid.endswith("@g.us")
+        if is_group:
+            remote_jid = remote_jid.split("@")[0]
         name = contact_info.get("pushName") or ""
         jid = contact_info.get("remoteJid", "")
         phone_raw = jid.split("@")[0] if "@" in jid else jid
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact-vcard"
         payload = {
             "phone":       [remote_jid],
-            "isGroup":     remote_jid.endswith("@g.us"),
+            "isGroup":     is_group,
             "contactsId":  [f"{phone_raw}@c.us"],
         }
         if quoted:
@@ -5765,34 +6540,28 @@ class MainWindow(wx.Frame):
         if lid_jid:
             remote_jid = lid_jid
 
-        # Find the message in records to see if we have a participant JID
-        participant = ""
+        # Find the message key in records to get participant (needed for groups).
+        msg_key = {"id": message_id, "fromMe": True}
         chat = self.chats.get(remote_jid)
         if chat:
             records = chat.get("messages", {}).get("messages", {}).get("records", [])
             for r in records:
                 if r.get("key", {}).get("id") == message_id:
-                    participant = r.get("key", {}).get("participant", "")
+                    msg_key = r.get("key", {})
                     break
+        # Fall back to our own JID as participant for group messages when the
+        # record wasn't found (so _serialize_msg_id can build the correct 4-part ID).
+        if remote_jid.endswith("@g.us") and not msg_key.get("participant"):
+            my_jid = getattr(self, "my_jid", "")
+            if my_jid:
+                msg_key = dict(msg_key)
+                msg_key["participant"] = my_jid
 
+        full_id = self._serialize_msg_id(remote_jid, msg_key)
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/edit-message"
         )
-        if remote_jid.endswith("@g.us"):
-            if participant:
-                participant_clean = participant.replace("@s.whatsapp.net", "@c.us")
-                full_id = f"true_{remote_jid}_{message_id}_{participant_clean}"
-            else:
-                my_jid = getattr(self, "my_jid", "")
-                if my_jid:
-                    my_jid_clean = my_jid.replace("@s.whatsapp.net", "@c.us")
-                    full_id = f"true_{remote_jid}_{message_id}_{my_jid_clean}"
-                else:
-                    full_id = f"true_{remote_jid}_{message_id}"
-        else:
-            full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
-        
         payload = {
             "id":      full_id,
             "newText": new_text,
@@ -5802,12 +6571,23 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            requests.post(url, json=payload, headers=headers, timeout=15)
-        except Exception:
-            pass
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code not in (200, 201):
+                logging.error("[edit_message] HTTP %s for %s: %s",
+                              r.status_code, full_id, r.text[:300])
+        except Exception as exc:
+            logging.error("[edit_message] exception for %s: %s", full_id, exc)
 
-    def delete_message_for_everyone(self, remote_jid: str, message_id: str, from_me: bool):
-        """Delete a message for everyone via POST /api/session/delete-message."""
+    def delete_message_for_everyone(self, remote_jid: str, msg_key: dict) -> bool:
+        """Revoke a message for everyone via POST /api/session/delete-message.
+
+        Returns True only when the server confirms the revoke. WPP.chat.delete-
+        Message resolves the target through getMessageById, which needs the FULL
+        serialized id (`<fromMe>_<chatId>_<id>[_<participant>]`) — a hardcoded
+        `true_` prefix made it fail to find (and therefore not revoke) messages
+        that weren't your own, and revoke only fires when the message is yours or
+        you are a group admin.
+        """
         lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid_jid:
             remote_jid = lid_jid
@@ -5815,13 +6595,16 @@ class MainWindow(wx.Frame):
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/delete-message"
         )
-        if remote_jid.endswith("@g.us"):
-            full_id = f"true_{remote_jid}_{message_id}"
-        else:
-            full_id = f"true_{remote_jid.replace('@s.whatsapp.net', '@c.us')}_{message_id}"
+        # WhatsApp chat ids use @c.us, not @s.whatsapp.net. Both the chat id
+        # embedded in the serialized message id AND the `phone` field must use
+        # the same normalized form, otherwise WPP.chat.deleteMessage cannot
+        # resolve the chat and the revoke silently no-ops.
+        chat_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
+        full_id = self._serialize_msg_id(chat_jid, msg_key)
 
         payload = {
-            "phone":     remote_jid,
+            "phone":     chat_jid,
+            "isGroup":   chat_jid.endswith("@g.us"),
             "messageId": full_id,
             "onlyLocal": False,
         }
@@ -5830,9 +6613,15 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            requests.post(url, json=payload, headers=headers, timeout=15)
-        except Exception:
-            pass
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True
+            logging.error("[delete_for_everyone] HTTP %s for %s: %s",
+                          r.status_code, full_id, r.text[:300])
+            return False
+        except Exception as exc:
+            logging.error("[delete_for_everyone] exception for %s: %s", full_id, exc)
+            return False
 
     def _preview_sender_from_jid(self, jid: str) -> str:
         """
@@ -6186,11 +6975,16 @@ class MainWindow(wx.Frame):
         displayed_names: list = []
 
         lst = self.conversations_panel.conversations_list
-        # Save currently focused chat JID before clearing the list to preserve user focus
+        # Recover the focused JID that _apply_chat_lists() preserved before it
+        # overwrote chats_list with the new reordered list.  Using focused_idx
+        # directly against the (now-updated) chats_list would map to the wrong
+        # chat after any reordering and send focus to the beginning.
         focused_idx = lst.GetFocusedItem()
-        focused_jid = None
-        if focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
+        focused_jid = getattr(self.conversations_panel, '_preserved_focused_jid', None)
+        self.conversations_panel._preserved_focused_jid = None  # consume
+        if focused_jid is None and focused_idx != -1 and 0 <= focused_idx < len(self.conversations_panel.chats_list):
             focused_jid = self.conversations_panel.chats_list[focused_idx].get("remoteJid")
+        if focused_idx != -1:
             try:
                 # Clear focus state from this item before deleting to prevent NVDA COMError/freeze
                 lst.SetItemState(focused_idx, 0, wx.LIST_STATE_FOCUSED)
@@ -6202,12 +6996,38 @@ class MainWindow(wx.Frame):
         if hasattr(self, "archived_conversations_panel"):
             arch_lst = self.archived_conversations_panel.conversations_list
             arch_focused_idx = arch_lst.GetFocusedItem()
-            if arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
+            arch_focused_jid = getattr(self.archived_conversations_panel, '_preserved_focused_jid', None)
+            self.archived_conversations_panel._preserved_focused_jid = None  # consume
+            if arch_focused_jid is None and arch_focused_idx != -1 and 0 <= arch_focused_idx < len(self.archived_conversations_panel.chats_list):
                 arch_focused_jid = self.archived_conversations_panel.chats_list[arch_focused_idx].get("remoteJid")
+            if arch_focused_idx != -1:
                 try:
                     arch_lst.SetItemState(arch_focused_idx, 0, wx.LIST_STATE_FOCUSED)
                 except Exception:
                     pass
+
+        # ── Content fingerprint: skip full rebuild when nothing visible changed ──
+        # This prevents NVDA from re-reading the current item on every socket
+        # event and eliminates idle CPU from constant DeleteAllItems() calls.
+        _fp_rows: list[tuple] = []
+        for _i, _chat in enumerate(full_chats):
+            _jid  = _chat.get("remoteJid", "")
+            _nm   = full_names[_i] if _i < len(full_names) else ""
+            _unrd = int(_chat.get("unreadCount") or 0)
+            _lid  = ((_chat.get("lastMessage") or {}).get("key") or {}).get("id", "")
+            if conv_filter == "unread" and _unrd == 0:
+                continue
+            if conv_filter == "groups" and not _jid.endswith("@g.us"):
+                continue
+            if conv_filter == "individual" and _jid.endswith("@g.us"):
+                continue
+            if search and search not in _nm.lower():
+                continue
+            _fp_rows.append((_jid, _nm, _unrd, _lid))
+        _fp = hash((conv_filter, search, tuple(_fp_rows)))
+        if _fp == getattr(self, "_chats_ui_fp", None):
+            return  # visible list unchanged — skip expensive rebuild
+        self._chats_ui_fp = _fp
 
         focus_allowed = self._allow_ui_focus_changes()
         _lst_had_focus = (wx.Window.FindFocus() is lst)
@@ -6247,6 +7067,9 @@ class MainWindow(wx.Frame):
                     )
                     if presence_label:
                         item_text += f" {presence_label}"
+                # Show mute indicator
+                if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('muted')})"
                 lst.Append((item_text,))
                 displayed_chats.append(chat)
                 displayed_names.append(name)
@@ -6278,6 +7101,17 @@ class MainWindow(wx.Frame):
             elif panel.conversation is not None:
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
+        elif (_lst_had_focus and focused_jid and displayed_chats
+              and focus_allowed):
+            # The previously focused chat is gone (e.g. it was just cleared and
+            # filtered out). Keep keyboard focus in the list by landing on
+            # whatever now occupies its slot instead of dropping focus entirely.
+            neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
+            if neighbor_idx < 0:
+                neighbor_idx = 0
+            panel.conversations_list.Focus(neighbor_idx)
+            panel.conversations_list.Select(neighbor_idx)
+            panel.conversations_list.EnsureVisible(neighbor_idx)
         elif getattr(self, "_initial_sync_running", False):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass

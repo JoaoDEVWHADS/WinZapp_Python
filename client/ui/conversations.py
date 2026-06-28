@@ -1,4 +1,5 @@
 import base64 as _b64
+import logging
 import mimetypes
 import os
 import re
@@ -27,6 +28,7 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
+    AccessibleMessagesList,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
 from app_paths import data_path
@@ -93,6 +95,9 @@ class ConversationsPanel(wx.Panel):
         # _auto_chain_next_audio and navigate_to_conversation to avoid operating
         # on the wrong conversation's message list.
         self._audio_conv_jid: str = ""
+
+        # ── Typing status state ─────────────────────────────────────────────
+        self._is_typing = False
 
         # ── Voice recording state ───────────────────────────────────────────
         self._is_recording         = False
@@ -299,6 +304,10 @@ class ConversationsPanel(wx.Panel):
 
         self.messages_list = wx.ListCtrl(self.conversation_panel, style=wx.LC_REPORT)
         self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
+        # Win32 ListView truncates item text (and its MSAA name) at ~259 chars.
+        # This custom accessible returns the full untruncated message text so
+        # screen readers announce long messages (and trailing URLs) completely.
+        self.messages_list.SetAccessible(AccessibleMessagesList(self))
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
@@ -704,12 +713,25 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             return
 
+    def _stop_typing_for_current_conversation(self):
+        """Stop typing/recording status for the currently open conversation, if active."""
+        if self._is_typing and self.conversation is not None:
+            jid = self.conversation.get("remoteJid", "")
+            if jid and not jid.endswith("@newsletter"):
+                self.main_window.send_typing_status(jid, False, jid.endswith("@g.us"))
+            self._is_typing = False
+        if self._is_recording and self.conversation is not None:
+            jid = self.conversation.get("remoteJid", "")
+            if jid and not jid.endswith("@newsletter"):
+                self.main_window.send_recording_status(jid, False, jid.endswith("@g.us"))
+
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
             self.conversation = conversation
             # Conversation already open — just focus the message input field.
             wx.CallAfter(self.message_field.SetFocus)
             return
+        self._stop_typing_for_current_conversation()
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -750,14 +772,14 @@ class ConversationsPanel(wx.Panel):
         self.conversation = conversation
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
-        _display_jid = getattr(self.main_window, "_lid_to_phone", {}).get(_conv_jid, _conv_jid) if _conv_jid.endswith("@lid") else _conv_jid
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
             or conversation.get("name", "")
-            or conversation.get("pushName", "")
+            or ("" if _conv_jid.endswith("@g.us") else conversation.get("pushName", ""))
             or self.main_window.find_jid_through_messages(conversation)
-            or format_number(_display_jid)
+            or self.main_window._format_jid_for_display(_conv_jid)
+            or (self.main_window.i18n.t("unknown_group") if _conv_jid.endswith("@g.us") else self.main_window.i18n.t("unknown_contact"))
         )
         jid      = conversation.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
@@ -806,6 +828,9 @@ class ConversationsPanel(wx.Panel):
             args=(conversation,),
             daemon=True,
         ).start()
+        # Subscribe to presence events for this contact so last-seen and typing
+        # indicators arrive via onpresencechanged Socket.IO events.
+        self.main_window.subscribe_presence(jid)
         # Background: cache group participants for @mention suggestions
         if is_group:
             threading.Thread(
@@ -861,8 +886,14 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.message_field.SetFocus)
 
     def preselect_messages(self):
-        self.messages_list.Focus(0)
-        self.messages_list.Select(0)
+        wx.CallAfter(self._do_preselect)
+
+    def _do_preselect(self):
+        count = self.messages_list.GetItemCount()
+        if count > 0:
+            self.messages_list.Focus(count - 1)
+            self.messages_list.Select(count - 1)
+            self.messages_list.EnsureVisible(count - 1)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -901,6 +932,15 @@ class ConversationsPanel(wx.Panel):
         else:
             self.send_message_btn.Hide()
             self.record_voice_message_btn.Show()
+        # Sync typing status with WPPConnect (only on state transitions)
+        if self.conversation is not None:
+            jid = self.conversation.get("remoteJid", "")
+            if jid and not jid.endswith("@newsletter"):
+                is_group = jid.endswith("@g.us")
+                now_typing = bool(msg.strip())
+                if now_typing != self._is_typing:
+                    self._is_typing = now_typing
+                    self.main_window.send_typing_status(jid, now_typing, is_group)
         self._on_text_changed_mention_check()
 
     def _on_conversation_char_hook(self, event):
@@ -1194,6 +1234,18 @@ class ConversationsPanel(wx.Panel):
         UUID in the virtual message's key so that media playback can later look
         up the message in the WPPConnect API database.
         """
+        # Panel-level guard: survive _sorted_messages rebuilds that replace dict
+        # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
+        _played = getattr(self, "_played_sent_local_ids", None)
+        if _played is None:
+            self._played_sent_local_ids: set = set()
+            _played = self._played_sent_local_ids
+        if local_id in _played:
+            return
+        _played.add(local_id)
+        if len(_played) > 500:
+            _played.clear()
+
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 if msg.get("_ui_sent"):
@@ -1275,6 +1327,11 @@ class ConversationsPanel(wx.Panel):
         def _callback(in_data, frame_count, time_info, status):
             # Runs on PyAudio's internal callback thread.
             # list.append is atomic under the GIL — no explicit lock needed.
+            if status:
+                # paInputOverflow: the capture buffer filled before we drained
+                # it (CPU/GIL contention). Logged so choppy recordings are
+                # diagnosable; the larger frames_per_buffer below minimises it.
+                logging.debug("[audio] input stream status flag: %s", status)
             if not self._recording_paused:
                 self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
@@ -1295,7 +1352,10 @@ class ConversationsPanel(wx.Panel):
                     channels=ch,
                     format=pyaudio.paInt16,
                     input=True,
-                    frames_per_buffer=1024,
+                    # Larger buffer (~85 ms at 48 kHz) so the Python callback
+                    # can tolerate scheduling delays from background sync/media
+                    # threads without PortAudio dropping samples (choppy audio).
+                    frames_per_buffer=4096,
                     stream_callback=_callback,
                 )
                 stream.start_stream()
@@ -1313,6 +1373,11 @@ class ConversationsPanel(wx.Panel):
             return
 
         self._is_recording = True
+
+        # Notify contacts that the user is recording audio
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
 
         # UI: play sound, swap buttons, focus the configured recording action.
         self.main_window.voicemsg_startrecording_sound.play()
@@ -1367,6 +1432,10 @@ class ConversationsPanel(wx.Panel):
         self._is_recording     = False
         self._recording_paused = False
         self._recording_frames = []
+        # Notify contacts that recording stopped
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
         self._hide_voice_panel()
         self.message_field.SetFocus()
 
@@ -1387,6 +1456,10 @@ class ConversationsPanel(wx.Panel):
         self._stop_recording_stream()
         self._is_recording     = False
         self._recording_paused = False
+        # Notify contacts that recording stopped
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
 
         frames = self._recording_frames
         self._recording_frames = []
@@ -1482,6 +1555,7 @@ class ConversationsPanel(wx.Panel):
             self._hide_mention_suggestions()
             self.message_field.SetFocus()
             return
+        self._stop_typing_for_current_conversation()
         if self._is_recording:
             self._stop_recording_stream()
             self._is_recording     = False
@@ -1937,8 +2011,10 @@ class ConversationsPanel(wx.Panel):
             fwd_item,
         )
 
-        # Star (Ctrl+Shift+O)
-        star_item = menu.Append(wx.ID_ANY, f"{i18n.t('star_message')}\tCtrl+Shift+O")
+        # Star / Unstar (Ctrl+Shift+O)
+        is_starred = bool(msg.get("starred"))
+        star_label = i18n.t("unstar_message") if is_starred else i18n.t("star_message")
+        star_item = menu.Append(wx.ID_ANY, f"{star_label}\tCtrl+Shift+O")
         self.Bind(
             wx.EVT_MENU,
             lambda e, m=msg: self._on_menu_star(m),
@@ -2534,8 +2610,10 @@ class ConversationsPanel(wx.Panel):
                 self._load_older_messages_from_server()
 
         # Unread-separator dismiss logic:
-        # - Focus at or past the separator → start/restart the 2-s dismiss timer
-        # - Focus above the separator → cancel the timer (user scrolled back up)
+        # - Focus at or past the separator → start the 2-s dismiss timer once.
+        # Once the timer is armed it is intentionally NOT cancelled when focus
+        # moves back above the separator, so the separator always disappears
+        # after the user has reached the unread region.
         if self._unread_sep_idx >= 0:
             if idx >= self._unread_sep_idx:
                 # Mark as read immediately (first time focus arrives)
@@ -2549,9 +2627,6 @@ class ConversationsPanel(wx.Panel):
                                 daemon=True,
                             ).start()
                     self._unread_sep_dismiss_timer.StartOnce(2000)
-            else:
-                # User scrolled back above the separator — cancel dismiss
-                self._unread_sep_dismiss_timer.Stop()
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
@@ -3555,8 +3630,25 @@ class ConversationsPanel(wx.Panel):
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                return "🚫 Mensagem apagada"
+                return "Mensagem apagada"
             return "⚙️ Mensagem do sistema"
+
+        # ── Interactive / Button reply ───────────────────────────────────────
+        if msg_type == "buttonsResponseMessage":
+            btn = msg_obj.get("buttonsResponseMessage") or {}
+            text = btn.get("selectedDisplayText") or ""
+            return text or i18n.t("interactive_reply")
+
+        if msg_type == "listResponseMessage":
+            lst = msg_obj.get("listResponseMessage") or {}
+            title = lst.get("title", "")
+            reply = (lst.get("singleSelectReply") or {}).get("selectedRowId", "")
+            return title or reply or i18n.t("list_reply")
+
+        if msg_type == "interactiveMessage":
+            inter = msg_obj.get("interactiveMessage") or {}
+            body = (inter.get("body") or {}).get("text", "")
+            return body or i18n.t("interactive_message")
 
         # ── Fallback ─────────────────────────────────────────────────────────
         return i18n.t("unsupported_message").format(
@@ -3954,6 +4046,8 @@ class ConversationsPanel(wx.Panel):
             header = sender
 
         pieces = [f"{header}: {body}"]
+        if msg.get("starred"):
+            pieces[0] = f"★ {pieces[0]}"
         if time_str:
             pieces.append(f", {time_str}")
         if status:
@@ -4068,7 +4162,9 @@ class ConversationsPanel(wx.Panel):
                     canonical = getattr(mw, "_lid_to_phone", {}).get(canonical, canonical)
                 presence = getattr(mw, "_presence_cache", {}).get(canonical, {})
                 lkp      = presence.get("lastKnownPresence", "")
-                last_seen = presence.get("lastSeen")
+                # Fall back to a direct last-seen fetch when no presence event
+                # has arrived yet (so the note isn't left without it).
+                last_seen = presence.get("lastSeen") or mw.get_last_seen(canonical)
                 if lkp in ("available", "composing", "recording"):
                     note = i18n.t("online_status")
                 elif last_seen:
@@ -4200,11 +4296,14 @@ class ConversationsPanel(wx.Panel):
             self,
         ) != wx.YES:
             return
-        self.main_window.clear_chat_messages_local(jid)
+        self.main_window.clear_chat(jid)
         # Refresh messages list if this conversation is open
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
+        # Refresh the conversations list immediately so the now-empty chat is
+        # removed, keeping focus on a neighbouring conversation.
+        self.main_window.set_chats()
 
     def _on_menu_delete_chat(self, jid: str):
         i18n = self.main_window.i18n
@@ -4217,7 +4316,7 @@ class ConversationsPanel(wx.Panel):
             return
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self.close_conversation()
-        self.main_window.delete_chat_local(jid)
+        self.main_window.delete_chat(jid)
 
     def _on_menu_leave_group(self, jid: str):
         i18n = self.main_window.i18n
@@ -4645,6 +4744,7 @@ class ConversationsPanel(wx.Panel):
         current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if target_jid == current_jid:
             self._sorted_messages.append(virtual_msg)
+            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
@@ -4653,8 +4753,11 @@ class ConversationsPanel(wx.Panel):
         mw.set_chats()
 
     def _on_menu_star(self, msg: dict):
-        # Star not yet fully implemented — no-op for now
-        pass
+        msg["starred"] = not msg.get("starred")
+        jid = self.conversation.get("remoteJid", "")
+        if jid:
+            self.main_window._schedule_save()
+            self.populate_messages()
 
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
@@ -4704,12 +4807,24 @@ class ConversationsPanel(wx.Panel):
             return
 
         if for_everyone:
-            # Delete for everyone via WPPConnect API
-            jid   = msg.get("key", {}).get("remoteJid", "") or (
+            # Revoke for everyone via WPPConnect API (off the UI thread). The
+            # message key carries fromMe/participant so the server can build the
+            # correct serialized id and actually revoke it.
+            msg_key = msg.get("key", {})
+            jid = msg_key.get("remoteJid", "") or (
                 self.conversation.get("remoteJid", "") if self.conversation else ""
             )
-            from_me = msg.get("key", {}).get("fromMe", False)
-            self.main_window.delete_message_for_everyone(jid, msg_id, from_me)
+
+            def _revoke(k=dict(msg_key), j=jid):
+                ok = self.main_window.delete_message_for_everyone(j, k)
+                if not ok:
+                    wx.CallAfter(
+                        wx.MessageBox,
+                        i18n.t("delete_for_everyone_failed"),
+                        i18n.t("delete_message"),
+                        wx.OK | wx.ICON_WARNING,
+                    )
+            threading.Thread(target=_revoke, daemon=True).start()
 
         # Always delete locally
         self._sorted_messages.pop(index)
@@ -4724,7 +4839,12 @@ class ConversationsPanel(wx.Panel):
                 m for m in records
                 if m.get("key", {}).get("id") != msg_id
             ]
-            self.main_window._schedule_save()
+            try:
+                self.main_window.db.delete_message(
+                    self.conversation.get("remoteJid", ""), msg_id
+                )
+            except Exception:
+                logging.exception("[conversations] delete_message failed")
 
     def _on_accel_edit_message(self, event):
         """Alt+E: enter edit mode for the focused own text message."""
@@ -5385,8 +5505,11 @@ class ConversationsPanel(wx.Panel):
             rxn_key = f"_rxn_{orig_id}"
             if not any(r.get("key", {}).get("id") == rxn_key for r in records):
                 records.append(reaction_record)
+                try:
+                    self.main_window.db.insert_message(jid, reaction_record)
+                except Exception:
+                    logging.exception("[conversations] insert reaction failed")
 
-        self.main_window._schedule_save()
         self.main_window.set_chats()
 
     # ── Attachment handling ──────────────────────────────────────────────────
@@ -5654,6 +5777,7 @@ class ConversationsPanel(wx.Panel):
                     "quotedMessage": quoted.get("message") or {},
                 }
             self._sorted_messages.append(virtual_msg)
+            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:

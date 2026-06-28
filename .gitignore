@@ -43,8 +43,13 @@ client/logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
+client/__pycache__/
+client/core/__pycache__/
+client/ui/__pycache__/
+client/ui/dialogs/__pycache__/
 *.py[codz]
 *$py.class
+node_modules/
 
 # C extensions
 *.so
