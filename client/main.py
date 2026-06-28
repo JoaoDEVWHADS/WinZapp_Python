@@ -374,6 +374,12 @@ class MainWindow(wx.Frame):
         self.i18n = I18n(self)
         self.i18n.get_language()
 
+        # ── Auto-updater ──────────────────────────────────────────────────────
+        # Schedule the update checker on the event loop early (but after i18n
+        # is initialized) so it can run even if modal dialogs block __init__.
+        if not self.background_mode:
+            wx.CallLater(2000, self._start_update_checker)
+
         # Terms of service – show once before anything else happens
         if not self.background_mode:
             logging.info("MainWindow: Checking terms acceptance...")
@@ -514,10 +520,6 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Initializing User Interface...")
         self.init_UI()
 
-        # ── Auto-updater ──────────────────────────────────────────────────────
-        # Schedule the update checker on the event loop now that MainWindow is fully initialized.
-        if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
 
 
     def init_UI(self):
