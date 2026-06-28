@@ -6206,7 +6206,7 @@ class MainWindow(wx.Frame):
         if jid not in lst:
             lst.append(jid)
         self.save_settings()
-        wx.CallAfter(self.set_chats)
+        self._schedule_set_chats()
         self._api_archive_chat(jid, archive=True)
 
     def unarchive_chat(self, jid: str):
@@ -6214,7 +6214,7 @@ class MainWindow(wx.Frame):
         if jid in lst:
             lst.remove(jid)
         self.save_settings()
-        wx.CallAfter(self.set_chats)
+        self._schedule_set_chats()
         self._api_archive_chat(jid, archive=False)
 
     def _api_archive_chat(self, jid: str, archive: bool):
@@ -6256,7 +6256,7 @@ class MainWindow(wx.Frame):
         self.save_settings()
         self.chats.pop(jid, None)
         self._schedule_save()
-        wx.CallAfter(self.set_chats)
+        self._schedule_set_chats()
 
     def clear_chat_messages_local(self, jid: str):
         chat = self.chats.get(jid)
@@ -6364,7 +6364,7 @@ class MainWindow(wx.Frame):
         if jid not in lst:
             lst.append(jid)
         self.save_settings()
-        wx.CallAfter(self.set_chats)
+        self._schedule_set_chats()
         self._sync_pin_to_server(jid, pinned=True)
 
     def unpin_chat(self, jid: str):
@@ -6372,7 +6372,7 @@ class MainWindow(wx.Frame):
         if jid in lst:
             lst.remove(jid)
         self.save_settings()
-        wx.CallAfter(self.set_chats)
+        self._schedule_set_chats()
         self._sync_pin_to_server(jid, pinned=False)
 
     def _sync_pin_to_server(self, jid: str, pinned: bool):

@@ -1202,7 +1202,7 @@ class ConversationsPanel(wx.Panel):
         # Register the virtual message in chat records so the conversation
         # list preview updates immediately to show the sent message.
         self._register_virtual_msg(virtual_msg)
-        self.main_window.set_chats()
+        self.main_window._schedule_set_chats()
 
     def _register_virtual_msg(self, virtual_msg: dict):
         """
@@ -1290,7 +1290,7 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.message_sent_sound.play()
                 break
         # Refresh conversation list so the preview reflects the sent message.
-        self.main_window.set_chats()
+        self.main_window._schedule_set_chats()
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
@@ -1550,7 +1550,7 @@ class ConversationsPanel(wx.Panel):
 
         # Register the virtual message so the conversation list preview updates.
         self._register_virtual_msg(virtual_msg)
-        self.main_window.set_chats()
+        self.main_window._schedule_set_chats()
 
         self._hide_voice_panel()
         self.message_field.SetFocus()
@@ -4323,7 +4323,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.DeleteAllItems()
         # Refresh the conversations list immediately so the now-empty chat is
         # removed, keeping focus on a neighbouring conversation.
-        self.main_window.set_chats()
+        self.main_window._schedule_set_chats()
 
     def _on_menu_delete_chat(self, jid: str):
         i18n = self.main_window.i18n
@@ -4770,7 +4770,7 @@ class ConversationsPanel(wx.Panel):
             if last >= 0:
                 self.messages_list.EnsureVisible(last)
 
-        mw.set_chats()
+        mw._schedule_set_chats()
 
     def _on_menu_star(self, msg: dict):
         msg["starred"] = not msg.get("starred")
@@ -5530,7 +5530,7 @@ class ConversationsPanel(wx.Panel):
                 except Exception:
                     logging.exception("[conversations] insert reaction failed")
 
-        self.main_window.set_chats()
+        self.main_window._schedule_set_chats()
 
     # ── Attachment handling ──────────────────────────────────────────────────
 
@@ -5814,7 +5814,7 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetFocus()
 
         # Refresh conversation list preview to show the last sent attachment.
-        self.main_window.set_chats()
+        self.main_window._schedule_set_chats()
 
     # ── Contact message helpers ──────────────────────────────────────────────
 
