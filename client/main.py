@@ -2655,6 +2655,11 @@ class MainWindow(wx.Frame):
         # ── Start background resolving of unknown LIDs ──────────────────
         self.start_background_lid_resolution()
 
+        # Show the contact list immediately from get_remote_chats() metadata
+        # (name, pushName, unreadCount) so the user is not staring at a blank
+        # screen while the per-chat message sync runs below.
+        wx.CallAfter(self.set_chats)
+
         # ── Phase 1: sync all messages ────────────────────────────────────
         self.sync_remote_chats()
 
@@ -3501,12 +3506,19 @@ class MainWindow(wx.Frame):
             if jid in deleted:
                 continue
                 
-            # Filter out contacts/chats with no messages, no unread messages, and not pinned
-            records = chat.get("messages", {}).get("messages", {}).get("records", [])
-            last_msg = chat.get("lastMessage")
-            unread = int(chat.get("unreadCount", 0) or 0)
+            records   = chat.get("messages", {}).get("messages", {}).get("records", [])
+            last_msg  = chat.get("lastMessage")
+            unread    = int(chat.get("unreadCount", 0) or 0)
             is_pinned = jid in pinned
-            if not records and not last_msg and unread == 0 and not is_pinned:
+            # Skip chats with absolutely no content AND no identity.
+            # We do NOT skip based on missing messages alone: during and just
+            # after sync many valid chats have empty records but still carry a
+            # name/pushName from the WPPConnect list-chats response.
+            has_content  = bool(records or last_msg or unread > 0 or is_pinned)
+            name_hint    = (chat.get("name") or chat.get("pushName") or
+                            chat.get("subject") or "").strip()
+            has_identity = bool(name_hint and not name_hint.isdigit() and len(name_hint) > 1)
+            if not has_content and not has_identity:
                 continue
                 
             def get_valid_name(val):
@@ -4157,13 +4169,20 @@ class MainWindow(wx.Frame):
                     lst.EnsureVisible(0)
 
     def sync_remote_chats(self):
-        for chat in list(self.chats.values()):
-            try:
-                self.sync_chat_messages(chat.copy())
-            except Exception:
-                # Log but continue — one failed chat must not abort the others
-                jid = chat.get("remoteJid", "?")
-                print(f"[sync_remote_chats] failed to sync {jid}, continuing")
+        chats = list(self.chats.values())
+        if not chats:
+            return
+        # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
+        # concurrent requests fine; cap at 6 workers to avoid overloading it.
+        max_workers = min(6, len(chats))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in chats}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception as exc:
+                    jid = futs[fut].get("remoteJid", "?")
+                    logging.warning("[sync_remote_chats] failed for %s: %s", jid, exc)
 
     def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
@@ -4314,12 +4333,21 @@ class MainWindow(wx.Frame):
             if "messages" not in chat:
                 chat["messages"] = {}
 
-        # Always persist after sync — chat and self.chats[remote_jid] may be
-        # the same dict object, making the old identity check a no-op.
         self.chats[remote_jid] = chat
+
         if not getattr(self, "_initial_sync_running", False):
             wx.CallAfter(self._schedule_set_chats)
-        self.save_data(self.chats, self.contacts)
+
+        # Incremental DB save: write only this chat + its messages.
+        # This replaces the old save_data(self.chats, ...) call which dumped the
+        # ENTIRE state (O(N) writes per chat → O(N²) total during bulk sync).
+        try:
+            self.db.upsert_chat(remote_jid, chat)
+            if all_messages:
+                self.db.insert_messages_batch(remote_jid, all_messages)
+        except Exception as exc:
+            logging.warning("[sync_chat_messages] incremental DB save failed for %s: %s",
+                            remote_jid, exc)
 
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
     # to download older media causes the WPPConnect to enter a 5-second retry
