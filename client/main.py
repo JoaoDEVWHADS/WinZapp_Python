@@ -2736,6 +2736,11 @@ class MainWindow(wx.Frame):
             def _probe_and_start() -> bool:
                 """Probe the API for existing chats; start sync and return True if found."""
                 if _already_syncing():
+                    # Sync is already running or completed — clear "preparing" status
+                    # if it was left visible because the sync finished before this
+                    # fallback thread checked in.
+                    if getattr(self, "_sync_completed", False) and not self.background_mode:
+                        wx.CallAfter(self._set_status, "")
                     return True
                 try:
                     url = (
@@ -2798,7 +2803,14 @@ class MainWindow(wx.Frame):
         if msg_id and any(m.get("key", {}).get("id") == msg_id for m in bucket):
             return  # deduplicate
         bucket.append(msg)
-        self._schedule_save()
+        # Persist the status update directly instead of going through _schedule_save()
+        # (which would fall back to writing all chats when no dirty_jid is set).
+        def _save_status():
+            try:
+                self.db.upsert_status_update(participant, msg)
+            except Exception as exc:
+                logging.warning("[_store_status_update] DB write failed: %s", exc)
+        threading.Thread(target=_save_status, daemon=True).start()
         # Refresh the Status tab if it is currently visible
         try:
             if hasattr(self, "navigation_panel"):
@@ -3323,10 +3335,10 @@ class MainWindow(wx.Frame):
         dirty_chats: set[str] = set(getattr(self, "_dirty_jids_for_save", None) or set())
         self._dirty_jids_for_save = set()
 
-        # If no specific dirty tracking, fall back to saving all chat metadata
-        # (still much cheaper than import_from_dict: no message blob encryption).
-        jids_to_save = dirty_chats if dirty_chats else list(self.chats.keys())
-        for jid in jids_to_save:
+        # Only save explicitly dirty chats.  The old "save all as fallback"
+        # behaviour wrote every chat on every unrelated event (e.g. mark-as-read,
+        # status updates), causing 1-second DB writes even during idle operation.
+        for jid in dirty_chats:
             chat = self.chats.get(jid)
             if not chat:
                 continue
@@ -3723,7 +3735,11 @@ class MainWindow(wx.Frame):
         self._set_chats_pending = False
         def _bg():
             try:
-                self._build_lid_to_phone_cache()
+                # _build_lid_to_phone_cache() is intentionally NOT called here.
+                # It scans every message in every chat (O(total_messages)) and is
+                # too expensive to run on every WebSocket event.  The cache is
+                # maintained incrementally by _extract_lid_mapping() on each new
+                # message, and rebuilt in full only at startup (set_chats calls).
                 result = self._compute_chat_lists()
                 wx.CallAfter(self._apply_chat_lists, *result)
             except Exception as e:
@@ -5465,7 +5481,7 @@ class MainWindow(wx.Frame):
 
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
-        self._schedule_save()
+        self._schedule_save(dirty_jid=remote_jid)
         wx.CallAfter(self._schedule_set_chats)
 
         if unread == 0 and not force:
@@ -6133,7 +6149,7 @@ class MainWindow(wx.Frame):
             chat["lastMessage"] = None
             chat["unreadCount"] = 0
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
-            self._schedule_save()
+            self._schedule_save(dirty_jid=jid)
             self.save_settings()
 
     def delete_chat(self, jid: str):

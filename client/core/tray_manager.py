@@ -78,11 +78,15 @@ class TrayIcon(wx.adv.TaskBarIcon):
 
         On Windows 11, NVDA accumulates tooltip text from successive SetIcon
         calls on the same icon slot.  Removing the icon first ensures only the
-        new tooltip text is announced.
+        new tooltip text is announced.  Skip the Remove/Set cycle when the
+        tooltip text is unchanged to avoid unnecessary flicker and NVDA chatter.
         """
         self.i18n.get_language()
         total, names = self._get_unread_info()
         tooltip = self._build_tooltip(total, names)
+        if tooltip == getattr(self, "_last_tooltip", None):
+            return
+        self._last_tooltip = tooltip
         try:
             self.RemoveIcon()
         except Exception:

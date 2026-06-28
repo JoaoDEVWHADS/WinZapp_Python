@@ -53,11 +53,14 @@ def _dll_search_paths() -> "list[str]":
     candidates: list[str] = []
 
     if hasattr(sys, "_MEIPASS"):
-        # Frozen: try exe dir first (onedir), then _MEIPASS temp dir (onefile)
+        # Frozen: try exe dir first (onedir), then _MEIPASS/lib/ (spec file
+        # bundles it there), then _MEIPASS root (onefile legacy).
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidates += [
             os.path.join(exe_dir, "lib", "libopus-0.dll"),
             os.path.join(exe_dir, "lib", "opus.dll"),
+            os.path.join(sys._MEIPASS, "lib", "libopus-0.dll"),
+            os.path.join(sys._MEIPASS, "lib", "opus.dll"),
             os.path.join(sys._MEIPASS, "libopus-0.dll"),
             os.path.join(sys._MEIPASS, "opus.dll"),
         ]
