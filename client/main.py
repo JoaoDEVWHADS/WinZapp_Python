@@ -332,6 +332,7 @@ class MainWindow(wx.Frame):
         self._unresolvable_names = set()
         self._resolving_lids = set()
         self._lid_resolution_lock = threading.Lock()
+        self._media_sync_running = False
 
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
@@ -358,11 +359,7 @@ class MainWindow(wx.Frame):
         self._sync_autostart_registry()
 
 
-        # ── Auto-updater ──────────────────────────────────────────────────────
-        # Schedule the update checker on the event loop early so it runs even
-        # if language selection, terms acceptance, or pairing dialogs are shown (modal).
-        if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
+
 
         # ── Language selection on first launch ─────────────────────────────────
         # Show before everything else so the user can pick their language
@@ -376,6 +373,12 @@ class MainWindow(wx.Frame):
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
+
+        # ── Auto-updater ──────────────────────────────────────────────────────
+        # Schedule the update checker on the event loop early (but after i18n
+        # is initialized) so it can run even if modal dialogs block __init__.
+        if not self.background_mode:
+            wx.CallLater(2000, self._start_update_checker)
 
         # Terms of service – show once before anything else happens
         if not self.background_mode:
@@ -394,7 +397,8 @@ class MainWindow(wx.Frame):
             self.wpp_port = 6300
         self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
         self.wpp_api_key   = conn.get("wpp_api_key",   "wz-local-api-key")
-        logging.info("MainWindow: WPPConnect config - server=%s, port=%s", self.wpp_server, self.wpp_port)
+        self.wpp_custom_api = conn.get("wpp_custom_api", False)
+        logging.info("MainWindow: WPPConnect config - server=%s, port=%s, custom_api=%s", self.wpp_server, self.wpp_port, self.wpp_custom_api)
 
         #Set basic variables
         self.chats = {}
@@ -405,18 +409,42 @@ class MainWindow(wx.Frame):
         # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
         self._ui_ready_event = threading.Event()
 
-        # Check and install API modules if needed (first run only)
-        logging.info("MainWindow: Checking/installing API modules...")
-        self.ensure_api_modules_installed()
+        # Check if we should ask the user to choose between local and custom/remote API (first run)
+        self._check_api_type_first_run()
 
-        # Check that the installed WPPConnect Server meets the minimum required version
-        logging.info("MainWindow: Checking WPPConnect Server version...")
-        self.ensure_wpp_version()
-
-        # Start local WPPConnect Server (if bundled)
+        # Handle API execution configuration
         self.wpp_process = None
-        logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
-        self.ensure_wpp_running()
+        if self.wpp_custom_api:
+            # Delete local node_modules and Puppeteer cache (Chrome) to free space
+            node_modules_path = resource_path("api", "node_modules")
+            if os.path.isdir(node_modules_path):
+                logging.info("MainWindow: Custom API enabled. Cleaning local node_modules...")
+                try:
+                    import shutil
+                    shutil.rmtree(node_modules_path, ignore_errors=True)
+                except Exception as e:
+                    logging.error("MainWindow: Failed to clean local node_modules: %s", e)
+
+            puppeteer_cache_path = resource_path("api", ".cache")
+            if os.path.isdir(puppeteer_cache_path):
+                logging.info("MainWindow: Custom API enabled. Cleaning local Puppeteer cache...")
+                try:
+                    import shutil
+                    shutil.rmtree(puppeteer_cache_path, ignore_errors=True)
+                except Exception as e:
+                    logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
+        else:
+            # Check and install API modules if needed (first run only)
+            logging.info("MainWindow: Checking/installing API modules...")
+            self.ensure_api_modules_installed()
+
+            # Check that the installed WPPConnect Server meets the minimum required version
+            logging.info("MainWindow: Checking WPPConnect Server version...")
+            self.ensure_wpp_version()
+
+            # Start local WPPConnect Server (if bundled)
+            logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
+            self.ensure_wpp_running()
 
         # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
         if not self.background_mode:
@@ -491,6 +519,7 @@ class MainWindow(wx.Frame):
         
         logging.info("MainWindow: Initializing User Interface...")
         self.init_UI()
+
 
 
     def init_UI(self):
@@ -742,6 +771,8 @@ class MainWindow(wx.Frame):
 
     def _apply_global_hotkey(self):
         """Register (or unregister) the global hotkey from settings."""
+        if not hasattr(self, "_hotkey_manager"):
+            return
         if self._hotkey_manager is not None:
             self._hotkey_manager.stop()
             self._hotkey_manager = None
@@ -1800,9 +1831,13 @@ class MainWindow(wx.Frame):
     # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
     def _is_wpp_running(self):
-        """Return True if the WPPConnect is already listening on the configured port."""
+        """Return True if the WPPConnect is already listening on the configured server/port."""
+        import urllib.parse
         try:
-            with _socket.create_connection(("127.0.0.1", self.wpp_port), timeout=1):
+            parsed = urllib.parse.urlparse(self.wpp_server)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or self.wpp_port
+            with _socket.create_connection((host, port), timeout=1):
                 return True
         except OSError:
             return False
@@ -2071,6 +2106,8 @@ class MainWindow(wx.Frame):
 
     def apply_language_changes(self):
         """Refresh all visible translatable text after a language change."""
+        if not hasattr(self, "navigation_panel"):
+            return
         self.navigation_panel.refresh_labels()
         self.conversations_panel.refresh_labels()
         if hasattr(self, "archived_conversations_panel"):
@@ -2144,7 +2181,58 @@ class MainWindow(wx.Frame):
         self.settings.setdefault("general", {})["language"] = lang
         self.save_settings()
 
-    # ── First-run / autostart ─────────────────────────────────────────────────
+    def _check_api_type_first_run(self):
+        """
+        Check if we need to ask the user to choose between local and custom/remote API on first launch.
+        """
+        if self.background_mode:
+            return
+
+        gen = self.settings.get("general", {})
+        if gen.get("api_type_first_run_asked", False):
+            return
+
+        msg = self.i18n.t("api_type_ask_message")
+        title = self.i18n.t("api_type_ask_title")
+
+        result = wx.MessageBox(
+            msg,
+            title,
+            wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION,
+        )
+
+        if result == wx.YES:
+            # User wants local API (default)
+            self.settings.setdefault("connection", {})["wpp_custom_api"] = False
+            self.wpp_custom_api = False
+            self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
+            self.save_settings()
+        elif result == wx.NO:
+            # User wants to specify a custom/remote API
+            self.settings.setdefault("connection", {})["wpp_custom_api"] = True
+            self.wpp_custom_api = True
+            self.save_settings()
+
+            # Open settings dialog on the Connection tab (index 2)
+            from ui.dialogs.settings_dialog import SettingsDialog
+            dlg = SettingsDialog(self)
+            dlg._notebook.SetSelection(2)
+            settings_res = dlg.ShowModal()
+            dlg.Destroy()
+
+            if settings_res == wx.ID_OK:
+                # Successfully configured! Mark as asked.
+                self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
+                self.save_settings()
+            else:
+                # User cancelled or closed settings dialog. Roll back and exit.
+                self.settings.setdefault("connection", {})["wpp_custom_api"] = False
+                self.wpp_custom_api = False
+                self.save_settings()
+                sys.exit(0)
+        else:
+            # User cancelled or closed the question box. Exit.
+            sys.exit(0)
 
     def _check_first_run(self):
         """
@@ -2690,7 +2778,11 @@ class MainWindow(wx.Frame):
         # ── Phase 2: download media (silent) ──────────────────────────────
         if not self.background_mode:
             wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-        self.sync_media_for_all_chats()
+        self._media_sync_running = True
+        try:
+            self.sync_media_for_all_chats()
+        finally:
+            self._media_sync_running = False
         if not self.background_mode:
             wx.CallAfter(self._set_status, "")
         # Final refresh so any media-resolved previews appear in the list.
@@ -3617,7 +3709,8 @@ class MainWindow(wx.Frame):
                     resolved_name
                     or chat_push
                     or msg_push
-                    or chat_name_field            )
+                    or chat_name_field
+                )
             
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
@@ -3739,12 +3832,16 @@ class MainWindow(wx.Frame):
             self.tray_icon.update_tooltip()
 
     def set_chats(self):
+        if getattr(self, "_media_sync_running", False):
+            return
         self._build_lid_to_phone_cache()
         self._apply_chat_lists(*self._compute_chat_lists())
 
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
+        if getattr(self, "_media_sync_running", False):
+            return
         if getattr(self, "_set_chats_pending", False):
             return
         self._set_chats_pending = True
@@ -3753,6 +3850,8 @@ class MainWindow(wx.Frame):
     def _do_scheduled_set_chats(self):
         """Run heavy computation in background; apply UI changes on main thread."""
         self._set_chats_pending = False
+        if getattr(self, "_media_sync_running", False):
+            return
         def _bg():
             try:
                 # _build_lid_to_phone_cache() is intentionally NOT called here.
@@ -7403,9 +7502,10 @@ def setup_logging():
         # Remove any handler added by a prior basicConfig call
         for h in root.handlers[:]:
             root.removeHandler(h)
-            h.close()
         root.addHandler(handler)
-        root.setLevel(logging.WARNING)
+        # Set logging level to INFO to expose auto-updater, settings validation,
+        # and startup logs. Noisy dependencies are silenced at ERROR level below.
+        root.setLevel(logging.INFO)
 
         # Silence very noisy third-party libraries
         for _lib in ("urllib3", "requests", "socketio", "engineio",
