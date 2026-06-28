@@ -22,6 +22,7 @@ Design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -171,6 +172,10 @@ class DatabaseManager:
         self.db_path = db_path
         self._fernet = Fernet(key)
         self._conn: aiosqlite.Connection | None = None
+        # Serialise every DB write.  aiosqlite uses a single sqlite3 connection;
+        # without this lock, two coroutines interleave at await points and one
+        # may try BEGIN while the other already started an auto-transaction.
+        self._write_lock = asyncio.Lock()
 
     # ── Async context manager ─────────────────────────────────────────────
 
@@ -301,52 +306,54 @@ class DatabaseManager:
 
     async def upsert_chat(self, jid: str, data: dict) -> None:
         """Insert or replace a chat record from a chat dict."""
-        conn = await self._ensure_conn()
-        remote_jid = data.get("remoteJid", jid)
-        unread = int(data.get("unreadCount", 0))
-        push_name = data.get("pushName", "")
-        name = data.get("name", "")
-        archived = 1 if (data.get("archived") or data.get("archive")) else 0
-        chat_type = data.get("type", "chat")
-        last_msg = data.get("lastMessage")
-        last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            remote_jid = data.get("remoteJid", jid)
+            unread = int(data.get("unreadCount", 0))
+            push_name = data.get("pushName", "")
+            name = data.get("name", "")
+            archived = 1 if (data.get("archived") or data.get("archive")) else 0
+            chat_type = data.get("type", "chat")
+            last_msg = data.get("lastMessage")
+            last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
 
-        await conn.execute(
-            """INSERT OR REPLACE INTO chats
-               (jid, remote_jid, unread_count, push_name, name,
-                archived, chat_type, last_message_json, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (jid, remote_jid, unread, push_name, name,
-             archived, chat_type, last_msg_enc, _now_ts()),
-        )
-        await conn.commit()
+            await conn.execute(
+                """INSERT OR REPLACE INTO chats
+                   (jid, remote_jid, unread_count, push_name, name,
+                    archived, chat_type, last_message_json, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (jid, remote_jid, unread, push_name, name,
+                 archived, chat_type, last_msg_enc, _now_ts()),
+            )
+            await conn.commit()
 
     async def upsert_chats_batch(self, chats: dict[str, dict]) -> None:
         """Insert/replace multiple chats in one transaction."""
-        conn = await self._ensure_conn()
-        await conn.execute("BEGIN")
-        try:
-            for jid, data in chats.items():
-                remote_jid = data.get("remoteJid", jid)
-                unread = int(data.get("unreadCount", 0))
-                push_name = data.get("pushName", "")
-                name = data.get("name", "")
-                archived = 1 if (data.get("archived") or data.get("archive")) else 0
-                chat_type = data.get("type", "chat")
-                last_msg = data.get("lastMessage")
-                last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
-                await conn.execute(
-                    """INSERT OR REPLACE INTO chats
-                       (jid, remote_jid, unread_count, push_name, name,
-                        archived, chat_type, last_message_json, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (jid, remote_jid, unread, push_name, name,
-                     archived, chat_type, last_msg_enc, _now_ts()),
-                )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            try:
+                await conn.execute("BEGIN")
+                for jid, data in chats.items():
+                    remote_jid = data.get("remoteJid", jid)
+                    unread = int(data.get("unreadCount", 0))
+                    push_name = data.get("pushName", "")
+                    name = data.get("name", "")
+                    archived = 1 if (data.get("archived") or data.get("archive")) else 0
+                    chat_type = data.get("type", "chat")
+                    last_msg = data.get("lastMessage")
+                    last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO chats
+                           (jid, remote_jid, unread_count, push_name, name,
+                            archived, chat_type, last_message_json, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (jid, remote_jid, unread, push_name, name,
+                         archived, chat_type, last_msg_enc, _now_ts()),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
 
     async def get_chat_jids(self) -> list[str]:
         """Return a sorted list of all chat JIDs."""
@@ -359,10 +366,11 @@ class DatabaseManager:
 
     async def delete_chat(self, jid: str) -> None:
         """Remove a chat and all its messages."""
-        conn = await self._ensure_conn()
-        await conn.execute("DELETE FROM messages WHERE remote_jid=?", (jid,))
-        await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute("DELETE FROM messages WHERE remote_jid=?", (jid,))
+            await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
+            await conn.commit()
 
     # ── Messages ────────────────────────────────────────────────────────────
 
@@ -433,80 +441,87 @@ class DatabaseManager:
 
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
         """Insert a single message record."""
-        conn = await self._ensure_conn()
-        key = msg.get("key", {})
-        mid = _msg_id(key)
-        from_me = 1 if key.get("fromMe") else 0
-        participant = key.get("participant", "")
-        mtype = _message_type(msg)
-        ts = _timestamp(msg)
-        msg_enc = self._encrypt_json(msg)
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            key = msg.get("key", {})
+            mid = _msg_id(key)
+            from_me = 1 if key.get("fromMe") else 0
+            participant = key.get("participant", "")
+            mtype = _message_type(msg)
+            ts = _timestamp(msg)
+            msg_enc = self._encrypt_json(msg)
 
-        await conn.execute(
-            """INSERT OR REPLACE INTO messages
-               (message_id, remote_jid, from_me, participant,
-                message_type, message_json, timestamp, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (mid, remote_jid, from_me, participant,
-             mtype, msg_enc, ts, 0),
-        )
-        await conn.commit()
+            await conn.execute(
+                """INSERT OR REPLACE INTO messages
+                   (message_id, remote_jid, from_me, participant,
+                    message_type, message_json, timestamp, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (mid, remote_jid, from_me, participant,
+                 mtype, msg_enc, ts, 0),
+            )
+            await conn.commit()
 
     async def insert_messages_batch(
         self, remote_jid: str, msgs: list[dict]
     ) -> None:
         """Insert many messages in a single transaction."""
-        conn = await self._ensure_conn()
-        await conn.execute("BEGIN")
-        try:
-            for msg in msgs:
-                key = msg.get("key", {})
-                mid = _msg_id(key)
-                from_me = 1 if key.get("fromMe") else 0
-                participant = key.get("participant", "")
-                mtype = _message_type(msg)
-                ts = _timestamp(msg)
-                msg_enc = self._encrypt_json(msg)
-                await conn.execute(
-                    """INSERT OR REPLACE INTO messages
-                       (message_id, remote_jid, from_me, participant,
-                        message_type, message_json, timestamp, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (mid, remote_jid, from_me, participant,
-                     mtype, msg_enc, ts, 0),
-                )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
+        if not msgs:
+            return
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            try:
+                await conn.execute("BEGIN")
+                for msg in msgs:
+                    key = msg.get("key", {})
+                    mid = _msg_id(key)
+                    from_me = 1 if key.get("fromMe") else 0
+                    participant = key.get("participant", "")
+                    mtype = _message_type(msg)
+                    ts = _timestamp(msg)
+                    msg_enc = self._encrypt_json(msg)
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO messages
+                           (message_id, remote_jid, from_me, participant,
+                            message_type, message_json, timestamp, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (mid, remote_jid, from_me, participant,
+                         mtype, msg_enc, ts, 0),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
 
     async def update_message_status(
         self, remote_jid: str, message_id: str, status: int
     ) -> None:
         """Update delivery/read status for a message."""
-        conn = await self._ensure_conn()
-        await conn.execute(
-            "UPDATE messages SET status=? WHERE message_id=? AND remote_jid=?",
-            (status, message_id, remote_jid),
-        )
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "UPDATE messages SET status=? WHERE message_id=? AND remote_jid=?",
+                (status, message_id, remote_jid),
+            )
+            await conn.commit()
 
     async def delete_message(self, remote_jid: str, message_id: str) -> None:
         """Delete a single message by remote_jid + message_id."""
-        conn = await self._ensure_conn()
-        await conn.execute(
-            "DELETE FROM messages WHERE remote_jid=? AND message_id=?",
-            (remote_jid, message_id),
-        )
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "DELETE FROM messages WHERE remote_jid=? AND message_id=?",
+                (remote_jid, message_id),
+            )
+            await conn.commit()
 
     async def delete_chat_messages(self, remote_jid: str) -> None:
         """Remove all messages for a chat."""
-        conn = await self._ensure_conn()
-        await conn.execute(
-            "DELETE FROM messages WHERE remote_jid=?", (remote_jid,)
-        )
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "DELETE FROM messages WHERE remote_jid=?", (remote_jid,)
+            )
+            await conn.commit()
 
     # ── Contacts ────────────────────────────────────────────────────────────
 
@@ -532,44 +547,46 @@ class DatabaseManager:
 
     async def upsert_contact(self, jid: str, data: dict) -> None:
         """Insert or replace a contact record."""
-        conn = await self._ensure_conn()
-        remote_jid = data.get("remoteJid", jid)
-        name = data.get("name", "")
-        push_name = data.get("pushName", "")
-        pic = data.get("profilePicUrl", "")
-        saved = 1 if data.get("isSaved") else 0
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            remote_jid = data.get("remoteJid", jid)
+            name = data.get("name", "")
+            push_name = data.get("pushName", "")
+            pic = data.get("profilePicUrl", "")
+            saved = 1 if data.get("isSaved") else 0
 
-        await conn.execute(
-            """INSERT OR REPLACE INTO contacts
-               (jid, remote_jid, name, push_name, profile_pic_url,
-                is_saved, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (jid, remote_jid, name, push_name, pic, saved, _now_ts()),
-        )
-        await conn.commit()
+            await conn.execute(
+                """INSERT OR REPLACE INTO contacts
+                   (jid, remote_jid, name, push_name, profile_pic_url,
+                    is_saved, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (jid, remote_jid, name, push_name, pic, saved, _now_ts()),
+            )
+            await conn.commit()
 
     async def upsert_contacts_batch(self, contacts: dict[str, dict]) -> None:
         """Insert/replace multiple contacts in one transaction."""
-        conn = await self._ensure_conn()
-        await conn.execute("BEGIN")
-        try:
-            for jid, data in contacts.items():
-                remote_jid = data.get("remoteJid", jid)
-                name = data.get("name", "")
-                push_name = data.get("pushName", "")
-                pic = data.get("profilePicUrl", "")
-                saved = 1 if data.get("isSaved") else 0
-                await conn.execute(
-                    """INSERT OR REPLACE INTO contacts
-                       (jid, remote_jid, name, push_name, profile_pic_url,
-                        is_saved, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (jid, remote_jid, name, push_name, pic, saved, _now_ts()),
-                )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            try:
+                await conn.execute("BEGIN")
+                for jid, data in contacts.items():
+                    remote_jid = data.get("remoteJid", jid)
+                    name = data.get("name", "")
+                    push_name = data.get("pushName", "")
+                    pic = data.get("profilePicUrl", "")
+                    saved = 1 if data.get("isSaved") else 0
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO contacts
+                           (jid, remote_jid, name, push_name, profile_pic_url,
+                            is_saved, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (jid, remote_jid, name, push_name, pic, saved, _now_ts()),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
 
     # ── LID Mappings ────────────────────────────────────────────────────────
 
@@ -584,12 +601,13 @@ class DatabaseManager:
 
     async def set_lid_mapping(self, lid_jid: str, phone_jid: str) -> None:
         """Insert or update a single LID → phone mapping."""
-        conn = await self._ensure_conn()
-        await conn.execute(
-            "INSERT OR REPLACE INTO lid_mappings (lid_jid, phone_jid) VALUES (?, ?)",
-            (lid_jid, phone_jid),
-        )
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "INSERT OR REPLACE INTO lid_mappings (lid_jid, phone_jid) VALUES (?, ?)",
+                (lid_jid, phone_jid),
+            )
+            await conn.commit()
 
     async def get_unresolvable_lids(self) -> tuple[set[str], set[str]]:
         """Return ``(set_of_lids, set_of_names)``."""
@@ -609,21 +627,23 @@ class DatabaseManager:
 
     async def add_unresolvable_lid(self, jid: str) -> None:
         """Mark a LID as unresolvable."""
-        conn = await self._ensure_conn()
-        await conn.execute(
-            "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'lid')",
-            (jid,),
-        )
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'lid')",
+                (jid,),
+            )
+            await conn.commit()
 
     async def add_unresolvable_name(self, jid: str) -> None:
         """Mark a LID as having an unresolvable name."""
-        conn = await self._ensure_conn()
-        await conn.execute(
-            "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'name')",
-            (jid,),
-        )
-        await conn.commit()
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'name')",
+                (jid,),
+            )
+            await conn.commit()
 
     # ── Status Updates (Stories) ─────────────────────────────────────────────
 
@@ -644,19 +664,20 @@ class DatabaseManager:
 
     async def upsert_status_update(self, participant: str, msg: dict) -> None:
         """Insert or replace a status update message."""
-        conn = await self._ensure_conn()
-        key = msg.get("key", {})
-        mid = _msg_id(key)
-        ts = _timestamp(msg)
-        msg_enc = self._encrypt_json(msg)
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            key = msg.get("key", {})
+            mid = _msg_id(key)
+            ts = _timestamp(msg)
+            msg_enc = self._encrypt_json(msg)
 
-        await conn.execute(
-            """INSERT OR REPLACE INTO status_updates
-               (participant_jid, message_id, message_json, timestamp)
-               VALUES (?, ?, ?, ?)""",
-            (participant, mid, msg_enc, ts),
-        )
-        await conn.commit()
+            await conn.execute(
+                """INSERT OR REPLACE INTO status_updates
+                   (participant_jid, message_id, message_json, timestamp)
+                   VALUES (?, ?, ?, ?)""",
+                (participant, mid, msg_enc, ts),
+            )
+            await conn.commit()
 
     # ── Bulk Import / Export (for migration) ─────────────────────────────────
 
@@ -671,59 +692,135 @@ class DatabaseManager:
             ``status_updates``).
         clear_first : bool
             If ``True``, delete all existing records before importing.
-            This replicates the old ``save_data()`` behaviour of replacing
-            the entire data store.
 
         Returns
         -------
         int
-            Total number of records imported (chats + messages + contacts +
-            LIDs + status updates).
+            Total number of records imported.
+
+        Notes
+        -----
+        All SQL is inlined here (not delegated to helper methods) because
+        this method holds _write_lock for the entire operation; calling any
+        other write method from here would deadlock on that same lock.
+        One explicit BEGIN … COMMIT wraps everything so the import is atomic.
         """
-        if clear_first:
-            await self.clear_all()
-        total = 0
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            total = 0
+            try:
+                await conn.execute("BEGIN")
 
-        # Chats + messages
-        chats = data.get("chats", {})
-        for jid, chat in chats.items():
-            await self.upsert_chat(jid, chat)
-            total += 1
-            records = (
-                chat.get("messages", {})
-                .get("messages", {})
-                .get("records", [])
-            )
-            if records:
-                await self.insert_messages_batch(jid, records)
-                total += len(records)
+                if clear_first:
+                    for tbl in (
+                        "chats", "messages", "contacts",
+                        "lid_mappings", "unresolvable_lids", "status_updates",
+                    ):
+                        await conn.execute(f"DELETE FROM {tbl}")
 
-        # Contacts
-        contacts = data.get("contacts", {})
-        for jid, contact in contacts.items():
-            await self.upsert_contact(jid, contact)
-            total += 1
+                # ── Chats + messages ─────────────────────────────────────
+                now = _now_ts()
+                for jid, chat in data.get("chats", {}).items():
+                    remote_jid  = chat.get("remoteJid", jid)
+                    unread      = int(chat.get("unreadCount", 0) or 0)
+                    push_name   = chat.get("pushName", "") or ""
+                    name        = chat.get("name", "") or ""
+                    archived    = 1 if (chat.get("archived") or chat.get("archive")) else 0
+                    chat_type   = chat.get("type", "chat") or "chat"
+                    last_msg    = chat.get("lastMessage")
+                    last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
 
-        # LID mappings
-        for lid_jid, phone_jid in data.get("lid_to_phone", {}).items():
-            await self.set_lid_mapping(lid_jid, phone_jid)
-            total += 1
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO chats
+                           (jid, remote_jid, unread_count, push_name, name,
+                            archived, chat_type, last_message_json, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (jid, remote_jid, unread, push_name, name,
+                         archived, chat_type, last_msg_enc, now),
+                    )
+                    total += 1
 
-        # Unresolvable LIDs
-        for lid in data.get("unresolvable_lids", []):
-            await self.add_unresolvable_lid(lid)
-            total += 1
-        for name in data.get("unresolvable_names", []):
-            await self.add_unresolvable_name(name)
-            total += 1
+                    records = (
+                        chat.get("messages", {})
+                            .get("messages", {})
+                            .get("records", [])
+                    )
+                    for msg in records:
+                        key   = msg.get("key", {})
+                        mid   = _msg_id(key)
+                        fm    = 1 if key.get("fromMe") else 0
+                        part  = key.get("participant", "") or ""
+                        mtype = _message_type(msg)
+                        ts    = _timestamp(msg)
+                        menc  = self._encrypt_json(msg)
+                        await conn.execute(
+                            """INSERT OR REPLACE INTO messages
+                               (message_id, remote_jid, from_me, participant,
+                                message_type, message_json, timestamp, status)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (mid, remote_jid, fm, part, mtype, menc, ts, 0),
+                        )
+                        total += 1
 
-        # Status updates
-        for participant, statuses in data.get("status_updates", {}).items():
-            for status_msg in statuses:
-                await self.upsert_status_update(participant, status_msg)
-                total += 1
+                # ── Contacts ─────────────────────────────────────────────
+                for jid, contact in data.get("contacts", {}).items():
+                    remote_jid = contact.get("remoteJid", jid)
+                    name       = contact.get("name", "") or ""
+                    push_name  = contact.get("pushName", "") or ""
+                    pic        = contact.get("profilePicUrl", "") or ""
+                    saved      = 1 if contact.get("isSaved") else 0
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO contacts
+                           (jid, remote_jid, name, push_name, profile_pic_url,
+                            is_saved, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (jid, remote_jid, name, push_name, pic, saved, now),
+                    )
+                    total += 1
 
-        return total
+                # ── LID mappings ──────────────────────────────────────────
+                for lid_jid, phone_jid in data.get("lid_to_phone", {}).items():
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO lid_mappings (lid_jid, phone_jid) VALUES (?, ?)",
+                        (lid_jid, phone_jid),
+                    )
+                    total += 1
+
+                # ── Unresolvable LIDs / names ─────────────────────────────
+                for lid in data.get("unresolvable_lids", []):
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'lid')",
+                        (lid,),
+                    )
+                    total += 1
+                for nm in data.get("unresolvable_names", []):
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO unresolvable_lids (jid, type) VALUES (?, 'name')",
+                        (nm,),
+                    )
+                    total += 1
+
+                # ── Status updates ────────────────────────────────────────
+                for participant, statuses in data.get("status_updates", {}).items():
+                    for smsg in statuses:
+                        key  = smsg.get("key", {})
+                        mid  = _msg_id(key)
+                        ts   = _timestamp(smsg)
+                        menc = self._encrypt_json(smsg)
+                        await conn.execute(
+                            """INSERT OR REPLACE INTO status_updates
+                               (participant_jid, message_id, message_json, timestamp)
+                               VALUES (?, ?, ?, ?)""",
+                            (participant, mid, menc, ts),
+                        )
+                        total += 1
+
+                await conn.commit()
+                return total
+
+            except Exception:
+                await conn.rollback()
+                raise
 
     async def export_as_dict(self) -> dict[str, Any]:
         """Export the full database as a messages.dat-shaped dict.
@@ -747,18 +844,19 @@ class DatabaseManager:
 
     async def clear_all(self) -> None:
         """Delete all records from every table (for full-state replacement)."""
-        conn = await self._ensure_conn()
-        await conn.execute("BEGIN")
-        try:
-            for table in (
-                "chats", "messages", "contacts",
-                "lid_mappings", "unresolvable_lids", "status_updates",
-            ):
-                await conn.execute(f"DELETE FROM {table}")
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            try:
+                await conn.execute("BEGIN")
+                for table in (
+                    "chats", "messages", "contacts",
+                    "lid_mappings", "unresolvable_lids", "status_updates",
+                ):
+                    await conn.execute(f"DELETE FROM {table}")
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
 
     async def vacuum(self) -> None:
         """Recover disk space.  Call during idle periods."""
