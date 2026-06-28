@@ -123,18 +123,13 @@ class AccessibleMessagesList(wx.Accessible):
 
     def GetName(self, childId):
         # childId 0 is the control itself; rows are 1-based.
+        # We return an empty string for items (childId > 0) to prevent the native OS
+        # MSAA list proxy from announcing the truncated text.
+        # This completely avoids speech duplication and double entries in NVDA history,
+        # allowing our debounced self.main_window.output() to cleanly announce the full message.
         if childId == 0:
             return (wx.ACC_NOT_IMPLEMENTED, "")
-        panel = self._panel
-        msgs = getattr(panel, "_sorted_messages", None)
-        idx = childId - 1
-        if not msgs or idx < 0 or idx >= len(msgs):
-            return (wx.ACC_NOT_IMPLEMENTED, "")
-        try:
-            text = panel._render_message_line(msgs[idx])
-        except Exception:
-            return (wx.ACC_NOT_IMPLEMENTED, "")
-        return (wx.ACC_OK, text)
+        return (wx.ACC_OK, "")
 
 
 class AccessibleAudioSlider(wx.Accessible):
