@@ -5443,21 +5443,36 @@ class MainWindow(wx.Frame):
             from_me_str = "true" if from_me else "false"
             remote_jid = _key.get("remoteJid", "")
             
-            # Resolve phone JID to LID JID if a mapping exists
-            lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-            if lid:
-                remote_jid = lid
-            elif remote_jid.endswith("@s.whatsapp.net"):
-                remote_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
-            
+            def clean_jid_for_wpp(jid_str):
+                if not jid_str:
+                    return ""
+                # Strip device suffix (e.g. 5511941034648:11@s.whatsapp.net -> 5511941034648@s.whatsapp.net)
+                if ":" in jid_str:
+                    parts = jid_str.split("@")
+                    if len(parts) == 2:
+                        prefix, domain = parts
+                        prefix = prefix.split(":")[0]
+                        jid_str = f"{prefix}@{domain}"
+                
+                # Resolve @lid to phone JID for WPPConnect compatibility
+                if jid_str.endswith("@lid"):
+                    phone = getattr(self, "_lid_to_phone", {}).get(jid_str, "")
+                    if phone:
+                        jid_str = phone
+                
+                # Map s.whatsapp.net to c.us
+                if jid_str.endswith("@s.whatsapp.net"):
+                    jid_str = jid_str.replace("@s.whatsapp.net", "@c.us")
+                return jid_str
+
+            remote_jid = clean_jid_for_wpp(remote_jid)
             msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
             
             # For group messages, append the participant JID if present
             if remote_jid.endswith("@g.us"):
                 participant = _key.get("participant", "")
                 if participant:
-                    if participant.endswith("@s.whatsapp.net") or participant.endswith("@c.us"):
-                        participant = participant.split("@")[0] + "@c.us"
+                    participant = clean_jid_for_wpp(participant)
                     msg_id = f"{msg_id}_{participant}"
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
@@ -5619,7 +5634,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                resp = requests.post(url, json={"phone": [target_phone]}, headers=headers, timeout=10)
+                resp = requests.post(url, json={"phone": target_phone}, headers=headers, timeout=10)
                 if not resp.ok:
                     logging.info("[mark_as_read] API response %s for %s (non-critical, marked locally)",
                                  resp.status_code, target_phone)
@@ -6284,7 +6299,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(url, json={"phone": [phone]}, headers=headers, timeout=10)
+                r = requests.post(url, json={"phone": phone}, headers=headers, timeout=10)
                 if not r.ok:
                     logging.warning("[delete_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
             except Exception as exc:
@@ -6299,7 +6314,7 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(url, json={"phone": [phone]}, headers=headers, timeout=10)
+                r = requests.post(url, json={"phone": phone}, headers=headers, timeout=10)
                 if not r.ok:
                     logging.warning("[clear_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
             except Exception as exc:
