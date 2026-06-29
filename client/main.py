@@ -4699,14 +4699,21 @@ class MainWindow(wx.Frame):
         raw_remote_jid = raw_key.get("remoteJid", "")
         
         if raw_remote_jid:
-            phone_to_lid = getattr(self, "_phone_to_lid", {})
             if raw_remote_jid.endswith("@lid"):
-                quoted_remote_jid = raw_remote_jid
+                # Resolve @lid to phone JID for WPPConnect compatibility
+                phone_jid = getattr(self, "_lid_to_phone", {}).get(raw_remote_jid, "")
+                if phone_jid:
+                    quoted_remote_jid = phone_jid.replace("@s.whatsapp.net", "@c.us")
+                else:
+                    quoted_remote_jid = raw_remote_jid
             else:
                 norm_remote_jid = self._normalize_jid(raw_remote_jid)
+                phone_to_lid = getattr(self, "_phone_to_lid", {})
                 lid_jid = phone_to_lid.get(norm_remote_jid, "")
                 if lid_jid:
-                    quoted_remote_jid = lid_jid
+                    # Actually, WPPConnect prefers phone JID for key serialization.
+                    # Revert to phone JID format.
+                    quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
                 elif norm_remote_jid.endswith("@s.whatsapp.net"):
                     quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
                 else:
@@ -4725,15 +4732,16 @@ class MainWindow(wx.Frame):
                 raw_participant = getattr(self, "my_jid", "")
             
             if raw_participant:
-                phone_to_lid = getattr(self, "_phone_to_lid", {})
                 if raw_participant.endswith("@lid"):
-                    participant = raw_participant
+                    # Resolve participant @lid to phone JID
+                    phone_jid = getattr(self, "_lid_to_phone", {}).get(raw_participant, "")
+                    if phone_jid:
+                        participant = phone_jid.replace("@s.whatsapp.net", "@c.us")
+                    else:
+                        participant = raw_participant
                 else:
                     norm_participant = self._normalize_jid(raw_participant)
-                    lid_jid = phone_to_lid.get(norm_participant, "")
-                    if lid_jid:
-                        participant = lid_jid
-                    elif norm_participant.endswith("@s.whatsapp.net"):
+                    if norm_participant.endswith("@s.whatsapp.net"):
                         participant = norm_participant.replace("@s.whatsapp.net", "@c.us")
                     else:
                         participant = norm_participant
