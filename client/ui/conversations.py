@@ -2474,43 +2474,57 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetFocus()
 
     def _fetch_group_participants(self, jid: str):
-        """Background: fetch participants for the group and populate the cache."""
+        """Background: fetch participants for the group and populate the cache with retries if session is loading."""
         import logging
-        try:
-            data = self.main_window.get_group_info(jid)
-            participants = data.get("participants", [])
-            logging.info(f"[mention] get_group_info({jid}) → {len(participants)} participants")
-            my_jid = getattr(self.main_window, "my_jid", "") or ""
-            mw_ref = self.main_window
+        import time
+        max_retries = 3
+        delay = 3
+        for attempt in range(max_retries):
+            # Check if this chat is still the active conversation before retrying
+            if not self.conversation or self.conversation.get("remoteJid") != jid:
+                logging.info(f"[mention] Active conversation changed. Aborting fetch for {jid}.")
+                return
+            try:
+                data = self.main_window.get_group_info(jid)
+                participants = data.get("participants", [])
+                logging.info(f"[mention] get_group_info({jid}) attempt {attempt+1}/{max_retries} → {len(participants)} participants")
+                if participants:
+                    my_jid = getattr(self.main_window, "my_jid", "") or ""
+                    mw_ref = self.main_window
+                    
+                    # Resolve any unknown @lid participant JIDs using API
+                    lid_jids_to_resolve = []
+                    lid_to_phone = getattr(mw_ref, "_lid_to_phone", {})
+                    for p in participants:
+                        if not isinstance(p, dict):
+                            continue
+                        p_jid = p.get("id", "")
+                        if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                            lid_jids_to_resolve.append(p_jid)
+                    if lid_jids_to_resolve:
+                        mw_ref.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                        
+                    cache = []
+                    for p in participants:
+                        if not isinstance(p, dict):
+                            continue
+                        p_jid = p.get("id", "")
+                        if not p_jid:
+                            continue
+                        if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
+                            continue  # skip self
+                        name = self._get_participant_name(p_jid, p)
+                        cache.append((name, p_jid))
+                    cache.sort(key=lambda x: x[0].lower())
+                    logging.info(f"[mention] cache built: {[n for n,_ in cache]}")
+                    wx.CallAfter(self._set_group_participants_cache, cache)
+                    return
+            except Exception as e:
+                logging.error(f"[mention] _fetch_group_participants error on attempt {attempt+1}: {e}", exc_info=True)
             
-            # Resolve any unknown @lid participant JIDs using API
-            lid_jids_to_resolve = []
-            lid_to_phone = getattr(mw_ref, "_lid_to_phone", {})
-            for p in participants:
-                if not isinstance(p, dict):
-                    continue
-                p_jid = p.get("id", "")
-                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
-                    lid_jids_to_resolve.append(p_jid)
-            if lid_jids_to_resolve:
-                mw_ref.resolve_lid_jids_via_api(lid_jids_to_resolve)
-                
-            cache = []
-            for p in participants:
-                if not isinstance(p, dict):
-                    continue
-                p_jid = p.get("id", "")
-                if not p_jid:
-                    continue
-                if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
-                    continue  # skip self
-                name = self._get_participant_name(p_jid, p)
-                cache.append((name, p_jid))
-            cache.sort(key=lambda x: x[0].lower())
-            logging.info(f"[mention] cache built: {[n for n,_ in cache]}")
-            wx.CallAfter(self._set_group_participants_cache, cache)
-        except Exception as e:
-            logging.error(f"[mention] _fetch_group_participants error: {e}", exc_info=True)
+            if attempt < max_retries - 1:
+                logging.info(f"[mention] Empty participants response, retrying in {delay}s...")
+                time.sleep(delay)
 
     def _set_group_participants_cache(self, cache: list):
         """Main-thread callback: store cache and refresh suggestions if active."""
