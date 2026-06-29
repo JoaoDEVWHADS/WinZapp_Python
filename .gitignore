@@ -1,12 +1,10 @@
 # ── WinZapp: project-specific ignores ────────────────────────────────────────
 
 # User data / secrets (generated at runtime, never committed)
-client/data/messages.dat
+client/data/messages.db
 client/data/settings.json
 client/data/settings_default.json
 client/data/secret.key
-client/data/token.tk
-client/data/token.tk2
 client/data/media/
 client/data/voice_messages/
 client/logs/
@@ -27,13 +25,6 @@ client/logs/
 !/client/api/package.json
 !/client/api/config.json
 !/client/api/.puppeteerrc.cjs
-
-# Evolution API runtime state (redundant with /api/* but explicit for clarity)
-/client/api/pgdata/
-/client/api/instances/
-/client/api/store/
-/client/api/evolution.log
-/client/api2/
 
 # Build intermediates and distribution artefacts
 /build/
@@ -60,8 +51,6 @@ develop-eggs/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
