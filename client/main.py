@@ -5605,9 +5605,15 @@ class MainWindow(wx.Frame):
         if remote_jid.endswith("@g.us"):
             return
 
+        # Resolve @lid to phone JID if necessary for WPPConnect compatibility
         target_phone = remote_jid
-        if remote_jid.endswith("@s.whatsapp.net"):
-            target_phone = remote_jid.rsplit("@", 1)[0] + "@c.us"
+        if remote_jid.endswith("@lid"):
+            phone_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+            if phone_jid:
+                target_phone = phone_jid
+        
+        if target_phone.endswith("@s.whatsapp.net"):
+            target_phone = target_phone.rsplit("@", 1)[0] + "@c.us"
 
         def _do_api():
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
@@ -5615,10 +5621,10 @@ class MainWindow(wx.Frame):
             try:
                 resp = requests.post(url, json={"phone": [target_phone]}, headers=headers, timeout=10)
                 if not resp.ok:
-                    logging.warning("[mark_as_read] API error %s for %s: %s",
-                                    resp.status_code, target_phone, resp.text[:200])
+                    logging.info("[mark_as_read] API response %s for %s (non-critical, marked locally)",
+                                 resp.status_code, target_phone)
             except Exception as exc:
-                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
+                logging.debug("[mark_as_read] Request failed for %s: %s", target_phone, exc)
         threading.Thread(target=_do_api, daemon=True).start()
 
     def mark_conversation_as_unread(self, remote_jid: str):
