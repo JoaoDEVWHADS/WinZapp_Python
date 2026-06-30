@@ -541,7 +541,6 @@ def compile_uninstaller():
         os.path.join(INSTALLER_DIR, "uninstaller.rc"),
         "-o", UNINSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
-        "--preprocessor-arg=-I/c/msys64/ucrt64/include",
     ])
     run([
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
@@ -571,7 +570,6 @@ def compile_installer_stub():
         os.path.join(INSTALLER_DIR, "installer.rc"),
         "-o", INSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
-        "--preprocessor-arg=-I/c/msys64/ucrt64/include",
     ])
     run([
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
