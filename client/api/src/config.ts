@@ -44,6 +44,7 @@ export default {
     logger: ['console', 'file'],
   },
   createOptions: {
+    autoClose: 0,
     // Always use Puppeteer's own bundled Chrome instead of searching for a
     // system Chrome installation. This makes the app self-contained: users
     // do not need to install Chrome separately, and behaviour is consistent
