@@ -480,16 +480,39 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
 
     const msgAny = message as any;
-    const tempSavePath = `./userDataDir/temp_media_${(msgAny.id && typeof msgAny.id === 'object') ? msgAny.id.id : (msgAny.id || messageId)}`;
-    await client.decryptAndSaveFile(message, tempSavePath);
-    const buffer = fs.readFileSync(tempSavePath);
+    let buffer: Buffer;
+    let mimetype = message.mimetype;
+
     try {
-      fs.unlinkSync(tempSavePath);
-    } catch {}
+      const tempSavePath = `./userDataDir/temp_media_${(msgAny.id && typeof msgAny.id === 'object') ? msgAny.id.id : (msgAny.id || messageId)}`;
+      await client.decryptAndSaveFile(message, tempSavePath);
+      buffer = fs.readFileSync(tempSavePath);
+      try {
+        fs.unlinkSync(tempSavePath);
+      } catch {}
+    } catch (err) {
+      req.logger.info(`decryptAndSaveFile failed, trying downloadMedia fallback for ${messageId}...`);
+      try {
+        const base64Data = await client.downloadMedia(messageId);
+        if (base64Data) {
+          const matches = base64Data.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+            mimetype = matches[1];
+            buffer = Buffer.from(matches[2], 'base64');
+          } else {
+            buffer = Buffer.from(base64Data, 'base64');
+          }
+        } else {
+          throw err;
+        }
+      } catch (fallbackErr) {
+        throw new Error(`Both decryptAndSaveFile and downloadMedia failed. Original error: ${(err as any).message}. Fallback error: ${(fallbackErr as any).message}`);
+      }
+    }
 
     res
       .status(200)
-      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype });
+      .json({ base64: buffer.toString('base64'), mimetype: mimetype });
   } catch (ex) {
     req.logger.error(ex);
     res.status(500).json({
