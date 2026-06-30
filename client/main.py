@@ -6341,10 +6341,17 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_api, daemon=True).start()
 
     def _resolve_jid_for_chat_state(self, jid: str) -> str:
-        """Resolve @lid to phone JID and convert to @c.us for WPPConnect chat-state endpoints."""
+        """Resolve @lid to phone JID and convert to @c.us for WPPConnect chat-state endpoints.
+        If no phone mapping is known for a @lid JID, returns the @lid as-is so WPP
+        can find the chat by its native identifier (LID-paired sessions).
+        """
         resolved = jid
         if resolved.endswith("@lid"):
-            resolved = getattr(self, "_lid_to_phone", {}).get(resolved, resolved)
+            phone = getattr(self, "_lid_to_phone", {}).get(resolved, "")
+            if phone:
+                resolved = phone
+            else:
+                return resolved  # keep @lid — WPP will try to match by LID
         return resolved.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
