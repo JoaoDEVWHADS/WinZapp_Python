@@ -3229,7 +3229,8 @@ class ConversationsPanel(wx.Panel):
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name
-        except Exception:
+        except Exception as e:
+            logging.exception(f"[AudioPlayback] Decryption failed for file {file_path}")
             self._stop_audio()
             return
 
@@ -3246,9 +3247,8 @@ class ConversationsPanel(wx.Panel):
             _speed = self._audio_speed_steps[self._audio_speed_index]
             self._audio_tempo_ctrl.tempo = self._audio_tempo_map.get(_speed, 0)
             stream_ok = True
-        except Exception:
-            # BASS FX not available or format not supported with decode=True;
-            # discard the broken stream and retry without decode.
+        except Exception as e:
+            logging.warning(f"[AudioPlayback] Decoded stream/Tempo init failed: {e}")
             self._audio_tempo_ctrl = None
             self._audio_stream = None
 
@@ -3257,7 +3257,8 @@ class ConversationsPanel(wx.Panel):
                 self._audio_stream = sl_stream.FileStream(
                     file=self._audio_temp_file
                 )
-            except Exception:
+            except Exception as e:
+                logging.exception(f"[AudioPlayback] Plain FileStream init failed for {self._audio_temp_file}")
                 self._stop_audio()
                 return
 
