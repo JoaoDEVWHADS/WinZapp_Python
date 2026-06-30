@@ -5468,12 +5468,6 @@ class MainWindow(wx.Frame):
                             prefix = prefix.split(":")[0]
                             jid_str = f"{prefix}@{domain}"
                     
-                    # Resolve @lid to phone JID for WPPConnect compatibility
-                    if jid_str.endswith("@lid"):
-                        phone = getattr(self, "_lid_to_phone", {}).get(jid_str, "")
-                        if phone:
-                            jid_str = phone
-                    
                     # Map s.whatsapp.net to c.us
                     if jid_str.endswith("@s.whatsapp.net"):
                         jid_str = jid_str.replace("@s.whatsapp.net", "@c.us")
