@@ -4838,7 +4838,7 @@ class MainWindow(wx.Frame):
                         "linkPreview": False
                     }
                 }
-                logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
+                logging.info("[send_text_message] sending quoted reply via send-reply to %s, quoted messageId=%s", phone_net, quoted_id)
             else:
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
@@ -4858,7 +4858,7 @@ class MainWindow(wx.Frame):
                 # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
                 # try sending it as a plain message instead of leaving it pending forever.
                 if quoted_id:
-                    logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote...", response.status_code)
+                    logging.warning("[send_text_message] Quoted send failed (HTTP %s): %s. Retrying without quote...", response.status_code, response.text[:200])
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     fb_phone = remote_jid
                     if fb_phone.endswith("@s.whatsapp.net"):
@@ -4879,6 +4879,8 @@ class MainWindow(wx.Frame):
                     self._check_wa_connection_closed(response)
                     return {"ok": False, "error": err, "retry": False}
             self._wa_connected = True
+            if quoted_id:
+                logging.info("[send_text_message] Reply sent OK (HTTP %s)", response.status_code)
             try:
                 body = response.json()
                 # WPPConnect retorna a resposta dentro de 'response'
