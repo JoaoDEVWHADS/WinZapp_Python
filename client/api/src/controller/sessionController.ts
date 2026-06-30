@@ -465,7 +465,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
   }
 
   try {
-    let message = null;
+    let message: any = null;
     try {
       message = await client.getMessageById(messageId);
     } catch (err) {
