@@ -1192,6 +1192,11 @@ class MainWindow(wx.Frame):
                     "currentPage": 1,
                 }},
             }
+            if remote_jid.endswith("@g.us"):
+                # Unlike chats created by get_remote_chats() at sync time, a
+                # group first seen via a live socket event has no name yet —
+                # without this it stays "unnamed" until the next full sync.
+                self._resolve_group_name_async(remote_jid)
 
         chat = self.chats[remote_jid]
 
@@ -3457,6 +3462,24 @@ class MainWindow(wx.Frame):
             pass
         return ""
 
+    def _resolve_group_name_async(self, jid: str):
+        """Look up a newly-seen group's name in the background.
+
+        _fill_group_name() does a blocking HTTP request, so this must not run
+        on the wx main thread (on_new_message is called via wx.CallAfter).
+        """
+        def _worker():
+            name = self._fill_group_name(jid)
+            if not name:
+                return
+            chat = self.chats.get(jid)
+            if chat is None or (chat.get("name") or chat.get("subject") or "").strip():
+                return
+            chat["name"] = name
+            self._schedule_save(dirty_jid=jid)
+            wx.CallAfter(self._schedule_set_chats)
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _resolve_missing_group_names(self):
         """Retry group-info lookups for groups still unnamed after sync.
 
@@ -3470,7 +3493,6 @@ class MainWindow(wx.Frame):
         ]
         if not unresolved:
             return
-        resolved_any = False
         max_workers = min(6, len(unresolved))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = {pool.submit(self._fill_group_name, jid): jid for jid in unresolved}
@@ -3482,9 +3504,7 @@ class MainWindow(wx.Frame):
                     name = ""
                 if name:
                     self.chats[jid]["name"] = name
-                    resolved_any = True
-        if resolved_any:
-            self._schedule_save()
+                    self._schedule_save(dirty_jid=jid)
 
     def save_data(self, chats, contacts):
         """Write chat+contact data to SQLite via DatabaseBridge.
@@ -3567,10 +3587,17 @@ class MainWindow(wx.Frame):
         contacts_dirty :
             Set to True to also flush self.contacts to the contacts table.
         """
+        if not hasattr(self, "_dirty_jids_for_save"):
+            self._dirty_jids_for_save = set()
         if dirty_jid:
-            if not hasattr(self, "_dirty_jids_for_save"):
-                self._dirty_jids_for_save = set()
             self._dirty_jids_for_save.add(dirty_jid)
+        else:
+            # No specific JID given — the caller wants the full chat set
+            # persisted (see docstring). _do_save() only writes JIDs found
+            # in _dirty_jids_for_save, so without this the "save everything"
+            # call was silently a no-op (e.g. resolved group names and
+            # mark-as-unread never reached disk).
+            self._dirty_jids_for_save.update(self.chats.keys())
         if contacts_dirty:
             self._contacts_dirty_for_save = True
         with self._save_timer_lock:
@@ -4639,7 +4666,14 @@ class MainWindow(wx.Frame):
         # This replaces the old save_data(self.chats, ...) call which dumped the
         # ENTIRE state (O(N) writes per chat → O(N²) total during bulk sync).
         try:
-            self.db.upsert_chat(remote_jid, chat)
+            # Don't persist a chat whose message fetch failed and which has
+            # no prior local records — that would write the chat-list summary
+            # (including a nonzero unreadCount) with zero messages attached,
+            # permanently showing "N unread" with an empty conversation on
+            # every future restart. Leave it unsaved so the next full sync
+            # retries it from scratch instead.
+            if api_ok or has_records:
+                self.db.upsert_chat(remote_jid, chat)
             if all_messages:
                 self.db.insert_messages_batch(remote_jid, all_messages)
         except Exception as exc:
@@ -4742,44 +4776,6 @@ class MainWindow(wx.Frame):
         with open(media_path, "wb") as f:
             f.write(encrypted)
 
-    def _clean_quoted(self, quoted: dict) -> dict:
-        """Return a minimal quoted dict the WPPConnect DTO accepts.
-
-        Only ``key`` is sent.  The WPPConnect will fetch the full message
-        content from its internal Baileys message store using
-        ``getMessage(key, true)``.  This avoids serialising binary fields
-        (``jpegThumbnail``, ``mediaKey``, ``fileEncSha256``, …) that arrive
-        from Socket.IO as Python ``bytes`` objects and cannot be JSON-encoded.
-
-        JIDs are normalised before sending:
-          - @c.us  → @s.whatsapp.net  (legacy format)
-          - @lid   → @s.whatsapp.net  when the reverse cache knows the mapping
-        """
-        if not quoted or not isinstance(quoted, dict):
-            return None
-        key_raw = quoted.get("key")
-        if not key_raw or not isinstance(key_raw, dict):
-            return None
-        _ALLOWED = {"id", "remoteJid", "fromMe", "participant"}
-        clean_key = {k: v for k, v in key_raw.items() if k in _ALLOWED}
-        if not clean_key.get("id"):
-            return None
-
-        # Normalise JIDs so the API always receives @s.whatsapp.net format.
-        lid_to_phone = getattr(self, "_lid_to_phone", {})
-        for field in ("remoteJid", "participant"):
-            jid = clean_key.get(field, "")
-            if not jid:
-                continue
-            jid = self._normalize_jid(jid)          # @c.us → @s.whatsapp.net
-            if jid.endswith("@lid"):
-                phone = lid_to_phone.get(jid, "")
-                if phone:
-                    jid = phone
-            clean_key[field] = jid
-
-        return {"key": clean_key}
-
     def _check_wa_connection_closed(self, response):
         """If the WPPConnect returned a 'Connection Closed' error, mark the
         WhatsApp connection as down so the MessageQueue pauses retrying until
@@ -4795,79 +4791,18 @@ class MainWindow(wx.Frame):
 
     def _serialize_quoted_id(self, quoted: dict) -> str:
         """Serialize a quoted message key into the format expected by WPPConnect.
-        For groups, this correctly appends the participant's JID."""
-        if not quoted:
-            return None
-        _cq = self._clean_quoted(quoted)
-        if not _cq or not _cq.get("key", {}).get("id"):
-            return None
-        
-        quoted_id = _cq.get("key", {}).get("id")
-        
-        # If the ID already has underscores, keep it but ensure standard domains are corrected
-        if "_" in quoted_id:
-            if "@s.whatsapp.net" in quoted_id:
-                quoted_id = quoted_id.replace("@s.whatsapp.net", "@c.us")
-            return quoted_id
 
-        from_me = _cq.get("key", {}).get("fromMe", False)
-        from_me_str = "true" if from_me else "false"
-        
-        # Determine the correct remoteJid for WPPConnect
-        raw_key = quoted.get("key", {}) if isinstance(quoted, dict) else {}
-        raw_remote_jid = raw_key.get("remoteJid", "")
-        
-        if raw_remote_jid:
-            if raw_remote_jid.endswith("@lid"):
-                # Resolve @lid to phone JID for WPPConnect compatibility. WPPConnect
-                # returns HTTP 500 when sent an @lid JID (confirmed elsewhere in this
-                # file), so an unresolved @lid here is a real cause of quoted-reply
-                # sends failing — try a live API resolution before giving up, instead
-                # of immediately falling back to the (likely-broken) raw @lid.
-                quoted_remote_jid = self._resolve_jid_for_send(raw_remote_jid).replace(
-                    "@s.whatsapp.net", "@c.us"
-                )
-            else:
-                norm_remote_jid = self._normalize_jid(raw_remote_jid)
-                phone_to_lid = getattr(self, "_phone_to_lid", {})
-                lid_jid = phone_to_lid.get(norm_remote_jid, "")
-                if lid_jid:
-                    # Actually, WPPConnect prefers phone JID for key serialization.
-                    # Revert to phone JID format.
-                    quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
-                elif norm_remote_jid.endswith("@s.whatsapp.net"):
-                    quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
-                else:
-                    quoted_remote_jid = norm_remote_jid
-        else:
-            quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
-            if quoted_remote_jid.endswith("@s.whatsapp.net"):
-                quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
-            
-        serialized_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
-        
-        # For group chats, WPPConnect requires the participant JID at the end
-        if quoted_remote_jid.endswith("@g.us"):
-            raw_participant = raw_key.get("participant", "") or _cq.get("key", {}).get("participant", "")
-            if not raw_participant and from_me:
-                raw_participant = getattr(self, "my_jid", "")
-            
-            if raw_participant:
-                if raw_participant.endswith("@lid"):
-                    # Resolve participant @lid to phone JID, with a live API
-                    # fallback (see remoteJid resolution above for why this matters).
-                    participant = self._resolve_jid_for_send(raw_participant).replace(
-                        "@s.whatsapp.net", "@c.us"
-                    )
-                else:
-                    norm_participant = self._normalize_jid(raw_participant)
-                    if norm_participant.endswith("@s.whatsapp.net"):
-                        participant = norm_participant.replace("@s.whatsapp.net", "@c.us")
-                    else:
-                        participant = norm_participant
-                serialized_id = f"{serialized_id}_{participant}"
-                
-        return serialized_id
+        Delegates to _serialize_msg_id, which keeps whatever JID variant
+        (@lid or phone) the message was actually keyed under in WPPConnect's
+        internal store — rewriting @lid to phone here makes the lookup miss
+        and the reply fail (same root cause as the media-download bug).
+        """
+        if not quoted or not isinstance(quoted, dict):
+            return None
+        raw_key = quoted.get("key", {})
+        if not isinstance(raw_key, dict) or not raw_key.get("id"):
+            return None
+        return self._serialize_msg_id(raw_key.get("remoteJid", ""), raw_key)
 
     def _canonical_mention_jids(self, mentioned_jids):
         """Return mention JIDs in the phone-number format Baileys/WPPConnect can tag."""
@@ -4936,6 +4871,7 @@ class MainWindow(wx.Frame):
                 "phone": [phone_net],
                 "message": text,
                 "mentioned": mentioned_clean,
+                "isGroup": phone_net.endswith("@g.us"),
                 "options": {
                     "linkPreview": False
                 }
@@ -4951,6 +4887,7 @@ class MainWindow(wx.Frame):
                     "phone": [phone_net],
                     "message": text,
                     "messageId": quoted_id,
+                    "isGroup": phone_net.endswith("@g.us"),
                     "options": {
                         "linkPreview": False
                     }
@@ -5741,7 +5678,11 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                resp = requests.post(url, json={"phone": target_phone}, headers=headers, timeout=10)
+                resp = requests.post(
+                    url,
+                    json={"phone": target_phone, "isGroup": target_phone.endswith("@g.us")},
+                    headers=headers, timeout=10,
+                )
                 if not resp.ok:
                     logging.warning("[mark_as_read] API response %s for %s: %s",
                                      resp.status_code, target_phone, resp.text[:200])
@@ -6363,7 +6304,7 @@ class MainWindow(wx.Frame):
         try:
             resp = requests.post(
                 url,
-                json={"phone": jid, "value": archive},
+                json={"phone": jid, "value": archive, "isGroup": jid.endswith("@g.us")},
                 headers=headers,
                 timeout=10,
             )
@@ -6415,7 +6356,10 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(url, json={"phone": phone}, headers=headers, timeout=10)
+                r = requests.post(
+                    url, json={"phone": phone, "isGroup": phone.endswith("@g.us")},
+                    headers=headers, timeout=10,
+                )
                 if not r.ok:
                     logging.warning("[delete_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
             except Exception as exc:
@@ -6430,7 +6374,10 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(url, json={"phone": phone}, headers=headers, timeout=10)
+                r = requests.post(
+                    url, json={"phone": phone, "isGroup": phone.endswith("@g.us")},
+                    headers=headers, timeout=10,
+                )
                 if not r.ok:
                     logging.warning("[clear_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
             except Exception as exc:
@@ -7208,11 +7155,20 @@ class MainWindow(wx.Frame):
         arch_full_chats = list(getattr(panel, '_all_chats_list', panel.chats_list))
         arch_full_names = list(getattr(panel, '_all_chat_names', panel.chat_names))
         arch_lst = panel.conversations_list
+        arch_filter = getattr(panel, '_conv_filter', 'all')
 
         new_arch_chats: list = []
         new_arch_names: list = []
         new_arch_texts: list = []
         for i, chat in enumerate(arch_full_chats):
+            chat_jid = chat.get("remoteJid", "")
+            unread_count = int(chat.get("unreadCount") or 0)
+            if arch_filter == 'unread' and unread_count == 0:
+                continue
+            if arch_filter == 'groups' and not chat_jid.endswith("@g.us"):
+                continue
+            if arch_filter == 'individual' and chat_jid.endswith("@g.us"):
+                continue
             name = arch_full_names[i] if i < len(arch_full_names) else ""
             unread = int(chat.get("unreadCount") or 0)
             unread_str = (
@@ -7230,17 +7186,22 @@ class MainWindow(wx.Frame):
         new_arch_jids = [c.get("remoteJid", "") for c in new_arch_chats]
         _arch_displayed_jids = getattr(panel, '_displayed_jids', None)
 
+        _arch_fast_path_ok = False
         if (
             _arch_displayed_jids is not None
             and _arch_displayed_jids == new_arch_jids
             and arch_lst.GetItemCount() == len(new_arch_jids)
         ):
-            for idx, new_text in enumerate(new_arch_texts):
-                try:
+            try:
+                for idx, new_text in enumerate(new_arch_texts):
                     if arch_lst.GetItemText(idx, 0) != new_text:
                         arch_lst.SetItem(idx, 0, new_text)
-                except Exception:
-                    arch_lst.SetItem(idx, 0, new_text)
+                _arch_fast_path_ok = True
+            except Exception:
+                # See add_chats_to_ui(): don't retry SetItem on a stale index,
+                # fall through to the full rebuild below instead.
+                pass
+        if _arch_fast_path_ok:
             panel.chats_list = new_arch_chats
             panel.chat_names = new_arch_names
             return
@@ -7402,17 +7363,25 @@ class MainWindow(wx.Frame):
         # function runs, so we track what's truly rendered via _displayed_jids.
         new_jids = [c.get("remoteJid", "") for c in displayed_chats]
         _displayed_jids = getattr(self.conversations_panel, '_displayed_jids', None)
+        _fast_path_ok = False
         if (
             _displayed_jids is not None
             and _displayed_jids == new_jids
             and lst.GetItemCount() == len(new_jids)
         ):
-            for idx, new_text in enumerate(new_item_texts):
-                try:
+            try:
+                for idx, new_text in enumerate(new_item_texts):
                     if lst.GetItemText(idx, 0) != new_text:
                         lst.SetItem(idx, 0, new_text)
-                except Exception:
-                    lst.SetItem(idx, 0, new_text)
+                _fast_path_ok = True
+            except Exception:
+                # The underlying Win32 list control rejected an index that
+                # GetItemCount() claimed was valid (observed as "Couldn't
+                # retrieve information about list control item N"). Don't
+                # retry SetItem blindly — fall through to the full rebuild
+                # below, which resyncs the control from scratch.
+                pass
+        if _fast_path_ok:
             self.conversations_panel.chats_list = displayed_chats
             self.conversations_panel.chat_names = displayed_names
             # _displayed_jids stays the same (JIDs didn't change)

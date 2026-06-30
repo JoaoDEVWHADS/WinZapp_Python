@@ -6181,6 +6181,24 @@ class ArchivedConversationsPanel(wx.Panel):
         )
         sizer.Add(self.conversations_label, 0, wx.LEFT | wx.TOP, 5)
 
+        # ── Conversation filter tabs ─────────────────────────────────────────
+        # Tracks the active filter key: 'all' | 'unread' | 'groups' | 'individual'
+        self._conv_filter = 'all'
+        self._filter_radio = wx.RadioBox(
+            self,
+            label=i18n.t("conv_filter_label"),
+            choices=[
+                i18n.t("conv_filter_all"),
+                i18n.t("conv_filter_unread"),
+                i18n.t("conv_filter_groups"),
+                i18n.t("conv_filter_individual"),
+            ],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_ROWS,
+        )
+        self._filter_radio.Bind(wx.EVT_RADIOBOX, self._on_filter_changed)
+        sizer.Add(self._filter_radio, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
+
         self.conversations_list = wx.ListCtrl(
             self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
         )
@@ -6197,6 +6215,13 @@ class ArchivedConversationsPanel(wx.Panel):
         self.SetSizer(sizer)
 
     # ── Events ────────────────────────────────────────────────────────────────
+
+    def _on_filter_changed(self, event):
+        """Update the active conversation filter and rebuild the list."""
+        _filter_map = ['all', 'unread', 'groups', 'individual']
+        sel = self._filter_radio.GetSelection()
+        self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
+        self.main_window.add_chats_to_ui()
 
     def _on_arch_list_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_SPACE:
@@ -6263,3 +6288,11 @@ class ArchivedConversationsPanel(wx.Panel):
         col = wx.ListItem()
         col.SetText(i18n.t("archived_chats"))
         self.conversations_list.SetColumn(0, col)
+
+        if hasattr(self, "_filter_radio"):
+            self._filter_radio.SetLabel(i18n.t("conv_filter_label"))
+            for _fi, _fk in enumerate([
+                "conv_filter_all", "conv_filter_unread",
+                "conv_filter_groups", "conv_filter_individual",
+            ]):
+                self._filter_radio.SetItemLabel(_fi, i18n.t(_fk))
