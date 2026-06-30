@@ -424,6 +424,12 @@ export async function getMessageById(req: Request, res: Response) {
   const { messageId } = req.params;
 
   try {
+    if (!req.client || typeof req.client.getMessageById !== 'function') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Session is not connected or initialized',
+      });
+    }
     const result = await req.client.getMessageById(messageId);
 
     returnSucess(res, session, (result as any).chatId.user, result);

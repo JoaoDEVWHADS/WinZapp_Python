@@ -457,6 +457,13 @@ export async function getMediaByMessage(req: Request, res: Response) {
   const client = req.client;
   const { messageId } = req.params;
 
+  if (!client || typeof client.getMessageById !== 'function') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Session is not connected or initialized',
+    });
+  }
+
   try {
     const message = await client.getMessageById(messageId);
 
