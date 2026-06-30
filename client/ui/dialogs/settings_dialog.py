@@ -119,6 +119,7 @@ class SettingsDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self._lang_codes = list(LANGUAGE_NAMES.keys())
+        self._restart_required = False
         self._build_ui()
         self._load_values()
         self.Fit()
@@ -244,8 +245,46 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(voice_focus_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._msg_list_mode_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_message_list_mode_label")
+        )
+        msg_list_mode_sizer = wx.StaticBoxSizer(self._msg_list_mode_box, wx.VERTICAL)
+
+        self._msg_list_mode_classic_rb = wx.RadioButton(
+            self._msg_list_mode_box,
+            label=i18n.t("ui_message_list_mode_classic"),
+            style=wx.RB_GROUP,
+        )
+        msg_list_mode_sizer.Add(self._msg_list_mode_classic_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._msg_list_mode_dataview_rb = wx.RadioButton(
+            self._msg_list_mode_box, label=i18n.t("ui_message_list_mode_dataview")
+        )
+        msg_list_mode_sizer.Add(
+            self._msg_list_mode_dataview_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+        )
+
+        ui_sizer.Add(msg_list_mode_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
+
+        # ── Spoken content tab ───────────────────────────────────────────────
+        self._speech_page = wx.Panel(self._notebook)
+        speech_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._announce_typing_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_announce_typing_label")
+        )
+        speech_sizer.Add(self._announce_typing_check, 0, wx.ALL, 8)
+
+        self._announce_recording_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_announce_recording_label")
+        )
+        speech_sizer.Add(self._announce_recording_check, 0, wx.ALL, 8)
+
+        self._speech_page.SetSizer(speech_sizer)
+        self._notebook.AddPage(self._speech_page, i18n.t("tab_speech_content"))
 
         # ── Connection tab ───────────────────────────────────────────────────
         self._conn_page = wx.Panel(self._notebook)
@@ -372,6 +411,18 @@ class SettingsDialog(wx.Dialog):
         else:
             self._voice_focus_send_rb.SetValue(True)
 
+        message_list_mode = self.main_window.settings.get("user_interface", {}).get(
+            "message_list_mode", "classic"
+        )
+        if message_list_mode == "dataview":
+            self._msg_list_mode_dataview_rb.SetValue(True)
+        else:
+            self._msg_list_mode_classic_rb.SetValue(True)
+
+        speech = self.main_window.settings.get("speech_content", {})
+        self._announce_typing_check.SetValue(speech.get("announce_typing", True))
+        self._announce_recording_check.SetValue(speech.get("announce_recording", True))
+
         conn = self.main_window.settings.get("connection", {})
         custom_api = conn.get("wpp_custom_api", False)
         self._custom_api_check.SetValue(custom_api)
@@ -490,6 +541,30 @@ class SettingsDialog(wx.Dialog):
             "voice_record_focus"
         ] = voice_record_focus
 
+        # UI: messages list control type (ListCtrl vs DataView) — takes effect
+        # after restart since the conversation panel control is built once at
+        # startup and switching its underlying wx control type at runtime would
+        # require rebuilding the whole conversation panel.
+        new_message_list_mode = (
+            "dataview" if self._msg_list_mode_dataview_rb.GetValue() else "classic"
+        )
+        old_message_list_mode = self.main_window.settings.get("user_interface", {}).get(
+            "message_list_mode", "classic"
+        )
+        self.main_window.settings.setdefault("user_interface", {})[
+            "message_list_mode"
+        ] = new_message_list_mode
+        if new_message_list_mode != old_message_list_mode:
+            self._restart_required = True
+
+        # Spoken content: typing/recording announcements
+        self.main_window.settings.setdefault("speech_content", {})[
+            "announce_typing"
+        ] = self._announce_typing_check.GetValue()
+        self.main_window.settings.setdefault("speech_content", {})[
+            "announce_recording"
+        ] = self._announce_recording_check.GetValue()
+
         # Connection settings
         custom_api = self._custom_api_check.GetValue()
         self.main_window.settings.setdefault("connection", {})["wpp_custom_api"] = custom_api
@@ -593,8 +668,9 @@ class SettingsDialog(wx.Dialog):
         self.SetTitle(i18n.t("settings_title"))
         self._notebook.SetPageText(0, i18n.t("tab_general"))
         self._notebook.SetPageText(1, i18n.t("tab_ui"))
-        self._notebook.SetPageText(2, i18n.t("tab_connection"))
-        self._notebook.SetPageText(3, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(2, i18n.t("tab_speech_content"))
+        self._notebook.SetPageText(3, i18n.t("tab_connection"))
+        self._notebook.SetPageText(4, i18n.t("tab_audio_playback"))
         self._sounds_check.SetLabel(i18n.t("sounds_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
@@ -606,6 +682,11 @@ class SettingsDialog(wx.Dialog):
         self._voice_focus_box.SetLabel(i18n.t("ui_voice_record_focus_label"))
         self._voice_focus_send_rb.SetLabel(i18n.t("ui_voice_record_focus_send"))
         self._voice_focus_discard_rb.SetLabel(i18n.t("ui_voice_record_focus_discard"))
+        self._msg_list_mode_box.SetLabel(i18n.t("ui_message_list_mode_label"))
+        self._msg_list_mode_classic_rb.SetLabel(i18n.t("ui_message_list_mode_classic"))
+        self._msg_list_mode_dataview_rb.SetLabel(i18n.t("ui_message_list_mode_dataview"))
+        self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
+        self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetAccessibleName(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))
@@ -629,6 +710,7 @@ class SettingsDialog(wx.Dialog):
 
     def _on_ok(self, event):
         if self._apply_values():
+            self._maybe_warn_restart_required()
             self.EndModal(wx.ID_OK)
 
     def _on_cancel(self, event):
@@ -637,3 +719,14 @@ class SettingsDialog(wx.Dialog):
     def _on_apply(self, event):
         if self._apply_values():
             self._refresh_dialog_labels()
+            self._maybe_warn_restart_required()
+
+    def _maybe_warn_restart_required(self):
+        if self._restart_required:
+            self._restart_required = False
+            wx.MessageBox(
+                self.main_window.i18n.t("restart_required_message"),
+                self.main_window.i18n.t("settings_title"),
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
