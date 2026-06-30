@@ -1255,11 +1255,25 @@ class ConversationsPanel(wx.Panel):
         if _played is None:
             self._played_sent_local_ids: set = set()
             _played = self._played_sent_local_ids
+        
+        _played_real = getattr(self, "_played_sent_real_ids", None)
+        if _played_real is None:
+            self._played_sent_real_ids: set = set()
+            _played_real = self._played_sent_real_ids
+
         if local_id in _played:
             return
+        if real_id and real_id in _played_real:
+            return
+
         _played.add(local_id)
         if len(_played) > 500:
             _played.clear()
+
+        if real_id:
+            _played_real.add(real_id)
+            if len(_played_real) > 500:
+                _played_real.clear()
 
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
