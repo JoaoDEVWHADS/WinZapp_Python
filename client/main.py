@@ -5441,47 +5441,53 @@ class MainWindow(wx.Frame):
         """
         _key = media.get("key", {})
         msg_id = _key.get("id", "")
-        # Extract clean ID if it already has underscores
-        if msg_id and "_" in msg_id:
-            parts = msg_id.split("_")
-            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        if msg_id and (msg_id.startswith("true_") or msg_id.startswith("false_")):
+            if ":" in msg_id:
+                import re
+                msg_id = re.sub(r':\d+', '', msg_id)
+            msg_id = msg_id.replace("@s.whatsapp.net", "@c.us")
+        else:
+            # Extract clean ID if it already has underscores
+            if msg_id and "_" in msg_id:
+                parts = msg_id.split("_")
+                msg_id = parts[2] if len(parts) > 2 else parts[-1]
 
-        if msg_id:
-            from_me = _key.get("fromMe", False)
-            from_me_str = "true" if from_me else "false"
-            remote_jid = _key.get("remoteJid", "")
-            
-            def clean_jid_for_wpp(jid_str):
-                if not jid_str:
-                    return ""
-                # Strip device suffix (e.g. 5511941034648:11@s.whatsapp.net -> 5511941034648@s.whatsapp.net)
-                if ":" in jid_str:
-                    parts = jid_str.split("@")
-                    if len(parts) == 2:
-                        prefix, domain = parts
-                        prefix = prefix.split(":")[0]
-                        jid_str = f"{prefix}@{domain}"
+            if msg_id:
+                from_me = _key.get("fromMe", False)
+                from_me_str = "true" if from_me else "false"
+                remote_jid = _key.get("remoteJid", "")
                 
-                # Resolve @lid to phone JID for WPPConnect compatibility
-                if jid_str.endswith("@lid"):
-                    phone = getattr(self, "_lid_to_phone", {}).get(jid_str, "")
-                    if phone:
-                        jid_str = phone
-                
-                # Map s.whatsapp.net to c.us
-                if jid_str.endswith("@s.whatsapp.net"):
-                    jid_str = jid_str.replace("@s.whatsapp.net", "@c.us")
-                return jid_str
+                def clean_jid_for_wpp(jid_str):
+                    if not jid_str:
+                        return ""
+                    # Strip device suffix (e.g. 5511941034648:11@s.whatsapp.net -> 5511941034648@s.whatsapp.net)
+                    if ":" in jid_str:
+                        parts = jid_str.split("@")
+                        if len(parts) == 2:
+                            prefix, domain = parts
+                            prefix = prefix.split(":")[0]
+                            jid_str = f"{prefix}@{domain}"
+                    
+                    # Resolve @lid to phone JID for WPPConnect compatibility
+                    if jid_str.endswith("@lid"):
+                        phone = getattr(self, "_lid_to_phone", {}).get(jid_str, "")
+                        if phone:
+                            jid_str = phone
+                    
+                    # Map s.whatsapp.net to c.us
+                    if jid_str.endswith("@s.whatsapp.net"):
+                        jid_str = jid_str.replace("@s.whatsapp.net", "@c.us")
+                    return jid_str
 
-            remote_jid = clean_jid_for_wpp(remote_jid)
-            msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
-            
-            # For group messages, append the participant JID if present
-            if remote_jid.endswith("@g.us"):
-                participant = _key.get("participant", "")
-                if participant:
-                    participant = clean_jid_for_wpp(participant)
-                    msg_id = f"{msg_id}_{participant}"
+                remote_jid = clean_jid_for_wpp(remote_jid)
+                msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
+                
+                # For group messages, append the participant JID if present
+                if remote_jid.endswith("@g.us"):
+                    participant = _key.get("participant", "")
+                    if participant:
+                        participant = clean_jid_for_wpp(participant)
+                        msg_id = f"{msg_id}_{participant}"
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
