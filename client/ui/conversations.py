@@ -28,6 +28,7 @@ from ui.accessible import (
     AccessibleSearchNextResult,
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
+    AccessibleMessagesListControl,
     CompatDataViewListCtrl,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
@@ -303,8 +304,23 @@ class ConversationsPanel(wx.Panel):
         )
         conv_sizer.Add(self.messages_label, 0, wx.LEFT | wx.TOP, 5)
 
-        self.messages_list = CompatDataViewListCtrl(self.conversation_panel)
+        # The messages list control type is configurable: the classic
+        # wx.ListCtrl (default — works with the OS native ListView, but
+        # truncates each row's accessible text to ~512 characters) or
+        # CompatDataViewListCtrl (full message text, but the underlying
+        # generic DataView control announces less cleanly to screen readers).
+        message_list_mode = self.main_window.settings.get("user_interface", {}).get(
+            "message_list_mode", "classic"
+        )
+        if message_list_mode == "dataview":
+            self.messages_list = CompatDataViewListCtrl(self.conversation_panel)
+        else:
+            self.messages_list = wx.ListCtrl(
+                self.conversation_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
+            )
         self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
+        self._messages_list_accessible = AccessibleMessagesListControl(i18n.t("messages"))
+        self.messages_list.SetAccessible(self._messages_list_accessible)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
@@ -1023,6 +1039,8 @@ class ConversationsPanel(wx.Panel):
         col2 = wx.ListItem()
         col2.SetText(i18n.t("messages"))
         self.messages_list.SetColumn(0, col2)
+        if hasattr(self, "_messages_list_accessible"):
+            self._messages_list_accessible._label = i18n.t("messages")
 
         self.audio_progress_label.SetLabel(i18n.t("audio_progress_label"))
         self._action_save_as_btn.SetLabel(i18n.t("save_as"))

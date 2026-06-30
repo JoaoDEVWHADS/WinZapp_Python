@@ -412,8 +412,16 @@ class MainWindow(wx.Frame):
         # Check if we should ask the user to choose between local and custom/remote API (first run)
         self._check_api_type_first_run()
 
-        # Handle API execution configuration
+        # First-run dialogs: autostart and global hotkey (normal mode only, once ever).
+        # These must run BEFORE the WPPConnect API is started so the user never
+        # sees a "starting WPPConnect" dialog stacked on top of setup prompts —
+        # the API only starts once all setup steps are confirmed.
         self.wpp_process = None
+        if not self.background_mode:
+            self._check_first_run()
+            self._check_hotkey_first_run()
+
+        # Handle API execution configuration
         if self.wpp_custom_api:
             # Delete local node_modules and Puppeteer cache (Chrome) to free space
             node_modules_path = resource_path("api", "node_modules")
@@ -445,11 +453,6 @@ class MainWindow(wx.Frame):
             # Start local WPPConnect Server (if bundled)
             logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
             self.ensure_wpp_running()
-
-        # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
-        if not self.background_mode:
-            self._check_first_run()
-            self._check_hotkey_first_run()
 
         self.offline_mode = False
         # True while the Baileys/WhatsApp WebSocket is connected; False after a
@@ -2213,10 +2216,10 @@ class MainWindow(wx.Frame):
             self.wpp_custom_api = True
             self.save_settings()
 
-            # Open settings dialog on the Connection tab (index 2)
+            # Open settings dialog on the Connection tab (index 3)
             from ui.dialogs.settings_dialog import SettingsDialog
             dlg = SettingsDialog(self)
-            dlg._notebook.SetSelection(2)
+            dlg._notebook.SetSelection(3)
             settings_res = dlg.ShowModal()
             dlg.Destroy()
 
@@ -5328,7 +5331,12 @@ class MainWindow(wx.Frame):
             # Speak via AO2 only when a composing/recording event starts in the ACTIVE conversation.
             # Events from other chats are intentionally silent to avoid interrupting the user.
             if new_lkp != old_lkp and new_lkp in ("composing", "recording"):
-                if chat_jid_norm == conv_jid:
+                speech = self.settings.get("speech_content", {})
+                announce_enabled = (
+                    speech.get("announce_typing", True) if new_lkp == "composing"
+                    else speech.get("announce_recording", True)
+                )
+                if announce_enabled and chat_jid_norm == conv_jid:
                     if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
                         name = self._resolve_jid_name(canonical)
                         if name:

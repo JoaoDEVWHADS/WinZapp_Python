@@ -243,10 +243,18 @@ class WebSocketClient:
         messageType, messageTimestamp, ...).
         """
         try:
+            # Ignore new-message events until the initial conversation sync has
+            # fully finished (i.e. we are neither "preparing to sync" nor
+            # "synchronizing"). Otherwise a message arriving mid-sync would
+            # create/insert a conversation in the list before the old-message
+            # history sync even started, leaving the UI in an inconsistent state.
+            if not getattr(self.main_window, "_sync_completed", False):
+                return
+
             msg = info.get("data", {})
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
-            
+
             # Extract JID mapping from WebSocket message
             self.main_window._extract_lid_mapping(msg)
             # fromMe=True can mean two things:
@@ -375,11 +383,15 @@ class WebSocketClient:
             # presences: {participant_jid: {"lastKnownPresence": state, "lastSeen": timestamp}}
             presences = {}
             
-            # Map state to expected values (available, unavailable, composing, recording)
+            # Map state to expected values (available, unavailable, composing, recording).
+            # Per WPPConnect's own PresenceEvent type, "state" is one of:
+            # 'available' | 'composing' | 'recording' | 'unavailable'. Older/alternate
+            # builds have been seen using "online"/"offline"/"typing" instead, so those
+            # are normalised here too.
             def map_state(s):
                 if not s:
                     return "unavailable"
-                s = s.lower()
+                s = s.strip().lower()
                 if s == "online":
                     return "available"
                 if s == "offline":
@@ -387,6 +399,11 @@ class WebSocketClient:
                 # WPPConnect/WhatsApp Web uses "typing" where Baileys uses "composing"
                 if s == "typing":
                     return "composing"
+                if s not in ("available", "unavailable", "composing", "recording", "paused"):
+                    # Unknown/unexpected chat-state value — log it so a real-world
+                    # mismatch (e.g. a different literal used for audio recording)
+                    # can be diagnosed from the logs instead of failing silently.
+                    print(f"[WebSocketClient] Unrecognized presence state: {s!r} (raw info: {info})")
                 return s
 
             timestamp = info.get("t")

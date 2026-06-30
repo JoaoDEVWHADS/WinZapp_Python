@@ -133,6 +133,33 @@ class AccessibleMessagesList(wx.Accessible):
         return (wx.ACC_OK, "")
 
 
+class AccessibleMessagesListControl(wx.Accessible):
+    """
+    Reports a simple, fixed name (e.g. "Mensagens") for the conversation
+    messages list control itself (childId 0) when it receives focus via
+    Tab/Shift+Tab.
+
+    Without this, NVDA falls back to a generic, redundant description built
+    from the native control's window class and item count — e.g. "DataViewCtrl
+    200 itens" for CompatDataViewListCtrl, or "wx dataviewctrlmainwindow" for
+    its internal child window — instead of announcing just the field label.
+    Applies to both the classic wx.ListCtrl and CompatDataViewListCtrl so the
+    announcement is identical regardless of which one is configured.
+
+    Per-row announcements (childId > 0) are left untouched (ACC_NOT_IMPLEMENTED)
+    so the screen reader keeps reading each message's content normally.
+    """
+
+    def __init__(self, label):
+        super().__init__()
+        self._label = label
+
+    def GetName(self, childId):
+        if childId == 0:
+            return (wx.ACC_OK, self._label)
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
 class AccessibleAudioSlider(wx.Accessible):
     def __init__(self, conversations_panel):
         super().__init__()
