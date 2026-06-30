@@ -465,13 +465,45 @@ export async function getMediaByMessage(req: Request, res: Response) {
   }
 
   try {
-    const message = await client.getMessageById(messageId);
+    let message = null;
+    try {
+      message = await client.getMessageById(messageId);
+    } catch (err) {
+      req.logger.info(`client.getMessageById failed for ${messageId}, trying manual lookup...`);
+    }
 
-    if (!message)
-      res.status(400).json({
+    if (!message) {
+      const parts = messageId.split('_');
+      if (parts.length >= 3) {
+        const chatId = parts[1];
+        const shortId = parts[2];
+        req.logger.info(`Searching for msg ${shortId} in chat ${chatId}...`);
+        
+        try {
+          message = await client.waPage.evaluate((cId: string, sId: string) => {
+            try {
+              const chat = (window as any).WPP.chat.get(cId);
+              if (chat && chat.msgs) {
+                const model = chat.msgs.get(sId) || chat.msgs.find((m: any) => m.id.id === sId);
+                if (model) {
+                  return (window as any).WAPI.processMessageObj(model, true, false);
+                }
+              }
+            } catch (e) {}
+            return null;
+          }, chatId, shortId);
+        } catch (evalErr) {
+          req.logger.error(`Error during manual message lookup: ${(evalErr as any).message}`);
+        }
+      }
+    }
+
+    if (!message) {
+      return res.status(400).json({
         status: 'error',
         message: 'Message not found',
       });
+    }
 
     if (!(message['mimetype'] || message.isMedia || message.isMMS))
       res.status(400).json({
