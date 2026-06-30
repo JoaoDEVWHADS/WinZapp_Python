@@ -31,6 +31,43 @@ async function returnSucess(res: any, data: any) {
   res.status(201).json({ status: 'success', response: data, mapper: 'return' });
 }
 
+async function resolveMessageId(client: any, messageId: string, logger: any): Promise<string> {
+  if (!messageId) return messageId;
+  try {
+    const msg = await client.getMessageById(messageId);
+    if (msg) return messageId;
+  } catch (err) {
+    logger.info(`Direct lookup for message ${messageId} failed, trying manual resolution...`);
+  }
+
+  const parts = messageId.split('_');
+  if (parts.length >= 3) {
+    const chatId = parts[1];
+    const shortId = parts[2];
+    try {
+      const resolvedId = await client.waPage.evaluate((cId: string, sId: string) => {
+        try {
+          const chat = (window as any).WPP.chat.get(cId);
+          if (chat && chat.msgs) {
+            const model = chat.msgs.get(sId) || chat.msgs.find((m: any) => m.id.id === sId);
+            if (model && model.id && model.id._serialized) {
+              return model.id._serialized;
+            }
+          }
+        } catch (e) {}
+        return null;
+      }, chatId, shortId);
+      if (resolvedId) {
+        logger.info(`Resolved message ID ${messageId} to ${resolvedId}`);
+        return resolvedId;
+      }
+    } catch (e) {
+      logger.error(`Error resolving message ID manually: ${(e as any).message}`);
+    }
+  }
+  return messageId;
+}
+
 export async function sendMessage(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]
@@ -95,6 +132,9 @@ export async function sendMessage(req: Request, res: Response) {
   const options = req.body.options || {};
 
   try {
+    if (options.quotedMsg) {
+      options.quotedMsg = await resolveMessageId(req.client, options.quotedMsg, req.logger);
+    }
     const results: any = [];
     for (const contato of phone) {
       results.push(await req.client.sendText(contato, message, options));
@@ -227,13 +267,17 @@ export async function sendFile(req: Request, res: Response) {
   const msg = message || caption;
 
   try {
+    let resolvedQuotedId = quotedMessageId;
+    if (quotedMessageId) {
+      resolvedQuotedId = await resolveMessageId(req.client, quotedMessageId, req.logger);
+    }
     const results: any = [];
     for (const contact of phone) {
       results.push(
         await req.client.sendFile(contact, pathFile, {
           filename: filename,
           caption: msg,
-          quotedMsg: quotedMessageId,
+          quotedMsg: resolvedQuotedId,
           ...options,
         })
       );
@@ -293,6 +337,10 @@ export async function sendVoice(req: Request, res: Response) {
   } = req.body;
 
   try {
+    let resolvedQuotedId = quotedMessageId;
+    if (quotedMessageId) {
+      resolvedQuotedId = await resolveMessageId(req.client, quotedMessageId, req.logger);
+    }
     const results: any = [];
     for (const contato of phone) {
       results.push(
@@ -301,7 +349,7 @@ export async function sendVoice(req: Request, res: Response) {
           path,
           filename,
           message,
-          quotedMessageId
+          resolvedQuotedId
         )
       );
     }
@@ -351,6 +399,10 @@ export async function sendVoice64(req: Request, res: Response) {
   const { phone, base64Ptt, quotedMessageId } = req.body;
 
   try {
+    let resolvedQuotedId = quotedMessageId;
+    if (quotedMessageId) {
+      resolvedQuotedId = await resolveMessageId(req.client, quotedMessageId, req.logger);
+    }
     const results: any = [];
     for (const contato of phone) {
       results.push(
@@ -359,7 +411,7 @@ export async function sendVoice64(req: Request, res: Response) {
           base64Ptt,
           'Voice Audio',
           '',
-          quotedMessageId
+          resolvedQuotedId
         )
       );
     }
@@ -855,9 +907,13 @@ export async function replyMessage(req: Request, res: Response) {
   const { phone, message, messageId } = req.body;
 
   try {
+    let resolvedMsgId = messageId;
+    if (messageId) {
+      resolvedMsgId = await resolveMessageId(req.client, messageId, req.logger);
+    }
     const results: any = [];
     for (const contato of phone) {
-      results.push(await req.client.reply(contato, message, messageId));
+      results.push(await req.client.reply(contato, message, resolvedMsgId));
     }
 
     if (results.length === 0) res.status(400).json('Error sending message');
