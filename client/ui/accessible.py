@@ -203,6 +203,39 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
     def _on_header_click(self, event):
         event.Veto()
 
+    def _get_main_window(self):
+        """Return the internal child window that actually receives OS focus.
+
+        wx.dataview.DataViewListCtrl (generic/wxWindowNR backend) is a
+        compound control: the window the user tabs into and that Windows
+        reports focus events for is an internal child ("wxDataViewCtrlMainWindow"),
+        not `self`. Calling SetAccessible()/SetName() only on `self` therefore
+        never reaches NVDA, which reads the child's native window class name
+        instead ("wx dataviewctrlmainwindow"). Returns None if no such child
+        is found (e.g. on non-Windows backends where this isn't an issue).
+        """
+        children = self.GetChildren()
+        return children[0] if children else None
+
+    def SetAccessible(self, accessible):
+        super().SetAccessible(accessible)
+        main_win = self._get_main_window()
+        if main_win is not None and main_win is not self:
+            # wx.Accessible instances are single-owner in wxPython (SetAccessible
+            # takes ownership), so a second one must be created for the child.
+            label = getattr(accessible, "_label", None)
+            if label is not None:
+                main_win.SetAccessible(type(accessible)(label))
+                main_win.SetName(label)
+            else:
+                main_win.SetAccessible(accessible)
+
+    def SetName(self, name):
+        super().SetName(name)
+        main_win = self._get_main_window()
+        if main_win is not None and main_win is not self:
+            main_win.SetName(name)
+
     def InsertColumn(self, col, heading, format=0, width=-1):
         self.AppendTextColumn(heading, width=width)
 

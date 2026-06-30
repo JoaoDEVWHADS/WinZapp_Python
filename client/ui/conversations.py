@@ -318,8 +318,12 @@ class ConversationsPanel(wx.Panel):
             self.messages_list = wx.ListCtrl(
                 self.conversation_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
             )
-        self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
-        self._messages_list_accessible = AccessibleMessagesListControl(i18n.t("messages"))
+        # i18n "messages" carries a "&" mnemonic for the StaticText label above
+        # the list; list-column headers and accessible names don't interpret
+        # "&" as a mnemonic, so it must be stripped there to avoid a stray "&"
+        # being shown/spoken.
+        self.messages_list.InsertColumn(0, i18n.t("messages").replace("&", ""), width=360)
+        self._messages_list_accessible = AccessibleMessagesListControl(i18n.t("messages").replace("&", ""))
         self.messages_list.SetAccessible(self._messages_list_accessible)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
@@ -1037,10 +1041,10 @@ class ConversationsPanel(wx.Panel):
 
         self.messages_label.SetLabel(i18n.t("messages"))
         col2 = wx.ListItem()
-        col2.SetText(i18n.t("messages"))
+        col2.SetText(i18n.t("messages").replace("&", ""))
         self.messages_list.SetColumn(0, col2)
         if hasattr(self, "_messages_list_accessible"):
-            self._messages_list_accessible._label = i18n.t("messages")
+            self._messages_list_accessible._label = i18n.t("messages").replace("&", "")
 
         self.audio_progress_label.SetLabel(i18n.t("audio_progress_label"))
         self._action_save_as_btn.SetLabel(i18n.t("save_as"))
@@ -2050,6 +2054,15 @@ class ConversationsPanel(wx.Panel):
                 wx.ID_ANY, f"{i18n.t('save_as')}\tCtrl+Shift+S"
             )
             self.Bind(wx.EVT_MENU, self._on_action_save_as, save_item)
+        elif msg_type == "audioMessage":
+            # Voice messages are cached separately (voice_messages/*.msv) and
+            # can be saved even while a download is still pending — the save
+            # flow downloads it first if needed, same as the other media types.
+            menu.AppendSeparator()
+            save_audio_item = menu.Append(
+                wx.ID_ANY, f"{i18n.t('save_audio_as')}\tCtrl+Shift+S"
+            )
+            self.Bind(wx.EVT_MENU, self._on_action_save_as, save_audio_item)
 
         # Edit (own text messages within 3 hours)
         _is_own      = msg.get("key", {}).get("fromMe", False)
@@ -2082,7 +2095,7 @@ class ConversationsPanel(wx.Panel):
         if index < 0 or index >= len(self._sorted_messages):
             return
         msg_type = self._sorted_messages[index].get("messageType", "")
-        if msg_type in ("documentMessage", "imageMessage", "videoMessage"):
+        if msg_type in ("documentMessage", "imageMessage", "videoMessage", "audioMessage"):
             self._on_action_save_as(None)
 
     # ── Media controls helpers ──────────────────────────────────────────────
@@ -3042,12 +3055,20 @@ class ConversationsPanel(wx.Panel):
             mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
             ext  = mime.split("/")[-1] if "/" in mime else "mp4"
             default_file = f"video_{msg_id}.{ext}"
+        elif msg_type == "audioMessage":
+            mime = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
+            ext  = mime.split("/")[-1].split(";")[0].strip() if "/" in mime else "ogg"
+            default_file = f"audio_{msg_id}.{ext or 'ogg'}"
         else:
             return
 
+        dlg_title = (
+            self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
+            else self.main_window.i18n.t("save_as")
+        )
         with wx.FileDialog(
             self,
-            self.main_window.i18n.t("save_as"),
+            dlg_title,
             defaultFile=default_file,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         ) as dlg:
@@ -3059,7 +3080,10 @@ class ConversationsPanel(wx.Panel):
         if "_" in msg_id:
             parts = msg_id.split("_")
             clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
+        if msg_type == "audioMessage":
+            media_path = data_path("voice_messages", f"{clean_msg_id}.msv")
+        else:
+            media_path = data_path("media", f"{clean_msg_id}.wzmedia")
 
         def _run():
             if not os.path.isfile(media_path):
@@ -3067,9 +3091,23 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.output, self.main_window.i18n.t("downloading")
                 )
                 try:
-                    self.main_window.handle_media_message(msg)
+                    if msg_type == "audioMessage":
+                        self.main_window.handle_audio_message(msg)
+                    else:
+                        self.main_window.handle_media_message(msg)
                 except Exception:
                     return
+            if not os.path.isfile(media_path):
+                # Download silently failed — nothing to save.
+                wx.CallAfter(
+                    wx.MessageBox,
+                    self.main_window.i18n.t("media_download_failed"),
+                    self.main_window.i18n.t("error").format(
+                        app_name=self.main_window.app_name
+                    ),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                return
             try:
                 with open(media_path, "rb") as fh:
                     content = decrypt_bytes(fh.read(), self.main_window.key)
@@ -3187,16 +3225,31 @@ class ConversationsPanel(wx.Panel):
             def _download_and_play():
                 try:
                     msg_type = msg.get("messageType", "") if msg else ""
-                    if msg_type == "audioMessage":
-                        if msg is not None:
-                            self.main_window.handle_audio_message(msg)
-                    else:
-                        if msg is not None:
-                            self.main_window.handle_media_message(msg)
+                    try:
+                        if msg_type == "audioMessage":
+                            if msg is not None:
+                                self.main_window.handle_audio_message(msg)
+                        else:
+                            if msg is not None:
+                                self.main_window.handle_media_message(msg)
+                    except Exception:
+                        logging.warning(
+                            "[_download_and_play] download failed for %s", msg_id,
+                            exc_info=True,
+                        )
                     # Only play if the file was actually downloaded (non-empty)
                     if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
                         wx.CallAfter(
                             self._play_audio, msg_id, duration_seconds, file_path, audio_ext
+                        )
+                    else:
+                        # Download silently failed (timeout, expired CDN link,
+                        # WPPConnect error) — the user's last feedback was
+                        # "baixando..." with no follow-up; tell them it failed
+                        # instead of leaving that as the final word.
+                        wx.CallAfter(
+                            self.main_window.output,
+                            self.main_window.i18n.t("media_download_failed"),
                         )
                 finally:
                     self._downloading_audio_ids.discard(msg_id)
@@ -3502,6 +3555,40 @@ class ConversationsPanel(wx.Panel):
         else:
             return f"{size / 1024 ** 3:.2f}".replace(".", sep) + " gb"
 
+    def _resolve_mentions_in_text(self, text: str, mentioned: list) -> str:
+        """Replace @{number}/@{lid} placeholders in *text* with display names.
+
+        Shared by both the main message renderer and the quoted-message
+        preview renderer, so a quoted message that itself contains a mention
+        gets the same @lid → contact-name resolution as a normal message
+        instead of showing the raw @<lid digits>.
+        """
+        for jid in mentioned or []:
+            mw_ref = self.main_window
+            if mw_ref._is_self_jid(jid):
+                name = "eu"
+            else:
+                name = self._get_participant_name(jid)
+
+            # Check what pattern (LID local part or phone number) is used in the text
+            lid_local = jid.rsplit("@", 1)[0]
+            _lid_map = getattr(mw_ref, "_lid_to_phone", {})
+            phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
+            phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
+
+            placeholder = None
+            if f"@{lid_local}" in text:
+                placeholder = lid_local
+            elif phone and f"@{phone}" in text:
+                placeholder = phone
+
+            if not placeholder:
+                continue
+
+            if name and name != placeholder and name != jid:
+                text = text.replace(f"@{placeholder}", f"@{name}", 1)
+        return text
+
     def _get_message_content(self, msg) -> str:
         """
         Return the human-readable text for a message item in the list.
@@ -3536,31 +3623,7 @@ class ConversationsPanel(wx.Panel):
                 or ctx_ext.get("mentionedJid") or ctx_ext.get("mentionedJidList")
                 or []
             )
-            for jid in mentioned:
-                mw_ref = self.main_window
-                if mw_ref._is_self_jid(jid):
-                    name = "eu"
-                else:
-                    name = self._get_participant_name(jid)
-                
-                # Check what pattern (LID local part or phone number) is used in the text
-                lid_local = jid.rsplit("@", 1)[0]
-                _lid_map = getattr(mw_ref, "_lid_to_phone", {})
-                phone_jid = _lid_map.get(jid, "") if jid.endswith("@lid") else ""
-                phone = phone_jid.split("@")[0] if phone_jid else jid.split("@")[0]
-                
-                placeholder = None
-                if f"@{lid_local}" in text:
-                    placeholder = lid_local
-                elif phone and f"@{phone}" in text:
-                    placeholder = phone
-                    
-                if not placeholder:
-                    continue
-                    
-                if name and name != placeholder and name != jid:
-                    text = text.replace(f"@{placeholder}", f"@{name}", 1)
-            return text
+            return self._resolve_mentions_in_text(text, mentioned)
 
         # ── Audio ────────────────────────────────────────────────────────────
         if msg_type == "audioMessage":
@@ -3901,7 +3964,21 @@ class ConversationsPanel(wx.Panel):
         if "conversation" in quoted_msg:
             return (quoted_msg.get("conversation") or "")
         if "extendedTextMessage" in quoted_msg:
-            return ((quoted_msg.get("extendedTextMessage") or {}).get("text") or "")
+            ext = quoted_msg.get("extendedTextMessage") or {}
+            text = ext.get("text") or ""
+            # The quoted message may itself contain @mentions; resolve them
+            # the same way the main message renderer does, instead of
+            # leaving the raw @<lid digits> placeholder in the preview.
+            ctx_top = quoted_msg.get("contextInfo") or {}
+            ctx_ext = ext.get("contextInfo") or {}
+            mentioned = (
+                ctx_top.get("mentionedJid") or ctx_top.get("mentionedJidList")
+                or ctx_ext.get("mentionedJid") or ctx_ext.get("mentionedJidList")
+                or []
+            )
+            if mentioned:
+                text = self._resolve_mentions_in_text(text, mentioned)
+            return text
 
         # Support raw WPPConnect types and body/text keys
         msg_type_raw = quoted_msg.get("type")

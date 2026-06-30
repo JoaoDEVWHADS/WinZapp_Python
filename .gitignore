@@ -7,24 +7,18 @@ client/data/settings_default.json
 client/data/secret.key
 client/data/media/
 client/data/voice_messages/
+client/data/log/
 client/logs/
 
 # Bundled Node.js runtime (binary distribution, ~50 MB)
 /client/node/
 /client/node-v24.15.0-win-x64.zip
 
-# Evolution API directory.
-# The entire directory is excluded because it contains the cloned upstream
-# repo (~hundreds of MB) plus runtime state (pgdata, instances, store, logs).
-# EXCEPTIONS: start.js, .env and package.json are WinZapp-specific files that
-# belong in version control.  package.json lists the minimal runtime deps
-# (embedded-postgres, prisma) needed before setup_api.py clones the full API.
 /client/api/*
 !/client/api/start.js
 !/client/api/.env
 !/client/api/package.json
 !/client/api/config.json
-!/client/api/.puppeteerrc.cjs
 
 # Build intermediates and distribution artefacts
 /build/
@@ -181,24 +175,3 @@ db.sqlite3-journal
 
 # Jupyter
 .ipynb_checkpoints
-
-# ── WinZapp: negations (must come last to override earlier rules) ─────────────
-
-# Re-admit the Evolution API config files that .env and /api/* would block.
-# Also track api/.gitignore itself so its WinZapp-specific !start.js / !.env
-# exceptions are available to anyone who clones this repo.
-!/api/.gitignore
-!/api/start.js
-!/api/.env
-!/client/api/src/util/functions.ts
-!/client/api/src/middleware/statusConnection.ts
-!/client/api/src/controller/deviceController.ts
-!/client/api/src/controller/messageController.ts
-!/client/api/src/controller/sessionController.ts
-!/client/api/src/util/createSessionUtil.ts
-!/client/api/src/config.ts
-!/client/api/config.json
-
-
-# data
-data/
