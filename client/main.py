@@ -7549,7 +7549,7 @@ class MainWindow(wx.Frame):
         jid      = chat.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
         if from_me:
-            sender_prefix = i18n.t("conv_preview_you") + " "
+            sender_prefix = self.self_reference_label() + ": "
         elif is_group:
             p_key      = last.get("key", {})
             sender_jid = last.get("participant") or p_key.get("participant") or p_key.get("remoteJid", "")
