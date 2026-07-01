@@ -1113,6 +1113,20 @@ class ConversationsPanel(wx.Panel):
         if not remote_jid:
             return
 
+        # Guard against a single user action enqueueing the same message
+        # twice — e.g. Enter's key-repeat firing EVT_TEXT_ENTER more than
+        # once for what felt like one press, or a stray duplicate BUTTON/
+        # TEXT_ENTER event. Each duplicate created its own pending message
+        # and both went through independently, so the "sent" sound played
+        # twice and the recipient got the text twice.
+        now = time.monotonic()
+        last = getattr(self, "_last_sent_signature", None)
+        if last is not None:
+            last_text, last_jid, last_time = last
+            if last_text == text and last_jid == remote_jid and (now - last_time) < 1.5:
+                return
+        self._last_sent_signature = (text, remote_jid, now)
+
         # ── Edit mode: update existing message ──────────────────────────────
         if self._editing_message_id is not None:
             msg_id = self._editing_message_id
