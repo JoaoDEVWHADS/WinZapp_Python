@@ -745,13 +745,32 @@ class SettingsDialog(wx.Dialog):
         # Refresh all visible labels in the main window
         self.main_window.apply_language_changes()
 
-        # Re-render the open conversation's message list so a self-reference
+        # Re-render the open conversation's message list, and the conversation
+        # list's last-message previews (which also embed the self-reference
+        # word for chats whose last message is our own), so a self-reference
         # change (e.g. "Eu" -> "Você") takes effect immediately instead of
         # only on the next restart.
         if self_reference_changed:
             cp = getattr(self.main_window, "conversations_panel", None)
             if cp is not None and getattr(cp, "conversation", None) is not None:
                 cp.populate_messages(preserve_focus=True)
+            # add_chats_to_ui() skips its rebuild when its content fingerprint
+            # (jid/name/unread/last-record-id) is unchanged from the last run —
+            # which it is here, since only the self-reference word changed, not
+            # any of the fingerprinted fields. Clear it so the previews (which
+            # embed that word for chats whose last message is our own) are
+            # actually regenerated instead of being served from the stale list.
+            # Call add_chats_to_ui() directly rather than set_chats(): the
+            # underlying messages/order/names haven't changed (only the
+            # pronoun used in previews for our own last messages), so there's
+            # no need to pay for set_chats()'s full lid-cache rebuild + name
+            # resolution + re-sort over every chat (which freezes the UI for
+            # a few seconds) just to refresh some preview strings. This also
+            # lets add_chats_to_ui()'s SetItem fast path kick in, updating
+            # row text in place instead of tearing down and rebuilding the
+            # whole list control.
+            self.main_window._chats_ui_fp = None
+            self.main_window.add_chats_to_ui()
 
         return True
 
