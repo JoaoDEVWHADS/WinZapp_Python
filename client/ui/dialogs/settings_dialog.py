@@ -628,12 +628,18 @@ class SettingsDialog(wx.Dialog):
             self_reference_mode = "custom"
         else:
             self_reference_mode = "eu"
+        self_reference_custom_word = self._self_ref_custom_field.GetValue().strip()
+        old_ui_settings = self.main_window.settings.get("user_interface", {})
+        self_reference_changed = (
+            old_ui_settings.get("self_reference_mode", "eu") != self_reference_mode
+            or old_ui_settings.get("self_reference_custom_word", "") != self_reference_custom_word
+        )
         self.main_window.settings.setdefault("user_interface", {})[
             "self_reference_mode"
         ] = self_reference_mode
         self.main_window.settings.setdefault("user_interface", {})[
             "self_reference_custom_word"
-        ] = self._self_ref_custom_field.GetValue().strip()
+        ] = self_reference_custom_word
 
         # Spoken content: typing/recording announcements
         self.main_window.settings.setdefault("speech_content", {})[
@@ -738,6 +744,15 @@ class SettingsDialog(wx.Dialog):
 
         # Refresh all visible labels in the main window
         self.main_window.apply_language_changes()
+
+        # Re-render the open conversation's message list so a self-reference
+        # change (e.g. "Eu" -> "Você") takes effect immediately instead of
+        # only on the next restart.
+        if self_reference_changed:
+            cp = getattr(self.main_window, "conversations_panel", None)
+            if cp is not None and getattr(cp, "conversation", None) is not None:
+                cp.populate_messages(preserve_focus=True)
+
         return True
 
     def _refresh_dialog_labels(self):
