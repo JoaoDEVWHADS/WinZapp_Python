@@ -4047,16 +4047,12 @@ class MainWindow(wx.Frame):
             self.tray_icon.update_tooltip()
 
     def set_chats(self):
-        if getattr(self, "_media_sync_running", False):
-            return
         self._build_lid_to_phone_cache()
         self._apply_chat_lists(*self._compute_chat_lists())
 
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
-        if getattr(self, "_media_sync_running", False):
-            return
         # Don't re-render the chat list from a stray WebSocket event (unread
         # count, archive flag, contact name, ...) while the initial sync is
         # still running — it would show partially-resolved names/placeholders
@@ -4072,8 +4068,6 @@ class MainWindow(wx.Frame):
     def _do_scheduled_set_chats(self):
         """Run heavy computation in background; apply UI changes on main thread."""
         self._set_chats_pending = False
-        if getattr(self, "_media_sync_running", False):
-            return
         def _bg():
             try:
                 # _build_lid_to_phone_cache() is intentionally NOT called here.
@@ -4769,7 +4763,14 @@ class MainWindow(wx.Frame):
     # loop for every expired URL, which starves the API thread pool and eventually
     # breaks sends.  Never request media older than this threshold.
     _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
-    _MEDIA_SYNC_WORKERS    = 6               # parallel workers during bulk sync
+    _MEDIA_SYNC_WORKERS    = 3               # parallel workers during bulk sync — kept
+                                              # low because WPPConnect proxies every
+                                              # request through a single Puppeteer/Chrome
+                                              # automation session; too many concurrent
+                                              # downloads were starving unrelated requests
+                                              # (send-seen, contact lookups) into sporadic
+                                              # "session is not active" / "chat not found"
+                                              # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 20              # seconds per request during bulk sync
 
     def _load_media_failed_ids(self) -> set:
@@ -5137,6 +5138,14 @@ class MainWindow(wx.Frame):
             participant = (
                 msg_key.get("participant")
                 or (msg_key.get("remoteJidAlt") if not from_me else "")
+                # Our own sent messages usually carry no "participant" field at
+                # all (it's populated for messages received from others in the
+                # group) — but WPPConnect's store still keys OUR group messages
+                # by our own JID as the 4th segment, so fall back to it here.
+                # Without this, quoting/reacting to/deleting our own group
+                # messages built a 3-part id, the lookup missed, and callers
+                # silently fell back to a non-quoted plain message.
+                or (getattr(self, "my_jid", "") if from_me else "")
                 or ""
             ).replace("@s.whatsapp.net", "@c.us")
         if participant:
@@ -5341,11 +5350,14 @@ class MainWindow(wx.Frame):
         Replaces the full _schedule_set_chats() rebuild for changes that don't
         affect list membership/order (presence, unread count going to 0).
         SetItem() on a single row prevents NVDA from re-reading the entire
-        list — and, unlike _schedule_set_chats()/set_chats(), isn't silently
-        dropped while a media sync is running, so e.g. opening an unread
-        conversation clears its badge immediately instead of only after the
-        media sync eventually finishes.
+        list, and applies immediately instead of waiting out the 300ms
+        _schedule_set_chats() debounce.
         """
+        # Title/tray tooltip unread count: cheap (one pass over self.chats),
+        # so recompute it here directly rather than waiting for the next
+        # debounced _apply_chat_lists() rebuild.
+        self._update_title()
+
         is_group = chat_jid_norm.endswith("@g.us")
         for panel in (
             getattr(self, "conversations_panel", None),
@@ -5361,8 +5373,29 @@ class MainWindow(wx.Frame):
             for idx, chat in enumerate(displayed):
                 if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
                     continue
-                name   = names[idx] if idx < len(names) else ""
                 unread = effective_unread_count(chat)
+                conv_filter = getattr(panel, '_conv_filter', 'all')
+                if conv_filter == 'unread' and unread == 0:
+                    # No longer belongs in the "unread" filtered view. Remove it
+                    # outright (and keep the backing arrays in sync) immediately
+                    # instead of waiting for the next debounced full rebuild —
+                    # this used to be the only way such a row ever disappeared,
+                    # and letting several of these pile up made the backing
+                    # arrays' indices drift from the ListCtrl's real item count
+                    # (the "Couldn't retrieve information about list control
+                    # item N" crashes).
+                    try:
+                        lst.DeleteItem(idx)
+                    except Exception:
+                        break
+                    del displayed[idx]
+                    if idx < len(names):
+                        del names[idx]
+                    displayed_jids = getattr(panel, '_displayed_jids', None)
+                    if displayed_jids is not None and idx < len(displayed_jids):
+                        del displayed_jids[idx]
+                    break
+                name   = names[idx] if idx < len(names) else ""
                 unread_str = (
                     f" {unread} " + (
                         self.i18n.t("unread_messages") if unread > 1
@@ -5777,18 +5810,35 @@ class MainWindow(wx.Frame):
         if target_phone.endswith("@s.whatsapp.net"):
             target_phone = target_phone.rsplit("@", 1)[0] + "@c.us"
 
-        def _do_api():
+        def _send_seen(phone: str, is_lid: bool) -> "requests.Response | None":
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
+            if is_lid:
+                payload["isLid"] = True
+            return requests.post(url, json=payload, headers=headers, timeout=10)
+
+        def _do_api():
             try:
-                resp = requests.post(
-                    url,
-                    json={"phone": target_phone, "isGroup": target_phone.endswith("@g.us")},
-                    headers=headers, timeout=10,
-                )
+                resp = _send_seen(target_phone, False)
                 if not resp.ok:
                     logging.warning("[mark_as_read] API response %s for %s: %s",
                                      resp.status_code, target_phone, resp.text[:200])
+                    # WPPConnect's live session sometimes only has this contact's
+                    # chat loaded under its @lid identity (not @c.us) — "Chat not
+                    # found" in that case leaves the read-receipt never sent to
+                    # WhatsApp, so the server (correctly) keeps reporting it
+                    # unread on every future sync/restart. Retry once with the
+                    # @lid form when we have one and it's a distinct JID.
+                    if "not found" in resp.text.lower():
+                        lid_jid = getattr(self, "_phone_to_lid", {}).get(
+                            self._normalize_jid(remote_jid), ""
+                        )
+                        if lid_jid and lid_jid != target_phone:
+                            resp2 = _send_seen(lid_jid, True)
+                            if not resp2.ok:
+                                logging.warning("[mark_as_read] Retry via @lid also failed %s for %s: %s",
+                                                 resp2.status_code, lid_jid, resp2.text[:200])
             except Exception as exc:
                 logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
         threading.Thread(target=_do_api, daemon=True).start()
@@ -6833,7 +6883,8 @@ class MainWindow(wx.Frame):
         if lid_jid:
             remote_jid = lid_jid
 
-        # Find the message key in records to get participant (needed for groups).
+        # Find the message key in records (_serialize_msg_id falls back to
+        # our own JID as the group participant when it's missing here).
         msg_key = {"id": message_id, "fromMe": True}
         chat = self.chats.get(remote_jid)
         if chat:
@@ -6842,13 +6893,6 @@ class MainWindow(wx.Frame):
                 if r.get("key", {}).get("id") == message_id:
                     msg_key = r.get("key", {})
                     break
-        # Fall back to our own JID as participant for group messages when the
-        # record wasn't found (so _serialize_msg_id can build the correct 4-part ID).
-        if remote_jid.endswith("@g.us") and not msg_key.get("participant"):
-            my_jid = getattr(self, "my_jid", "")
-            if my_jid:
-                msg_key = dict(msg_key)
-                msg_key["participant"] = my_jid
 
         full_id = self._serialize_msg_id(remote_jid, msg_key)
         url = (

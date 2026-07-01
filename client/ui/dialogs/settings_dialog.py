@@ -257,11 +257,11 @@ class SettingsDialog(wx.Dialog):
         )
         msg_list_mode_sizer.Add(self._msg_list_mode_classic_rb, 0, wx.LEFT | wx.TOP, 5)
 
-        self._msg_list_mode_dataview_rb = wx.RadioButton(
-            self._msg_list_mode_box, label=i18n.t("ui_message_list_mode_dataview")
+        self._msg_list_mode_listbox_rb = wx.RadioButton(
+            self._msg_list_mode_box, label=i18n.t("ui_message_list_mode_listbox")
         )
         msg_list_mode_sizer.Add(
-            self._msg_list_mode_dataview_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+            self._msg_list_mode_listbox_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
         )
 
         ui_sizer.Add(msg_list_mode_sizer, 0, wx.EXPAND | wx.ALL, 8)
@@ -414,8 +414,11 @@ class SettingsDialog(wx.Dialog):
         message_list_mode = self.main_window.settings.get("user_interface", {}).get(
             "message_list_mode", "classic"
         )
-        if message_list_mode == "dataview":
-            self._msg_list_mode_dataview_rb.SetValue(True)
+        # "dataview" was the old (now-removed) alternative mode name — treat
+        # it as "listbox" so settings saved before the switch still resolve
+        # to the equivalent current option.
+        if message_list_mode in ("listbox", "dataview"):
+            self._msg_list_mode_listbox_rb.SetValue(True)
         else:
             self._msg_list_mode_classic_rb.SetValue(True)
 
@@ -541,16 +544,18 @@ class SettingsDialog(wx.Dialog):
             "voice_record_focus"
         ] = voice_record_focus
 
-        # UI: messages list control type (ListCtrl vs DataView) — takes effect
+        # UI: messages list control type (ListCtrl vs ListBox) — takes effect
         # after restart since the conversation panel control is built once at
         # startup and switching its underlying wx control type at runtime would
         # require rebuilding the whole conversation panel.
         new_message_list_mode = (
-            "dataview" if self._msg_list_mode_dataview_rb.GetValue() else "classic"
+            "listbox" if self._msg_list_mode_listbox_rb.GetValue() else "classic"
         )
         old_message_list_mode = self.main_window.settings.get("user_interface", {}).get(
             "message_list_mode", "classic"
         )
+        if old_message_list_mode == "dataview":
+            old_message_list_mode = "listbox"
         self.main_window.settings.setdefault("user_interface", {})[
             "message_list_mode"
         ] = new_message_list_mode
@@ -684,7 +689,7 @@ class SettingsDialog(wx.Dialog):
         self._voice_focus_discard_rb.SetLabel(i18n.t("ui_voice_record_focus_discard"))
         self._msg_list_mode_box.SetLabel(i18n.t("ui_message_list_mode_label"))
         self._msg_list_mode_classic_rb.SetLabel(i18n.t("ui_message_list_mode_classic"))
-        self._msg_list_mode_dataview_rb.SetLabel(i18n.t("ui_message_list_mode_dataview"))
+        self._msg_list_mode_listbox_rb.SetLabel(i18n.t("ui_message_list_mode_listbox"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))

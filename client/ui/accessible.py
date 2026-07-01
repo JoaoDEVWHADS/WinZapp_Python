@@ -1,7 +1,6 @@
 import os
 import sys
 import wx
-import wx.dataview
 
 
 class AccessibleSearchInConversation(wx.Accessible):
@@ -117,7 +116,7 @@ class AccessibleMessagesList(wx.Accessible):
     """
     Custom accessible for the conversation messages ListCtrl.
 
-    The native Win32 ListView control truncates each item's text to ~259
+    The native Win32 ListView control truncates each item's text to ~512
     characters, both visually and in the MSAA name exposed to screen readers.
     Long messages (e.g. a paragraph ending in a URL) therefore got cut off and
     could only be read in full through the Alt+C popup.  This accessible returns
@@ -147,11 +146,10 @@ class AccessibleMessagesListControl(wx.Accessible):
     Tab/Shift+Tab.
 
     Without this, NVDA falls back to a generic, redundant description built
-    from the native control's window class and item count — e.g. "DataViewCtrl
-    200 itens" for CompatDataViewListCtrl, or "wx dataviewctrlmainwindow" for
-    its internal child window — instead of announcing just the field label.
-    Applies to both the classic wx.ListCtrl and CompatDataViewListCtrl so the
-    announcement is identical regardless of which one is configured.
+    from the native control's window class and item count — e.g. "List Box
+    200 itens" — instead of announcing just the field label. Applies to both
+    the classic wx.ListCtrl and CompatListBoxMessagesCtrl so the announcement
+    is identical regardless of which one is configured.
 
     Per-row announcements (childId > 0) are left untouched (ACC_NOT_IMPLEMENTED)
     so the screen reader keeps reading each message's content normally.
@@ -197,183 +195,139 @@ class MockListEvent:
         pass
 
 
-class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
+class CompatListBoxMessagesCtrl(wx.ListBox):
     """
-    Subclass of wx.dataview.DataViewListCtrl that mimics the wx.ListCtrl API.
-    Used to bypass the native Windows SysListView32 512-character screen reader limitation
-    by utilizing the generic wxWindowNR backend, exactly like Easygram does.
+    Subclass of wx.ListBox that mimics the wx.ListCtrl API used elsewhere in
+    the messages list code.
+
+    wx.dataview.DataViewListCtrl (the previous alternative to the classic
+    wx.ListCtrl) turned out to be a compound control whose generic backend
+    is not natively screen-reader accessible on Windows — NVDA read only the
+    raw "wxdataviewctrlmainwindow" window class, announced no label, and
+    arrow-key navigation produced nothing at all. Plain wx.ListBox wraps a
+    single native Win32 LISTBOX control (not the SysListView32 used by
+    wx.ListCtrl), which is fully MSAA-accessible out of the box and — unlike
+    SysListView32 — does not truncate item text at ~512 characters.
     """
     def __init__(self, parent, style=0):
-        super().__init__(parent, style=wx.dataview.DV_ROW_LINES | wx.dataview.DV_SINGLE)
-        self.Bind(wx.dataview.EVT_DATAVIEW_COLUMN_HEADER_CLICK, self._on_header_click)
+        super().__init__(parent, style=wx.LB_SINGLE)
+        self._activated_handler = None
+        # wx.ListBox has no built-in "activate" notification for Enter (only
+        # EVT_LISTBOX_DCLICK, which is mouse-double-click only). A plain
+        # EVT_KEY_DOWN binding is not reliable for Enter specifically:
+        # Windows' dialog/panel keyboard navigation can claim WXK_RETURN
+        # before it ever becomes a normal key event for a control that,
+        # unlike wx.ListCtrl, has no native "activate" concept of its own —
+        # this is exactly why Enter did nothing here. EVT_CHAR_HOOK
+        # intercepts before that navigation processing, so bind it here
+        # unconditionally instead of trying to fold Enter into EVT_KEY_DOWN.
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
-    def _on_header_click(self, event):
-        event.Veto()
-
-    def _get_main_window(self):
-        """Return the internal child window that actually receives OS focus.
-
-        wx.dataview.DataViewListCtrl (generic/wxWindowNR backend) is a
-        compound control: the window the user tabs into and that Windows
-        reports focus events for is an internal child ("wxDataViewCtrlMainWindow"),
-        not `self`. Calling SetAccessible()/SetName() only on `self` therefore
-        never reaches NVDA, which reads the child's native window class name
-        instead ("wx dataviewctrlmainwindow"). Returns None if no such child
-        is found (e.g. on non-Windows backends where this isn't an issue).
-        """
-        children = self.GetChildren()
-        return children[0] if children else None
-
-    def SetAccessible(self, accessible):
-        super().SetAccessible(accessible)
-        main_win = self._get_main_window()
-        if main_win is not None and main_win is not self:
-            # wx.Accessible instances are single-owner in wxPython (SetAccessible
-            # takes ownership), so a second one must be created for the child.
-            label = getattr(accessible, "_label", None)
-            if label is not None:
-                main_win.SetAccessible(type(accessible)(label))
-                main_win.SetName(label)
-            else:
-                main_win.SetAccessible(accessible)
-
-    def SetName(self, name):
-        super().SetName(name)
-        main_win = self._get_main_window()
-        if main_win is not None and main_win is not self:
-            main_win.SetName(name)
+    def _on_char_hook(self, event):
+        if event.GetKeyCode() == wx.WXK_RETURN and wx.Window.FindFocus() is self:
+            row = self.GetSelection()
+            if row != wx.NOT_FOUND and self._activated_handler is not None:
+                self._activated_handler(MockListEvent(row))
+                return
+        event.Skip()
 
     def InsertColumn(self, col, heading, format=0, width=-1):
-        self.AppendTextColumn(heading, width=width)
+        pass  # wx.ListBox has no columns — single text per row.
+
+    def SetColumn(self, col, listItem):
+        pass  # wx.ListBox has no columns.
 
     def GetItemCount(self):
-        return super().GetItemCount()
+        return self.GetCount()
+
+    def DeleteAllItems(self):
+        self.Clear()
 
     def Focus(self, row):
-        item = self.RowToItem(row)
-        if item.IsOk():
-            self.SelectRow(row)
-            # SelectRow() alone only changes which row is highlighted — it does
-            # not move the DataViewCtrl's internal "current item" that arrow-key
-            # navigation continues from. Without also setting it here, the very
-            # first Up/Down press after programmatic Focus()/Select() has no
-            # valid position to move relative to, so navigation appears dead.
-            self.SetCurrentItem(item)
+        if 0 <= row < self.GetCount():
+            self.SetSelection(row)
 
     def Select(self, row, select=True):
-        item = self.RowToItem(row)
         if select:
-            self.SelectRow(row)
-            if item.IsOk():
-                self.SetCurrentItem(item)
+            if 0 <= row < self.GetCount():
+                self.SetSelection(row)
         else:
-            self.UnselectRow(row)
+            self.Deselect(row)
 
     def EnsureVisible(self, row):
-        item = self.RowToItem(row)
-        if item.IsOk():
-            super().EnsureVisible(item)
+        if 0 <= row < self.GetCount():
+            super().EnsureVisible(row)
 
     def SetItemText(self, row, col_or_text, text=None):
         if text is None:
-            self.SetValue(col_or_text, row, 0)
+            self.SetString(row, col_or_text)
         else:
-            self.SetValue(text, row, col_or_text)
+            self.SetString(row, text)
 
     def GetItemText(self, row, col=0):
-        return self.GetValue(row, col)
+        return self.GetString(row)
 
     def Append(self, entry_tuple):
-        self.AppendItem([entry_tuple[0]])
+        super().Append(entry_tuple[0])
 
     def InsertItem(self, pos, text):
-        """DataViewListCtrl only supports append, so we rebuild the list to insert at pos.
-        Saves and restores the selected row and OS-level focus to prevent cursor jumping and
-        focus loss when a new message arrives while the user is navigating with arrow keys."""
-        count = self.GetItemCount()
-        selected = self.GetSelectedRow()
+        """Insert at pos, preserving the selected row and OS-level focus so
+        a live message arriving mid-navigation doesn't jump the cursor."""
+        selected  = self.GetSelection()
         had_focus = self.HasFocus()
-        values = [self.GetValue(i, 0) for i in range(count)]
-        values.insert(pos, text)
-        self.DeleteAllItems()
-        for v in values:
-            self.AppendItem([v])
-        # Restore selection: shift down if the insertion was at or before it
+        self.Insert(text, pos)
         if selected != wx.NOT_FOUND:
             restored = selected + 1 if pos <= selected else selected
-            self.SelectRow(restored)
-            item = self.RowToItem(restored)
-            if item.IsOk():
-                super().EnsureVisible(item)
+            self.SetSelection(restored)
         if had_focus:
             self.SetFocus()
         return pos
 
     def DeleteItem(self, row):
-        """DataViewListCtrl has no native delete-by-row, so we rebuild the list.
-        Saves and restores the selected row and OS-level focus to prevent cursor jumping and
-        focus loss when the unread separator is dismissed."""
-        count = self.GetItemCount()
+        """Delete row, preserving the selected row and OS-level focus so
+        dismissing the unread separator doesn't jump the cursor."""
+        count = self.GetCount()
         if row < 0 or row >= count:
             return
-        selected = self.GetSelectedRow()
+        selected  = self.GetSelection()
         had_focus = self.HasFocus()
-        values = [self.GetValue(i, 0) for i in range(count) if i != row]
-        self.DeleteAllItems()
-        for v in values:
-            self.AppendItem([v])
-        # Restore selection: shift up if deleted row was before it; clamp if same row deleted
-        if selected != wx.NOT_FOUND and len(values) > 0:
+        self.Delete(row)
+        if selected != wx.NOT_FOUND and self.GetCount() > 0:
             if selected > row:
                 restored = selected - 1
             elif selected == row:
                 restored = max(0, row - 1)
             else:
                 restored = selected
-            self.SelectRow(restored)
-            item = self.RowToItem(restored)
-            if item.IsOk():
-                super().EnsureVisible(item)
+            self.SetSelection(restored)
         if had_focus:
             self.SetFocus()
 
     def GetFocusedItem(self):
-        return self.GetSelectedRow()
+        return self.GetSelection()
 
     def GetFirstSelected(self):
-        return self.GetSelectedRow()
-
-    def SetColumn(self, col, listItem):
-        column = self.GetColumn(col)
-        if column:
-            column.SetTitle(listItem.GetText())
+        return self.GetSelection()
 
     def Bind(self, event_type, handler, *args, **kwargs):
         if event_type == wx.EVT_LIST_ITEM_ACTIVATED:
-            def _on_activated(evt):
-                row = self.ItemToRow(evt.GetItem())
+            # wx.ListBox has no Enter-to-activate notification of its own
+            # (EVT_LISTBOX_DCLICK is mouse-double-click only) — _on_char_hook
+            # invokes this same handler on Enter (see __init__).
+            self._activated_handler = handler
+            def _on_dclick(evt):
+                row = self.GetSelection()
                 if row != wx.NOT_FOUND:
                     handler(MockListEvent(row))
-            super().Bind(wx.dataview.EVT_DATAVIEW_ITEM_ACTIVATED, _on_activated, *args, **kwargs)
+            super().Bind(wx.EVT_LISTBOX_DCLICK, _on_dclick, *args, **kwargs)
 
         elif event_type in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_LIST_ITEM_FOCUSED):
             def _on_selected(evt):
-                row = self.ItemToRow(evt.GetItem())
+                row = self.GetSelection()
                 if row != wx.NOT_FOUND:
                     handler(MockListEvent(row))
-            super().Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, _on_selected, *args, **kwargs)
-
-        elif event_type == wx.EVT_KEY_DOWN:
-            # Raw key events are delivered to whichever window actually has OS
-            # focus. For this compound control that's the internal child
-            # ("wxDataViewCtrlMainWindow"), not self — binding on self here
-            # would silently never fire (breaking e.g. Space-to-activate),
-            # unlike EVT_LIST_ITEM_ACTIVATED/SELECTED above, which are
-            # explicitly re-emitted from DataView events rather than relying
-            # on OS event delivery.
-            main_win = self._get_main_window()
-            target = main_win if main_win is not None else self
-            target.Bind(event_type, handler, *args, **kwargs)
+                evt.Skip()
+            super().Bind(wx.EVT_LISTBOX, _on_selected, *args, **kwargs)
 
         else:
             super().Bind(event_type, handler, *args, **kwargs)

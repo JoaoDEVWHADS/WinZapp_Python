@@ -121,19 +121,6 @@ class ModuleInstallDialog(wx.Dialog):
             creation_flags = subprocess.CREATE_NO_WINDOW
 
         try:
-            # package-lock.json pins @wppconnect-team/wppconnect to whatever
-            # nightly tarball content it last resolved against an integrity
-            # hash. The nightly asset is rebuilt daily under the same URL, so
-            # a stale lock would make npm reject (or skip) today's build.
-            # Drop it so npm always re-resolves and fetches the current
-            # nightly release on a fresh install.
-            lock_path = resource_path("api", "package-lock.json")
-            if os.path.isfile(lock_path):
-                try:
-                    os.remove(lock_path)
-                except OSError:
-                    pass
-
             # ── Step 1: npm install ──────────────────────────────────────
             self._proc = subprocess.Popen(
                 npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],

@@ -30,7 +30,7 @@ from ui.accessible import (
     AccessibleNewConversationButton,
     AccessibleMessagesListControl,
     AccessibleReadMoreButton,
-    CompatDataViewListCtrl,
+    CompatListBoxMessagesCtrl,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count
 from app_paths import data_path
@@ -64,7 +64,7 @@ class ConversationsPanel(wx.Panel):
     # Windows' native SysListView32 (the classic wx.ListCtrl) truncates each
     # item's accessible text to this many characters — used to decide whether
     # the "Ler mais" button should appear for the focused row.
-    _LIST_CTRL_TEXT_LIMIT = 259
+    _LIST_CTRL_TEXT_LIMIT = 512
 
     def __init__(self, main_window, parent):
         super().__init__(parent)
@@ -312,15 +312,21 @@ class ConversationsPanel(wx.Panel):
 
         # The messages list control type is configurable: the classic
         # wx.ListCtrl (default — works with the OS native ListView, but
-        # truncates each row's accessible text to ~259 characters) or
-        # CompatDataViewListCtrl (full message text, but the underlying
-        # generic DataView control announces less cleanly to screen readers).
+        # truncates each row's accessible text to ~512 characters) or
+        # CompatListBoxMessagesCtrl (full message text via a native
+        # wx.ListBox, which isn't subject to that truncation and — unlike
+        # the DataView-based control this replaced — is natively accessible).
         message_list_mode = self.main_window.settings.get("user_interface", {}).get(
             "message_list_mode", "classic"
         )
-        self._message_list_mode = message_list_mode
+        # "dataview" was the old (now-removed) alternative mode name — treat
+        # it as "listbox" so settings saved before the switch still resolve
+        # to the equivalent current option.
         if message_list_mode == "dataview":
-            self.messages_list = CompatDataViewListCtrl(self.conversation_panel)
+            message_list_mode = "listbox"
+        self._message_list_mode = message_list_mode
+        if message_list_mode == "listbox":
+            self.messages_list = CompatListBoxMessagesCtrl(self.conversation_panel)
         else:
             self.messages_list = wx.ListCtrl(
                 self.conversation_panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
@@ -340,7 +346,7 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── "Ler mais" button (classic ListCtrl only) ─────────────────────────
-        # SysListView32 truncates each row's accessible text to ~259 characters,
+        # SysListView32 truncates each row's accessible text to ~512 characters,
         # so a screen reader can't read the tail of a long text message just by
         # focusing it. This button is the first focusable control after the
         # list (created here, before any other conversation_panel child) and is
@@ -2692,9 +2698,9 @@ class ConversationsPanel(wx.Panel):
 
         Only meaningful in classic wx.ListCtrl mode — SysListView32 truncates
         the accessible name of each row at _LIST_CTRL_TEXT_LIMIT characters;
-        CompatDataViewListCtrl exposes the full text and has no such limit.
+        CompatListBoxMessagesCtrl exposes the full text and has no such limit.
         """
-        if getattr(self, "_message_list_mode", "classic") == "dataview":
+        if getattr(self, "_message_list_mode", "classic") == "listbox":
             return
         show = False
         if 0 <= idx < len(self._sorted_messages):
