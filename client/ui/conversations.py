@@ -3893,7 +3893,7 @@ class ConversationsPanel(wx.Panel):
 
     def _sender_label(self, msg) -> str:
         if msg.get("key", {}).get("fromMe"):
-            return self.main_window.i18n.t("sender_you")
+            return self.main_window.self_reference_label()
         key         = msg.get("key", {})
         participant = key.get("participant", "")
         jid         = key.get("remoteJid", "")
@@ -4130,7 +4130,7 @@ class ConversationsPanel(wx.Panel):
                 for m in self._sorted_messages:
                     if m.get("key", {}).get("id") == stanza_id:
                         if m.get("key", {}).get("fromMe", False):
-                            return i18n.t("sender_you")
+                            return mw.self_reference_label()
                         # Not fromMe → the other party in the conversation
                         conv = self.conversation or {}
                         remote = conv.get("remoteJid", "")
@@ -4152,7 +4152,7 @@ class ConversationsPanel(wx.Panel):
                     or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
                 )
             else:
-                return i18n.t("sender_you")
+                return mw.self_reference_label()
 
         # Strip Baileys device suffix before contact lookup
         clean_p = _strip_dev(participant)
@@ -4171,7 +4171,7 @@ class ConversationsPanel(wx.Panel):
             my_jid = getattr(mw, "my_jid", "")
             my_phone = _phone_part(my_jid) if my_jid else ""
             if my_phone and p_phone == my_phone:
-                return i18n.t("sender_you")
+                return mw.self_reference_label()
             elif p_phone == r_phone:
                 return (
                     mw._resolve_contact_name(conv)
@@ -4179,12 +4179,12 @@ class ConversationsPanel(wx.Panel):
                     or (format_number(remote) if not remote.endswith("@lid") else "")
                 )
             else:
-                return i18n.t("sender_you")
+                return mw.self_reference_label()
 
         # Check if the quoted sender is "me" — strip device suffix from both sides
         my_jid = getattr(mw, "my_jid", "")
         if my_jid and _phone_part(clean_p) == _phone_part(my_jid):
-            return i18n.t("sender_you")
+            return mw.self_reference_label()
 
         return self._get_participant_name(clean_p)
 
@@ -4649,7 +4649,7 @@ class ConversationsPanel(wx.Panel):
         """Return a display name for a group participant."""
         mw = self.main_window
         if mw._is_self_jid(participant_jid):
-            return mw.i18n.t("sender_you")
+            return mw.self_reference_label()
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
         ppm = getattr(mw, "_presence_pushname_map", {})
 

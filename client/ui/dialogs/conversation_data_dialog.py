@@ -51,15 +51,30 @@ class ConversationDataDialog(wx.Dialog):
         self._i18n = main_window.i18n
 
         jid  = chat.get("remoteJid", "")
-        name = (
-            main_window._resolve_contact_name(chat)
-            or main_window.find_name_through_messages(chat)
-            or chat.get("pushName", "")
-            or format_number(jid)
-        )
+        is_group = jid.endswith("@g.us")
+        if is_group:
+            # _resolve_contact_name() always returns None for groups (no
+            # address-book entry) and pushName is never populated for group
+            # chats — the real group name lives in chat["name"]/["subject"].
+            # Without checking those first, the title fell through to
+            # format_number(jid), which read the raw group JID digits aloud
+            # via NVDA instead of the group's name.
+            name = (
+                chat.get("name")
+                or chat.get("subject")
+                or main_window.find_name_through_messages(chat)
+                or main_window.i18n.t("unknown_group")
+            )
+        else:
+            name = (
+                main_window._resolve_contact_name(chat)
+                or main_window.find_name_through_messages(chat)
+                or chat.get("pushName", "")
+                or format_number(jid)
+            )
         self._jid    = jid
         self._name   = name
-        self._is_group = jid.endswith("@g.us")
+        self._is_group = is_group
         # Parallel list of participant JIDs, populated by _populate_group().
         # Index matches the row index in _part_list.
         self._participant_jids: list = []

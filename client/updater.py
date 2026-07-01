@@ -436,12 +436,26 @@ class UpdateChecker:
         t.start()
 
     def force_check(self):
-        """Called from the Help > Force Update menu item."""
+        """Called from the Help > Check for Updates menu item."""
         self._force = True
         if self._retry_timer is not None:
             self._retry_timer.cancel()
             self._retry_timer = None
         t = threading.Thread(target=self._check_once, daemon=True)
+        t.start()
+
+    def force_reinstall(self):
+        """
+        Called from the Help > Force Reinstall from ZIP menu item.
+        Unlike force_check(), this skips the version comparison entirely and
+        always re-downloads and reinstalls whatever ZIP is attached to the
+        latest GitHub release — used to recover a broken install without
+        waiting for a newer version to exist.
+        """
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+            self._retry_timer = None
+        t = threading.Thread(target=self._fetch_latest_release_for_reinstall, daemon=True)
         t.start()
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -512,6 +526,61 @@ class UpdateChecker:
             i18n.t("update_not_available"),
             i18n.t("update_not_available_title"),
             wx.OK | wx.ICON_INFORMATION,
+            self._mw,
+        )
+
+    def _fetch_latest_release_for_reinstall(self):
+        logging.info("Auto-updater: Fetching latest GitHub release for forced ZIP reinstall...")
+        try:
+            resp = requests.get(
+                GITHUB_API_LATEST_RELEASE,
+                headers={"User-Agent": f"WinZapp/{__version__}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logging.exception("Auto-updater: Exception fetching latest release for forced reinstall")
+            wx.CallAfter(self._show_reinstall_error, str(exc))
+            return
+
+        tag_name       = data.get("tag_name", "")
+        remote_version = tag_name.lstrip("vV") or tag_name
+
+        zip_url = ""
+        for asset in data.get("assets", []):
+            name = asset.get("name", "").lower()
+            url  = asset.get("browser_download_url", "")
+            if name == "winzapp.zip":
+                zip_url = url
+                break
+            if name.endswith(".zip") and not zip_url:
+                zip_url = url
+
+        if not zip_url:
+            logging.warning("Auto-updater: No ZIP asset found in latest release %s", tag_name)
+            wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
+            return
+
+        wx.CallAfter(self._confirm_and_reinstall, remote_version, zip_url)
+
+    def _confirm_and_reinstall(self, remote_version: str, zip_url: str):
+        i18n = self._mw.i18n
+        if wx.MessageBox(
+            i18n.t("force_reinstall_confirm_msg").format(version=remote_version),
+            i18n.t("force_reinstall_confirm_title"),
+            wx.YES_NO | wx.ICON_WARNING,
+            self._mw,
+        ) != wx.YES:
+            return
+        self._do_install(remote_version, zip_url)
+
+    def _show_reinstall_error(self, error_msg: str):
+        i18n = self._mw.i18n
+        wx.MessageBox(
+            i18n.t("update_error_msg").format(error=error_msg),
+            i18n.t("update_error_title"),
+            wx.OK | wx.ICON_ERROR,
             self._mw,
         )
 

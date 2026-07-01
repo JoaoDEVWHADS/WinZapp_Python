@@ -618,6 +618,7 @@ class MainWindow(wx.Frame):
         self._ID_OFFLINE_MENU  = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
+        self._ID_FORCE_REINSTALL_ZIP = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
 
         menubar = wx.MenuBar()
@@ -666,6 +667,7 @@ class MainWindow(wx.Frame):
         )
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_FORCE_UPDATE, self.i18n.t("menu_force_update"))
+        help_menu.Append(self._ID_FORCE_REINSTALL_ZIP, self.i18n.t("menu_force_reinstall_zip"))
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_ABOUT, self.i18n.t("menu_about"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
@@ -679,6 +681,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
+        self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _refresh_menubar(self):
@@ -713,6 +716,9 @@ class MainWindow(wx.Frame):
         )
         mb.GetMenu(2).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
             self.i18n.t("menu_force_update")
+        )
+        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
+            self.i18n.t("menu_force_reinstall_zip")
         )
         mb.GetMenu(2).FindItemById(self._ID_ABOUT).SetItemLabel(
             self.i18n.t("menu_about")
@@ -944,6 +950,18 @@ class MainWindow(wx.Frame):
             self._start_update_checker(force=True)
         else:
             self._update_checker.force_check()
+
+    def _on_force_reinstall_zip(self, event):
+        """
+        Help > Force Reinstall from ZIP: always downloads and reinstalls the
+        latest GitHub release's ZIP, regardless of whether it's actually
+        newer than the running version — unlike _on_force_update(), which
+        only checks and installs when a newer version exists.
+        """
+        if self._update_checker is None:
+            from updater import UpdateChecker
+            self._update_checker = UpdateChecker(self)
+        self._update_checker.force_reinstall()
 
     # ── Auto-updater ──────────────────────────────────────────────────────────
 
@@ -1204,6 +1222,62 @@ class MainWindow(wx.Frame):
         if not remote_jid:
             return
 
+        # ── Guard against self-chat multi-device-sync artifacts ─────────────
+        # WPPConnect/Baileys occasionally reports one of our own sends (seen
+        # with self-chat text, audio and documents) tagged with an identity
+        # that isn't our real phone JID, in one of two shapes:
+        #
+        #  (a) "participant" (the actual sender/author, per wa-js semantics)
+        #      has the same digits as "remoteJid" (the chat). For a real
+        #      GROUP, remoteJid is the group's own independently-allocated
+        #      ID, never equal to any participant's JID — so this overlap
+        #      alone proves it's not a real group, regardless of whatever
+        #      fromMe flag WPPConnect attached to the sync echo (observed:
+        #      it can arrive as fromMe=False, producing a bogus "new message
+        #      from an unnamed participant" notification). For a bare,
+        #      not-yet-resolved @lid or @s.whatsapp.net remoteJid, the same
+        #      overlap is only unambiguous when fromMe is already True —
+        #      for a real 1:1 chat, an incoming (fromMe=False) message's
+        #      participant legitimately mirrors remoteJid (the sender IS
+        #      the chat), so that combination must NOT be redirected.
+        #
+        #  (b) remoteJid is suffixed "@g.us" but its digits are simply our
+        #      own phone number (with the Brazilian 9th-digit variant) — no
+        #      real group JID is ever shaped like a plain phone number.
+        #
+        # Either shape otherwise spawns an unnamed phantom "group"/duplicate
+        # chat that (1) duplicates a message already stored under "Eu" and
+        # (2) can't be cleanly identified/deleted afterwards. Redirect to
+        # the real self-chat, and opportunistically learn my_lid from case
+        # (a) so later messages resolve immediately via _is_self_jid()
+        # without waiting on resolve_self_lid()'s async API round-trip.
+        participant_raw = key.get("participant") or ""
+        remote_digits = remote_jid.split("@", 1)[0]
+        part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
+        my_jid = getattr(self, "my_jid", "")
+        my_lid = getattr(self, "my_lid", "")
+        is_group_jid = remote_jid.endswith("@g.us")
+
+        digits_self_referential = bool(part_digits and remote_digits == part_digits)
+        is_self_referential = digits_self_referential and (is_group_jid or from_me)
+        is_self_phone_group = bool(
+            is_group_jid and my_jid
+            and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0])
+        )
+
+        if is_self_referential or is_self_phone_group:
+            from_me = True
+            if participant_raw.endswith("@lid") and not my_lid:
+                self.my_lid = my_lid = participant_raw
+                if my_jid:
+                    self.register_jid_mapping(participant_raw, my_jid)
+            if my_jid:
+                remote_jid = my_jid
+            elif my_lid:
+                remote_jid = my_lid
+            else:
+                remote_jid = participant_raw or remote_jid
+
         # Learn/update presence pushName map from incoming message
         if not from_me:
             sender_jid = key.get("participant") or key.get("remoteJid", "")
@@ -1291,17 +1365,52 @@ class MainWindow(wx.Frame):
                 .setdefault("records", [])
         )
         if from_me:
+            # Match the echo to the pending virtual message it actually
+            # confirms, not just "whichever pending message we saw first".
+            # When two sends are in flight at once (e.g. a text message
+            # still awaiting its HTTP response while a voice message is
+            # fired off right after), the previous "first pending" pick
+            # would happily hand a text message the real ID of an unrelated
+            # audio message (and vice versa) — corrupting both: the text
+            # message freezes with no status updates (WhatsApp's status
+            # events for its real ID never find a matching record), the
+            # audio message's real ID collides with another entry's, its
+            # sent sound fires for the wrong message, and the recording
+            # file gets renamed onto the wrong ID so playback later loads
+            # someone else's audio. Restrict candidates to pending messages
+            # of the same type so unrelated messages can no longer swap IDs.
+            incoming_type = msg.get("messageType", "")
+            _text_types = ("conversation", "extendedTextMessage")
             pending_msg = None
             for r in records:
-                if r.get("_local_pending"):
-                    pending_msg = r
-                    break
+                if not r.get("_local_pending"):
+                    continue
+                r_type = r.get("messageType", "")
+                if incoming_type in _text_types:
+                    if r_type not in _text_types:
+                        continue
+                elif r_type != incoming_type:
+                    continue
+                pending_msg = r
+                break
             if pending_msg:
                 # Found the corresponding pending message: update it and skip appending a duplicate
                 pending_msg["_local_pending"] = False
                 local_id = pending_msg.get("_local_id")
                 pending_msg["key"]["id"] = msg_id
                 pending_msg["messageTimestamp"] = msg.get("messageTimestamp", pending_msg["messageTimestamp"])
+                # The virtual message built before sending never carries a
+                # "participant" (it doesn't know its own WhatsApp identity),
+                # but our own group messages are indexed in WPPConnect's
+                # store under participant=our own JID (see _serialize_msg_id).
+                # Without backfilling it from the real echo here, replying-
+                # to/quoting a message sent seconds ago falls back to a
+                # guessed participant (my_jid) that doesn't match what the
+                # live store actually indexed it under whenever the account
+                # is on @lid — "Message ... not found" — until a later full
+                # resync overwrites this record with the API's copy anyway.
+                if key.get("participant"):
+                    pending_msg["key"]["participant"] = key.get("participant")
                 
                 # Remove any existing record with the same real ID (e.g. from API
                 # sync) *including* pending_msg itself (its key was just updated
@@ -3441,6 +3550,62 @@ class MainWindow(wx.Frame):
                 if r.get("key", {}).get("id") not in dst_ids:
                     dst_records.append(r)
 
+        # ── Pass 0: merge phantom "self-referential" chats ────────────────────
+        # WPPConnect/Baileys occasionally reports a self-chat send (seen with
+        # text, audio and documents) tagged with an identity that isn't our
+        # real phone JID — either a group whose JID is built from a
+        # participant's own @lid number with "@g.us" swapped in for "@lid",
+        # a group JID that's simply our own phone number, or the bare,
+        # not-yet-resolved @lid itself left over from before
+        # resolve_self_lid() completed (see on_new_message() for the same
+        # detection applied to live traffic). No real WhatsApp group JID is
+        # ever numerically identical to one of its own participants' JIDs or
+        # to a plain phone number — group IDs come from an entirely
+        # different, longer ID space — so either digit overlap alone
+        # identifies the artifact. Merge its records into the real
+        # self-chat and drop it, instead of leaving an unnamed phantom
+        # chat that duplicates messages already stored under "Eu" and
+        # can't be reliably deleted (any other chat cleared out by the same
+        # buggy delete would be a side effect of this same bogus entry, not
+        # a separate bug).
+        my_jid = getattr(self, "my_jid", "")
+        if my_jid:
+            my_jid_digits = my_jid.split("@", 1)[0]
+            candidate_jids = [
+                j for j in list(chats.keys())
+                if j.endswith("@g.us") or j.endswith("@lid")
+            ]
+            for cand_jid in candidate_jids:
+                cand_chat = chats.get(cand_jid)
+                if cand_chat is None:
+                    continue
+                cand_digits = cand_jid.split("@", 1)[0]
+                records = cand_chat.get("messages", {}).get("messages", {}).get("records", [])
+                is_self_referential = any(
+                    r.get("key", {}).get("fromMe")
+                    and r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
+                    for r in records
+                    if r.get("key", {}).get("participant")
+                )
+                is_self_phone_group = (
+                    cand_jid.endswith("@g.us")
+                    and self._phone_digits_equivalent(cand_digits, my_jid_digits)
+                )
+                if not (is_self_referential or is_self_phone_group):
+                    continue
+                if my_jid in chats:
+                    dst_records = (
+                        chats[my_jid]
+                        .setdefault("messages", {})
+                        .setdefault("messages", {})
+                        .setdefault("records", [])
+                    )
+                    _merge_records(dst_records, records)
+                else:
+                    cand_chat["remoteJid"] = my_jid
+                    chats[my_jid] = cand_chat
+                del chats[cand_jid]
+
         # ── Pass 1: normalise @c.us → @s.whatsapp.net ────────────────────────
         cus_jids = [j for j in list(chats.keys()) if j.endswith("@c.us")]
         for cus_jid in cus_jids:
@@ -3832,6 +3997,38 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_loop, daemon=True).start()
 
+    @staticmethod
+    def _phone_digits_equivalent(a: str, b: str) -> bool:
+        """Compare two bare digit strings, tolerating the Brazilian 9th-digit
+        variant (55DDD9XXXXXXXX vs 55DDDXXXXXXXX) so a self/contact match
+        isn't missed just because one side carries the extra digit.
+        """
+        if a == b:
+            return True
+        if a.startswith("55") and b.startswith("55"):
+            if len(a) == 13 and len(b) == 12 and a[4] == "9":
+                return a[:4] + a[5:] == b
+            if len(b) == 13 and len(a) == 12 and b[4] == "9":
+                return b[:4] + b[5:] == a
+        return False
+
+    def self_reference_label(self) -> str:
+        """Return the word used for the user's own messages/replies in the
+        messages list ("Eu"/"Você"/a custom word), per the "Como se referir
+        a mim?" setting. Does not affect the self-chat's own name (still
+        always self_chat_name, "Eu (mensagens para mim)") — only the sender
+        label shown next to your own messages and quoted-reply headers.
+        """
+        ui = self.settings.get("user_interface", {})
+        mode = ui.get("self_reference_mode", "eu")
+        if mode == "voce":
+            return self.i18n.t("ui_self_reference_voce")
+        if mode == "custom":
+            word = (ui.get("self_reference_custom_word") or "").strip()
+            if word:
+                return word
+        return self.i18n.t("sender_you")
+
     def _is_self_jid(self, jid: str) -> bool:
         """Return True if jid refers to the user's own WhatsApp account.
         Bridges @lid JIDs via cache and strips Baileys device suffixes (':N')
@@ -3847,7 +4044,7 @@ class MainWindow(wx.Frame):
             compare = getattr(self, "_lid_to_phone", {}).get(jid, jid)
         def _phone_part(j: str) -> str:
             return j.rsplit("@", 1)[0].split(":")[0]
-        if _phone_part(compare) == _phone_part(my_jid):
+        if self._phone_digits_equivalent(_phone_part(compare), _phone_part(my_jid)):
             return True
         my_lid = getattr(self, "my_lid", "")
         if my_lid and _phone_part(compare) == _phone_part(my_lid):
@@ -5144,8 +5341,11 @@ class MainWindow(wx.Frame):
                 # by our own JID as the 4th segment, so fall back to it here.
                 # Without this, quoting/reacting to/deleting our own group
                 # messages built a 3-part id, the lookup missed, and callers
-                # silently fell back to a non-quoted plain message.
-                or (getattr(self, "my_jid", "") if from_me else "")
+                # silently fell back to a non-quoted plain message. Prefer
+                # my_lid over my_jid: accounts that use @lid addressing are
+                # indexed under that identity even for their own group
+                # messages, not under the phone-number JID.
+                or ((getattr(self, "my_lid", "") or getattr(self, "my_jid", "")) if from_me else "")
                 or ""
             ).replace("@s.whatsapp.net", "@c.us")
         if participant:
@@ -5373,6 +5573,17 @@ class MainWindow(wx.Frame):
             for idx, chat in enumerate(displayed):
                 if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
                     continue
+                if idx >= lst.GetItemCount():
+                    # displayed/chats_list (this panel's backing array) has
+                    # drifted ahead of the ListCtrl's actual row count — e.g.
+                    # a debounced full rebuild (_apply_chat_lists) is
+                    # mid-flight on another callback and hasn't inserted this
+                    # many rows yet. There's nothing to patch until that
+                    # rebuild finishes and re-syncs both; the next presence/
+                    # unread event will retry. Falls through to the crash
+                    # this guard exists for otherwise ("invalid item index in
+                    # SetItem").
+                    break
                 unread = effective_unread_count(chat)
                 conv_filter = getattr(panel, '_conv_filter', 'all')
                 if conv_filter == 'unread' and unread == 0:
@@ -5418,7 +5629,12 @@ class MainWindow(wx.Frame):
                     if lst.GetItemText(idx, 0) != item_text:
                         lst.SetItem(idx, 0, item_text)
                 except Exception:
-                    lst.SetItem(idx, 0, item_text)
+                    # GetItemText/SetItem failing here almost always means idx
+                    # is no longer valid for this ListCtrl (see the item-count
+                    # guard above) — unconditionally retrying SetItem with the
+                    # same idx just raised the exact same wx assertion again,
+                    # uncaught this time, crashing the app instead of no-op'ing.
+                    pass
                 break
 
     def on_presence_update(self, jid: str, presences: dict):

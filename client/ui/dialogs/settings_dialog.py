@@ -266,6 +266,42 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(msg_list_mode_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._self_ref_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_self_reference_label")
+        )
+        self_ref_sizer = wx.StaticBoxSizer(self._self_ref_box, wx.VERTICAL)
+
+        self._self_ref_eu_rb = wx.RadioButton(
+            self._self_ref_box, label=i18n.t("sender_you"), style=wx.RB_GROUP
+        )
+        self_ref_sizer.Add(self._self_ref_eu_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._self_ref_voce_rb = wx.RadioButton(
+            self._self_ref_box, label=i18n.t("ui_self_reference_voce")
+        )
+        self_ref_sizer.Add(self._self_ref_voce_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._self_ref_other_rb = wx.RadioButton(
+            self._self_ref_box, label=i18n.t("ui_self_reference_other")
+        )
+        self_ref_sizer.Add(self._self_ref_other_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+
+        self._self_ref_custom_label = wx.StaticText(
+            self._self_ref_box, label=i18n.t("ui_self_reference_custom_label")
+        )
+        self_ref_sizer.Add(
+            self._self_ref_custom_label, 0, wx.LEFT | wx.RIGHT, 8
+        )
+        self._self_ref_custom_field = wx.TextCtrl(self._self_ref_box, style=wx.TE_DONTWRAP)
+        self_ref_sizer.Add(
+            self._self_ref_custom_field, 0, wx.EXPAND | wx.ALL, 8
+        )
+
+        for rb in (self._self_ref_eu_rb, self._self_ref_voce_rb, self._self_ref_other_rb):
+            rb.Bind(wx.EVT_RADIOBUTTON, self._on_self_reference_toggle)
+
+        ui_sizer.Add(self_ref_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -422,6 +458,22 @@ class SettingsDialog(wx.Dialog):
         else:
             self._msg_list_mode_classic_rb.SetValue(True)
 
+        self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
+            "self_reference_mode", "eu"
+        )
+        if self_reference_mode == "voce":
+            self._self_ref_voce_rb.SetValue(True)
+        elif self_reference_mode == "custom":
+            self._self_ref_other_rb.SetValue(True)
+        else:
+            self._self_ref_eu_rb.SetValue(True)
+        self._self_ref_custom_field.SetValue(
+            self.main_window.settings.get("user_interface", {}).get(
+                "self_reference_custom_word", ""
+            )
+        )
+        self._update_self_reference_field_state()
+
         speech = self.main_window.settings.get("speech_content", {})
         self._announce_typing_check.SetValue(speech.get("announce_typing", True))
         self._announce_recording_check.SetValue(speech.get("announce_recording", True))
@@ -448,6 +500,13 @@ class SettingsDialog(wx.Dialog):
         self._server_field.Enable(is_custom)
         self._ws_server_field.Enable(is_custom)
         self._api_key_field.Enable(is_custom)
+
+    def _update_self_reference_field_state(self):
+        is_other = self._self_ref_other_rb.GetValue()
+        self._self_ref_custom_field.Enable(is_other)
+
+    def _on_self_reference_toggle(self, event):
+        self._update_self_reference_field_state()
 
     def _on_custom_api_toggle(self, event):
         self._update_fields_state()
@@ -561,6 +620,20 @@ class SettingsDialog(wx.Dialog):
         ] = new_message_list_mode
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
+
+        # UI: how to refer to the user's own messages/replies in the messages list
+        if self._self_ref_voce_rb.GetValue():
+            self_reference_mode = "voce"
+        elif self._self_ref_other_rb.GetValue():
+            self_reference_mode = "custom"
+        else:
+            self_reference_mode = "eu"
+        self.main_window.settings.setdefault("user_interface", {})[
+            "self_reference_mode"
+        ] = self_reference_mode
+        self.main_window.settings.setdefault("user_interface", {})[
+            "self_reference_custom_word"
+        ] = self._self_ref_custom_field.GetValue().strip()
 
         # Spoken content: typing/recording announcements
         self.main_window.settings.setdefault("speech_content", {})[
@@ -690,6 +763,11 @@ class SettingsDialog(wx.Dialog):
         self._msg_list_mode_box.SetLabel(i18n.t("ui_message_list_mode_label"))
         self._msg_list_mode_classic_rb.SetLabel(i18n.t("ui_message_list_mode_classic"))
         self._msg_list_mode_listbox_rb.SetLabel(i18n.t("ui_message_list_mode_listbox"))
+        self._self_ref_box.SetLabel(i18n.t("ui_self_reference_label"))
+        self._self_ref_eu_rb.SetLabel(i18n.t("sender_you"))
+        self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
+        self._self_ref_other_rb.SetLabel(i18n.t("ui_self_reference_other"))
+        self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))
