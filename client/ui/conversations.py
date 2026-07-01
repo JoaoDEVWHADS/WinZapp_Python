@@ -4195,7 +4195,7 @@ class ConversationsPanel(wx.Panel):
             return self._render_separator(msg.get("count", 1))
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
-        body     = (self._get_message_content(msg) or "").replace("\n", " ")
+        body     = (self._get_message_content(msg) or "")
         sender   = self._sender_label(msg)
         status   = self._map_status(msg)
         i18n     = self.main_window.i18n
