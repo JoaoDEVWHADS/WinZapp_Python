@@ -20,6 +20,27 @@ client/logs/
 !/client/api/package.json
 !/client/api/config.json
 
+# Custom patches on top of upstream wppconnect-server — setup_api.py stashes
+# and restores these across re-clones, but that only works when they already
+# exist on disk. Without tracking them, a fresh checkout (including the CI
+# release build) has nothing to restore, so the officially published
+# installer/ZIP silently ships vanilla, unpatched WPPConnect Server code.
+!/client/api/src/
+/client/api/src/*
+!/client/api/src/config.ts
+!/client/api/src/controller/
+/client/api/src/controller/*
+!/client/api/src/controller/deviceController.ts
+!/client/api/src/controller/messageController.ts
+!/client/api/src/controller/sessionController.ts
+!/client/api/src/middleware/
+/client/api/src/middleware/*
+!/client/api/src/middleware/statusConnection.ts
+!/client/api/src/util/
+/client/api/src/util/*
+!/client/api/src/util/createSessionUtil.ts
+!/client/api/src/util/functions.ts
+
 # Build intermediates and distribution artefacts
 /build/
 /dist/
