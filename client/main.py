@@ -1254,9 +1254,30 @@ class MainWindow(wx.Frame):
         participant_raw = key.get("participant") or ""
         remote_digits = remote_jid.split("@", 1)[0]
         part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
-        my_jid = getattr(self, "my_jid", "")
+        # Normalize before using as a redirect target below — my_jid can be
+        # in raw "@c.us" form early in a session (set directly from the
+        # host-device API response, before resolve_self_lid() gets a chance
+        # to normalize it), and redirecting to it as-is created yet another
+        # duplicate "Eu" chat under @c.us instead of the canonical @s.whatsapp.net one.
+        my_jid = self._normalize_jid(getattr(self, "my_jid", ""))
         my_lid = getattr(self, "my_lid", "")
         is_group_jid = remote_jid.endswith("@g.us")
+
+        # A fromMe message's own "participant" field always identifies us —
+        # wa-js only populates it to tag the sender within a group, and the
+        # sender of our own outgoing message is always us. Learn my_lid from
+        # this far more common signal (any ordinary group message we send),
+        # not just the rarer self-referential artifacts checked below, so
+        # _is_self_jid()/self_reference_label() resolve correctly (e.g. for
+        # quoted-reply headers) from the first group message sent this
+        # session — without waiting on resolve_self_lid()'s async API call,
+        # which otherwise left _get_participant_name() falling through to a
+        # saved contact name (e.g. a self-addressed contact literally named
+        # "Eu") instead of honouring the "Como se referir a mim?" setting.
+        if from_me and participant_raw.endswith("@lid") and my_lid != participant_raw:
+            self.my_lid = my_lid = participant_raw
+            if my_jid:
+                self.register_jid_mapping(participant_raw, my_jid)
 
         digits_self_referential = bool(part_digits and remote_digits == part_digits)
         is_self_referential = digits_self_referential and (is_group_jid or from_me)
@@ -1267,16 +1288,27 @@ class MainWindow(wx.Frame):
 
         if is_self_referential or is_self_phone_group:
             from_me = True
-            if participant_raw.endswith("@lid") and not my_lid:
-                self.my_lid = my_lid = participant_raw
-                if my_jid:
-                    self.register_jid_mapping(participant_raw, my_jid)
             if my_jid:
                 remote_jid = my_jid
             elif my_lid:
                 remote_jid = my_lid
             else:
                 remote_jid = participant_raw or remote_jid
+        elif (
+            my_jid and remote_jid != my_jid
+            and remote_jid.endswith("@s.whatsapp.net")
+            and self._is_self_jid(remote_jid)
+        ):
+            # Plain self-chat message, no group/participant artifact involved
+            # — just WhatsApp reporting our own number in the "other" digit
+            # variant for this particular event (with vs. without the
+            # Brazilian 9th digit). _is_self_jid() already tolerates that
+            # when deciding it's self, but without canonicalizing remote_jid
+            # here too, each variant kept its own separate chat entry —
+            # e.g. sending a photo to yourself as a document created one
+            # "Eu" chat for the (9-digit) document echo and a second "Eu"
+            # chat for the (8-digit) sync-artifact echo of the same send.
+            remote_jid = my_jid
 
         # Learn/update presence pushName map from incoming message
         if not from_me:
@@ -3605,6 +3637,37 @@ class MainWindow(wx.Frame):
                     cand_chat["remoteJid"] = my_jid
                     chats[my_jid] = cand_chat
                 del chats[cand_jid]
+
+        # ── Pass 0b: merge duplicate self-chat digit variants ────────────────
+        # Even without any group/participant artifact, WhatsApp sometimes
+        # reports our own self-chat messages under the "other" Brazilian
+        # 9th-digit variant of our number for a given event (the matching
+        # normalisation for live traffic is in on_new_message()) — e.g.
+        # sending a photo to yourself as a document created one "Eu" chat
+        # for the real document echo and a second "Eu" chat, under the
+        # other digit variant, for a sync-artifact echo of the same send.
+        # Merge any such leftover duplicate into the canonical my_jid entry.
+        if my_jid:
+            for other_jid in [
+                j for j in list(chats.keys())
+                if j != my_jid and j.endswith("@s.whatsapp.net") and self._is_self_jid(j)
+            ]:
+                other_chat = chats.get(other_jid)
+                if other_chat is None:
+                    continue
+                records = other_chat.get("messages", {}).get("messages", {}).get("records", [])
+                if my_jid in chats:
+                    dst_records = (
+                        chats[my_jid]
+                        .setdefault("messages", {})
+                        .setdefault("messages", {})
+                        .setdefault("records", [])
+                    )
+                    _merge_records(dst_records, records)
+                else:
+                    other_chat["remoteJid"] = my_jid
+                    chats[my_jid] = other_chat
+                del chats[other_jid]
 
         # ── Pass 1: normalise @c.us → @s.whatsapp.net ────────────────────────
         cus_jids = [j for j in list(chats.keys()) if j.endswith("@c.us")]
