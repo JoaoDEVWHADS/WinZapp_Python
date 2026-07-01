@@ -404,6 +404,19 @@ class MainWindow(wx.Frame):
         self.chats = {}
         self.chat_names = []
         self.contacts = {}
+        # Presence cache: maps JID → {lastKnownPresence, lastSeen}. Must be
+        # initialized here (not lazily in _build_lid_to_phone_cache, which only
+        # runs after the initial chat sync) because a presence.update WebSocket
+        # event can arrive and call on_presence_update() before that sync
+        # completes, depending on how fast WPPConnect emits it.
+        self._presence_cache = {}
+        # Maps chat JID → {participant_jid: "composing"|"recording"}
+        self._composing_chats = {}
+        # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
+        self._presence_timers = {}
+        # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
+        # from presence.update events. Loaded from settings and saved whenever updated.
+        self._presence_pushname_map = dict(self.settings.get("presence_pushname_map", {}))
         # Set by init_UI() when all wx widgets are ready.  start_sync() waits
         # on this before making any wx.CallAfter calls so it never touches
         # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
@@ -4381,23 +4394,6 @@ class MainWindow(wx.Frame):
 
         self._lid_to_phone  = cache
         self._phone_to_lid  = {v: k for k, v in cache.items()}
-        # Presence cache: maps JID → {lastKnownPresence, lastSeen}
-        # Populated by WebSocketClient.on_presence_update via wx.CallAfter.
-        if not hasattr(self, "_presence_cache"):
-            self._presence_cache = {}
-        # Maps chat JID → {participant_jid: "composing"|"recording"}
-        if not hasattr(self, "_composing_chats"):
-            self._composing_chats = {}
-        # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
-        if not hasattr(self, "_presence_timers"):
-            self._presence_timers = {}
-        # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned from
-        # presence.update events.  Keyed by phone JID so @lid chats can resolve via
-        # _lid_to_phone lookup.  Loaded from settings and saved whenever updated.
-        if not hasattr(self, "_presence_pushname_map"):
-            self._presence_pushname_map = dict(
-                self.settings.get("presence_pushname_map", {})
-            )
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
