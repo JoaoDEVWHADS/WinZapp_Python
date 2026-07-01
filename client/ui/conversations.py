@@ -29,9 +29,10 @@ from ui.accessible import (
     AccessibleSearchPrevResult,
     AccessibleNewConversationButton,
     AccessibleMessagesListControl,
+    AccessibleReadMoreButton,
     CompatDataViewListCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -60,6 +61,11 @@ def _fmt_last_seen(ts, i18n) -> str:
 
 
 class ConversationsPanel(wx.Panel):
+    # Windows' native SysListView32 (the classic wx.ListCtrl) truncates each
+    # item's accessible text to this many characters — used to decide whether
+    # the "Ler mais" button should appear for the focused row.
+    _LIST_CTRL_TEXT_LIMIT = 259
+
     def __init__(self, main_window, parent):
         super().__init__(parent)
         self.main_window = main_window
@@ -306,12 +312,13 @@ class ConversationsPanel(wx.Panel):
 
         # The messages list control type is configurable: the classic
         # wx.ListCtrl (default — works with the OS native ListView, but
-        # truncates each row's accessible text to ~512 characters) or
+        # truncates each row's accessible text to ~259 characters) or
         # CompatDataViewListCtrl (full message text, but the underlying
         # generic DataView control announces less cleanly to screen readers).
         message_list_mode = self.main_window.settings.get("user_interface", {}).get(
             "message_list_mode", "classic"
         )
+        self._message_list_mode = message_list_mode
         if message_list_mode == "dataview":
             self.messages_list = CompatDataViewListCtrl(self.conversation_panel)
         else:
@@ -331,6 +338,20 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
+
+        # ── "Ler mais" button (classic ListCtrl only) ─────────────────────────
+        # SysListView32 truncates each row's accessible text to ~259 characters,
+        # so a screen reader can't read the tail of a long text message just by
+        # focusing it. This button is the first focusable control after the
+        # list (created here, before any other conversation_panel child) and is
+        # only shown when the focused row is a truncated text message.
+        self._read_more_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("read_more_button")
+        )
+        self._read_more_btn.SetAccessible(AccessibleReadMoreButton())
+        self._read_more_btn.Bind(wx.EVT_BUTTON, self._on_read_more)
+        conv_sizer.Add(self._read_more_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._read_more_btn.Hide()
 
         # ── Link controls (shown when focused message contains URLs) ─────────
         self._links_panel = wx.Panel(self.conversation_panel)
@@ -633,6 +654,9 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         self.ID_ALT_E           = wx.NewIdRef()  # edit message            (Alt+E)
+        self.ID_ALT_L           = wx.NewIdRef()  # read-more (truncated)   (Alt+L)
+        self.ID_ALT_SHIFT_L     = wx.NewIdRef()  # announce message status (Alt+Shift+L)
+        self.ID_ALT_SHIFT_K     = wx.NewIdRef()  # announce message date   (Alt+Shift+K)
         # ── Conversation-level ───────────────────────────────────────────────
         self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+S)
         self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # toggle read / unread    (Ctrl+Shift+M)
@@ -674,6 +698,9 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_CTRL,    ord("C"),          self.ID_CTRL_C),
             (wx.ACCEL_ALT,     ord("C"),          self.ID_ALT_C),
             (wx.ACCEL_ALT,     ord("E"),          self.ID_ALT_E),
+            (wx.ACCEL_ALT,     ord("L"),          self.ID_ALT_L),
+            (AS,               ord("L"),          self.ID_ALT_SHIFT_L),
+            (AS,               ord("K"),          self.ID_ALT_SHIFT_K),
             (CS,               ord("S"),          self.ID_CTRL_SHIFT_S),
             (CS,               ord("M"),          self.ID_CTRL_SHIFT_M),
             (CS,               ord("L"),          self.ID_CTRL_SHIFT_L),
@@ -705,6 +732,9 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_copy_message,        id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup,     id=self.ID_ALT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_edit_message,        id=self.ID_ALT_E)
+        self.Bind(wx.EVT_MENU, self._on_read_more,                 id=self.ID_ALT_L)
+        self.Bind(wx.EVT_MENU, self._on_accel_msg_status,          id=self.ID_ALT_SHIFT_L)
+        self.Bind(wx.EVT_MENU, self._on_accel_msg_datetime,        id=self.ID_ALT_SHIFT_K)
         self.Bind(wx.EVT_MENU, self._on_accel_block,               id=self.ID_CTRL_SHIFT_B)
         self.Bind(wx.EVT_MENU, self._on_accel_toggle_read,         id=self.ID_CTRL_SHIFT_M)
         self.Bind(wx.EVT_MENU, self._on_accel_clear,               id=self.ID_CTRL_SHIFT_L)
@@ -831,9 +861,8 @@ class ConversationsPanel(wx.Panel):
             self._remove_quote_btn.Hide()
         self.conversation_panel.Show()
         self.Layout()
-        self.preselect_messages()
         # Snapshot before the background thread zeros unreadCount on the same dict
-        self._pending_open_unread = int(conversation.get("unreadCount") or 0)
+        self._pending_open_unread = effective_unread_count(conversation)
         threading.Thread(
             target=self.main_window.mark_conversation_as_read,
             args=(jid,),
@@ -855,17 +884,6 @@ class ConversationsPanel(wx.Panel):
                 args=(jid,),
                 daemon=True,
             ).start()
-        # Background: Fetch/Sync latest messages for this chat on-demand
-        def _fetch_messages_bg():
-            try:
-                self.main_window.sync_chat_messages(conversation)
-                if self.conversation and self.conversation.get("remoteJid") == jid:
-                    wx.CallAfter(self.populate_messages)
-            except Exception as e:
-                print(f"[navigate_to_conversation] background sync failed: {e}")
-
-        threading.Thread(target=_fetch_messages_bg, daemon=True).start()
-
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
@@ -880,16 +898,6 @@ class ConversationsPanel(wx.Panel):
                 self._format_speed(self._audio_speed_steps[self._audio_speed_index])
             )
 
-        # Always ensure the correct list item is selected/focused:
-        # the unread separator when it exists, otherwise the last message.
-        # (populate_messages already handles the separator case; handle the
-        # last-message case here so it applies regardless of focus_on_open.)
-        if self._unread_sep_idx < 0:
-            last = self.messages_list.GetItemCount() - 1
-            if last >= 0:
-                self.messages_list.Focus(last)
-                self.messages_list.Select(last, True)
-                self.messages_list.EnsureVisible(last)
 
         # Move keyboard focus based on user preference.
         # Deferred via wx.CallAfter so this is the last item in the event
@@ -901,16 +909,6 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.messages_list.SetFocus)
         else:
             wx.CallAfter(self.message_field.SetFocus)
-
-    def preselect_messages(self):
-        wx.CallAfter(self._do_preselect)
-
-    def _do_preselect(self):
-        count = self.messages_list.GetItemCount()
-        if count > 0:
-            self.messages_list.Focus(count - 1)
-            self.messages_list.Select(count - 1)
-            self.messages_list.EnsureVisible(count - 1)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -1849,7 +1847,8 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        # For text-based messages: open the first link if one is present
+        # For text-based messages: open the first link if one is present,
+        # otherwise show the full message text popup (same as Alt+C).
         if msg_type in ("conversation", "extendedTextMessage", ""):
             rendered = self.messages_list.GetItemText(index)
             links = self._extract_links(rendered)
@@ -1859,6 +1858,8 @@ class ConversationsPanel(wx.Panel):
                 except Exception:
                     wx.LaunchDefaultBrowser(links[0])
                 return
+            self._show_message_text_popup(msg)
+            return
 
         if msg_type == "audioMessage":
             duration = (msg_obj.get("audioMessage") or {}).get("seconds", 0) or 0
@@ -2682,7 +2683,41 @@ class ConversationsPanel(wx.Panel):
                     self._show_audio_controls()
                 else:
                     self._hide_audio_controls()
+
+        self._update_read_more_button(idx)
         event.Skip()
+
+    def _update_read_more_button(self, idx: int):
+        """Show/hide the "Ler mais" button for a truncated text message row.
+
+        Only meaningful in classic wx.ListCtrl mode — SysListView32 truncates
+        the accessible name of each row at _LIST_CTRL_TEXT_LIMIT characters;
+        CompatDataViewListCtrl exposes the full text and has no such limit.
+        """
+        if getattr(self, "_message_list_mode", "classic") == "dataview":
+            return
+        show = False
+        if 0 <= idx < len(self._sorted_messages):
+            msg = self._sorted_messages[idx]
+            if not self._is_separator(msg):
+                msg_type = msg.get("messageType", "")
+                if msg_type in ("conversation", "extendedTextMessage", ""):
+                    rendered = self._render_message_line(msg)
+                    if len(rendered) > self._LIST_CTRL_TEXT_LIMIT:
+                        self._read_more_remainder = rendered[self._LIST_CTRL_TEXT_LIMIT:]
+                        show = True
+        if show:
+            self._read_more_btn.Show()
+        else:
+            self._read_more_btn.Hide()
+            self._read_more_remainder = ""
+        self.conversation_panel.Layout()
+
+    def _on_read_more(self, event):
+        """Alt+L / button click: speak only the text cut off by the list-view limit."""
+        remainder = getattr(self, "_read_more_remainder", "")
+        if remainder:
+            self.main_window.output(remainder, interrupt=True)
 
     def _on_unread_sep_dismiss_timer(self, event):
         """Fired 2 s after focus reached the unread separator — remove it."""
@@ -4866,7 +4901,7 @@ class ConversationsPanel(wx.Panel):
         jid = self.conversation.get("remoteJid", "")
         if jid:
             self.main_window._schedule_save()
-            self.populate_messages()
+            self.populate_messages(preserve_focus=True)
 
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
@@ -5192,6 +5227,35 @@ class ConversationsPanel(wx.Panel):
         if self._is_separator(msg):
             return
         self._show_message_text_popup(msg)
+
+    # ── Alt+Shift+L / Alt+Shift+K: announce message status / date-time ────
+
+    def _on_accel_msg_status(self, event):
+        """Alt+Shift+L: speak the focused message's current status."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        i18n   = self.main_window.i18n
+        status = self._map_status(msg)
+        self.main_window.output(status or i18n.t("msg_status_none"), interrupt=True)
+
+    def _on_accel_msg_datetime(self, event):
+        """Alt+Shift+K: speak the focused message's date/time, as shown in the list."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        ts       = self._extract_timestamp(msg)
+        date_str = self._format_date(ts) if ts else ""
+        i18n     = self.main_window.i18n
+        self.main_window.output(
+            date_str or i18n.t("msg_datetime_none"), interrupt=True
+        )
 
     # ── Alt+Shift+R: reply privately ────────────────────────────────────────
 
@@ -6037,7 +6101,16 @@ class ConversationsPanel(wx.Panel):
 
     # ── Populate ─────────────────────────────────────────────────────────────
 
-    def populate_messages(self):
+    def populate_messages(self, preserve_focus: bool = False):
+        """Rebuild the messages list from self.conversation.
+
+        preserve_focus=True keeps whatever message is currently focused
+        instead of resetting to the unread separator / last message — used
+        by background refreshes (e.g. the on-demand sync kicked off by
+        navigate_to_conversation) so they don't silently yank focus away
+        from the user a few seconds after a conversation was opened.
+        """
+        _preserved_msg_id = self._focused_msg_id() if preserve_focus else None
         self.messages_list.DeleteAllItems()
         self._unread_sep_idx = -1
         self._reaction_map = {}
@@ -6136,6 +6209,19 @@ class ConversationsPanel(wx.Panel):
 
         for msg in paginated:
             self.messages_list.Append((self._render_message_line(msg),))
+
+        # A background refresh (preserve_focus=True) should keep the user's
+        # current position instead of jumping back to the separator/last
+        # message — only fall back to the default placement below if the
+        # previously-focused message is no longer present (e.g. it was
+        # cleared or paginated out).
+        if _preserved_msg_id:
+            for idx, msg in enumerate(self._sorted_messages):
+                if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
+                    self.messages_list.EnsureVisible(idx)
+                    self.messages_list.Focus(idx)
+                    self.messages_list.Select(idx)
+                    return
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
         if self._unread_sep_idx >= 0:

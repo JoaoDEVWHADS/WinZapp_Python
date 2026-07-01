@@ -17,7 +17,7 @@ from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound, load_sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count
 from core.database_bridge import DatabaseBridge
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
@@ -609,11 +609,13 @@ class MainWindow(wx.Frame):
     # ── Menu bar ─────────────────────────────────────────────────────────────
 
     def _build_menubar(self):
-        """Create the menu bar with Arquivo and Ajuda menus."""
+        """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
         self._ID_MARK_ALL_READ = wx.NewIdRef()
         self._ID_SETTINGS      = wx.NewIdRef()
         self._ID_DISCONNECT    = wx.NewIdRef()
         self._ID_EXIT          = wx.NewIdRef()
+        self._ID_RESYNC_ALL    = wx.NewIdRef()
+        self._ID_OFFLINE_MENU  = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
@@ -643,6 +645,19 @@ class MainWindow(wx.Frame):
         )
         menubar.Append(file_menu, self.i18n.t("menu_file"))
 
+        # ── Sincronização ─────────────────────────────────────────────────────
+        sync_menu = wx.Menu()
+        sync_menu.Append(
+            self._ID_RESYNC_ALL,
+            f"{self.i18n.t('menu_resync_all')}\tF5",
+        )
+        self._sync_offline_menu_item = sync_menu.AppendCheckItem(
+            self._ID_OFFLINE_MENU,
+            f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O",
+        )
+        self._sync_offline_menu_item.Check(bool(self.offline_mode))
+        menubar.Append(sync_menu, self.i18n.t("menu_sync"))
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -660,6 +675,8 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
         self.Bind(wx.EVT_MENU, self._on_disconnect,    id=self._ID_DISCONNECT)
         self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
+        self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
+        self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
@@ -683,14 +700,21 @@ class MainWindow(wx.Frame):
         file_menu.FindItemById(self._ID_EXIT).SetItemLabel(
             f"{self.i18n.t('menu_exit')}\tCtrl+Alt+Shift+Q"
         )
-        mb.SetMenuLabel(1, self.i18n.t("menu_help"))
-        mb.GetMenu(1).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
+        mb.SetMenuLabel(1, self.i18n.t("menu_sync"))
+        mb.GetMenu(1).FindItemById(self._ID_RESYNC_ALL).SetItemLabel(
+            f"{self.i18n.t('menu_resync_all')}\tF5"
+        )
+        mb.GetMenu(1).FindItemById(self._ID_OFFLINE_MENU).SetItemLabel(
+            f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O"
+        )
+        mb.SetMenuLabel(2, self.i18n.t("menu_help"))
+        mb.GetMenu(2).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
             f"{self.i18n.t('menu_shortcuts')}\tF1"
         )
-        mb.GetMenu(1).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
+        mb.GetMenu(2).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
             self.i18n.t("menu_force_update")
         )
-        mb.GetMenu(1).FindItemById(self._ID_ABOUT).SetItemLabel(
+        mb.GetMenu(2).FindItemById(self._ID_ABOUT).SetItemLabel(
             self.i18n.t("menu_about")
         )
 
@@ -817,7 +841,7 @@ class MainWindow(wx.Frame):
         deleted = set(self.settings.get("deleted_chats", []))
         unread_chats = sum(
             1 for jid, chat in self.chats.items()
-            if jid not in deleted and int(chat.get("unreadCount") or 0) > 0
+            if jid not in deleted and effective_unread_count(chat) > 0
         )
         if unread_chats:
             title += f" ({unread_chats})"
@@ -839,7 +863,7 @@ class MainWindow(wx.Frame):
 
     def toggle_offline_mode(self):
         """
-        Toggle the user-controlled offline mode (tray menu item).
+        Toggle the user-controlled offline mode (tray menu item / Sincronização menu).
         While offline the outgoing message queue is suspended; disabling it
         wakes the queue so pending messages are sent immediately.
         """
@@ -854,6 +878,66 @@ class MainWindow(wx.Frame):
         self._update_title()
         if getattr(self, "tray_icon", None) is not None and self._window_hidden:
             self.tray_icon.update_tooltip()
+        if getattr(self, "_sync_offline_menu_item", None) is not None:
+            self._sync_offline_menu_item.Check(bool(self.offline_mode))
+
+    def _on_menu_toggle_offline(self, event=None):
+        """Sincronização menu / Ctrl+Alt+Shift+O: toggle offline mode."""
+        self.toggle_offline_mode()
+
+    def _on_menu_resync_all(self, event=None):
+        """Sincronização menu / F5: wipe all local chat/message state and
+        force a full resync, exactly as if pairing for the first time."""
+        if getattr(self, "_initial_sync_running", False):
+            # Avoid corrupting state with two syncs writing to self.chats/db
+            # at the same time.
+            return
+        self.output(self.i18n.t("resyncing_all_announcement"), interrupt=True)
+        threading.Thread(target=self._resync_all_worker, daemon=True).start()
+
+    def _resync_all_worker(self):
+        """Background worker for _on_menu_resync_all(). See that method."""
+        ui_ready = threading.Event()
+
+        def _prepare_ui():
+            try:
+                panel = self.conversations_panel
+                panel._stop_audio()
+                panel.close_conversation()
+                panel.chats_list = []
+                panel.chat_names = []
+                panel._all_chats_list = []
+                panel._all_chat_names = []
+                panel._displayed_jids = None
+                panel.conversations_list.DeleteAllItems()
+                if hasattr(self, "archived_conversations_panel"):
+                    ap = self.archived_conversations_panel
+                    ap.chats_list = []
+                    ap.chat_names = []
+                    ap._all_chats_list = []
+                    ap._all_chat_names = []
+                    ap._displayed_jids = None
+                    ap.conversations_list.DeleteAllItems()
+            finally:
+                ui_ready.set()
+
+        wx.CallAfter(_prepare_ui)
+        ui_ready.wait(timeout=5)
+
+        # Wipe the local database and downloaded media/voice-message caches.
+        self._sync_completed = False
+        self.clear_local_data()
+        try:
+            media_failed_path = data_path("media_failed.json")
+            if os.path.isfile(media_failed_path):
+                os.remove(media_failed_path)
+        except Exception as exc:
+            logging.warning("[resync_all] failed to remove media_failed.json: %s", exc)
+        self._media_failed_ids = set()
+
+        # Resync from scratch, exactly like a fresh pairing.
+        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+        self.sync_thread.start()
 
     def _on_force_update(self, event):
         if self._update_checker is None:
@@ -5043,12 +5127,18 @@ class MainWindow(wx.Frame):
         prefix = "true" if from_me else "false"
         chat = (remote_jid or "").replace("@s.whatsapp.net", "@c.us")
         # Group messages always carry the sender's JID in the serialized id,
-        # even for our own messages (fromMe=True).  1-on-1 keys have no participant.
-        participant = (
-            msg_key.get("participant")
-            or (msg_key.get("remoteJidAlt") if not from_me else "")
-            or ""
-        ).replace("@s.whatsapp.net", "@c.us")
+        # even for our own messages (fromMe=True). 1-on-1 keys have no
+        # participant — gate on chat type, since a 1:1 @lid message's key
+        # often still carries a (same-JID) remoteJidAlt, which would
+        # otherwise get wrongly appended as a 4th segment and break the
+        # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
+        participant = ""
+        if chat.endswith("@g.us"):
+            participant = (
+                msg_key.get("participant")
+                or (msg_key.get("remoteJidAlt") if not from_me else "")
+                or ""
+            ).replace("@s.whatsapp.net", "@c.us")
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
@@ -5263,7 +5353,7 @@ class MainWindow(wx.Frame):
             if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
                 continue
             name   = names[idx] if idx < len(names) else ""
-            unread = int(chat.get("unreadCount") or 0)
+            unread = effective_unread_count(chat)
             unread_str = (
                 f" {unread} " + (
                     self.i18n.t("unread_messages") if unread > 1
@@ -7162,7 +7252,7 @@ class MainWindow(wx.Frame):
         new_arch_texts: list = []
         for i, chat in enumerate(arch_full_chats):
             chat_jid = chat.get("remoteJid", "")
-            unread_count = int(chat.get("unreadCount") or 0)
+            unread_count = effective_unread_count(chat)
             if arch_filter == 'unread' and unread_count == 0:
                 continue
             if arch_filter == 'groups' and not chat_jid.endswith("@g.us"):
@@ -7170,7 +7260,7 @@ class MainWindow(wx.Frame):
             if arch_filter == 'individual' and chat_jid.endswith("@g.us"):
                 continue
             name = arch_full_names[i] if i < len(arch_full_names) else ""
-            unread = int(chat.get("unreadCount") or 0)
+            unread = unread_count
             unread_str = (
                 f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
                 if unread > 0 else ""
@@ -7257,6 +7347,15 @@ class MainWindow(wx.Frame):
         search       = self.conversations_panel.search_field.GetValue().strip().lower()
         conv_filter  = getattr(self.conversations_panel, '_conv_filter', 'all')
 
+        # Used below to tell "the same filtered view just lost an item" (where
+        # reusing the old row position to keep focus nearby makes sense) apart
+        # from "the active filter/search changed" (where the old row position
+        # belongs to a different, unrelated list and must not be reused).
+        _filter_or_search_changed = (
+            getattr(self, "_last_conv_filter_key", None) != (conv_filter, search)
+        )
+        self._last_conv_filter_key = (conv_filter, search)
+
         # Always start from the full sorted lists saved by set_chats() so
         # that restoring the window or clearing a search shows all chats.
         full_chats = list(getattr(self.conversations_panel, '_all_chats_list',
@@ -7288,7 +7387,7 @@ class MainWindow(wx.Frame):
         for _i, _chat in enumerate(full_chats):
             _jid  = _chat.get("remoteJid", "")
             _nm   = full_names[_i] if _i < len(full_names) else ""
-            _unrd = int(_chat.get("unreadCount") or 0)
+            _unrd = effective_unread_count(_chat)
             # NOTE: chat["lastMessage"] is only ever set by get_remote_chats()
             # at sync time — on_new_message() (the WebSocket new-message path)
             # appends to chat["messages"]["messages"]["records"] but never
@@ -7321,7 +7420,7 @@ class MainWindow(wx.Frame):
         # choose between a lightweight SetItem path and a full rebuild.
         def _build_item_text(chat, name):
             chat_jid = chat.get("remoteJid", "")
-            unread = int(chat.get("unreadCount") or 0)
+            unread = effective_unread_count(chat)
             unread_str = (
                 f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
                 if unread > 0 else ""
@@ -7345,7 +7444,7 @@ class MainWindow(wx.Frame):
         for i, chat in enumerate(full_chats):
             name     = full_names[i]
             chat_jid = chat.get("remoteJid", "")
-            if conv_filter == 'unread' and int(chat.get("unreadCount") or 0) == 0:
+            if conv_filter == 'unread' and effective_unread_count(chat) == 0:
                 continue
             if conv_filter == 'groups' and not chat_jid.endswith("@g.us"):
                 continue
@@ -7445,7 +7544,14 @@ class MainWindow(wx.Frame):
             # The previously focused chat is gone (e.g. it was just cleared and
             # filtered out). Keep keyboard focus in the list by landing on
             # whatever now occupies its slot instead of dropping focus entirely.
-            neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
+            # But only reuse that raw position when this is still the same
+            # filtered/searched view — if the filter or search just changed,
+            # the old index refers to an unrelated list and landing on row 0
+            # is the only position that means anything in the new one.
+            if _filter_or_search_changed:
+                neighbor_idx = 0
+            else:
+                neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
             if neighbor_idx < 0:
                 neighbor_idx = 0
             panel.conversations_list.Focus(neighbor_idx)

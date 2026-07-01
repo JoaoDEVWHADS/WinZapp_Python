@@ -97,6 +97,9 @@ class ShortcutsDialog(wx.Dialog):
             i18n.t("shortcut_ctrl_c_label"),
             i18n.t("shortcut_alt_c_label"),
             i18n.t("shortcut_alt_e_label"),
+            i18n.t("shortcut_alt_l_label"),
+            i18n.t("shortcut_alt_shift_l_label"),
+            i18n.t("shortcut_alt_shift_k_label"),
             i18n.t("shortcut_ctrl_shift_s_label"),
             i18n.t("shortcut_ctrl_shift_m_label"),
             i18n.t("shortcut_ctrl_shift_l_label"),
@@ -115,5 +118,9 @@ class ShortcutsDialog(wx.Dialog):
             section("shortcuts_search_section"),
             i18n.t("shortcut_search_enter_label"),
             i18n.t("shortcut_search_shift_enter_label"),
+            "",
+            section("shortcuts_sync_section"),
+            i18n.t("shortcut_f5_label"),
+            i18n.t("shortcut_ctrl_alt_shift_o_label"),
         ]
         return "\n".join(lines)

@@ -202,6 +202,30 @@ def prune_chats_messages(chats) -> bool:
     return changed
 
 
+def effective_unread_count(chat) -> int:
+    """Clamp a chat's server-reported unreadCount to how many messages are
+    actually stored locally for it.
+
+    A chat-list sync can report e.g. unreadCount=2 for a chat whose per-chat
+    message fetch previously failed (or hasn't run yet), leaving 0 messages
+    in the local store — showing "2 unread" on a conversation that opens
+    empty. Since the badge/UI can only ever show messages we actually have,
+    never claim more unread messages than local records exist.
+    """
+    if not isinstance(chat, dict):
+        return 0
+    reported = int(chat.get("unreadCount") or 0)
+    if reported <= 0:
+        return 0
+    try:
+        local_count = len(
+            chat.get("messages", {}).get("messages", {}).get("records", []) or []
+        )
+    except AttributeError:
+        local_count = 0
+    return min(reported, local_count)
+
+
 _CC_SORTED: list[str] | None = None
 
 def _known_country_codes() -> list[str]:

@@ -64,6 +64,13 @@ class AccessibleSaveAs(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+S")
 
 
+class AccessibleReadMoreButton(wx.Accessible):
+    """Reports Alt+L as the keyboard shortcut for the Read-more button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Alt+L")
+
+
 class AccessibleConversationDataButton(wx.Accessible):
     """Reports Ctrl+Shift+D as the keyboard shortcut for the conversation-data button."""
 
@@ -246,10 +253,19 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
         item = self.RowToItem(row)
         if item.IsOk():
             self.SelectRow(row)
+            # SelectRow() alone only changes which row is highlighted — it does
+            # not move the DataViewCtrl's internal "current item" that arrow-key
+            # navigation continues from. Without also setting it here, the very
+            # first Up/Down press after programmatic Focus()/Select() has no
+            # valid position to move relative to, so navigation appears dead.
+            self.SetCurrentItem(item)
 
     def Select(self, row, select=True):
+        item = self.RowToItem(row)
         if select:
             self.SelectRow(row)
+            if item.IsOk():
+                self.SetCurrentItem(item)
         else:
             self.UnselectRow(row)
 
@@ -346,6 +362,18 @@ class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
                 if row != wx.NOT_FOUND:
                     handler(MockListEvent(row))
             super().Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, _on_selected, *args, **kwargs)
+
+        elif event_type == wx.EVT_KEY_DOWN:
+            # Raw key events are delivered to whichever window actually has OS
+            # focus. For this compound control that's the internal child
+            # ("wxDataViewCtrlMainWindow"), not self — binding on self here
+            # would silently never fire (breaking e.g. Space-to-activate),
+            # unlike EVT_LIST_ITEM_ACTIVATED/SELECTED above, which are
+            # explicitly re-emitted from DataView events rather than relying
+            # on OS event delivery.
+            main_win = self._get_main_window()
+            target = main_win if main_win is not None else self
+            target.Bind(event_type, handler, *args, **kwargs)
 
         else:
             super().Bind(event_type, handler, *args, **kwargs)
