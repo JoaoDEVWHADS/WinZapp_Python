@@ -5334,51 +5334,59 @@ class MainWindow(wx.Frame):
                 )
         return action_label
 
-    def _refresh_presence_label_in_list(self, chat_jid_norm: str):
-        """Update only the chat-list row for chat_jid_norm via SetItem().
+    def _refresh_chat_row_in_list(self, chat_jid_norm: str):
+        """Update only the chat-list row for chat_jid_norm via SetItem(), in
+        whichever panel (main or archived) currently displays it.
 
-        Replaces the full _schedule_set_chats() rebuild for presence-only changes.
-        Using SetItem() on a single row prevents NVDA from re-reading the entire
-        list and stuttering in TTS echo while the user is typing a message.
+        Replaces the full _schedule_set_chats() rebuild for changes that don't
+        affect list membership/order (presence, unread count going to 0).
+        SetItem() on a single row prevents NVDA from re-reading the entire
+        list — and, unlike _schedule_set_chats()/set_chats(), isn't silently
+        dropped while a media sync is running, so e.g. opening an unread
+        conversation clears its badge immediately instead of only after the
+        media sync eventually finishes.
         """
-        panel = getattr(self, "conversations_panel", None)
-        if panel is None:
-            return
-        lst       = getattr(panel, "conversations_list", None)
-        displayed = getattr(panel, "chats_list", [])
-        names     = getattr(panel, "chat_names", [])
-        if lst is None:
-            return
-        for idx, chat in enumerate(displayed):
-            if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
+        is_group = chat_jid_norm.endswith("@g.us")
+        for panel in (
+            getattr(self, "conversations_panel", None),
+            getattr(self, "archived_conversations_panel", None),
+        ):
+            if panel is None:
                 continue
-            name   = names[idx] if idx < len(names) else ""
-            unread = effective_unread_count(chat)
-            unread_str = (
-                f" {unread} " + (
-                    self.i18n.t("unread_messages") if unread > 1
-                    else self.i18n.t("unread_message")
+            lst       = getattr(panel, "conversations_list", None)
+            displayed = getattr(panel, "chats_list", [])
+            names     = getattr(panel, "chat_names", [])
+            if lst is None:
+                continue
+            for idx, chat in enumerate(displayed):
+                if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
+                    continue
+                name   = names[idx] if idx < len(names) else ""
+                unread = effective_unread_count(chat)
+                unread_str = (
+                    f" {unread} " + (
+                        self.i18n.t("unread_messages") if unread > 1
+                        else self.i18n.t("unread_message")
+                    )
+                    if unread > 0 else ""
                 )
-                if unread > 0 else ""
-            )
-            preview   = self._last_msg_preview(chat)
-            item_text = name + unread_str
-            if preview:
-                item_text += f" {preview}"
-            is_group = chat_jid_norm.endswith("@g.us")
-            label = self._presence_label_for_chat(chat_jid_norm, is_group)
-            if label:
-                item_text += f" {label}"
-            # Only touch the row when the visible text actually changes. Presence
-            # bursts (online/offline toggles that don't alter the row) otherwise
-            # rewrote the focused item's text repeatedly, making NVDA announce the
-            # conversation name over and over while the user sat idle on the list.
-            try:
-                if lst.GetItemText(idx, 0) != item_text:
+                preview   = self._last_msg_preview(chat)
+                item_text = name + unread_str
+                if preview:
+                    item_text += f" {preview}"
+                label = self._presence_label_for_chat(chat_jid_norm, is_group)
+                if label:
+                    item_text += f" {label}"
+                # Only touch the row when the visible text actually changes. Presence
+                # bursts (online/offline toggles that don't alter the row) otherwise
+                # rewrote the focused item's text repeatedly, making NVDA announce the
+                # conversation name over and over while the user sat idle on the list.
+                try:
+                    if lst.GetItemText(idx, 0) != item_text:
+                        lst.SetItem(idx, 0, item_text)
+                except Exception:
                     lst.SetItem(idx, 0, item_text)
-            except Exception:
-                lst.SetItem(idx, 0, item_text)
-            break
+                break
 
     def on_presence_update(self, jid: str, presences: dict):
         """
@@ -5465,7 +5473,7 @@ class MainWindow(wx.Frame):
                     def _clear():
                         self._composing_chats.get(cjid, {}).pop(part, None)
                         self._presence_timers.pop((cjid, part), None)
-                        self._refresh_presence_label_in_list(cjid)
+                        self._refresh_chat_row_in_list(cjid)
                     return _clear
                 self._presence_timers[timer_key] = wx.CallLater(
                     10_000, _make_clear(chat_jid_norm, canonical)
@@ -5506,7 +5514,7 @@ class MainWindow(wx.Frame):
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
         if presence_changed:
-            self._refresh_presence_label_in_list(chat_jid_norm)
+            self._refresh_chat_row_in_list(chat_jid_norm)
 
         # Refresh the data-button note for the open conversation
         if panel is None or conv is None:
@@ -5749,6 +5757,11 @@ class MainWindow(wx.Frame):
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
         self._schedule_save(dirty_jid=remote_jid)
+        # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
+        # this isn't suppressed while a media sync is running, so the badge
+        # clears right away instead of only after the sync eventually finishes
+        # (previously observed as a 10-20+ second — or longer — delay).
+        wx.CallAfter(self._refresh_chat_row_in_list, self._normalize_jid(remote_jid))
         wx.CallAfter(self._schedule_set_chats)
 
         if unread == 0 and not force:

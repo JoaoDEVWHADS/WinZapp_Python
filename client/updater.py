@@ -188,7 +188,12 @@ class WhatsNewDialog(wx.Dialog):
     """Shows the changelog entries between the current and new version."""
 
     def __init__(self, parent, changelog: str):
-        i18n = parent.main_window.i18n if hasattr(parent, "main_window") else parent.i18n
+        # parent is the UpdateDialog, which stores the real MainWindow as
+        # _main_window (not main_window) and never kept its own .i18n
+        # attribute — looking those up directly raised an AttributeError
+        # every time "Quais as novidades?" was clicked.
+        mw = getattr(parent, "main_window", None) or getattr(parent, "_main_window", None) or parent
+        i18n = mw.i18n
         super().__init__(
             parent,
             title=i18n.t("whats_new_title"),
