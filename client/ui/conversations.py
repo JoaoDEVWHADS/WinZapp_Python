@@ -3357,6 +3357,12 @@ class ConversationsPanel(wx.Panel):
         try:
             with open(file_path, "rb") as fh:
                 content = decrypt_bytes(fh.read(), self.main_window.key)
+            import logging
+            logging.info(
+                f"[UI Audio Playback] Decrypted {len(content)} bytes. "
+                f"Header hex: {content[:16].hex()} "
+                f"(OGG magic = 4f676753, Opus head = 4f707573)"
+            )
             tmp = tempfile.NamedTemporaryFile(suffix=audio_ext, delete=False)
             tmp.write(content)
             tmp.close()
