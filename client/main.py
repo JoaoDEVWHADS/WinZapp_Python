@@ -6143,6 +6143,7 @@ class MainWindow(wx.Frame):
         }
 
         try:
+            logging.info(f"[fetch_older_messages] Querying URL: {url}")
             response = requests.get(url, headers=headers, timeout=30)
             if response.status_code in (200, 201):
                 body = response.json()
@@ -6173,6 +6174,10 @@ class MainWindow(wx.Frame):
                             chat["messages"]["messages"]["total"] = len(all_records)
                             self.save_data(self.chats, self.contacts)
                     return fetched_messages
+            else:
+                logging.warning(
+                    f"[fetch_older_messages] API returned status {response.status_code} for {remote_jid}: {response.text[:300]}"
+                )
         except Exception as e:
             logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
         return []
