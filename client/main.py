@@ -6118,22 +6118,13 @@ class MainWindow(wx.Frame):
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
-        # If msg_id already has underscores, extract the actual clean message ID (the last part)
+        # WPPConnect's getMessages ?id= param expects ONLY the raw message ID
+        # (e.g. "3EB0D3BCB679BFCAFD2D39"), not the full serialised key.
+        # Sending the reconstructed key caused WPPConnect to parse the last
+        # underscore-segment as a chat JID → "Chat not found" error.
         if msg_id and "_" in msg_id:
             parts = msg_id.split("_")
             msg_id = parts[2] if len(parts) > 2 else parts[-1]
-
-        if msg_id:
-            from_me = _key.get("fromMe", False)
-            from_me_str = "true" if from_me else "false"
-            # Always reconstruct the ID using phone (mapped LID or @c.us JID) to match WPPConnect's expectation
-            msg_id = f"{from_me_str}_{phone}_{msg_id}"
-            if phone.endswith("@g.us"):
-                participant = _key.get("participant", "")
-                if participant:
-                    if participant.endswith("@s.whatsapp.net") or participant.endswith("@c.us"):
-                        participant = participant.split("@")[0] + "@c.us"
-                    msg_id = f"{msg_id}_{participant}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={msg_id}"
