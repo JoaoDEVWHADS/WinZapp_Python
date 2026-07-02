@@ -1916,6 +1916,8 @@ class ConversationsPanel(wx.Panel):
             if "_" in msg_id:
                 parts = msg_id.split("_")
                 clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+            import logging
+            logging.info(f"[UI Audio Activation] msg_id={msg_id}, clean_msg_id={clean_msg_id}, duration={duration}, file={data_path('voice_messages', f'{clean_msg_id}.msv')}")
             self._toggle_playback(
                 msg_id, duration, msg,
                 file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
@@ -3303,6 +3305,8 @@ class ConversationsPanel(wx.Panel):
                 self.main_window.output(self.main_window.i18n.t("downloading"))
                 return
 
+            import logging
+            logging.info(f"[UI Audio Playback] File not found local, launching download thread. file_path={file_path}")
             self.main_window.output(self.main_window.i18n.t("downloading"))
             self._downloading_audio_ids.add(msg_id)
 
@@ -3312,17 +3316,22 @@ class ConversationsPanel(wx.Panel):
                     try:
                         if msg_type == "audioMessage":
                             if msg is not None:
+                                logging.info(f"[UI Audio Playback] Calling handle_audio_message for {msg_id}")
                                 self.main_window.handle_audio_message(msg)
                         else:
                             if msg is not None:
+                                logging.info(f"[UI Audio Playback] Calling handle_media_message for {msg_id}")
                                 self.main_window.handle_media_message(msg)
-                    except Exception:
+                    except Exception as e:
                         logging.warning(
-                            "[_download_and_play] download failed for %s", msg_id,
+                            "[_download_and_play] download failed for %s: %s", msg_id, e,
                             exc_info=True,
                         )
                     # Only play if the file was actually downloaded (non-empty)
-                    if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
+                    exists = os.path.isfile(file_path)
+                    size = os.path.getsize(file_path) if exists else 0
+                    logging.info(f"[UI Audio Playback] Finished download try. exists={exists}, size={size}")
+                    if exists and size > 16:
                         wx.CallAfter(
                             self._play_audio, msg_id, duration_seconds, file_path, audio_ext
                         )
