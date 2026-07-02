@@ -3361,7 +3361,9 @@ class ConversationsPanel(wx.Panel):
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.exception(f"[UI Audio Playback] Error decrypting or creating temp audio file: {e}")
             self._stop_audio()
             return
 
@@ -3389,7 +3391,9 @@ class ConversationsPanel(wx.Panel):
                 self._audio_stream = sl_stream.FileStream(
                     file=self._audio_temp_file
                 )
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.exception(f"[UI Audio Playback] Error creating fallback FileStream: {e}")
                 self._stop_audio()
                 return
 
@@ -3411,7 +3415,9 @@ class ConversationsPanel(wx.Panel):
                 except Exception:
                     pass
             playback_ctrl.play()
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.exception(f"[UI Audio Playback] Error starting playback: {e}")
             self._stop_audio()
             return
 
