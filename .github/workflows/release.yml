@@ -96,10 +96,20 @@ jobs:
       - name: Adicionar MSYS2 GCC ao Path do Windows
         run: echo "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Copiar DLL do libopus para client/lib
+      - name: Copiar DLL do libopus e bassopus para client/lib
         run: |
           New-Item -ItemType Directory -Force client\lib | Out-Null
           Copy-Item "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin\libopus-0.dll" "client\lib\libopus-0.dll"
+          # bassopus.dll already committed in client/lib/ — verify both names exist
+          if (Test-Path "client\lib\bass_opus.dll") {
+            Copy-Item "client\lib\bass_opus.dll" "client\lib\bassopus.dll" -Force
+            Write-Output "[INFO] bassopus.dll copied from bass_opus.dll"
+          }
+          if (Test-Path "client\lib\bassopus.dll") {
+            Write-Output "[INFO] bassopus.dll is present in client/lib"
+          } else {
+            Write-Warning "[WARN] bassopus.dll not found in client/lib — OGG Opus playback will fail"
+          }
 
       - name: Cache Node.js Portátil
         id: cache-node
