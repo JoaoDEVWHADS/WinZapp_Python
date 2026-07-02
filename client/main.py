@@ -6494,6 +6494,10 @@ class MainWindow(wx.Frame):
                         logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
                 else:
                     logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
+                    # If the API returns 404/500 indicating the session was closed/disconnected, stop making calls immediately
+                    if resp_profile.status_code in (404, 500) or "session is not active" in resp_profile.text.lower():
+                        logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
+                        break
             except Exception as e:
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
             finally:
@@ -6506,7 +6510,7 @@ class MainWindow(wx.Frame):
                         has_name_now = contact_now.get("name") or contact_now.get("pushName")
                         if not has_name_now:
                             self._unresolvable_names.add(lid_jid)
-                time.sleep(0.1)
+                time.sleep(0.5)
 
         self.save_data(self.chats, self.contacts)
         wx.CallAfter(self._schedule_set_chats)
