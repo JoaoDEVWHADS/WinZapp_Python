@@ -216,7 +216,7 @@ class ConversationDataDialog(wx.Dialog):
 
     def _populate_personal(self, data: dict):
         """Fill the personal-chat TextCtrl (called on main thread)."""
-        if not self.IsShown():
+        if not self or not self.IsShown():
             return
         i18n  = self._i18n
         lines = []
@@ -268,7 +268,7 @@ class ConversationDataDialog(wx.Dialog):
 
     def _populate_group(self, data: dict):
         """Fill the group Notebook tabs (called on main thread)."""
-        if not self.IsShown():
+        if not self or not self.IsShown():
             return
 
         i18n = self._i18n
