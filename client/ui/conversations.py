@@ -1615,13 +1615,23 @@ class ConversationsPanel(wx.Panel):
             self._search_panel.Hide()
             self._search_open_btn.Show()
             self._search_field.SetValue("")
+        closed_jid = self._last_open_jid
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
-        # Defer focus restoration so it runs after the accelerator event is
-        # fully processed — calling SetFocus() synchronously inside an EVT_MENU
-        # handler can be overridden by wx's post-event focus management on Win32.
-        wx.CallAfter(self._restore_conversation_selection)
+        mw = self.main_window
+        # If the conversation being closed is archived, it was opened from the
+        # archived list (ArchivedConversationsPanel), which stays hidden behind
+        # this panel while the conversation is open — so Esc must send focus
+        # back there instead of the regular conversations list.
+        if (closed_jid and mw.is_chat_archived(closed_jid)
+                and hasattr(mw, "archived_conversations_panel")):
+            wx.CallAfter(self._restore_to_archived_list, closed_jid)
+        else:
+            # Defer focus restoration so it runs after the accelerator event is
+            # fully processed — calling SetFocus() synchronously inside an EVT_MENU
+            # handler can be overridden by wx's post-event focus management on Win32.
+            wx.CallAfter(self._restore_conversation_selection)
 
     def _restore_conversation_selection(self):
         """Select, focus and give keyboard focus to the last-opened conversation."""
@@ -1633,6 +1643,25 @@ class ConversationsPanel(wx.Panel):
                     target = i
                     break
         if self.chats_list:
+            lst.Focus(target)
+            lst.Select(target)
+            lst.EnsureVisible(target)
+        lst.SetFocus()
+
+    def _restore_to_archived_list(self, jid: str):
+        """Switch back to the archived conversations list and re-select `jid`."""
+        mw = self.main_window
+        self.Hide()
+        mw.archived_conversations_panel.Show()
+        mw.content_panel.Layout()
+        arch = mw.archived_conversations_panel
+        lst = arch.conversations_list
+        target = 0
+        for i, chat in enumerate(arch.chats_list):
+            if chat.get("remoteJid") == jid:
+                target = i
+                break
+        if arch.chats_list:
             lst.Focus(target)
             lst.Select(target)
             lst.EnsureVisible(target)
