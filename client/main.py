@@ -1,8 +1,26 @@
 import os
 import sys
 import time
+
+# Add lib/ directory to Windows DLL search path so BASS plugins can find their dependencies (e.g. libopus-0.dll)
+if sys.platform == 'win32':
+    _lib_path = ""
+    if getattr(sys, 'frozen', False):
+        _lib_path = os.path.join(os.path.dirname(sys.executable), 'lib')
+    else:
+        _lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib')
+    if os.path.isdir(_lib_path):
+        if hasattr(os, 'add_dll_directory'):
+            try:
+                os.add_dll_directory(_lib_path)
+            except Exception:
+                pass
+        # Fallback: add to PATH environment variable
+        os.environ['PATH'] = _lib_path + os.pathsep + os.environ.get('PATH', '')
+
 import shutil
 import socket as _socket
+
 import subprocess
 import threading
 import textwrap
