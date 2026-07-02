@@ -4981,11 +4981,14 @@ class MainWindow(wx.Frame):
                                     logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
                         api_ok = True
                         break
-                    elif response.status_code == 404 and (
-                        "sess" in response.text.lower() and "n" in response.text.lower() and
-                        "ativa" in response.text.lower()
-                    ):
-                        logging.warning(f"[sync_chat_messages] Session not active for {remote_jid}, retry {attempt+1}/{max_retries}")
+                    elif response.status_code in (401, 404, 500):
+                        # 401 = "Error on open list" (Baileys not ready yet)
+                        # 404 = session not active
+                        # 500 = transient WPPConnect internal error
+                        # All are retryable — wait briefly and try again.
+                        logging.warning(f"[sync_chat_messages] Retryable error {response.status_code} for {remote_jid} (attempt {attempt+1}/{max_retries}): {response.text[:120]}")
+                        if attempt < max_retries - 1:
+                            time.sleep(3)
                         continue
                     else:
                         logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
@@ -5460,12 +5463,18 @@ class MainWindow(wx.Frame):
         # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
         participant = ""
         if chat.endswith("@g.us"):
-            participant = (
-                ((getattr(self, "my_lid", "") or getattr(self, "my_jid", "")) if from_me else msg_key.get("participant"))
-                or msg_key.get("participant")
-                or (msg_key.get("remoteJidAlt") if not from_me else "")
-                or ""
-            ).replace("@s.whatsapp.net", "@c.us")
+            if from_me:
+                # Our own group messages: always use our LID/phone as participant.
+                participant = (getattr(self, "my_lid", "") or getattr(self, "my_jid", "") or msg_key.get("participant") or "")
+            else:
+                # Others' group messages: participant may be in key or a dedicated field.
+                participant = (
+                    msg_key.get("participant")
+                    or msg_key.get("author")
+                    or msg_key.get("remoteJidAlt")
+                    or ""
+                )
+            participant = participant.replace("@s.whatsapp.net", "@c.us")
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
