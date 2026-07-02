@@ -5998,59 +5998,101 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
-        if progress_callback is None:
-            try:
-                response = requests.get(url, headers=headers, timeout=timeout)
-            except MediaExpiredError:
-                raise
-            except Exception as exc:
-                logging.warning(
-                    "[get_base64_from_media] request failed for %s: %s", msg_id, exc,
-                )
-                return ""
-            if response.status_code in (403, 410):
-                raise MediaExpiredError(response.status_code)
-            if response.status_code in (200, 201):
-                return response.json().get("base64", "")
-            logging.warning(
-                "[get_base64_from_media] HTTP %s fetching media for %s: %s",
-                response.status_code, msg_id, response.text[:200],
-            )
-            return ""
-
-        # Streaming mode so we can report per-chunk progress
-        try:
-            response = requests.get(url, headers=headers, stream=True, timeout=timeout)
-            if response.status_code in (403, 410):
-                raise MediaExpiredError(response.status_code)
-            if response.status_code not in (200, 201):
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            if progress_callback is None:
+                try:
+                    response = requests.get(url, headers=headers, timeout=timeout)
+                except MediaExpiredError:
+                    raise
+                except Exception as exc:
+                    logging.warning(
+                        "[get_base64_from_media] request failed for %s (attempt %d/%d): %s",
+                        msg_id, attempt + 1, max_attempts, exc,
+                    )
+                    if attempt < max_attempts - 1:
+                        time.sleep(3)
+                        continue
+                    return ""
+                if response.status_code in (403, 410):
+                    raise MediaExpiredError(response.status_code)
+                if response.status_code in (200, 201):
+                    return response.json().get("base64", "")
+                
+                # Check for transient session not active errors
+                resp_text = response.text
+                if response.status_code in (400, 500) and any(x in resp_text.lower() for x in ("session is not active", "not active", "disconnected")):
+                    logging.warning(
+                        "[get_base64_from_media] session not active for %s, retrying in 3s (attempt %d/%d)",
+                        msg_id, attempt + 1, max_attempts
+                    )
+                    if attempt < max_attempts - 1:
+                        time.sleep(3)
+                        continue
                 logging.warning(
                     "[get_base64_from_media] HTTP %s fetching media for %s: %s",
-                    response.status_code, msg_id, response.text[:200],
+                    response.status_code, msg_id, resp_text[:200],
                 )
                 return ""
-            total = int(response.headers.get("content-length", 0))
-            downloaded = 0
-            chunks: list = []
-            for chunk in response.iter_content(chunk_size=65536):
-                if chunk:
-                    chunks.append(chunk)
-                    downloaded += len(chunk)
-                    if total > 0:
-                        progress_callback(downloaded / total)
-            body = b"".join(chunks).decode("utf-8", errors="replace")
-            try:
-                return json.loads(body).get("base64", "")
-            except Exception:
-                # Caso o body retornado seja o base64 bruto ou binário
-                return base64.b64encode(b"".join(chunks)).decode("utf-8")
-        except MediaExpiredError:
-            raise
-        except Exception as exc:
-            logging.warning(
-                "[get_base64_from_media] request failed for %s: %s", msg_id, exc,
-            )
-            return ""
+            else:
+                # Streaming mode so we can report per-chunk progress
+                try:
+                    response = requests.get(url, headers=headers, stream=True, timeout=timeout)
+                    if response.status_code in (403, 410):
+                        raise MediaExpiredError(response.status_code)
+                    
+                    # Check for transient session not active errors before streaming
+                    if response.status_code in (400, 500):
+                        # Read small error response
+                        resp_text = response.text
+                        if any(x in resp_text.lower() for x in ("session is not active", "not active", "disconnected")):
+                            logging.warning(
+                                "[get_base64_from_media] session not active for %s (stream), retrying in 3s (attempt %d/%d)",
+                                msg_id, attempt + 1, max_attempts
+                            )
+                            if attempt < max_attempts - 1:
+                                time.sleep(3)
+                                continue
+                        logging.warning(
+                            "[get_base64_from_media] HTTP %s fetching media for %s: %s",
+                            response.status_code, msg_id, resp_text[:200],
+                        )
+                        return ""
+
+                    if response.status_code not in (200, 201):
+                        logging.warning(
+                            "[get_base64_from_media] HTTP %s fetching media for %s",
+                            response.status_code, msg_id,
+                        )
+                        return ""
+                    
+                    total = int(response.headers.get("content-length", 0))
+                    downloaded = 0
+                    chunks: list = []
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if chunk:
+                            chunks.append(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                progress_callback(downloaded / total)
+                    body = b"".join(chunks).decode("utf-8", errors="replace")
+                    try:
+                        return json.loads(body).get("base64", "")
+                    except Exception:
+                        # Caso o body retornado seja o base64 bruto ou binário
+                        return base64.b64encode(b"".join(chunks)).decode("utf-8")
+                except MediaExpiredError:
+                    raise
+                except Exception as exc:
+                    logging.warning(
+                        "[get_base64_from_media] request failed for %s (stream) (attempt %d/%d): %s",
+                        msg_id, attempt + 1, max_attempts, exc,
+                    )
+                    if attempt < max_attempts - 1:
+                        time.sleep(3)
+                        continue
+                    return ""
+        return ""
 
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
