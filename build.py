@@ -505,7 +505,24 @@ def assemble_staging():
         print(f"  -> lib/libopus-0.dll")
     else:
         print("  [WARN] libopus-0.dll not found — voice message encoding will fail")
+
+    # bassopus.dll — BASS plugin for OGG Opus *playback* (audio messages)
+    _bassopus_src_names = ["bassopus.dll", "bass_opus.dll"]
+    _bassopus_copied = False
+    for _bname in _bassopus_src_names:
+        _bsrc = os.path.join(CLIENT_DIR, "lib", _bname)
+        if os.path.isfile(_bsrc):
+            # Always write as bassopus.dll (the name sound_lib/BASS_PluginLoad expects)
+            shutil.copy2(_bsrc, os.path.join(lib_dir, "bassopus.dll"))
+            dll_count += 1
+            print(f"  -> lib/bassopus.dll  (from {_bname})")
+            _bassopus_copied = True
+            break
+    if not _bassopus_copied:
+        print("  [WARN] bassopus.dll not found in client/lib — OGG Opus audio playback will fail")
+
     print(f"  -> lib/  ({dll_count} DLLs total)")
+
 
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
     shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))
