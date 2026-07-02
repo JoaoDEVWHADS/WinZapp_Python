@@ -880,7 +880,11 @@ class Connect:
         )
 
     def on_cancel_pairing(self, event):
-        self.pairing_dial.Destroy()
+        try:
+            if hasattr(self, "pairing_dial") and self.pairing_dial:
+                self.pairing_dial.Destroy()
+        except RuntimeError:
+            pass
         
         # Disconnect WebSocket
         if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
