@@ -5220,7 +5220,7 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def _serialize_quoted_id(self, quoted: dict) -> str:
+    def _serialize_quoted_id(self, quoted: dict, fallback_jid: str = None) -> str:
         """Serialize a quoted message key into the format expected by WPPConnect.
 
         Delegates to _serialize_msg_id, which keeps whatever JID variant
@@ -5233,7 +5233,9 @@ class MainWindow(wx.Frame):
         raw_key = quoted.get("key", {})
         if not isinstance(raw_key, dict) or not raw_key.get("id"):
             return None
-        return self._serialize_msg_id(raw_key.get("remoteJid", ""), raw_key)
+        # key.remoteJid can be empty for own messages in local cache, fallback to current conversation JID
+        remote_jid = raw_key.get("remoteJid") or fallback_jid or ""
+        return self._serialize_msg_id(remote_jid, raw_key)
 
     def _canonical_mention_jids(self, mentioned_jids):
         """Return mention JIDs in the phone-number format Baileys/WPPConnect can tag."""
@@ -5308,7 +5310,7 @@ class MainWindow(wx.Frame):
                 }
             }
         else:
-            quoted_id = self._serialize_quoted_id(quoted) if quoted else None
+            quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
             if quoted_id:
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
                 phone_net = remote_jid
@@ -6125,14 +6127,12 @@ class MainWindow(wx.Frame):
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
-        # Se houver mapeamento phone -> LID, usamos o LID.
-        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid:
-            phone = lid
-        elif remote_jid.endswith("@s.whatsapp.net"):
-            phone = remote_jid.split("@")[0] + "@c.us"
-        else:
-            phone = remote_jid
+        # Always resolve @lid to phone JID for WPPConnect's getMessages API.
+        # WPPConnect returns HTTP 401 TypeError if queried with a @lid.
+        phone = self._resolve_jid_for_send(remote_jid)
+        if phone.endswith("@s.whatsapp.net"):
+            phone = phone.split("@")[0] + "@c.us"
+
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
