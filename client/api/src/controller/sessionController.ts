@@ -466,19 +466,42 @@ export async function getMediaByMessage(req: Request, res: Response) {
   }
 
   try {
-    const message = await client.getMessageById(messageId);
+    let message = await client.getMessageById(messageId);
 
-    if (!message)
-      res.status(400).json({
+    // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
+    // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
+    // and load earlier messages to force sync it.
+    if (!message && messageId) {
+      const parts = messageId.split('_');
+      if (parts.length >= 2) {
+        const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
+        if (chatId && typeof client.loadEarlierMessages === 'function') {
+          req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+          try {
+            // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
+            await client.loadEarlierMessages(chatId);
+            // Query again
+            message = await client.getMessageById(messageId);
+          } catch (loadErr) {
+            req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+          }
+        }
+      }
+    }
+
+    if (!message) {
+      return res.status(400).json({
         status: 'error',
-        message: 'Message not found',
+        message: `Message ${messageId} not found`,
       });
+    }
 
-    if (!(message['mimetype'] || message.isMedia || message.isMMS))
-      res.status(400).json({
+    if (!(message['mimetype'] || message.isMedia || message.isMMS)) {
+      return res.status(400).json({
         status: 'error',
         message: 'Message does not contain media',
       });
+    }
 
     const buffer = await client.decryptFile(message);
 
