@@ -27,7 +27,8 @@
       "Bash(Sort-Object)",
       "Read(//c/msys64/ucrt64/bin/**)",
       "Read(//c/msys64/mingw64/bin/**)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('client/ui/conversations.py', encoding='utf-8'\\).read\\(\\)\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('client/ui/conversations.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "WebSearch"
     ]
   }
 }

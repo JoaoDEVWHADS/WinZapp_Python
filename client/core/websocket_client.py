@@ -646,6 +646,12 @@ class WebSocketClient:
             if code:
                 self._phone_code_value = str(code)
                 self._phone_code_event.set()
+                # WPPConnect requests a fresh pairing code whenever WhatsApp
+                # rotates the auth ref, invalidating the previous one. Refresh
+                # the pairing dialog (if open) so the user never types a stale
+                # code.
+                if self.connect:
+                    wx.CallAfter(self.connect.update_pairing_code, str(code))
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_phone_code error: {e}")
 

@@ -835,6 +835,13 @@ class Connect:
         return os.urandom(16).hex()
 
     def show_pairing_dial(self, pairing_code):
+        # WPPConnect may have already rotated the code between the moment the
+        # background thread captured it and this CallAfter running — always
+        # open the dialog with the most recent code received.
+        ws = getattr(self.main_window, "ws", None)
+        latest_code = str(getattr(ws, "_phone_code_value", "") or "")
+        pairing_code = latest_code or pairing_code
+
         self.pairing_dial = wx.Dialog(self.connection_dial, title=self.i18n.t("pairing_dial_intro"), size=(300, 150))
         self.pairing_instructions = wx.StaticText(self.pairing_dial, label=self.i18n.t("pairing_instructions"))
         self.pairing_code_label = wx.StaticText(self.pairing_dial, label=self.i18n.t("pairing_code_label"))
@@ -844,6 +851,33 @@ class Connect:
 
         self.main_window.waiting_pairing_sound.play()
         self.pairing_dial.ShowModal()
+
+    def update_pairing_code(self, code):
+        """Refresh the pairing dialog when WPPConnect emits a new phoneCode.
+
+        WhatsApp rotates the pairing code periodically while the session is
+        unauthenticated, invalidating the previous one. Without this refresh
+        the dialog keeps showing the first (stale) code, the user types it,
+        pairing fails and they retry — multiplying code requests until
+        WhatsApp's anti-abuse blocks the account.
+        """
+        code = str(code or "")
+        if not code:
+            return
+        dial = getattr(self, "pairing_dial", None)
+        # A destroyed wx.Dialog evaluates to False, covering cancel/close.
+        if not dial:
+            return
+        try:
+            if not dial.IsShown() or self.pairing_code_field.GetValue() == code:
+                return
+            self.pairing_code_field.ChangeValue(code)
+        except RuntimeError:
+            return  # dialog destroyed between the checks
+        self.main_window.pairing_code_updated_sound.play()
+        self.main_window.output(
+            f"{self.i18n.t('qrcode_updated')} {self.i18n.t('pairing_code_label')} {code}"
+        )
 
     def on_cancel_pairing(self, event):
         self.pairing_dial.Destroy()
