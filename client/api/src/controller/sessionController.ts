@@ -261,7 +261,9 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
     } else {
       (clientsArray as any)[session] = { status: null };
 
-      await req.client.close();
+      if (req.client && typeof req.client.close === 'function') {
+        await req.client.close();
+      }
       req.io.emit('whatsapp-status', false);
       callWebHook(req.client, req, 'closesession', {
         message: `Session: ${session} disconnected`,
@@ -395,6 +397,13 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
   const client = req.client;
   const { messageId } = req.body;
 
+  if (!client || typeof client.getMessageById !== 'function') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'The WhatsApp session is not active.',
+    });
+  }
+
   let message;
 
   try {
@@ -448,6 +457,13 @@ export async function getMediaByMessage(req: Request, res: Response) {
    */
   const client = req.client;
   const { messageId } = req.params;
+
+  if (!client || typeof client.getMessageById !== 'function') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'The WhatsApp session is not active.',
+    });
+  }
 
   try {
     const message = await client.getMessageById(messageId);

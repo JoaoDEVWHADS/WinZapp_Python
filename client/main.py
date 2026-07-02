@@ -4944,6 +4944,17 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
+        # Check if the latest message on the server matches the latest message in our local cache.
+        last_msg = chat.get("lastMessage")
+        if isinstance(last_msg, dict):
+            last_msg_key = last_msg.get("key", {})
+            last_msg_id = last_msg_key.get("id")
+            if last_msg_id:
+                records = chat.get("messages", {}).get("messages", {}).get("records", [])
+                if any(r.get("key", {}).get("id") == last_msg_id for r in records):
+                    logging.info(f"[sync_chat_messages] Skipping sync for {remote_jid} — already up to date (last message matches)")
+                    return
+
         all_messages = []
         api_ok = False
         # Skip API call entirely if session is known disconnected
@@ -5450,19 +5461,9 @@ class MainWindow(wx.Frame):
         participant = ""
         if chat.endswith("@g.us"):
             participant = (
-                msg_key.get("participant")
+                ((getattr(self, "my_lid", "") or getattr(self, "my_jid", "")) if from_me else msg_key.get("participant"))
+                or msg_key.get("participant")
                 or (msg_key.get("remoteJidAlt") if not from_me else "")
-                # Our own sent messages usually carry no "participant" field at
-                # all (it's populated for messages received from others in the
-                # group) — but WPPConnect's store still keys OUR group messages
-                # by our own JID as the 4th segment, so fall back to it here.
-                # Without this, quoting/reacting to/deleting our own group
-                # messages built a 3-part id, the lookup missed, and callers
-                # silently fell back to a non-quoted plain message. Prefer
-                # my_lid over my_jid: accounts that use @lid addressing are
-                # indexed under that identity even for their own group
-                # messages, not under the phone-number JID.
-                or ((getattr(self, "my_lid", "") or getattr(self, "my_jid", "")) if from_me else "")
                 or ""
             ).replace("@s.whatsapp.net", "@c.us")
         if participant:
