@@ -84,6 +84,7 @@ def main():
         
         # Additional custom files to backup and restore
         custom_files = [
+            ".gitignore",
             "src/config.ts",
             "src/util/createSessionUtil.ts",
             "src/util/functions.ts",

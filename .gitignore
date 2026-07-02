@@ -19,6 +19,7 @@ client/logs/
 !/client/api/.env
 !/client/api/package.json
 !/client/api/config.json
+!/client/api/.gitignore
 
 # Custom patches on top of upstream wppconnect-server — setup_api.py stashes
 # and restores these across re-clones, but that only works when they already
