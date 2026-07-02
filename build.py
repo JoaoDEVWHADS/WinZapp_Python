@@ -253,6 +253,22 @@ API_EXCLUDE_FILES = {
 }
 API_EXCLUDE_SUB_DIRS = {"tests", "types"}
 
+# WinZapp's own patches on top of upstream wppconnect-server (same list as
+# setup_api.py's custom_files). API_EXCLUDE_DIRS skips all of src/ wholesale
+# since only the compiled client/api/dist/server.js runs at build time — but
+# the user wants these specific source files copied into the shipped api/
+# folder too (alongside .env/start.js/package.json/config.json) so they're
+# visible/patchable directly from an extracted install, not just at dev time.
+API_CUSTOM_SRC_FILES = [
+    "src/config.ts",
+    "src/util/createSessionUtil.ts",
+    "src/util/functions.ts",
+    "src/middleware/statusConnection.ts",
+    "src/controller/deviceController.ts",
+    "src/controller/messageController.ts",
+    "src/controller/sessionController.ts",
+]
+
 # -- CLI --------------------------------------------------------------------
 
 parser = argparse.ArgumentParser(
@@ -489,15 +505,6 @@ def assemble_staging():
         print(f"  -> lib/libopus-0.dll")
     else:
         print("  [WARN] libopus-0.dll not found — voice message encoding will fail")
-    # bassopus.dll — BASS plugin for OGG Opus playback (sound_lib/pybassopus)
-    # Must sit alongside bass.dll so BASS discovers it automatically.
-    bassopus_src = os.path.join(CLIENT_DIR, "lib", "bassopus.dll")
-    if os.path.isfile(bassopus_src):
-        shutil.copy2(bassopus_src, os.path.join(lib_dir, "bassopus.dll"))
-        dll_count += 1
-        print(f"  -> lib/bassopus.dll")
-    else:
-        print("  [WARN] bassopus.dll not found in client/lib/ — OGG Opus playback will fail")
     print(f"  -> lib/  ({dll_count} DLLs total)")
 
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
@@ -539,7 +546,19 @@ def assemble_staging():
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(abs_path, dst)
         api_count += 1
-    print(f"  -> api/  ({api_count} files)")
+
+    custom_src_count = 0
+    for rel_path in API_CUSTOM_SRC_FILES:
+        src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
+        if not os.path.isfile(src_path):
+            print(f"  [WARN] custom api source file missing: {rel_path}")
+            continue
+        dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src_path, dst)
+        api_count += 1
+        custom_src_count += 1
+    print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
 
 # -- Step 4-7: Installer (onedir only) -------------------------------------
 

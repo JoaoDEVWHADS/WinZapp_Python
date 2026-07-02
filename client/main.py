@@ -17,7 +17,7 @@ from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound, load_sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count
 from core.database_bridge import DatabaseBridge
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
@@ -404,6 +404,19 @@ class MainWindow(wx.Frame):
         self.chats = {}
         self.chat_names = []
         self.contacts = {}
+        # Presence cache: maps JID → {lastKnownPresence, lastSeen}. Must be
+        # initialized here (not lazily in _build_lid_to_phone_cache, which only
+        # runs after the initial chat sync) because a presence.update WebSocket
+        # event can arrive and call on_presence_update() before that sync
+        # completes, depending on how fast WPPConnect emits it.
+        self._presence_cache = {}
+        # Maps chat JID → {participant_jid: "composing"|"recording"}
+        self._composing_chats = {}
+        # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
+        self._presence_timers = {}
+        # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
+        # from presence.update events. Loaded from settings and saved whenever updated.
+        self._presence_pushname_map = dict(self.settings.get("presence_pushname_map", {}))
         # Set by init_UI() when all wx widgets are ready.  start_sync() waits
         # on this before making any wx.CallAfter calls so it never touches
         # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
@@ -609,13 +622,16 @@ class MainWindow(wx.Frame):
     # ── Menu bar ─────────────────────────────────────────────────────────────
 
     def _build_menubar(self):
-        """Create the menu bar with Arquivo and Ajuda menus."""
+        """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
         self._ID_MARK_ALL_READ = wx.NewIdRef()
         self._ID_SETTINGS      = wx.NewIdRef()
         self._ID_DISCONNECT    = wx.NewIdRef()
         self._ID_EXIT          = wx.NewIdRef()
+        self._ID_RESYNC_ALL    = wx.NewIdRef()
+        self._ID_OFFLINE_MENU  = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
+        self._ID_FORCE_REINSTALL_ZIP = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
 
         menubar = wx.MenuBar()
@@ -643,6 +659,19 @@ class MainWindow(wx.Frame):
         )
         menubar.Append(file_menu, self.i18n.t("menu_file"))
 
+        # ── Sincronização ─────────────────────────────────────────────────────
+        sync_menu = wx.Menu()
+        sync_menu.Append(
+            self._ID_RESYNC_ALL,
+            f"{self.i18n.t('menu_resync_all')}\tF5",
+        )
+        self._sync_offline_menu_item = sync_menu.AppendCheckItem(
+            self._ID_OFFLINE_MENU,
+            f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O",
+        )
+        self._sync_offline_menu_item.Check(bool(self.offline_mode))
+        menubar.Append(sync_menu, self.i18n.t("menu_sync"))
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -651,6 +680,7 @@ class MainWindow(wx.Frame):
         )
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_FORCE_UPDATE, self.i18n.t("menu_force_update"))
+        help_menu.Append(self._ID_FORCE_REINSTALL_ZIP, self.i18n.t("menu_force_reinstall_zip"))
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_ABOUT, self.i18n.t("menu_about"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
@@ -660,8 +690,11 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
         self.Bind(wx.EVT_MENU, self._on_disconnect,    id=self._ID_DISCONNECT)
         self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
+        self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
+        self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
+        self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _refresh_menubar(self):
@@ -683,14 +716,24 @@ class MainWindow(wx.Frame):
         file_menu.FindItemById(self._ID_EXIT).SetItemLabel(
             f"{self.i18n.t('menu_exit')}\tCtrl+Alt+Shift+Q"
         )
-        mb.SetMenuLabel(1, self.i18n.t("menu_help"))
-        mb.GetMenu(1).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
+        mb.SetMenuLabel(1, self.i18n.t("menu_sync"))
+        mb.GetMenu(1).FindItemById(self._ID_RESYNC_ALL).SetItemLabel(
+            f"{self.i18n.t('menu_resync_all')}\tF5"
+        )
+        mb.GetMenu(1).FindItemById(self._ID_OFFLINE_MENU).SetItemLabel(
+            f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O"
+        )
+        mb.SetMenuLabel(2, self.i18n.t("menu_help"))
+        mb.GetMenu(2).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
             f"{self.i18n.t('menu_shortcuts')}\tF1"
         )
-        mb.GetMenu(1).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
+        mb.GetMenu(2).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
             self.i18n.t("menu_force_update")
         )
-        mb.GetMenu(1).FindItemById(self._ID_ABOUT).SetItemLabel(
+        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
+            self.i18n.t("menu_force_reinstall_zip")
+        )
+        mb.GetMenu(2).FindItemById(self._ID_ABOUT).SetItemLabel(
             self.i18n.t("menu_about")
         )
 
@@ -817,7 +860,7 @@ class MainWindow(wx.Frame):
         deleted = set(self.settings.get("deleted_chats", []))
         unread_chats = sum(
             1 for jid, chat in self.chats.items()
-            if jid not in deleted and int(chat.get("unreadCount") or 0) > 0
+            if jid not in deleted and effective_unread_count(chat) > 0
         )
         if unread_chats:
             title += f" ({unread_chats})"
@@ -839,7 +882,7 @@ class MainWindow(wx.Frame):
 
     def toggle_offline_mode(self):
         """
-        Toggle the user-controlled offline mode (tray menu item).
+        Toggle the user-controlled offline mode (tray menu item / Sincronização menu).
         While offline the outgoing message queue is suspended; disabling it
         wakes the queue so pending messages are sent immediately.
         """
@@ -854,12 +897,84 @@ class MainWindow(wx.Frame):
         self._update_title()
         if getattr(self, "tray_icon", None) is not None and self._window_hidden:
             self.tray_icon.update_tooltip()
+        if getattr(self, "_sync_offline_menu_item", None) is not None:
+            self._sync_offline_menu_item.Check(bool(self.offline_mode))
+
+    def _on_menu_toggle_offline(self, event=None):
+        """Sincronização menu / Ctrl+Alt+Shift+O: toggle offline mode."""
+        self.toggle_offline_mode()
+
+    def _on_menu_resync_all(self, event=None):
+        """Sincronização menu / F5: wipe all local chat/message state and
+        force a full resync, exactly as if pairing for the first time."""
+        if getattr(self, "_initial_sync_running", False):
+            # Avoid corrupting state with two syncs writing to self.chats/db
+            # at the same time.
+            return
+        self.output(self.i18n.t("resyncing_all_announcement"), interrupt=True)
+        threading.Thread(target=self._resync_all_worker, daemon=True).start()
+
+    def _resync_all_worker(self):
+        """Background worker for _on_menu_resync_all(). See that method."""
+        ui_ready = threading.Event()
+
+        def _prepare_ui():
+            try:
+                panel = self.conversations_panel
+                panel._stop_audio()
+                panel.close_conversation()
+                panel.chats_list = []
+                panel.chat_names = []
+                panel._all_chats_list = []
+                panel._all_chat_names = []
+                panel._displayed_jids = None
+                panel.conversations_list.DeleteAllItems()
+                if hasattr(self, "archived_conversations_panel"):
+                    ap = self.archived_conversations_panel
+                    ap.chats_list = []
+                    ap.chat_names = []
+                    ap._all_chats_list = []
+                    ap._all_chat_names = []
+                    ap._displayed_jids = None
+                    ap.conversations_list.DeleteAllItems()
+            finally:
+                ui_ready.set()
+
+        wx.CallAfter(_prepare_ui)
+        ui_ready.wait(timeout=5)
+
+        # Wipe the local database and downloaded media/voice-message caches.
+        self._sync_completed = False
+        self.clear_local_data()
+        try:
+            media_failed_path = data_path("media_failed.json")
+            if os.path.isfile(media_failed_path):
+                os.remove(media_failed_path)
+        except Exception as exc:
+            logging.warning("[resync_all] failed to remove media_failed.json: %s", exc)
+        self._media_failed_ids = set()
+
+        # Resync from scratch, exactly like a fresh pairing.
+        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+        self.sync_thread.start()
 
     def _on_force_update(self, event):
         if self._update_checker is None:
             self._start_update_checker(force=True)
         else:
             self._update_checker.force_check()
+
+    def _on_force_reinstall_zip(self, event):
+        """
+        Help > Force Reinstall from ZIP: always downloads and reinstalls the
+        latest GitHub release's ZIP, regardless of whether it's actually
+        newer than the running version — unlike _on_force_update(), which
+        only checks and installs when a newer version exists.
+        """
+        if self._update_checker is None:
+            from updater import UpdateChecker
+            self._update_checker = UpdateChecker(self)
+        self._update_checker.force_reinstall()
 
     # ── Auto-updater ──────────────────────────────────────────────────────────
 
@@ -1120,6 +1235,94 @@ class MainWindow(wx.Frame):
         if not remote_jid:
             return
 
+        # ── Guard against self-chat multi-device-sync artifacts ─────────────
+        # WPPConnect/Baileys occasionally reports one of our own sends (seen
+        # with self-chat text, audio and documents) tagged with an identity
+        # that isn't our real phone JID, in one of two shapes:
+        #
+        #  (a) "participant" (the actual sender/author, per wa-js semantics)
+        #      has the same digits as "remoteJid" (the chat). For a real
+        #      GROUP, remoteJid is the group's own independently-allocated
+        #      ID, never equal to any participant's JID — so this overlap
+        #      alone proves it's not a real group, regardless of whatever
+        #      fromMe flag WPPConnect attached to the sync echo (observed:
+        #      it can arrive as fromMe=False, producing a bogus "new message
+        #      from an unnamed participant" notification). For a bare,
+        #      not-yet-resolved @lid or @s.whatsapp.net remoteJid, the same
+        #      overlap is only unambiguous when fromMe is already True —
+        #      for a real 1:1 chat, an incoming (fromMe=False) message's
+        #      participant legitimately mirrors remoteJid (the sender IS
+        #      the chat), so that combination must NOT be redirected.
+        #
+        #  (b) remoteJid is suffixed "@g.us" but its digits are simply our
+        #      own phone number (with the Brazilian 9th-digit variant) — no
+        #      real group JID is ever shaped like a plain phone number.
+        #
+        # Either shape otherwise spawns an unnamed phantom "group"/duplicate
+        # chat that (1) duplicates a message already stored under "Eu" and
+        # (2) can't be cleanly identified/deleted afterwards. Redirect to
+        # the real self-chat, and opportunistically learn my_lid from case
+        # (a) so later messages resolve immediately via _is_self_jid()
+        # without waiting on resolve_self_lid()'s async API round-trip.
+        participant_raw = key.get("participant") or ""
+        remote_digits = remote_jid.split("@", 1)[0]
+        part_digits = participant_raw.split("@", 1)[0] if participant_raw else ""
+        # Normalize before using as a redirect target below — my_jid can be
+        # in raw "@c.us" form early in a session (set directly from the
+        # host-device API response, before resolve_self_lid() gets a chance
+        # to normalize it), and redirecting to it as-is created yet another
+        # duplicate "Eu" chat under @c.us instead of the canonical @s.whatsapp.net one.
+        my_jid = self._normalize_jid(getattr(self, "my_jid", ""))
+        my_lid = getattr(self, "my_lid", "")
+        is_group_jid = remote_jid.endswith("@g.us")
+
+        # A fromMe message's own "participant" field always identifies us —
+        # wa-js only populates it to tag the sender within a group, and the
+        # sender of our own outgoing message is always us. Learn my_lid from
+        # this far more common signal (any ordinary group message we send),
+        # not just the rarer self-referential artifacts checked below, so
+        # _is_self_jid()/self_reference_label() resolve correctly (e.g. for
+        # quoted-reply headers) from the first group message sent this
+        # session — without waiting on resolve_self_lid()'s async API call,
+        # which otherwise left _get_participant_name() falling through to a
+        # saved contact name (e.g. a self-addressed contact literally named
+        # "Eu") instead of honouring the "Como se referir a mim?" setting.
+        if from_me and participant_raw.endswith("@lid") and my_lid != participant_raw:
+            self.my_lid = my_lid = participant_raw
+            if my_jid:
+                self.register_jid_mapping(participant_raw, my_jid)
+
+        digits_self_referential = bool(part_digits and remote_digits == part_digits)
+        is_self_referential = digits_self_referential and (is_group_jid or from_me)
+        is_self_phone_group = bool(
+            is_group_jid and my_jid
+            and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0])
+        )
+
+        if is_self_referential or is_self_phone_group:
+            from_me = True
+            if my_jid:
+                remote_jid = my_jid
+            elif my_lid:
+                remote_jid = my_lid
+            else:
+                remote_jid = participant_raw or remote_jid
+        elif (
+            my_jid and remote_jid != my_jid
+            and remote_jid.endswith("@s.whatsapp.net")
+            and self._is_self_jid(remote_jid)
+        ):
+            # Plain self-chat message, no group/participant artifact involved
+            # — just WhatsApp reporting our own number in the "other" digit
+            # variant for this particular event (with vs. without the
+            # Brazilian 9th digit). _is_self_jid() already tolerates that
+            # when deciding it's self, but without canonicalizing remote_jid
+            # here too, each variant kept its own separate chat entry —
+            # e.g. sending a photo to yourself as a document created one
+            # "Eu" chat for the (9-digit) document echo and a second "Eu"
+            # chat for the (8-digit) sync-artifact echo of the same send.
+            remote_jid = my_jid
+
         # Learn/update presence pushName map from incoming message
         if not from_me:
             sender_jid = key.get("participant") or key.get("remoteJid", "")
@@ -1192,6 +1395,11 @@ class MainWindow(wx.Frame):
                     "currentPage": 1,
                 }},
             }
+            if remote_jid.endswith("@g.us"):
+                # Unlike chats created by get_remote_chats() at sync time, a
+                # group first seen via a live socket event has no name yet —
+                # without this it stays "unnamed" until the next full sync.
+                self._resolve_group_name_async(remote_jid)
 
         chat = self.chats[remote_jid]
 
@@ -1202,17 +1410,52 @@ class MainWindow(wx.Frame):
                 .setdefault("records", [])
         )
         if from_me:
+            # Match the echo to the pending virtual message it actually
+            # confirms, not just "whichever pending message we saw first".
+            # When two sends are in flight at once (e.g. a text message
+            # still awaiting its HTTP response while a voice message is
+            # fired off right after), the previous "first pending" pick
+            # would happily hand a text message the real ID of an unrelated
+            # audio message (and vice versa) — corrupting both: the text
+            # message freezes with no status updates (WhatsApp's status
+            # events for its real ID never find a matching record), the
+            # audio message's real ID collides with another entry's, its
+            # sent sound fires for the wrong message, and the recording
+            # file gets renamed onto the wrong ID so playback later loads
+            # someone else's audio. Restrict candidates to pending messages
+            # of the same type so unrelated messages can no longer swap IDs.
+            incoming_type = msg.get("messageType", "")
+            _text_types = ("conversation", "extendedTextMessage")
             pending_msg = None
             for r in records:
-                if r.get("_local_pending"):
-                    pending_msg = r
-                    break
+                if not r.get("_local_pending"):
+                    continue
+                r_type = r.get("messageType", "")
+                if incoming_type in _text_types:
+                    if r_type not in _text_types:
+                        continue
+                elif r_type != incoming_type:
+                    continue
+                pending_msg = r
+                break
             if pending_msg:
                 # Found the corresponding pending message: update it and skip appending a duplicate
                 pending_msg["_local_pending"] = False
                 local_id = pending_msg.get("_local_id")
                 pending_msg["key"]["id"] = msg_id
                 pending_msg["messageTimestamp"] = msg.get("messageTimestamp", pending_msg["messageTimestamp"])
+                # The virtual message built before sending never carries a
+                # "participant" (it doesn't know its own WhatsApp identity),
+                # but our own group messages are indexed in WPPConnect's
+                # store under participant=our own JID (see _serialize_msg_id).
+                # Without backfilling it from the real echo here, replying-
+                # to/quoting a message sent seconds ago falls back to a
+                # guessed participant (my_jid) that doesn't match what the
+                # live store actually indexed it under whenever the account
+                # is on @lid — "Message ... not found" — until a later full
+                # resync overwrites this record with the API's copy anyway.
+                if key.get("participant"):
+                    pending_msg["key"]["participant"] = key.get("participant")
                 
                 # Remove any existing record with the same real ID (e.g. from API
                 # sync) *including* pending_msg itself (its key was just updated
@@ -1958,9 +2201,18 @@ class MainWindow(wx.Frame):
                 pass
 
         proc = getattr(self, "wpp_process", None)
+        pid = None
         if proc and proc.poll() is None:
+            pid = proc.pid
+        elif proc is None:
+            # This session never spawned WPPConnect itself — it found the port
+            # already open (e.g. a previous session was force-quit and its
+            # node.exe never got killed). Locate the orphaned process by the
+            # port it's listening on so it doesn't leak across restarts.
+            pid = self._find_pid_listening_on_port(self.wpp_port)
+
+        if pid:
             try:
-                pid = proc.pid
                 import sys
                 if sys.platform == "win32":
                     subprocess.run(
@@ -1969,25 +2221,72 @@ class MainWindow(wx.Frame):
                         stderr=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
                     )
-                else:
+                elif proc is not None:
                     proc.terminate()
             except Exception:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+
+    def _find_pid_listening_on_port(self, port):
+        """Return the PID of the node.exe process listening on *port* (Windows only).
+
+        Used when this session reused an already-running WPPConnect Server
+        left behind by a previous session that was force-quit, so we still
+        have a way to terminate it instead of leaving it running forever.
+        """
+        import sys
+        if sys.platform != "win32":
+            return None
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        try:
+            out = subprocess.check_output(
+                ["netstat", "-ano", "-p", "TCP"],
+                creationflags=no_window,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return None
+
+        port_suffix = f":{port}"
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0] != "TCP" or parts[3] != "LISTENING":
+                continue
+            if not parts[1].endswith(port_suffix):
+                continue
+            try:
+                candidate_pid = int(parts[-1])
+            except ValueError:
+                continue
+            try:
+                tasklist_out = subprocess.check_output(
+                    ["tasklist", "/FI", f"PID eq {candidate_pid}", "/FO", "CSV", "/NH"],
+                    creationflags=no_window,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                continue
+            if "node.exe" in tasklist_out.lower():
+                return candidate_pid
+        return None
 
     def ensure_wpp_running(self):
         """
         Start the local WPPConnect Server if it is not already listening.
 
-        Normal mode   — shows a progress dialog while waiting (up to 3 min).
+        Normal mode   — shows a progress dialog while waiting (up to 5 min).
         Background mode — polls silently; exits with code 1 on timeout.
 
-        Originally:
-        wait up to 3 minutes for it to become ready via a progress dialog.
         On first launch the database initialisation and migrations can take
-        60-90 s; subsequent starts are much faster.
+        60-90 s; subsequent starts are much faster.  On slower machines (HDD,
+        antivirus scanning, or a first-run Puppeteer/Chrome download in
+        start.js) startup can take well over 2 minutes, hence the 5-minute
+        budget below.
         """
         if self._is_wpp_running():
             return  # Already up (e.g. left running from a previous session)
@@ -2022,7 +2321,7 @@ class MainWindow(wx.Frame):
 
         if self.background_mode:
             # Silent wait — no dialog, no speech.  Timeout → exit code 1.
-            deadline = time.time() + 120
+            deadline = time.time() + 300
             while time.time() < deadline:
                 if self._is_wpp_running():
                     return
@@ -2701,6 +3000,21 @@ class MainWindow(wx.Frame):
             return  # UI never initialized; bail out silently
 
         self._initial_sync_running = True
+        try:
+            self._run_sync()
+        except Exception:
+            logging.exception("[start_sync] Unhandled error during sync")
+        finally:
+            # Always clear the tray/status text and the running flag, even if
+            # something above raised — otherwise an error mid-sync leaves the
+            # tray stuck on "preparing to sync" / "synchronizing" forever,
+            # since none of those status calls are inside a try/finally and a
+            # thread that dies mid-sync never reaches its own clear-status line.
+            self._initial_sync_running = False
+            if not self.background_mode:
+                wx.CallAfter(self._set_status, "")
+
+    def _run_sync(self):
         logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
         self.check_wa_connection_http()
         waited = 0
@@ -2762,6 +3076,16 @@ class MainWindow(wx.Frame):
         # fully resolved and merged.
         self.chats = self.deduplicate_chats(self.chats)
 
+        # Re-resolve group names that were still empty right after pairing.
+        # WPPConnect doesn't have every group's metadata (subject) cached
+        # immediately after a fresh pairing — group-info lookups made during
+        # the initial fast chat-list fetch can come back empty. By now the
+        # (much slower) per-chat message sync above has given WPPConnect time
+        # to receive that metadata from WhatsApp, so retry once here before
+        # the chat list is shown, instead of leaving the group stuck on the
+        # generic "unknown group" placeholder for the rest of the session.
+        self._resolve_missing_group_names()
+
         # Re-fetch contacts now that sync_remote_chats() has finished.  The
         # message sync takes long enough that by this point the WPPConnect
         # has received all contacts from WhatsApp — solving the first-pairing
@@ -2810,7 +3134,7 @@ class MainWindow(wx.Frame):
                     self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
                     self.sync_thread.start()
             threading.Thread(target=_retry_sync, daemon=True).start()
-        self._initial_sync_running = False
+        # _initial_sync_running is reset by start_sync()'s finally block.
 
     def wait_messages_set(self):
         if not self.background_mode:
@@ -3022,11 +3346,12 @@ class MainWindow(wx.Frame):
                         "[get_remote_chats] API error %s (attempt %d/3): %s",
                         response.status_code, attempt + 1, response.text[:200],
                     )
+                    last_error = f"HTTP {response.status_code}"
                     if attempt < 2:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
                         continue
-                    return chats
+                    break
                 try:
                     body = response.json()
                 except Exception as json_err:
@@ -3034,11 +3359,12 @@ class MainWindow(wx.Frame):
                         "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
                         attempt + 1, json_err, response.text[:200],
                     )
+                    last_error = json_err
                     if attempt < 2:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
                         continue
-                    return chats
+                    break
 
                 # list-chats returns the array directly; tolerate the legacy
                 # {"response": [...]} envelope too in case of a mixed deployment.
@@ -3153,6 +3479,24 @@ class MainWindow(wx.Frame):
                             continue
                     if jid in cleared:
                         continue
+                    # WPPConnect's list-chats returns every entry in WhatsApp's
+                    # internal ChatStore, which includes 1:1 "phantom" chats the
+                    # user never actually messaged (e.g. address-book contacts
+                    # WhatsApp matched but no conversation ever started with).
+                    # Real chats always carry a last-activity timestamp ("t"),
+                    # a last message, or unread messages; entries with none of
+                    # these are not real conversations and would otherwise
+                    # pollute the chat list and the forward-message picker.
+                    # Groups are exempt: a freshly-joined group can legitimately
+                    # have none of these yet.
+                    if jid not in chats and not jid.endswith("@g.us"):
+                        has_activity = (
+                            bool(chat.get("t"))
+                            or bool(chat.get("lastMessage"))
+                            or bool(chat.get("unreadCount"))
+                        )
+                        if not has_activity:
+                            continue
                     if jid not in chats:
                         if "messages" not in chat:
                             chat["messages"] = {"messages": {"records": []}}
@@ -3208,6 +3552,35 @@ class MainWindow(wx.Frame):
                             pinned_chats.append(jid)
                     elif jid in pinned_chats:
                         pinned_chats.remove(jid)
+
+                # Retroactively prune 1:1 phantom chats that slipped into the
+                # local cache before this filter existed: no local messages,
+                # no server-reported activity, and not deliberately pinned or
+                # muted by the user.
+                response_jids = {
+                    self._normalize_jid(c.get("remoteJid", ""))
+                    for c in response_data if isinstance(c, dict)
+                }
+                for stale_jid in list(chats.keys()):
+                    if stale_jid.endswith("@g.us"):
+                        continue
+                    if stale_jid not in response_jids:
+                        continue
+                    if stale_jid in pinned_chats or stale_jid in muted_chats:
+                        continue
+                    stale_chat = chats[stale_jid]
+                    has_messages = bool(
+                        stale_chat.get("messages", {}).get("messages", {}).get("records")
+                    )
+                    if has_messages:
+                        continue
+                    has_activity = (
+                        bool(stale_chat.get("t"))
+                        or bool(stale_chat.get("lastMessage"))
+                        or bool(stale_chat.get("unreadCount"))
+                    )
+                    if not has_activity:
+                        del chats[stale_jid]
 
                 self.save_data(chats, self.contacts)
                 return chats
@@ -3279,6 +3652,93 @@ class MainWindow(wx.Frame):
             for r in src_records:
                 if r.get("key", {}).get("id") not in dst_ids:
                     dst_records.append(r)
+
+        # ── Pass 0: merge phantom "self-referential" chats ────────────────────
+        # WPPConnect/Baileys occasionally reports a self-chat send (seen with
+        # text, audio and documents) tagged with an identity that isn't our
+        # real phone JID — either a group whose JID is built from a
+        # participant's own @lid number with "@g.us" swapped in for "@lid",
+        # a group JID that's simply our own phone number, or the bare,
+        # not-yet-resolved @lid itself left over from before
+        # resolve_self_lid() completed (see on_new_message() for the same
+        # detection applied to live traffic). No real WhatsApp group JID is
+        # ever numerically identical to one of its own participants' JIDs or
+        # to a plain phone number — group IDs come from an entirely
+        # different, longer ID space — so either digit overlap alone
+        # identifies the artifact. Merge its records into the real
+        # self-chat and drop it, instead of leaving an unnamed phantom
+        # chat that duplicates messages already stored under "Eu" and
+        # can't be reliably deleted (any other chat cleared out by the same
+        # buggy delete would be a side effect of this same bogus entry, not
+        # a separate bug).
+        my_jid = getattr(self, "my_jid", "")
+        if my_jid:
+            my_jid_digits = my_jid.split("@", 1)[0]
+            candidate_jids = [
+                j for j in list(chats.keys())
+                if j.endswith("@g.us") or j.endswith("@lid")
+            ]
+            for cand_jid in candidate_jids:
+                cand_chat = chats.get(cand_jid)
+                if cand_chat is None:
+                    continue
+                cand_digits = cand_jid.split("@", 1)[0]
+                records = cand_chat.get("messages", {}).get("messages", {}).get("records", [])
+                is_self_referential = any(
+                    r.get("key", {}).get("fromMe")
+                    and r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
+                    for r in records
+                    if r.get("key", {}).get("participant")
+                )
+                is_self_phone_group = (
+                    cand_jid.endswith("@g.us")
+                    and self._phone_digits_equivalent(cand_digits, my_jid_digits)
+                )
+                if not (is_self_referential or is_self_phone_group):
+                    continue
+                if my_jid in chats:
+                    dst_records = (
+                        chats[my_jid]
+                        .setdefault("messages", {})
+                        .setdefault("messages", {})
+                        .setdefault("records", [])
+                    )
+                    _merge_records(dst_records, records)
+                else:
+                    cand_chat["remoteJid"] = my_jid
+                    chats[my_jid] = cand_chat
+                del chats[cand_jid]
+
+        # ── Pass 0b: merge duplicate self-chat digit variants ────────────────
+        # Even without any group/participant artifact, WhatsApp sometimes
+        # reports our own self-chat messages under the "other" Brazilian
+        # 9th-digit variant of our number for a given event (the matching
+        # normalisation for live traffic is in on_new_message()) — e.g.
+        # sending a photo to yourself as a document created one "Eu" chat
+        # for the real document echo and a second "Eu" chat, under the
+        # other digit variant, for a sync-artifact echo of the same send.
+        # Merge any such leftover duplicate into the canonical my_jid entry.
+        if my_jid:
+            for other_jid in [
+                j for j in list(chats.keys())
+                if j != my_jid and j.endswith("@s.whatsapp.net") and self._is_self_jid(j)
+            ]:
+                other_chat = chats.get(other_jid)
+                if other_chat is None:
+                    continue
+                records = other_chat.get("messages", {}).get("messages", {}).get("records", [])
+                if my_jid in chats:
+                    dst_records = (
+                        chats[my_jid]
+                        .setdefault("messages", {})
+                        .setdefault("messages", {})
+                        .setdefault("records", [])
+                    )
+                    _merge_records(dst_records, records)
+                else:
+                    other_chat["remoteJid"] = my_jid
+                    chats[my_jid] = other_chat
+                del chats[other_jid]
 
         # ── Pass 1: normalise @c.us → @s.whatsapp.net ────────────────────────
         cus_jids = [j for j in list(chats.keys()) if j.endswith("@c.us")]
@@ -3385,6 +3845,50 @@ class MainWindow(wx.Frame):
             pass
         return ""
 
+    def _resolve_group_name_async(self, jid: str):
+        """Look up a newly-seen group's name in the background.
+
+        _fill_group_name() does a blocking HTTP request, so this must not run
+        on the wx main thread (on_new_message is called via wx.CallAfter).
+        """
+        def _worker():
+            name = self._fill_group_name(jid)
+            if not name:
+                return
+            chat = self.chats.get(jid)
+            if chat is None or (chat.get("name") or chat.get("subject") or "").strip():
+                return
+            chat["name"] = name
+            self._schedule_save(dirty_jid=jid)
+            wx.CallAfter(self._schedule_set_chats)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _resolve_missing_group_names(self):
+        """Retry group-info lookups for groups still unnamed after sync.
+
+        Runs on the background sync thread. Uses a few parallel workers so a
+        large number of unresolved groups doesn't add much wall-clock time to
+        the sync.
+        """
+        unresolved = [
+            jid for jid, chat in self.chats.items()
+            if jid.endswith("@g.us") and not (chat.get("name") or chat.get("subject") or "").strip()
+        ]
+        if not unresolved:
+            return
+        max_workers = min(6, len(unresolved))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(self._fill_group_name, jid): jid for jid in unresolved}
+            for fut in as_completed(futs):
+                jid = futs[fut]
+                try:
+                    name = fut.result()
+                except Exception:
+                    name = ""
+                if name:
+                    self.chats[jid]["name"] = name
+                    self._schedule_save(dirty_jid=jid)
+
     def save_data(self, chats, contacts):
         """Write chat+contact data to SQLite via DatabaseBridge.
 
@@ -3466,10 +3970,17 @@ class MainWindow(wx.Frame):
         contacts_dirty :
             Set to True to also flush self.contacts to the contacts table.
         """
+        if not hasattr(self, "_dirty_jids_for_save"):
+            self._dirty_jids_for_save = set()
         if dirty_jid:
-            if not hasattr(self, "_dirty_jids_for_save"):
-                self._dirty_jids_for_save = set()
             self._dirty_jids_for_save.add(dirty_jid)
+        else:
+            # No specific JID given — the caller wants the full chat set
+            # persisted (see docstring). _do_save() only writes JIDs found
+            # in _dirty_jids_for_save, so without this the "save everything"
+            # call was silently a no-op (e.g. resolved group names and
+            # mark-as-unread never reached disk).
+            self._dirty_jids_for_save.update(self.chats.keys())
         if contacts_dirty:
             self._contacts_dirty_for_save = True
         with self._save_timer_lock:
@@ -3620,6 +4131,38 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_loop, daemon=True).start()
 
+    @staticmethod
+    def _phone_digits_equivalent(a: str, b: str) -> bool:
+        """Compare two bare digit strings, tolerating the Brazilian 9th-digit
+        variant (55DDD9XXXXXXXX vs 55DDDXXXXXXXX) so a self/contact match
+        isn't missed just because one side carries the extra digit.
+        """
+        if a == b:
+            return True
+        if a.startswith("55") and b.startswith("55"):
+            if len(a) == 13 and len(b) == 12 and a[4] == "9":
+                return a[:4] + a[5:] == b
+            if len(b) == 13 and len(a) == 12 and b[4] == "9":
+                return b[:4] + b[5:] == a
+        return False
+
+    def self_reference_label(self) -> str:
+        """Return the word used for the user's own messages/replies in the
+        messages list ("Eu"/"Você"/a custom word), per the "Como se referir
+        a mim?" setting. Does not affect the self-chat's own name (still
+        always self_chat_name, "Eu (mensagens para mim)") — only the sender
+        label shown next to your own messages and quoted-reply headers.
+        """
+        ui = self.settings.get("user_interface", {})
+        mode = ui.get("self_reference_mode", "eu")
+        if mode == "voce":
+            return self.i18n.t("ui_self_reference_voce")
+        if mode == "custom":
+            word = (ui.get("self_reference_custom_word") or "").strip()
+            if word:
+                return word
+        return self.i18n.t("sender_you")
+
     def _is_self_jid(self, jid: str) -> bool:
         """Return True if jid refers to the user's own WhatsApp account.
         Bridges @lid JIDs via cache and strips Baileys device suffixes (':N')
@@ -3635,7 +4178,7 @@ class MainWindow(wx.Frame):
             compare = getattr(self, "_lid_to_phone", {}).get(jid, jid)
         def _phone_part(j: str) -> str:
             return j.rsplit("@", 1)[0].split(":")[0]
-        if _phone_part(compare) == _phone_part(my_jid):
+        if self._phone_digits_equivalent(_phone_part(compare), _phone_part(my_jid)):
             return True
         my_lid = getattr(self, "my_lid", "")
         if my_lid and _phone_part(compare) == _phone_part(my_lid):
@@ -3835,15 +4378,18 @@ class MainWindow(wx.Frame):
             self.tray_icon.update_tooltip()
 
     def set_chats(self):
-        if getattr(self, "_media_sync_running", False):
-            return
         self._build_lid_to_phone_cache()
         self._apply_chat_lists(*self._compute_chat_lists())
 
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
-        if getattr(self, "_media_sync_running", False):
+        # Don't re-render the chat list from a stray WebSocket event (unread
+        # count, archive flag, contact name, ...) while the initial sync is
+        # still running — it would show partially-resolved names/placeholders
+        # for chats that haven't synced yet. start_sync() already triggers the
+        # real renders once sync completes.
+        if not getattr(self, "_sync_completed", False) and getattr(self, "_initial_sync_running", False):
             return
         if getattr(self, "_set_chats_pending", False):
             return
@@ -3853,8 +4399,6 @@ class MainWindow(wx.Frame):
     def _do_scheduled_set_chats(self):
         """Run heavy computation in background; apply UI changes on main thread."""
         self._set_chats_pending = False
-        if getattr(self, "_media_sync_running", False):
-            return
         def _bg():
             try:
                 # _build_lid_to_phone_cache() is intentionally NOT called here.
@@ -3908,23 +4452,6 @@ class MainWindow(wx.Frame):
 
         self._lid_to_phone  = cache
         self._phone_to_lid  = {v: k for k, v in cache.items()}
-        # Presence cache: maps JID → {lastKnownPresence, lastSeen}
-        # Populated by WebSocketClient.on_presence_update via wx.CallAfter.
-        if not hasattr(self, "_presence_cache"):
-            self._presence_cache = {}
-        # Maps chat JID → {participant_jid: "composing"|"recording"}
-        if not hasattr(self, "_composing_chats"):
-            self._composing_chats = {}
-        # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
-        if not hasattr(self, "_presence_timers"):
-            self._presence_timers = {}
-        # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned from
-        # presence.update events.  Keyed by phone JID so @lid chats can resolve via
-        # _lid_to_phone lookup.  Loaded from settings and saved whenever updated.
-        if not hasattr(self, "_presence_pushname_map"):
-            self._presence_pushname_map = dict(
-                self.settings.get("presence_pushname_map", {})
-            )
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
@@ -4477,7 +5004,15 @@ class MainWindow(wx.Frame):
             api_ids = {r.get("key", {}).get("id") for r in all_messages}
             extra   = [r for r in local_records
                        if r.get("key", {}).get("id") and
-                          r.get("key", {}).get("id") not in api_ids]
+                          r.get("key", {}).get("id") not in api_ids
+                          # Also apply the clear-chat cutoff here: local_records
+                          # comes from the on-disk cache, which can still hold
+                          # pre-clear messages if the app was closed before the
+                          # debounced save after clear_chat_messages_local() ran.
+                          # Without this check those stale records get merged
+                          # right back in, making "clear chat" undone by the
+                          # next sync / app restart.
+                          and not self._is_cleared_message(remote_jid, r)]
             if extra:
                 all_messages = all_messages + extra
 
@@ -4523,7 +5058,14 @@ class MainWindow(wx.Frame):
         # This replaces the old save_data(self.chats, ...) call which dumped the
         # ENTIRE state (O(N) writes per chat → O(N²) total during bulk sync).
         try:
-            self.db.upsert_chat(remote_jid, chat)
+            # Don't persist a chat whose message fetch failed and which has
+            # no prior local records — that would write the chat-list summary
+            # (including a nonzero unreadCount) with zero messages attached,
+            # permanently showing "N unread" with an empty conversation on
+            # every future restart. Leave it unsaved so the next full sync
+            # retries it from scratch instead.
+            if api_ok or has_records:
+                self.db.upsert_chat(remote_jid, chat)
             if all_messages:
                 self.db.insert_messages_batch(remote_jid, all_messages)
         except Exception as exc:
@@ -4535,7 +5077,14 @@ class MainWindow(wx.Frame):
     # loop for every expired URL, which starves the API thread pool and eventually
     # breaks sends.  Never request media older than this threshold.
     _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
-    _MEDIA_SYNC_WORKERS    = 6               # parallel workers during bulk sync
+    _MEDIA_SYNC_WORKERS    = 3               # parallel workers during bulk sync — kept
+                                              # low because WPPConnect proxies every
+                                              # request through a single Puppeteer/Chrome
+                                              # automation session; too many concurrent
+                                              # downloads were starving unrelated requests
+                                              # (send-seen, contact lookups) into sporadic
+                                              # "session is not active" / "chat not found"
+                                              # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 20              # seconds per request during bulk sync
 
     def _load_media_failed_ids(self) -> set:
@@ -4626,44 +5175,6 @@ class MainWindow(wx.Frame):
         with open(media_path, "wb") as f:
             f.write(encrypted)
 
-    def _clean_quoted(self, quoted: dict) -> dict:
-        """Return a minimal quoted dict the WPPConnect DTO accepts.
-
-        Only ``key`` is sent.  The WPPConnect will fetch the full message
-        content from its internal Baileys message store using
-        ``getMessage(key, true)``.  This avoids serialising binary fields
-        (``jpegThumbnail``, ``mediaKey``, ``fileEncSha256``, …) that arrive
-        from Socket.IO as Python ``bytes`` objects and cannot be JSON-encoded.
-
-        JIDs are normalised before sending:
-          - @c.us  → @s.whatsapp.net  (legacy format)
-          - @lid   → @s.whatsapp.net  when the reverse cache knows the mapping
-        """
-        if not quoted or not isinstance(quoted, dict):
-            return None
-        key_raw = quoted.get("key")
-        if not key_raw or not isinstance(key_raw, dict):
-            return None
-        _ALLOWED = {"id", "remoteJid", "fromMe", "participant"}
-        clean_key = {k: v for k, v in key_raw.items() if k in _ALLOWED}
-        if not clean_key.get("id"):
-            return None
-
-        # Normalise JIDs so the API always receives @s.whatsapp.net format.
-        lid_to_phone = getattr(self, "_lid_to_phone", {})
-        for field in ("remoteJid", "participant"):
-            jid = clean_key.get(field, "")
-            if not jid:
-                continue
-            jid = self._normalize_jid(jid)          # @c.us → @s.whatsapp.net
-            if jid.endswith("@lid"):
-                phone = lid_to_phone.get(jid, "")
-                if phone:
-                    jid = phone
-            clean_key[field] = jid
-
-        return {"key": clean_key}
-
     def _check_wa_connection_closed(self, response):
         """If the WPPConnect returned a 'Connection Closed' error, mark the
         WhatsApp connection as down so the MessageQueue pauses retrying until
@@ -4679,78 +5190,18 @@ class MainWindow(wx.Frame):
 
     def _serialize_quoted_id(self, quoted: dict) -> str:
         """Serialize a quoted message key into the format expected by WPPConnect.
-        For groups, this correctly appends the participant's JID."""
-        if not quoted:
-            return None
-        _cq = self._clean_quoted(quoted)
-        if not _cq or not _cq.get("key", {}).get("id"):
-            return None
-        
-        quoted_id = _cq.get("key", {}).get("id")
-        
-        # If the ID already has underscores, keep it but ensure standard domains are corrected
-        if "_" in quoted_id:
-            if "@s.whatsapp.net" in quoted_id:
-                quoted_id = quoted_id.replace("@s.whatsapp.net", "@c.us")
-            return quoted_id
 
-        from_me = _cq.get("key", {}).get("fromMe", False)
-        from_me_str = "true" if from_me else "false"
-        
-        # Determine the correct remoteJid for WPPConnect
-        raw_key = quoted.get("key", {}) if isinstance(quoted, dict) else {}
-        raw_remote_jid = raw_key.get("remoteJid", "")
-        
-        if raw_remote_jid:
-            if raw_remote_jid.endswith("@lid"):
-                # Resolve @lid to phone JID for WPPConnect compatibility
-                phone_jid = getattr(self, "_lid_to_phone", {}).get(raw_remote_jid, "")
-                if phone_jid:
-                    quoted_remote_jid = phone_jid.replace("@s.whatsapp.net", "@c.us")
-                else:
-                    quoted_remote_jid = raw_remote_jid
-            else:
-                norm_remote_jid = self._normalize_jid(raw_remote_jid)
-                phone_to_lid = getattr(self, "_phone_to_lid", {})
-                lid_jid = phone_to_lid.get(norm_remote_jid, "")
-                if lid_jid:
-                    # Actually, WPPConnect prefers phone JID for key serialization.
-                    # Revert to phone JID format.
-                    quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
-                elif norm_remote_jid.endswith("@s.whatsapp.net"):
-                    quoted_remote_jid = norm_remote_jid.replace("@s.whatsapp.net", "@c.us")
-                else:
-                    quoted_remote_jid = norm_remote_jid
-        else:
-            quoted_remote_jid = _cq.get("key", {}).get("remoteJid", "")
-            if quoted_remote_jid.endswith("@s.whatsapp.net"):
-                quoted_remote_jid = quoted_remote_jid.replace("@s.whatsapp.net", "@c.us")
-            
-        serialized_id = f"{from_me_str}_{quoted_remote_jid}_{quoted_id}"
-        
-        # For group chats, WPPConnect requires the participant JID at the end
-        if quoted_remote_jid.endswith("@g.us"):
-            raw_participant = raw_key.get("participant", "") or _cq.get("key", {}).get("participant", "")
-            if not raw_participant and from_me:
-                raw_participant = getattr(self, "my_jid", "")
-            
-            if raw_participant:
-                if raw_participant.endswith("@lid"):
-                    # Resolve participant @lid to phone JID
-                    phone_jid = getattr(self, "_lid_to_phone", {}).get(raw_participant, "")
-                    if phone_jid:
-                        participant = phone_jid.replace("@s.whatsapp.net", "@c.us")
-                    else:
-                        participant = raw_participant
-                else:
-                    norm_participant = self._normalize_jid(raw_participant)
-                    if norm_participant.endswith("@s.whatsapp.net"):
-                        participant = norm_participant.replace("@s.whatsapp.net", "@c.us")
-                    else:
-                        participant = norm_participant
-                serialized_id = f"{serialized_id}_{participant}"
-                
-        return serialized_id
+        Delegates to _serialize_msg_id, which keeps whatever JID variant
+        (@lid or phone) the message was actually keyed under in WPPConnect's
+        internal store — rewriting @lid to phone here makes the lookup miss
+        and the reply fail (same root cause as the media-download bug).
+        """
+        if not quoted or not isinstance(quoted, dict):
+            return None
+        raw_key = quoted.get("key", {})
+        if not isinstance(raw_key, dict) or not raw_key.get("id"):
+            return None
+        return self._serialize_msg_id(raw_key.get("remoteJid", ""), raw_key)
 
     def _canonical_mention_jids(self, mentioned_jids):
         """Return mention JIDs in the phone-number format Baileys/WPPConnect can tag."""
@@ -4819,6 +5270,7 @@ class MainWindow(wx.Frame):
                 "phone": [phone_net],
                 "message": text,
                 "mentioned": mentioned_clean,
+                "isGroup": phone_net.endswith("@g.us"),
                 "options": {
                     "linkPreview": False
                 }
@@ -4834,11 +5286,12 @@ class MainWindow(wx.Frame):
                     "phone": [phone_net],
                     "message": text,
                     "messageId": quoted_id,
+                    "isGroup": phone_net.endswith("@g.us"),
                     "options": {
                         "linkPreview": False
                     }
                 }
-                logging.info("[send_text_message] sending quoted reply via send-reply to %s, quoted messageId=%s", phone_net, quoted_id)
+                logging.debug("[send_text_message] sending quoted reply via send-reply to %s, quoted key.id=%s", phone_net, quoted_id)
             else:
                 phone_net = remote_jid
                 if phone_net.endswith("@s.whatsapp.net"):
@@ -4853,12 +5306,19 @@ class MainWindow(wx.Frame):
                     }
                 }
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            # 25s (not 15s): WPPConnect can take longer to ack under load (e.g.
+            # concurrent media sync). A client-side timeout here is indistinguishable
+            # from a real failure to MessageQueue, which then retries — if the
+            # original request actually went through server-side, that retry sends
+            # a genuine duplicate message to the recipient. A more generous timeout
+            # reduces how often that false-timeout/duplicate-send scenario happens.
+            response = requests.post(url, json=payload, headers=headers, timeout=25)
             if response.status_code not in (200, 201):
                 # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
                 # try sending it as a plain message instead of leaving it pending forever.
                 if quoted_id:
-                    logging.warning("[send_text_message] Quoted send failed (HTTP %s): %s. Retrying without quote...", response.status_code, response.text[:200])
+                    logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote...", response.status_code)
+                    wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     fb_phone = remote_jid
                     if fb_phone.endswith("@s.whatsapp.net"):
@@ -4871,7 +5331,7 @@ class MainWindow(wx.Frame):
                             "linkPreview": False
                         }
                     }
-                    response = requests.post(url, json=payload, headers=headers, timeout=15)
+                    response = requests.post(url, json=payload, headers=headers, timeout=25)
                 
                 if response.status_code not in (200, 201):
                     err = f"HTTP {response.status_code}: {response.text[:300]}"
@@ -4879,8 +5339,6 @@ class MainWindow(wx.Frame):
                     self._check_wa_connection_closed(response)
                     return {"ok": False, "error": err, "retry": False}
             self._wa_connected = True
-            if quoted_id:
-                logging.info("[send_text_message] Reply sent OK (HTTP %s)", response.status_code)
             try:
                 body = response.json()
                 # WPPConnect retorna a resposta dentro de 'response'
@@ -4984,12 +5442,29 @@ class MainWindow(wx.Frame):
         prefix = "true" if from_me else "false"
         chat = (remote_jid or "").replace("@s.whatsapp.net", "@c.us")
         # Group messages always carry the sender's JID in the serialized id,
-        # even for our own messages (fromMe=True).  1-on-1 keys have no participant.
-        participant = (
-            msg_key.get("participant")
-            or (msg_key.get("remoteJidAlt") if not from_me else "")
-            or ""
-        ).replace("@s.whatsapp.net", "@c.us")
+        # even for our own messages (fromMe=True). 1-on-1 keys have no
+        # participant — gate on chat type, since a 1:1 @lid message's key
+        # often still carries a (same-JID) remoteJidAlt, which would
+        # otherwise get wrongly appended as a 4th segment and break the
+        # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
+        participant = ""
+        if chat.endswith("@g.us"):
+            participant = (
+                msg_key.get("participant")
+                or (msg_key.get("remoteJidAlt") if not from_me else "")
+                # Our own sent messages usually carry no "participant" field at
+                # all (it's populated for messages received from others in the
+                # group) — but WPPConnect's store still keys OUR group messages
+                # by our own JID as the 4th segment, so fall back to it here.
+                # Without this, quoting/reacting to/deleting our own group
+                # messages built a 3-part id, the lookup missed, and callers
+                # silently fell back to a non-quoted plain message. Prefer
+                # my_lid over my_jid: accounts that use @lid addressing are
+                # indexed under that identity even for their own group
+                # messages, not under the phone-number JID.
+                or ((getattr(self, "my_lid", "") or getattr(self, "my_jid", "")) if from_me else "")
+                or ""
+            ).replace("@s.whatsapp.net", "@c.us")
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
@@ -5185,51 +5660,99 @@ class MainWindow(wx.Frame):
                 )
         return action_label
 
-    def _refresh_presence_label_in_list(self, chat_jid_norm: str):
-        """Update only the chat-list row for chat_jid_norm via SetItem().
+    def _refresh_chat_row_in_list(self, chat_jid_norm: str):
+        """Update only the chat-list row for chat_jid_norm via SetItem(), in
+        whichever panel (main or archived) currently displays it.
 
-        Replaces the full _schedule_set_chats() rebuild for presence-only changes.
-        Using SetItem() on a single row prevents NVDA from re-reading the entire
-        list and stuttering in TTS echo while the user is typing a message.
+        Replaces the full _schedule_set_chats() rebuild for changes that don't
+        affect list membership/order (presence, unread count going to 0).
+        SetItem() on a single row prevents NVDA from re-reading the entire
+        list, and applies immediately instead of waiting out the 300ms
+        _schedule_set_chats() debounce.
         """
-        panel = getattr(self, "conversations_panel", None)
-        if panel is None:
-            return
-        lst       = getattr(panel, "conversations_list", None)
-        displayed = getattr(panel, "chats_list", [])
-        names     = getattr(panel, "chat_names", [])
-        if lst is None:
-            return
-        for idx, chat in enumerate(displayed):
-            if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
+        # Title/tray tooltip unread count: cheap (one pass over self.chats),
+        # so recompute it here directly rather than waiting for the next
+        # debounced _apply_chat_lists() rebuild.
+        self._update_title()
+
+        is_group = chat_jid_norm.endswith("@g.us")
+        for panel in (
+            getattr(self, "conversations_panel", None),
+            getattr(self, "archived_conversations_panel", None),
+        ):
+            if panel is None:
                 continue
-            name   = names[idx] if idx < len(names) else ""
-            unread = int(chat.get("unreadCount") or 0)
-            unread_str = (
-                f" {unread} " + (
-                    self.i18n.t("unread_messages") if unread > 1
-                    else self.i18n.t("unread_message")
+            lst       = getattr(panel, "conversations_list", None)
+            displayed = getattr(panel, "chats_list", [])
+            names     = getattr(panel, "chat_names", [])
+            if lst is None:
+                continue
+            for idx, chat in enumerate(displayed):
+                if self._normalize_jid(chat.get("remoteJid", "")) != chat_jid_norm:
+                    continue
+                if idx >= lst.GetItemCount():
+                    # displayed/chats_list (this panel's backing array) has
+                    # drifted ahead of the ListCtrl's actual row count — e.g.
+                    # a debounced full rebuild (_apply_chat_lists) is
+                    # mid-flight on another callback and hasn't inserted this
+                    # many rows yet. There's nothing to patch until that
+                    # rebuild finishes and re-syncs both; the next presence/
+                    # unread event will retry. Falls through to the crash
+                    # this guard exists for otherwise ("invalid item index in
+                    # SetItem").
+                    break
+                unread = effective_unread_count(chat)
+                conv_filter = getattr(panel, '_conv_filter', 'all')
+                if conv_filter == 'unread' and unread == 0:
+                    # No longer belongs in the "unread" filtered view. Remove it
+                    # outright (and keep the backing arrays in sync) immediately
+                    # instead of waiting for the next debounced full rebuild —
+                    # this used to be the only way such a row ever disappeared,
+                    # and letting several of these pile up made the backing
+                    # arrays' indices drift from the ListCtrl's real item count
+                    # (the "Couldn't retrieve information about list control
+                    # item N" crashes).
+                    try:
+                        lst.DeleteItem(idx)
+                    except Exception:
+                        break
+                    del displayed[idx]
+                    if idx < len(names):
+                        del names[idx]
+                    displayed_jids = getattr(panel, '_displayed_jids', None)
+                    if displayed_jids is not None and idx < len(displayed_jids):
+                        del displayed_jids[idx]
+                    break
+                name   = names[idx] if idx < len(names) else ""
+                unread_str = (
+                    f" {unread} " + (
+                        self.i18n.t("unread_messages") if unread > 1
+                        else self.i18n.t("unread_message")
+                    )
+                    if unread > 0 else ""
                 )
-                if unread > 0 else ""
-            )
-            preview   = self._last_msg_preview(chat)
-            item_text = name + unread_str
-            if preview:
-                item_text += f" {preview}"
-            is_group = chat_jid_norm.endswith("@g.us")
-            label = self._presence_label_for_chat(chat_jid_norm, is_group)
-            if label:
-                item_text += f" {label}"
-            # Only touch the row when the visible text actually changes. Presence
-            # bursts (online/offline toggles that don't alter the row) otherwise
-            # rewrote the focused item's text repeatedly, making NVDA announce the
-            # conversation name over and over while the user sat idle on the list.
-            try:
-                if lst.GetItemText(idx, 0) != item_text:
-                    lst.SetItem(idx, 0, item_text)
-            except Exception:
-                lst.SetItem(idx, 0, item_text)
-            break
+                preview   = self._last_msg_preview(chat)
+                item_text = name + unread_str
+                if preview:
+                    item_text += f" {preview}"
+                label = self._presence_label_for_chat(chat_jid_norm, is_group)
+                if label:
+                    item_text += f" {label}"
+                # Only touch the row when the visible text actually changes. Presence
+                # bursts (online/offline toggles that don't alter the row) otherwise
+                # rewrote the focused item's text repeatedly, making NVDA announce the
+                # conversation name over and over while the user sat idle on the list.
+                try:
+                    if lst.GetItemText(idx, 0) != item_text:
+                        lst.SetItem(idx, 0, item_text)
+                except Exception:
+                    # GetItemText/SetItem failing here almost always means idx
+                    # is no longer valid for this ListCtrl (see the item-count
+                    # guard above) — unconditionally retrying SetItem with the
+                    # same idx just raised the exact same wx assertion again,
+                    # uncaught this time, crashing the app instead of no-op'ing.
+                    pass
+                break
 
     def on_presence_update(self, jid: str, presences: dict):
         """
@@ -5316,7 +5839,7 @@ class MainWindow(wx.Frame):
                     def _clear():
                         self._composing_chats.get(cjid, {}).pop(part, None)
                         self._presence_timers.pop((cjid, part), None)
-                        self._refresh_presence_label_in_list(cjid)
+                        self._refresh_chat_row_in_list(cjid)
                     return _clear
                 self._presence_timers[timer_key] = wx.CallLater(
                     10_000, _make_clear(chat_jid_norm, canonical)
@@ -5357,7 +5880,7 @@ class MainWindow(wx.Frame):
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
         if presence_changed:
-            self._refresh_presence_label_in_list(chat_jid_norm)
+            self._refresh_chat_row_in_list(chat_jid_norm)
 
         # Refresh the data-button note for the open conversation
         if panel is None or conv is None:
@@ -5442,48 +5965,7 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        msg_id = _key.get("id", "")
-        if msg_id and (msg_id.startswith("true_") or msg_id.startswith("false_")):
-            if ":" in msg_id:
-                import re
-                msg_id = re.sub(r':\d+', '', msg_id)
-            msg_id = msg_id.replace("@s.whatsapp.net", "@c.us")
-        else:
-            # Extract clean ID if it already has underscores
-            if msg_id and "_" in msg_id:
-                parts = msg_id.split("_")
-                msg_id = parts[2] if len(parts) > 2 else parts[-1]
-
-            if msg_id:
-                from_me = _key.get("fromMe", False)
-                from_me_str = "true" if from_me else "false"
-                remote_jid = _key.get("remoteJid", "")
-                
-                def clean_jid_for_wpp(jid_str):
-                    if not jid_str:
-                        return ""
-                    # Strip device suffix (e.g. 5511941034648:11@s.whatsapp.net -> 5511941034648@s.whatsapp.net)
-                    if ":" in jid_str:
-                        parts = jid_str.split("@")
-                        if len(parts) == 2:
-                            prefix, domain = parts
-                            prefix = prefix.split(":")[0]
-                            jid_str = f"{prefix}@{domain}"
-                    
-                    # Map s.whatsapp.net to c.us
-                    if jid_str.endswith("@s.whatsapp.net"):
-                        jid_str = jid_str.replace("@s.whatsapp.net", "@c.us")
-                    return jid_str
-
-                remote_jid = clean_jid_for_wpp(remote_jid)
-                msg_id = f"{from_me_str}_{remote_jid}_{msg_id}"
-                
-                # For group messages, append the participant JID if present
-                if remote_jid.endswith("@g.us"):
-                    participant = _key.get("participant", "")
-                    if participant:
-                        participant = clean_jid_for_wpp(participant)
-                        msg_id = f"{msg_id}_{participant}"
+        msg_id = self._serialize_msg_id(_key.get("remoteJid", ""), _key)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -5491,11 +5973,23 @@ class MainWindow(wx.Frame):
         }
 
         if progress_callback is None:
-            response = requests.get(url, headers=headers, timeout=timeout)
+            try:
+                response = requests.get(url, headers=headers, timeout=timeout)
+            except MediaExpiredError:
+                raise
+            except Exception as exc:
+                logging.warning(
+                    "[get_base64_from_media] request failed for %s: %s", msg_id, exc,
+                )
+                return ""
             if response.status_code in (403, 410):
                 raise MediaExpiredError(response.status_code)
             if response.status_code in (200, 201):
                 return response.json().get("base64", "")
+            logging.warning(
+                "[get_base64_from_media] HTTP %s fetching media for %s: %s",
+                response.status_code, msg_id, response.text[:200],
+            )
             return ""
 
         # Streaming mode so we can report per-chunk progress
@@ -5504,6 +5998,10 @@ class MainWindow(wx.Frame):
             if response.status_code in (403, 410):
                 raise MediaExpiredError(response.status_code)
             if response.status_code not in (200, 201):
+                logging.warning(
+                    "[get_base64_from_media] HTTP %s fetching media for %s: %s",
+                    response.status_code, msg_id, response.text[:200],
+                )
                 return ""
             total = int(response.headers.get("content-length", 0))
             downloaded = 0
@@ -5522,7 +6020,10 @@ class MainWindow(wx.Frame):
                 return base64.b64encode(b"".join(chunks)).decode("utf-8")
         except MediaExpiredError:
             raise
-        except Exception:
+        except Exception as exc:
+            logging.warning(
+                "[get_base64_from_media] request failed for %s: %s", msg_id, exc,
+            )
             return ""
 
     def fetch_older_messages(self, remote_jid, oldest_msg):
@@ -5622,12 +6123,14 @@ class MainWindow(wx.Frame):
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
         self._schedule_save(dirty_jid=remote_jid)
+        # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
+        # this isn't suppressed while a media sync is running, so the badge
+        # clears right away instead of only after the sync eventually finishes
+        # (previously observed as a 10-20+ second — or longer — delay).
+        wx.CallAfter(self._refresh_chat_row_in_list, self._normalize_jid(remote_jid))
         wx.CallAfter(self._schedule_set_chats)
 
         if unread == 0 and not force:
-            return
-
-        if remote_jid.endswith("@g.us"):
             return
 
         # Resolve @lid to phone JID if necessary for WPPConnect compatibility
@@ -5640,16 +6143,37 @@ class MainWindow(wx.Frame):
         if target_phone.endswith("@s.whatsapp.net"):
             target_phone = target_phone.rsplit("@", 1)[0] + "@c.us"
 
-        def _do_api():
+        def _send_seen(phone: str, is_lid: bool) -> "requests.Response | None":
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
+            if is_lid:
+                payload["isLid"] = True
+            return requests.post(url, json=payload, headers=headers, timeout=10)
+
+        def _do_api():
             try:
-                resp = requests.post(url, json={"phone": target_phone}, headers=headers, timeout=10)
+                resp = _send_seen(target_phone, False)
                 if not resp.ok:
-                    logging.info("[mark_as_read] API response %s for %s (non-critical, marked locally)",
-                                 resp.status_code, target_phone)
+                    logging.warning("[mark_as_read] API response %s for %s: %s",
+                                     resp.status_code, target_phone, resp.text[:200])
+                    # WPPConnect's live session sometimes only has this contact's
+                    # chat loaded under its @lid identity (not @c.us) — "Chat not
+                    # found" in that case leaves the read-receipt never sent to
+                    # WhatsApp, so the server (correctly) keeps reporting it
+                    # unread on every future sync/restart. Retry once with the
+                    # @lid form when we have one and it's a distinct JID.
+                    if "not found" in resp.text.lower():
+                        lid_jid = getattr(self, "_phone_to_lid", {}).get(
+                            self._normalize_jid(remote_jid), ""
+                        )
+                        if lid_jid and lid_jid != target_phone:
+                            resp2 = _send_seen(lid_jid, True)
+                            if not resp2.ok:
+                                logging.warning("[mark_as_read] Retry via @lid also failed %s for %s: %s",
+                                                 resp2.status_code, lid_jid, resp2.text[:200])
             except Exception as exc:
-                logging.debug("[mark_as_read] Request failed for %s: %s", target_phone, exc)
+                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
         threading.Thread(target=_do_api, daemon=True).start()
 
     def mark_conversation_as_unread(self, remote_jid: str):
@@ -6266,7 +6790,7 @@ class MainWindow(wx.Frame):
         try:
             resp = requests.post(
                 url,
-                json={"phone": jid, "value": archive},
+                json={"phone": jid, "value": archive, "isGroup": jid.endswith("@g.us")},
                 headers=headers,
                 timeout=10,
             )
@@ -6318,7 +6842,10 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(url, json={"phone": phone}, headers=headers, timeout=10)
+                r = requests.post(
+                    url, json={"phone": phone, "isGroup": phone.endswith("@g.us")},
+                    headers=headers, timeout=10,
+                )
                 if not r.ok:
                     logging.warning("[delete_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
             except Exception as exc:
@@ -6333,7 +6860,10 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/clear-chat"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                r = requests.post(url, json={"phone": phone}, headers=headers, timeout=10)
+                r = requests.post(
+                    url, json={"phone": phone, "isGroup": phone.endswith("@g.us")},
+                    headers=headers, timeout=10,
+                )
                 if not r.ok:
                     logging.warning("[clear_chat] API error %s for %s: %s", r.status_code, jid, r.text[:200])
             except Exception as exc:
@@ -6341,17 +6871,10 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_api, daemon=True).start()
 
     def _resolve_jid_for_chat_state(self, jid: str) -> str:
-        """Resolve @lid to phone JID and convert to @c.us for WPPConnect chat-state endpoints.
-        If no phone mapping is known for a @lid JID, returns the @lid as-is so WPP
-        can find the chat by its native identifier (LID-paired sessions).
-        """
+        """Resolve @lid to phone JID and convert to @c.us for WPPConnect chat-state endpoints."""
         resolved = jid
         if resolved.endswith("@lid"):
-            phone = getattr(self, "_lid_to_phone", {}).get(resolved, "")
-            if phone:
-                resolved = phone
-            else:
-                return resolved  # keep @lid — WPP will try to match by LID
+            resolved = getattr(self, "_lid_to_phone", {}).get(resolved, resolved)
         return resolved.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
@@ -6547,11 +7070,20 @@ class MainWindow(wx.Frame):
         # when using files= (multipart/form-data with correct boundary).
         headers = {"Authorization": f"Bearer {self.token}"}
         phone_val = remote_jid.rsplit("@", 1)[0] if remote_jid.endswith("@g.us") else remote_jid
+        # Force WPPConnect to send the chosen WhatsApp message type instead of
+        # its mimetype-based "auto-detect", which otherwise sends e.g. an .mp3
+        # picked from the "Document" menu as a playable audio message, or a
+        # .jpg/.png as a photo, regardless of what the user actually selected.
+        _wpp_type = {
+            "image": "image", "video": "video",
+            "audio": "audio", "document": "document",
+        }.get(media_type, "document")
         data = {
             "phone":    [phone_val],
             "filename": filename,
             "caption":  caption,
             "isGroup":  remote_jid.endswith("@g.us"),
+            "type":     _wpp_type,
         }
         if quoted:
             quoted_id = self._serialize_quoted_id(quoted)
@@ -6684,7 +7216,8 @@ class MainWindow(wx.Frame):
         if lid_jid:
             remote_jid = lid_jid
 
-        # Find the message key in records to get participant (needed for groups).
+        # Find the message key in records (_serialize_msg_id falls back to
+        # our own JID as the group participant when it's missing here).
         msg_key = {"id": message_id, "fromMe": True}
         chat = self.chats.get(remote_jid)
         if chat:
@@ -6693,13 +7226,6 @@ class MainWindow(wx.Frame):
                 if r.get("key", {}).get("id") == message_id:
                     msg_key = r.get("key", {})
                     break
-        # Fall back to our own JID as participant for group messages when the
-        # record wasn't found (so _serialize_msg_id can build the correct 4-part ID).
-        if remote_jid.endswith("@g.us") and not msg_key.get("participant"):
-            my_jid = getattr(self, "my_jid", "")
-            if my_jid:
-                msg_key = dict(msg_key)
-                msg_key["participant"] = my_jid
 
         full_id = self._serialize_msg_id(remote_jid, msg_key)
         url = (
@@ -7077,7 +7603,7 @@ class MainWindow(wx.Frame):
         jid      = chat.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
         if from_me:
-            sender_prefix = i18n.t("conv_preview_you") + " "
+            sender_prefix = self.self_reference_label() + ": "
         elif is_group:
             p_key      = last.get("key", {})
             sender_jid = last.get("participant") or p_key.get("participant") or p_key.get("remoteJid", "")
@@ -7109,13 +7635,22 @@ class MainWindow(wx.Frame):
         arch_full_chats = list(getattr(panel, '_all_chats_list', panel.chats_list))
         arch_full_names = list(getattr(panel, '_all_chat_names', panel.chat_names))
         arch_lst = panel.conversations_list
+        arch_filter = getattr(panel, '_conv_filter', 'all')
 
         new_arch_chats: list = []
         new_arch_names: list = []
         new_arch_texts: list = []
         for i, chat in enumerate(arch_full_chats):
+            chat_jid = chat.get("remoteJid", "")
+            unread_count = effective_unread_count(chat)
+            if arch_filter == 'unread' and unread_count == 0:
+                continue
+            if arch_filter == 'groups' and not chat_jid.endswith("@g.us"):
+                continue
+            if arch_filter == 'individual' and chat_jid.endswith("@g.us"):
+                continue
             name = arch_full_names[i] if i < len(arch_full_names) else ""
-            unread = int(chat.get("unreadCount") or 0)
+            unread = unread_count
             unread_str = (
                 f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
                 if unread > 0 else ""
@@ -7131,17 +7666,22 @@ class MainWindow(wx.Frame):
         new_arch_jids = [c.get("remoteJid", "") for c in new_arch_chats]
         _arch_displayed_jids = getattr(panel, '_displayed_jids', None)
 
+        _arch_fast_path_ok = False
         if (
             _arch_displayed_jids is not None
             and _arch_displayed_jids == new_arch_jids
             and arch_lst.GetItemCount() == len(new_arch_jids)
         ):
-            for idx, new_text in enumerate(new_arch_texts):
-                try:
+            try:
+                for idx, new_text in enumerate(new_arch_texts):
                     if arch_lst.GetItemText(idx, 0) != new_text:
                         arch_lst.SetItem(idx, 0, new_text)
-                except Exception:
-                    arch_lst.SetItem(idx, 0, new_text)
+                _arch_fast_path_ok = True
+            except Exception:
+                # See add_chats_to_ui(): don't retry SetItem on a stale index,
+                # fall through to the full rebuild below instead.
+                pass
+        if _arch_fast_path_ok:
             panel.chats_list = new_arch_chats
             panel.chat_names = new_arch_names
             return
@@ -7197,6 +7737,15 @@ class MainWindow(wx.Frame):
         search       = self.conversations_panel.search_field.GetValue().strip().lower()
         conv_filter  = getattr(self.conversations_panel, '_conv_filter', 'all')
 
+        # Used below to tell "the same filtered view just lost an item" (where
+        # reusing the old row position to keep focus nearby makes sense) apart
+        # from "the active filter/search changed" (where the old row position
+        # belongs to a different, unrelated list and must not be reused).
+        _filter_or_search_changed = (
+            getattr(self, "_last_conv_filter_key", None) != (conv_filter, search)
+        )
+        self._last_conv_filter_key = (conv_filter, search)
+
         # Always start from the full sorted lists saved by set_chats() so
         # that restoring the window or clearing a search shows all chats.
         full_chats = list(getattr(self.conversations_panel, '_all_chats_list',
@@ -7228,8 +7777,21 @@ class MainWindow(wx.Frame):
         for _i, _chat in enumerate(full_chats):
             _jid  = _chat.get("remoteJid", "")
             _nm   = full_names[_i] if _i < len(full_names) else ""
-            _unrd = int(_chat.get("unreadCount") or 0)
-            _lid  = ((_chat.get("lastMessage") or {}).get("key") or {}).get("id", "")
+            _unrd = effective_unread_count(_chat)
+            # NOTE: chat["lastMessage"] is only ever set by get_remote_chats()
+            # at sync time — on_new_message() (the WebSocket new-message path)
+            # appends to chat["messages"]["messages"]["records"] but never
+            # touches "lastMessage". Fingerprinting on "lastMessage" therefore
+            # never changes for messages that arrive live, so the row's
+            # last-message preview silently stops updating in real time
+            # (most visible for the currently-open conversation, where
+            # unreadCount also stays 0 and so doesn't bust the fingerprint
+            # either). Track the actual records list instead.
+            _records = (_chat.get("messages", {}) or {}).get("messages", {}).get("records", [])
+            _lid  = (
+                len(_records),
+                (_records[-1].get("key", {}) or {}).get("id", "") if _records else "",
+            )
             if conv_filter == "unread" and _unrd == 0:
                 continue
             if conv_filter == "groups" and not _jid.endswith("@g.us"):
@@ -7248,7 +7810,7 @@ class MainWindow(wx.Frame):
         # choose between a lightweight SetItem path and a full rebuild.
         def _build_item_text(chat, name):
             chat_jid = chat.get("remoteJid", "")
-            unread = int(chat.get("unreadCount") or 0)
+            unread = effective_unread_count(chat)
             unread_str = (
                 f" {unread} " + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
                 if unread > 0 else ""
@@ -7272,7 +7834,7 @@ class MainWindow(wx.Frame):
         for i, chat in enumerate(full_chats):
             name     = full_names[i]
             chat_jid = chat.get("remoteJid", "")
-            if conv_filter == 'unread' and int(chat.get("unreadCount") or 0) == 0:
+            if conv_filter == 'unread' and effective_unread_count(chat) == 0:
                 continue
             if conv_filter == 'groups' and not chat_jid.endswith("@g.us"):
                 continue
@@ -7290,17 +7852,25 @@ class MainWindow(wx.Frame):
         # function runs, so we track what's truly rendered via _displayed_jids.
         new_jids = [c.get("remoteJid", "") for c in displayed_chats]
         _displayed_jids = getattr(self.conversations_panel, '_displayed_jids', None)
+        _fast_path_ok = False
         if (
             _displayed_jids is not None
             and _displayed_jids == new_jids
             and lst.GetItemCount() == len(new_jids)
         ):
-            for idx, new_text in enumerate(new_item_texts):
-                try:
+            try:
+                for idx, new_text in enumerate(new_item_texts):
                     if lst.GetItemText(idx, 0) != new_text:
                         lst.SetItem(idx, 0, new_text)
-                except Exception:
-                    lst.SetItem(idx, 0, new_text)
+                _fast_path_ok = True
+            except Exception:
+                # The underlying Win32 list control rejected an index that
+                # GetItemCount() claimed was valid (observed as "Couldn't
+                # retrieve information about list control item N"). Don't
+                # retry SetItem blindly — fall through to the full rebuild
+                # below, which resyncs the control from scratch.
+                pass
+        if _fast_path_ok:
             self.conversations_panel.chats_list = displayed_chats
             self.conversations_panel.chat_names = displayed_names
             # _displayed_jids stays the same (JIDs didn't change)
@@ -7364,7 +7934,14 @@ class MainWindow(wx.Frame):
             # The previously focused chat is gone (e.g. it was just cleared and
             # filtered out). Keep keyboard focus in the list by landing on
             # whatever now occupies its slot instead of dropping focus entirely.
-            neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
+            # But only reuse that raw position when this is still the same
+            # filtered/searched view — if the filter or search just changed,
+            # the old index refers to an unrelated list and landing on row 0
+            # is the only position that means anything in the new one.
+            if _filter_or_search_changed:
+                neighbor_idx = 0
+            else:
+                neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
             if neighbor_idx < 0:
                 neighbor_idx = 0
             panel.conversations_list.Focus(neighbor_idx)
