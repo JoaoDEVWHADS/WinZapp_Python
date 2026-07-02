@@ -2201,9 +2201,18 @@ class MainWindow(wx.Frame):
                 pass
 
         proc = getattr(self, "wpp_process", None)
+        pid = None
         if proc and proc.poll() is None:
+            pid = proc.pid
+        elif proc is None:
+            # This session never spawned WPPConnect itself — it found the port
+            # already open (e.g. a previous session was force-quit and its
+            # node.exe never got killed). Locate the orphaned process by the
+            # port it's listening on so it doesn't leak across restarts.
+            pid = self._find_pid_listening_on_port(self.wpp_port)
+
+        if pid:
             try:
-                pid = proc.pid
                 import sys
                 if sys.platform == "win32":
                     subprocess.run(
@@ -2212,25 +2221,72 @@ class MainWindow(wx.Frame):
                         stderr=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
                     )
-                else:
+                elif proc is not None:
                     proc.terminate()
             except Exception:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+
+    def _find_pid_listening_on_port(self, port):
+        """Return the PID of the node.exe process listening on *port* (Windows only).
+
+        Used when this session reused an already-running WPPConnect Server
+        left behind by a previous session that was force-quit, so we still
+        have a way to terminate it instead of leaving it running forever.
+        """
+        import sys
+        if sys.platform != "win32":
+            return None
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        try:
+            out = subprocess.check_output(
+                ["netstat", "-ano", "-p", "TCP"],
+                creationflags=no_window,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return None
+
+        port_suffix = f":{port}"
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0] != "TCP" or parts[3] != "LISTENING":
+                continue
+            if not parts[1].endswith(port_suffix):
+                continue
+            try:
+                candidate_pid = int(parts[-1])
+            except ValueError:
+                continue
+            try:
+                tasklist_out = subprocess.check_output(
+                    ["tasklist", "/FI", f"PID eq {candidate_pid}", "/FO", "CSV", "/NH"],
+                    creationflags=no_window,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                continue
+            if "node.exe" in tasklist_out.lower():
+                return candidate_pid
+        return None
 
     def ensure_wpp_running(self):
         """
         Start the local WPPConnect Server if it is not already listening.
 
-        Normal mode   — shows a progress dialog while waiting (up to 3 min).
+        Normal mode   — shows a progress dialog while waiting (up to 5 min).
         Background mode — polls silently; exits with code 1 on timeout.
 
-        Originally:
-        wait up to 3 minutes for it to become ready via a progress dialog.
         On first launch the database initialisation and migrations can take
-        60-90 s; subsequent starts are much faster.
+        60-90 s; subsequent starts are much faster.  On slower machines (HDD,
+        antivirus scanning, or a first-run Puppeteer/Chrome download in
+        start.js) startup can take well over 2 minutes, hence the 5-minute
+        budget below.
         """
         if self._is_wpp_running():
             return  # Already up (e.g. left running from a previous session)
@@ -2265,7 +2321,7 @@ class MainWindow(wx.Frame):
 
         if self.background_mode:
             # Silent wait — no dialog, no speech.  Timeout → exit code 1.
-            deadline = time.time() + 120
+            deadline = time.time() + 300
             while time.time() < deadline:
                 if self._is_wpp_running():
                     return
@@ -3290,11 +3346,12 @@ class MainWindow(wx.Frame):
                         "[get_remote_chats] API error %s (attempt %d/3): %s",
                         response.status_code, attempt + 1, response.text[:200],
                     )
+                    last_error = f"HTTP {response.status_code}"
                     if attempt < 2:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
                         continue
-                    return chats
+                    break
                 try:
                     body = response.json()
                 except Exception as json_err:
@@ -3302,11 +3359,12 @@ class MainWindow(wx.Frame):
                         "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
                         attempt + 1, json_err, response.text[:200],
                     )
+                    last_error = json_err
                     if attempt < 2:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
                         continue
-                    return chats
+                    break
 
                 # list-chats returns the array directly; tolerate the legacy
                 # {"response": [...]} envelope too in case of a mixed deployment.
