@@ -105,14 +105,35 @@ class SoundSystem:
             logging.info("[sound_system] Checking %s (exists=%s)", path, os.path.isfile(path))
             if not os.path.isfile(path):
                 continue
+            
+            # Temporarily add the specific DLL directory to Windows DLL search path
+            cookie = None
+            if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+                try:
+                    cookie = os.add_dll_directory(d)
+                except Exception as e:
+                    logging.debug("[sound_system] os.add_dll_directory failed for %s: %s", d, e)
+
+            # Keep track of current working directory to restore it later
+            old_cwd = os.getcwd()
             try:
+                # Change directory to where the DLL resides so dependencies like libopus-0.dll are resolved locally
+                os.chdir(d)
+                # Load DLL dependency search paths locally using win32 API SetDllDirectoryW if available
+                try:
+                    ctypes.windll.kernel32.SetDllDirectoryW(d)
+                except Exception:
+                    pass
+
                 bass_dll = ctypes.WinDLL("bass.dll")
                 BASS_PluginLoad = bass_dll.BASS_PluginLoad
                 BASS_PluginLoad.restype  = ctypes.c_ulong
                 BASS_PluginLoad.argtypes = [ctypes.c_char_p, ctypes.c_ulong]
-                handle = BASS_PluginLoad(path.encode('utf-8'), 0)
+                
+                # Pass just the filename to BASS_PluginLoad since we already changed the CWD to the target directory
+                handle = BASS_PluginLoad(dll_name.encode('utf-8'), 0)
                 if handle:
-                    logging.info("[sound_system] BASS_PluginLoad OK: %s → handle=%s", path, handle)
+                    logging.info("[sound_system] BASS_PluginLoad OK: %s (handle=%s)", path, handle)
                     return True
                 else:
                     try:
@@ -122,6 +143,19 @@ class SoundSystem:
                     logging.warning("[sound_system] BASS_PluginLoad=0 for %s (BASS error=%s)", path, err)
             except Exception as _ex:
                 logging.warning("[sound_system] BASS_PluginLoad exception for %s: %s", path, _ex)
+            finally:
+                # Restore original CWD and clean SetDllDirectoryW
+                try:
+                    os.chdir(old_cwd)
+                    if sys.platform == 'win32':
+                        ctypes.windll.kernel32.SetDllDirectoryW(None)
+                except Exception:
+                    pass
+                if cookie:
+                    try:
+                        cookie.close()
+                    except Exception:
+                        pass
         return False
 
     def start(self):
