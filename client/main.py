@@ -5445,7 +5445,23 @@ class MainWindow(wx.Frame):
         (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
         needs `<fromMe>_<chatId>_<id>` and, for group messages, a trailing
         `_<participant>` — including for our own group messages (`fromMe=True`).
+
+        @lid JIDs must be resolved to @c.us because WPPConnect indexes messages
+        by the phone-number form of the JID, not the device-linked LID.
         """
+        lid_to_phone = getattr(self, "_lid_to_phone", {})
+
+        def _resolve_jid(jid: str) -> str:
+            """Resolve @lid to @c.us, normalise @s.whatsapp.net → @c.us."""
+            if not jid:
+                return jid
+            jid = jid.replace("@s.whatsapp.net", "@c.us")
+            if jid.endswith("@lid"):
+                phone = lid_to_phone.get(jid, "")
+                if phone:
+                    return phone.replace("@s.whatsapp.net", "@c.us")
+            return jid
+
         msg_id = msg_key.get("id", "")
         if not msg_id:
             return ""
@@ -5454,7 +5470,7 @@ class MainWindow(wx.Frame):
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
-        chat = (remote_jid or "").replace("@s.whatsapp.net", "@c.us")
+        chat = _resolve_jid(remote_jid or "")
         # Group messages always carry the sender's JID in the serialized id,
         # even for our own messages (fromMe=True). 1-on-1 keys have no
         # participant — gate on chat type, since a 1:1 @lid message's key
@@ -5465,16 +5481,16 @@ class MainWindow(wx.Frame):
         if chat.endswith("@g.us"):
             if from_me:
                 # Our own group messages: always use our LID/phone as participant.
-                participant = (getattr(self, "my_lid", "") or getattr(self, "my_jid", "") or msg_key.get("participant") or "")
+                raw = (getattr(self, "my_lid", "") or getattr(self, "my_jid", "") or msg_key.get("participant") or "")
             else:
                 # Others' group messages: participant may be in key or a dedicated field.
-                participant = (
+                raw = (
                     msg_key.get("participant")
                     or msg_key.get("author")
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            participant = participant.replace("@s.whatsapp.net", "@c.us")
+            participant = _resolve_jid(raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
