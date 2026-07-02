@@ -1447,11 +1447,19 @@ export async function getMessages(req: Request, res: Response) {
   const { phone } = req.params;
   const { count = 20, direction = 'before', id = null } = req.query;
   try {
-    const response = await req.client.getMessages(`${phone}`, {
-      count: parseInt(count as string),
-      direction: direction.toString() as any,
-      id: id as string,
-    });
+    let response;
+    if (phone && phone.endsWith('@lid')) {
+      // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
+      response = await req.client.page.evaluate(({ chatId, params }) => {
+        return (window as any).WAPI.getMessages(chatId, params);
+      }, { chatId: phone, params: { count: parseInt(count as string), direction: direction.toString() as any, id: id as string } });
+    } else {
+      response = await req.client.getMessages(`${phone}`, {
+        count: parseInt(count as string),
+        direction: direction.toString() as any,
+        id: id as string,
+      });
+    }
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
     req.logger.error(e);
