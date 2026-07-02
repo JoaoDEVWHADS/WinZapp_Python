@@ -6002,7 +6002,7 @@ class MainWindow(wx.Frame):
         for attempt in range(max_attempts):
             if progress_callback is None:
                 try:
-                    response = requests.get(url, headers=headers, timeout=timeout)
+                    response = requests.post(url, headers=headers, json=media, timeout=timeout)
                 except MediaExpiredError:
                     raise
                 except Exception as exc:
@@ -6030,14 +6030,14 @@ class MainWindow(wx.Frame):
                         time.sleep(3)
                         continue
                 logging.warning(
-                    "[get_base64_from_media] HTTP %s fetching media for %s: %s",
-                    response.status_code, msg_id, resp_text[:200],
+                     "[get_base64_from_media] HTTP %s fetching media for %s: %s",
+                     response.status_code, msg_id, resp_text[:200],
                 )
                 return ""
             else:
                 # Streaming mode so we can report per-chunk progress
                 try:
-                    response = requests.get(url, headers=headers, stream=True, timeout=timeout)
+                    response = requests.post(url, headers=headers, json=media, stream=True, timeout=timeout)
                     if response.status_code in (403, 410):
                         raise MediaExpiredError(response.status_code)
                     
