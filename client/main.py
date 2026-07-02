@@ -2949,6 +2949,8 @@ class MainWindow(wx.Frame):
 
                 logging.info("[check_wa_connection_http] Instance status: %s", status)
 
+                # Robust check: Only call start-session if the instance is explicitly CLOSED, DESTROYED, or completely inactive.
+                # WPPConnect status values include: CONNECTED, open, INITIALIZING, QRCODE, PHONECODE, notLogged, inChat, PAIRED, etc.
                 if status in ("CONNECTED", "open"):
                     self._wa_connected = True
                     try:
@@ -2972,16 +2974,7 @@ class MainWindow(wx.Frame):
                                     self.save_settings()
                     except Exception as e:
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
-                elif status in ("INITIALIZING", "QRCODE", "PHONECODE"):
-                    # Session is already starting up (e.g. fresh after pairing) — do NOT
-                    # call /start-session again: a second call attempts to open a second
-                    # browser instance, which fails with "browser is already running" and
-                    # causes the WPPConnect auto-close timer to fire, disconnecting us.
-                    logging.info(
-                        "[check_wa_connection_http] Session is %s — skipping /start-session to avoid browser conflict.",
-                        status,
-                    )
-                else:
+                elif status in ("CLOSED", "DESTROYED", ""):
                     # Status is CLOSED or unknown: safe to start a new session.
                     try:
                         start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
@@ -2989,6 +2982,13 @@ class MainWindow(wx.Frame):
                         logging.info("[check_wa_connection_http] Sent auto-start session command")
                     except Exception as e:
                         logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
+                else:
+                    # Instance is in some active state (e.g. notLogged, inChat, QRCODE, INITIALIZING, etc.)
+                    # We should NOT call start-session to avoid launching duplicate Puppeteer tabs.
+                    logging.info(
+                        "[check_wa_connection_http] Session is in active state '%s' — skipping /start-session to avoid browser conflict.",
+                        status,
+                    )
         except Exception as e:
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
 
@@ -6002,7 +6002,7 @@ class MainWindow(wx.Frame):
         for attempt in range(max_attempts):
             if progress_callback is None:
                 try:
-                    response = requests.get(url, headers=headers, timeout=timeout)
+                    response = requests.post(url, headers=headers, json=media, timeout=timeout)
                 except MediaExpiredError:
                     raise
                 except Exception as exc:
@@ -6030,14 +6030,14 @@ class MainWindow(wx.Frame):
                         time.sleep(3)
                         continue
                 logging.warning(
-                    "[get_base64_from_media] HTTP %s fetching media for %s: %s",
-                    response.status_code, msg_id, resp_text[:200],
+                     "[get_base64_from_media] HTTP %s fetching media for %s: %s",
+                     response.status_code, msg_id, resp_text[:200],
                 )
                 return ""
             else:
                 # Streaming mode so we can report per-chunk progress
                 try:
-                    response = requests.get(url, headers=headers, stream=True, timeout=timeout)
+                    response = requests.post(url, headers=headers, json=media, stream=True, timeout=timeout)
                     if response.status_code in (403, 410):
                         raise MediaExpiredError(response.status_code)
                     
