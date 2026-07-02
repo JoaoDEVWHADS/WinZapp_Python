@@ -5452,14 +5452,10 @@ class MainWindow(wx.Frame):
         lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
-            """Resolve @lid to @c.us, normalise @s.whatsapp.net → @c.us."""
+            """Keep @lid JIDs as-is, normalise @s.whatsapp.net → @c.us."""
             if not jid:
                 return jid
             jid = jid.replace("@s.whatsapp.net", "@c.us")
-            if jid.endswith("@lid"):
-                phone = lid_to_phone.get(jid, "")
-                if phone:
-                    return phone.replace("@s.whatsapp.net", "@c.us")
             return jid
 
         msg_id = msg_key.get("id", "")
@@ -5998,11 +5994,25 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
+        # Prepare body with media details to bypass Puppeteer cache lookups in WPPConnect Server
+        body_data = dict(media)
+        msg_type = media.get("messageType")
+        if msg_type and "message" in media:
+            inner = media["message"].get(msg_type)
+            if isinstance(inner, dict):
+                if "mediaKey" in inner and inner["mediaKey"]:
+                    body_data["mediaKey"] = inner["mediaKey"]
+                if "url" in inner and inner["url"]:
+                    body_data["clientUrl"] = inner["url"]
+                if "mimetype" in inner and inner["mimetype"]:
+                    body_data["mimetype"] = inner["mimetype"]
+                body_data["type"] = msg_type.replace("Message", "")
+
         max_attempts = 3
         for attempt in range(max_attempts):
             if progress_callback is None:
                 try:
-                    response = requests.post(url, headers=headers, json=media, timeout=timeout)
+                    response = requests.post(url, headers=headers, json=body_data, timeout=timeout)
                 except MediaExpiredError:
                     raise
                 except Exception as exc:
@@ -6037,7 +6047,7 @@ class MainWindow(wx.Frame):
             else:
                 # Streaming mode so we can report per-chunk progress
                 try:
-                    response = requests.post(url, headers=headers, json=media, stream=True, timeout=timeout)
+                    response = requests.post(url, headers=headers, json=body_data, stream=True, timeout=timeout)
                     if response.status_code in (403, 410):
                         raise MediaExpiredError(response.status_code)
                     
