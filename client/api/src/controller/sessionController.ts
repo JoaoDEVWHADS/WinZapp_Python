@@ -466,24 +466,38 @@ export async function getMediaByMessage(req: Request, res: Response) {
   }
 
   try {
-    let message = await client.getMessageById(messageId);
+    let message: any = null;
 
-    // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
-    // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
-    // and load earlier messages to force sync it.
-    if (!message && messageId) {
-      const parts = messageId.split('_');
-      if (parts.length >= 2) {
-        const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
-        if (chatId && typeof client.loadEarlierMessages === 'function') {
-          req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
-          try {
-            // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
-            await client.loadEarlierMessages(chatId);
-            // Query again
-            message = await client.getMessageById(messageId);
-          } catch (loadErr) {
-            req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+    // If details are provided in the request body (e.g. POST request with local cache), use them directly.
+    if (req.body && (req.body.mediaKey || req.body.clientUrl)) {
+      req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
+      message = req.body;
+      // Normalise key types and structures if needed by decryptFile
+      if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
+        message.mediaKey = Buffer.from(message.mediaKey.data);
+      } else if (typeof message.mediaKey === 'string') {
+        message.mediaKey = Buffer.from(message.mediaKey, 'base64');
+      }
+    } else {
+      message = await client.getMessageById(messageId);
+
+      // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
+      // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
+      // and load earlier messages to force sync it.
+      if (!message && messageId) {
+        const parts = messageId.split('_');
+        if (parts.length >= 2) {
+          const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
+          if (chatId && typeof client.loadEarlierMessages === 'function') {
+            req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+            try {
+              // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
+              await client.loadEarlierMessages(chatId);
+              // Query again
+              message = await client.getMessageById(messageId);
+            } catch (loadErr) {
+              req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+            }
           }
         }
       }
@@ -496,10 +510,12 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
-    if (!(message['mimetype'] || message.isMedia || message.isMMS)) {
+    // Ensure it contains media properties or has mimetype
+    const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
+    if (!mediaUrl) {
       return res.status(400).json({
         status: 'error',
-        message: 'Message does not contain media',
+        message: 'Message does not contain media download URL',
       });
     }
 
@@ -507,13 +523,13 @@ export async function getMediaByMessage(req: Request, res: Response) {
 
     res
       .status(200)
-      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype });
+      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
   } catch (ex) {
     req.logger.error(ex);
     res.status(500).json({
       status: 'error',
-      message: 'The session is not active',
-      error: ex,
+      message: 'Failed to decrypt file',
+      error: ex instanceof Error ? ex.message : ex,
     });
   }
 }
