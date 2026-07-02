@@ -823,6 +823,18 @@ class WebSocketClient:
         msg_type = wpp_msg.get("type", "chat")
         conversation = wpp_msg.get("body", "")
 
+        def _safe_media_key(val):
+            if not val:
+                return ""
+            if isinstance(val, (bytes, bytearray)):
+                import base64
+                return base64.b64encode(val).decode("utf-8")
+            if isinstance(val, dict) and "data" in val:
+                return val
+            if isinstance(val, str):
+                return val
+            return ""
+
         message_content = {}
         if msg_type == "chat":
             message_content = {"conversation": conversation}
@@ -837,7 +849,8 @@ class WebSocketClient:
             message_content = {
                 "audioMessage": {
                     "url": wpp_msg.get("clientUrl", ""),
-                    "seconds": seconds_val
+                    "seconds": seconds_val,
+                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "image":
@@ -851,7 +864,8 @@ class WebSocketClient:
                 "imageMessage": {
                     "caption": img_caption,
                     "url": wpp_msg.get("clientUrl", ""),
-                    "mimetype": wpp_msg.get("mimetype", "image/jpeg")
+                    "mimetype": wpp_msg.get("mimetype", "image/jpeg"),
+                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "video":
@@ -871,7 +885,8 @@ class WebSocketClient:
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
                     "url": wpp_msg.get("clientUrl", ""),
-                    "mimetype": wpp_msg.get("mimetype", "video/mp4")
+                    "mimetype": wpp_msg.get("mimetype", "video/mp4"),
+                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "document":
@@ -880,14 +895,16 @@ class WebSocketClient:
                     "fileName": wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or "Document",
                     "fileLength": wpp_msg.get("size") or wpp_msg.get("fileLength") or 0,
                     "url": wpp_msg.get("clientUrl", ""),
-                    "mimetype": wpp_msg.get("mimetype", "")
+                    "mimetype": wpp_msg.get("mimetype", ""),
+                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "sticker":
             message_content = {
                 "stickerMessage": {
                     "url": wpp_msg.get("clientUrl", ""),
-                    "mimetype": wpp_msg.get("mimetype", "image/webp")
+                    "mimetype": wpp_msg.get("mimetype", "image/webp"),
+                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "vcard":
