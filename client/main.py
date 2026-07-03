@@ -1232,6 +1232,11 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
+        try:
+            self.db.delete_chat(lid_jid)
+        except Exception as e:
+            logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
+
         
         # Redirect active conversation if it was the merged LID chat
         if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
@@ -1508,6 +1513,14 @@ class MainWindow(wx.Frame):
             for existing in records:
                 if existing.get("key", {}).get("id") == msg_id:
                     return  # already stored
+
+            try:
+                if hasattr(self, "db") and self.db is not None:
+                    if self.db.has_message(remote_jid, msg_id):
+                        return  # already stored in database
+            except Exception as e:
+                logging.error(f"[on_new_message] Error checking message existence in DB: {e}")
+
 
         # Ignore stale re-deliveries of messages the user already cleared.
         if self._is_cleared_message(remote_jid, msg):

@@ -376,7 +376,18 @@ class DatabaseManager:
             await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
             await conn.commit()
 
+    async def has_message(self, remote_jid: str, message_id: str) -> bool:
+        """Return True if the message exists in the database."""
+        conn = await self._ensure_conn()
+        cursor = await conn.execute(
+            "SELECT 1 FROM messages WHERE remote_jid=? AND message_id=? LIMIT 1",
+            (remote_jid, message_id)
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
     # ── Messages ────────────────────────────────────────────────────────────
+
 
     async def get_messages(
         self, remote_jid: str, limit: int = 200, offset: int = 0
