@@ -6556,71 +6556,97 @@ class MainWindow(wx.Frame):
                             canonical_jid = self._normalize_jid(pn_jid)
                             if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                                 self.register_jid_mapping(lid_jid, canonical_jid)
+                        
+                        # Try to resolve contact name/pushname directly from pn-lid mapping response
+                        contact_obj = res_data.get("contact") or {}
+                        res_name = contact_obj.get("name") or contact_obj.get("pushname") or contact_obj.get("pushName") or contact_obj.get("displayName")
+                        if res_name and res_name != "Contato sem nome" and not is_phone_like(res_name):
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {}
+                            self.contacts[lid_jid]["name"] = res_name
+                            self.contacts[lid_jid]["pushName"] = res_name
+                            
+                            if not hasattr(self, "_presence_pushname_map"):
+                                self._presence_pushname_map = {}
+                            self._presence_pushname_map[lid_jid] = res_name
+                            
+                            if canonical_jid:
+                                if canonical_jid not in self.contacts:
+                                    self.contacts[canonical_jid] = {}
+                                self.contacts[canonical_jid]["name"] = res_name
+                                self.contacts[canonical_jid]["pushName"] = res_name
+                                self._presence_pushname_map[canonical_jid] = res_name
+                            
+                            # Resolved the name successfully, no need to query profile
+                            query_name = False
                 
-                # Fetch profile info for name caching
-                # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
-                target_jid = canonical_jid if canonical_jid else lid_jid
-                url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
-                logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
-                resp_profile = requests.get(url_profile, headers=headers, timeout=4)
-                # Check profile response
-                if (query_name or (query_pn and canonical_jid)) and resp_profile.status_code in (200, 201):
-                    res_prof = resp_profile.json() or {}
-                    res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
-                    if not isinstance(res_data, dict):
-                        res_data = {}
-                        
-                    # Resolve JID mapping from contact details
-                    profile_pn_jid = None
-                    id_obj = res_data.get("id") or {}
-                    if isinstance(id_obj, dict):
-                        ser_id = id_obj.get("_serialized") or ""
-                        if ser_id.endswith(("@c.us", "@s.whatsapp.net")):
-                            profile_pn_jid = ser_id
-                    if not profile_pn_jid:
-                        pn_obj = res_data.get("phoneNumber") or {}
-                        if isinstance(pn_obj, dict):
-                            profile_pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
-                        elif isinstance(pn_obj, str):
-                            profile_pn_jid = pn_obj
-                    if not profile_pn_jid:
-                        profile_pn_jid = res_data.get("pnJid")
-                    if not profile_pn_jid:
-                        profile_pn_jid = res_data.get("phone")
-                        
-                    if profile_pn_jid:
-                        profile_canonical = self._normalize_jid(profile_pn_jid)
-                        if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
-                            self.register_jid_mapping(lid_jid, profile_canonical)
-                            if not canonical_jid:
-                                canonical_jid = profile_canonical
-                    name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
-                    if name and name != "Contato sem nome" and not is_phone_like(name):
-                        if lid_jid not in self.contacts:
-                            self.contacts[lid_jid] = {}
-                        self.contacts[lid_jid]["name"] = name
-                        self.contacts[lid_jid]["pushName"] = name
-                        
-                        # Also save to presence pushname map to ensure UI functions find it
-                        if not hasattr(self, "_presence_pushname_map"):
-                            self._presence_pushname_map = {}
-                        self._presence_pushname_map[lid_jid] = name
-                        
-                        # Also copy to phone contact cache if mapped
-                        if canonical_jid:
-                            if canonical_jid not in self.contacts:
-                                self.contacts[canonical_jid] = {}
-                            self.contacts[canonical_jid]["name"] = name
-                            self.contacts[canonical_jid]["pushName"] = name
-                            self._presence_pushname_map[canonical_jid] = name
+                if query_name:
+                    # Fetch profile info for name caching
+                    # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
+                    target_jid = canonical_jid if canonical_jid else lid_jid
+                    url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
+                    logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
+                    resp_profile = requests.get(url_profile, headers=headers, timeout=4)
+                    # Check profile response
+                    if resp_profile.status_code in (200, 201):
+                        res_prof = resp_profile.json() or {}
+                        res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
+                        if not isinstance(res_data, dict):
+                            res_data = {}
+                            
+                        # Resolve JID mapping from contact details
+                        profile_pn_jid = None
+                        id_obj = res_data.get("id") or {}
+                        if isinstance(id_obj, dict):
+                            ser_id = id_obj.get("_serialized") or ""
+                            if ser_id.endswith(("@c.us", "@s.whatsapp.net")):
+                                profile_pn_jid = ser_id
+                        if not profile_pn_jid:
+                            pn_obj = res_data.get("phoneNumber") or {}
+                            if isinstance(pn_obj, dict):
+                                profile_pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
+                            elif isinstance(pn_obj, str):
+                                profile_pn_jid = pn_obj
+                        if not profile_pn_jid:
+                            profile_pn_jid = res_data.get("pnJid")
+                        if not profile_pn_jid:
+                            profile_pn_jid = res_data.get("phone")
+                            
+                        if profile_pn_jid:
+                            profile_canonical = self._normalize_jid(profile_pn_jid)
+                            if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
+                                self.register_jid_mapping(lid_jid, profile_canonical)
+                                if not canonical_jid:
+                                    canonical_jid = profile_canonical
+                        name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
+                        if name and name != "Contato sem nome" and not is_phone_like(name):
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {}
+                            self.contacts[lid_jid]["name"] = name
+                            self.contacts[lid_jid]["pushName"] = name
+                            
+                            # Also save to presence pushname map to ensure UI functions find it
+                            if not hasattr(self, "_presence_pushname_map"):
+                                self._presence_pushname_map = {}
+                            self._presence_pushname_map[lid_jid] = name
+                            
+                            # Also copy to phone contact cache if mapped
+                            if canonical_jid:
+                                if canonical_jid not in self.contacts:
+                                    self.contacts[canonical_jid] = {}
+                                self.contacts[canonical_jid]["name"] = name
+                                self.contacts[canonical_jid]["pushName"] = name
+                                self._presence_pushname_map[canonical_jid] = name
+                        else:
+                            logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
                     else:
-                        logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
-                else:
-                    logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
-                    # If the API returns 404/500 indicating the session was closed/disconnected, stop making calls immediately
-                    if resp_profile.status_code in (404, 500) or "session is not active" in resp_profile.text.lower():
-                        logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
-                        break
+                        logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
+                        # If the API returns 404/500 indicating the session was closed/disconnected, stop making calls immediately
+                        if resp_profile.status_code in (404, 500) or "session is not active" in resp_profile.text.lower():
+                            logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
+                            break
+                # Throttle query loop so Puppeteer isn't overwhelmed and can prioritize message sending
+                time.sleep(0.5)
             except Exception as e:
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
             finally:
