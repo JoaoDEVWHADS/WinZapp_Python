@@ -5591,9 +5591,7 @@ class MainWindow(wx.Frame):
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            # Resolve group participant JID to phone JID for WPPConnect's index lookup
-            resolved_raw = self._resolve_jid_for_send(raw)
-            participant = _resolve_jid(resolved_raw)
+            participant = _resolve_jid(raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
@@ -6307,7 +6305,7 @@ class MainWindow(wx.Frame):
                 if len(parts) > 3:
                     p_raw = parts[3]
             if p_raw:
-                participant = self._resolve_jid_for_send(p_raw).replace("@s.whatsapp.net", "@c.us")
+                participant = p_raw.replace("@s.whatsapp.net", "@c.us")
 
         if participant:
             serialized_id = f"{prefix}_{phone}_{raw_id}_{participant}"
