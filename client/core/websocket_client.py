@@ -57,6 +57,23 @@ class WebSocketClient:
         # Record when we connected so on_messages_upsert can use a stable
         # cutoff time rather than the ever-advancing time.time().
         self._connect_time = time.time()
+        # This fires both on the initial connect and on every automatic
+        # reconnect after a transport-level drop. on_disconnect() pauses the
+        # MessageQueue by setting _wa_connected = False, but nothing else
+        # reliably flips it back to True on a plain reconnect (WPPConnect
+        # only re-emits "session-logged" around pairing/login, not on every
+        # reconnect) — so a brief network blip could pause sending forever
+        # even though WhatsApp itself never actually disconnected. Re-check
+        # via HTTP and flush the queue so it self-heals like a manual resync.
+        threading.Thread(target=self._recheck_connection_after_connect, daemon=True).start()
+
+    def _recheck_connection_after_connect(self):
+        try:
+            self.main_window.check_wa_connection_http()
+            if getattr(self.main_window, "_wa_connected", False) and hasattr(self.main_window, "message_queue"):
+                self.main_window.message_queue.flush()
+        except Exception as e:
+            print(f"[WebSocketClient] _recheck_connection_after_connect error: {e}")
 
     def on_disconnect(self):
         print("WebSocket disconnected.")
