@@ -209,6 +209,14 @@ class DatabaseBridge:
             self._db.update_message_status(remote_jid, message_id, status)
         )
 
+    def update_message_id(
+        self, remote_jid: str, old_id: str, new_id: str
+    ) -> None:
+        return self._call(
+            self._db.update_message_id(remote_jid, old_id, new_id)
+        )
+
+
     def delete_chat(self, jid: str) -> None:
         return self._call(self._db.delete_chat(jid))
 

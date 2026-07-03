@@ -5440,8 +5440,51 @@ class MainWindow(wx.Frame):
                 if response.status_code not in (200, 201):
                     err = f"HTTP {response.status_code}: {response.text[:300]}"
                     logging.error("[send_text_message] %s for %s", err, remote_jid)
-                    self._check_wa_connection_closed(response)
-                    return {"ok": False, "error": err, "retry": False}
+                    
+                    # If the @lid was invalid ("número não existe"), invalidate cache and retry with phone JID
+                    if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
+                        logging.warning("[send_text_message] @lid %s invalid — removing from cache and retrying with original JID", remote_jid)
+                        orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+                        if orig_jid:
+                            # Invalidate the bad mapping
+                            self._lid_to_phone.pop(remote_jid, None)
+                            self._phone_to_lid.pop(orig_jid, None)
+                            try:
+                                self.db.delete_lid_mapping(remote_jid)
+                            except Exception:
+                                pass
+                            # Retry with original phone JID
+                            fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
+                            retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
+                            if quoted_id:
+                                retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
+                                retry_payload = {
+                                    "phone": [fb_phone], "message": text,
+                                    "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
+                                    "options": {"linkPreview": False}
+                                }
+                            else:
+                                retry_payload = {
+                                    "phone": [fb_phone], "message": text,
+                                    "isGroup": fb_phone.endswith("@g.us"),
+                                    "options": {"linkPreview": False}
+                                }
+                            response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
+                            if response.status_code in (200, 201):
+                                logging.info("[send_text_message] Retry with %s succeeded after invalidating @lid %s", fb_phone, remote_jid)
+                                # re-use normal parsing below
+                            else:
+                                err = f"HTTP {response.status_code}: {response.text[:300]}"
+                                logging.error("[send_text_message] Retry also failed: %s", err)
+                                self._check_wa_connection_closed(response)
+                                return {"ok": False, "error": err, "retry": False}
+                        else:
+                            self._check_wa_connection_closed(response)
+                            return {"ok": False, "error": err, "retry": False}
+                    else:
+                        self._check_wa_connection_closed(response)
+                        return {"ok": False, "error": err, "retry": False}
+
             self._wa_connected = True
             try:
                 body = response.json()
@@ -5623,8 +5666,7 @@ class MainWindow(wx.Frame):
         if real_id and remote_jid:
             def _bg_update_db():
                 try:
-                    import asyncio
-                    asyncio.run(self.db.update_message_id(remote_jid, local_id, real_id))
+                    self.db.update_message_id(remote_jid, local_id, real_id)
                 except Exception as e:
                     logging.error("[_on_message_sent] failed to update database message ID: %s", e)
             threading.Thread(target=_bg_update_db, daemon=True).start()
