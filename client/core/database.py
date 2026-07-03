@@ -285,7 +285,7 @@ class DatabaseManager:
             t = 0
             if isinstance(last_msg, dict):
                 try:
-                    t = int(last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                    t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
                 except (TypeError, ValueError):
                     t = 0
             result[jid] = {
