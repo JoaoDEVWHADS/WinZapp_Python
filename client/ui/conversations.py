@@ -1316,30 +1316,9 @@ class ConversationsPanel(wx.Panel):
                             daemon=True,
                         ).start()
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
-                # Play sent sound — fires only when the originating conversation
-                # is still the active one (otherwise local_id is not found here).
-                if hasattr(self.main_window, "message_sent_sound"):
-                    self.main_window.message_sent_sound.play()
                 break
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window._schedule_set_chats()
-
-    def _mark_message_sent_no_sound(self, local_id: str, real_id: str = None):
-        """Same as _mark_message_sent but does NOT play the sent sound.
-        Called from the WebSocket fromMe echo path to avoid the duplicate sound
-        that occurs because MessageQueue's _on_message_sent also calls
-        _mark_message_sent (which plays the sound) for the same message."""
-        # Temporarily suppress the sound by patching message_sent_sound
-        _orig = getattr(self.main_window, "message_sent_sound", None)
-        class _NoPlay:
-            def play(self): pass
-        if _orig:
-            self.main_window.message_sent_sound = _NoPlay()
-        try:
-            self._mark_message_sent(local_id, real_id=real_id)
-        finally:
-            if _orig:
-                self.main_window.message_sent_sound = _orig
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""

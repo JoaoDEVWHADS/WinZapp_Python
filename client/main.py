@@ -1232,6 +1232,13 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
+        
+        # Redirect active conversation if it was the merged LID chat
+        if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
+            active_jid = self.conversations_panel.conversation.get("remoteJid", "")
+            if active_jid == lid_jid:
+                self.conversations_panel.conversation = self.chats[phone_jid]
+                wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
 
     def on_new_message(self, msg: dict):
         """
@@ -1491,8 +1498,7 @@ class MainWindow(wx.Frame):
                         self._own_sent_ids.discard(next(iter(self._own_sent_ids)))
                 
                 if hasattr(self, "conversations_panel"):
-                    # _no_sound: MessageQueue's _on_message_sent will play sound
-                    wx.CallAfter(self.conversations_panel._mark_message_sent_no_sound, local_id, real_id=msg_id)
+                    wx.CallAfter(self.conversations_panel._mark_message_sent, local_id, real_id=msg_id)
                 
                 self._schedule_save(dirty_jid=remote_jid)
                 self._schedule_set_chats()
@@ -3853,6 +3859,13 @@ class MainWindow(wx.Frame):
                 lid_chat["remoteJid"] = alt_jid
                 chats[alt_jid] = lid_chat
             del chats[lid_jid]
+            
+            # Redirect active conversation if it was the merged LID chat
+            if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
+                active_jid = self.conversations_panel.conversation.get("remoteJid", "")
+                if active_jid == lid_jid:
+                    self.conversations_panel.conversation = chats[alt_jid]
+                    wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
 
         return chats
 
@@ -5610,6 +5623,9 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
 
+        if not audio_path and hasattr(self, "message_sent_sound"):
+            self.message_sent_sound.play()
+            
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
 
