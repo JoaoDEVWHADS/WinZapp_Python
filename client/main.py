@@ -4174,7 +4174,7 @@ class MainWindow(wx.Frame):
                     contact["pushName"] = name
                     
                     if jid not in self.contacts:
-                        logging.info(f"[get_remote_contacts] Adding contact: {name} ({jid})")
+                        logging.debug(f"[get_remote_contacts] Adding contact: {name} ({jid})")
                         self.contacts[jid] = contact
                     else:
                         updated_fields = []
@@ -4184,9 +4184,9 @@ class MainWindow(wx.Frame):
                                     self.contacts[jid][k] = v
                                     updated_fields.append(k)
                         if updated_fields:
-                            logging.info(f"[get_remote_contacts] Updated fields {updated_fields} for contact: {name} ({jid})")
+                            logging.debug(f"[get_remote_contacts] Updated fields {updated_fields} for contact: {name} ({jid})")
                     contacts[jid] = self.contacts[jid]
-            self.save_data(self.chats, self.contacts)
+            self._schedule_save(contacts_dirty=True)
             return contacts
         except Exception as e:
             self.error_sound.play()
