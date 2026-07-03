@@ -1253,7 +1253,7 @@ class ConversationsPanel(wx.Panel):
         remote_jid = virtual_msg.get("key", {}).get("remoteJid", "")
         if not remote_jid:
             return
-        chat = self.main_window.chats.get(remote_jid)
+        chat = self.main_window.get_chat(remote_jid)
         if chat is None:
             return
         records = (
@@ -5782,7 +5782,7 @@ class ConversationsPanel(wx.Panel):
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
         # can reflect it after a conversation close/reopen.
-        chat = self.main_window.chats.get(jid)
+        chat = self.main_window.get_chat(jid)
         if chat:
             reaction_record = {
                 "messageType": "reactionMessage",
@@ -6119,7 +6119,7 @@ class ConversationsPanel(wx.Panel):
         """Navigate to the conversation with the contact from the selected message."""
         if not self._contact_msg_jid:
             return
-        chat = self.main_window.chats.get(self._contact_msg_jid)
+        chat = self.main_window.get_chat(self._contact_msg_jid)
         if chat is not None:
             self.navigate_to_conversation(chat)
 

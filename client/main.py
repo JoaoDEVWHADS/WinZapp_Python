@@ -3414,6 +3414,23 @@ class MainWindow(wx.Frame):
         sys.stderr = open(stderr_log, "a")
         sys.stdout = open(stdout_log, "a")
 
+    def get_chat(self, jid: str) -> dict | None:
+        """Get a chat from self.chats by JID, with fallback to mapped JID (LID/phone)."""
+        if not jid:
+            return None
+        chat = self.chats.get(jid)
+        if chat is not None:
+            return chat
+        # Fallback to mapped JID
+        alt_jid = ""
+        if jid.endswith("@lid"):
+            alt_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
+        else:
+            alt_jid = getattr(self, "_phone_to_lid", {}).get(jid, "")
+        if alt_jid:
+            return self.chats.get(alt_jid)
+        return None
+
     def get_chats(self):
         try:
             return self.db.get_chats()
@@ -4445,7 +4462,9 @@ class MainWindow(wx.Frame):
                     lm_ts //= 1000
                 if lm_ts > ts:
                     ts = lm_ts
-            for m in c.get("messages", {}).get("messages", {}).get("records", []):
+            # Copy the records list to prevent RuntimeError during concurrent modifications
+            records_copy = list(c.get("messages", {}).get("messages", {}).get("records", []))
+            for m in records_copy:
                 t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
                 if t > 1_000_000_000_000:
                     t //= 1000
@@ -4841,7 +4860,9 @@ class MainWindow(wx.Frame):
                     j = parts[0].split(":")[0] + "@" + parts[1]
             return j
 
-        for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+        # Copy records list to avoid RuntimeError due to concurrent modifications
+        records_copy = list(chat.get("messages", {}).get("messages", {}).get("records", []))
+        for msg in records_copy:
             key    = msg.get("key", {})
             remote = _norm(key.get("remoteJid", ""))
             alt    = _norm(key.get("remoteJidAlt", ""))
@@ -7879,7 +7900,7 @@ class MainWindow(wx.Frame):
         Returns "" if no messages are found.
         Format: "[você: ]{content} {timestamp}"
         """
-        records = (
+        records = list(
             chat.get("messages", {})
                 .get("messages", {})
                 .get("records", [])
