@@ -3354,7 +3354,7 @@ class MainWindow(wx.Frame):
         # Retry up to 3 times with a fixed timeout and a short sleep between
         # attempts so we don't hammer the API server during startup.
         _RETRY_SLEEP = 5   # seconds between retries
-        _TIMEOUT     = 30  # seconds per request
+        _TIMEOUT     = 120  # seconds per request
         last_error = None
         for attempt in range(3):
             try:
