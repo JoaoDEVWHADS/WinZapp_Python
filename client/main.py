@@ -3090,6 +3090,8 @@ class MainWindow(wx.Frame):
         # Show the contact list immediately from get_remote_chats() metadata
         # (name, pushName, unreadCount) so the user is not staring at a blank
         # screen while the per-chat message sync runs below.
+        # Build the LID cache first (background is fine here — sync thread).
+        self._build_lid_to_phone_cache()
         wx.CallAfter(self.set_chats)
 
         # ── Phase 1: sync all messages ────────────────────────────────────
@@ -3120,6 +3122,8 @@ class MainWindow(wx.Frame):
         # Conversations are fully sorted as soon as messages are synced.
         # Sort, display, play sync-complete sound, and announce to the user
         # NOW — before the slower media-download phase begins.
+        # Rebuild the LID cache first so the chat list shows correct names.
+        self._build_lid_to_phone_cache()
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
         self.sync_complete_sound.play()
@@ -4407,7 +4411,11 @@ class MainWindow(wx.Frame):
             self.tray_icon.update_tooltip()
 
     def set_chats(self):
-        self._build_lid_to_phone_cache()
+        # NOTE: _build_lid_to_phone_cache() is intentionally NOT called here.
+        # It scans every message in every chat (O(chats × messages)) and is
+        # too expensive to run on the wx main thread. The cache is built once
+        # at startup (in init_chats) and then maintained incrementally by
+        # _extract_lid_mapping() on each new message.
         self._apply_chat_lists(*self._compute_chat_lists())
 
     def _schedule_set_chats(self):
@@ -4911,7 +4919,7 @@ class MainWindow(wx.Frame):
             return
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
-        max_workers = min(6, len(chats))
+        max_workers = min(4, len(chats))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in chats}
             for fut in as_completed(futs):
