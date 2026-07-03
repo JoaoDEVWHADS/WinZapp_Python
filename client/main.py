@@ -4271,13 +4271,33 @@ class MainWindow(wx.Frame):
         pinned   = set(self.settings.get("pinned_chats",   []))
         my_jid   = getattr(self, "my_jid", "")
 
+        # Dedup: if both a @lid JID and its corresponding phone JID exist as
+        # separate keys in self.chats, only render the one with more content
+        # (prefer @lid since that's the active WPPConnect chat). Build a set of
+        # phone JIDs that are already covered by a @lid entry so we can skip them.
+        lid_to_phone = getattr(self, "_lid_to_phone", {})
+        phone_to_lid = getattr(self, "_phone_to_lid", {})
+        _covered_by_lid: set[str] = set()
+        for lid_jid, phone_jid in lid_to_phone.items():
+            if lid_jid in self.chats and phone_jid in self.chats:
+                # Both exist — keep the one with more messages (usually lid).
+                lid_msgs = len(self.chats[lid_jid].get("messages", {}).get("messages", {}).get("records", []))
+                phone_msgs = len(self.chats[phone_jid].get("messages", {}).get("messages", {}).get("records", []))
+                if lid_msgs >= phone_msgs:
+                    _covered_by_lid.add(phone_jid)
+                else:
+                    _covered_by_lid.add(lid_jid)
+
         main_chats, main_names = [], []
         arch_chats, arch_names = [], []
 
         for jid, chat in list(self.chats.items()):
             if jid in deleted:
                 continue
-                
+            if jid in _covered_by_lid:
+                continue  # duplicate – already shown via the other JID
+
+    
             records   = chat.get("messages", {}).get("messages", {}).get("records", [])
             last_msg  = chat.get("lastMessage")
             unread    = int(chat.get("unreadCount", 0) or 0)
@@ -5440,21 +5460,15 @@ class MainWindow(wx.Frame):
                 if response.status_code not in (200, 201):
                     err = f"HTTP {response.status_code}: {response.text[:300]}"
                     logging.error("[send_text_message] %s for %s", err, remote_jid)
-                    
-                    # If the @lid was invalid ("número não existe"), invalidate cache and retry with phone JID
+
+                    # If the @lid returned "número não existe", the chat is just not loaded
+                    # in Puppeteer yet — do NOT invalidate the cache mapping (it's valid).
+                    # Silently retry with the phone JID so the message goes through.
                     if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
-                        logging.warning("[send_text_message] @lid %s invalid — removing from cache and retrying with original JID", remote_jid)
                         orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
                         if orig_jid:
-                            # Invalidate the bad mapping
-                            self._lid_to_phone.pop(remote_jid, None)
-                            self._phone_to_lid.pop(orig_jid, None)
-                            try:
-                                self.db.delete_lid_mapping(remote_jid)
-                            except Exception:
-                                pass
-                            # Retry with original phone JID
                             fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
+                            logging.warning("[send_text_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
                             retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                             if quoted_id:
                                 retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
@@ -5471,19 +5485,20 @@ class MainWindow(wx.Frame):
                                 }
                             response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
                             if response.status_code in (200, 201):
-                                logging.info("[send_text_message] Retry with %s succeeded after invalidating @lid %s", fb_phone, remote_jid)
-                                # re-use normal parsing below
+                                logging.info("[send_text_message] Retry with %s succeeded", fb_phone)
+                                # fall through to normal response parsing below
                             else:
                                 err = f"HTTP {response.status_code}: {response.text[:300]}"
                                 logging.error("[send_text_message] Retry also failed: %s", err)
                                 self._check_wa_connection_closed(response)
-                                return {"ok": False, "error": err, "retry": False}
+                                return {"ok": False, "error": err, "retry": True}
                         else:
                             self._check_wa_connection_closed(response)
                             return {"ok": False, "error": err, "retry": False}
                     else:
                         self._check_wa_connection_closed(response)
                         return {"ok": False, "error": err, "retry": False}
+
 
             self._wa_connected = True
             try:
