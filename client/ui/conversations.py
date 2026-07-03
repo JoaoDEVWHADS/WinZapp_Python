@@ -6182,6 +6182,7 @@ class ConversationsPanel(wx.Panel):
         from the user a few seconds after a conversation was opened.
         """
         _preserved_msg_id = self._focused_msg_id() if preserve_focus else None
+        _had_focus = (wx.Window.FindFocus() is self.messages_list)
         self.messages_list.DeleteAllItems()
         self._unread_sep_idx = -1
         self._reaction_map = {}
@@ -6289,6 +6290,8 @@ class ConversationsPanel(wx.Panel):
         if _preserved_msg_id:
             for idx, msg in enumerate(self._sorted_messages):
                 if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
+                    if _had_focus:
+                        self.messages_list.SetFocus()
                     self.messages_list.EnsureVisible(idx)
                     self.messages_list.Focus(idx)
                     self.messages_list.Select(idx)
