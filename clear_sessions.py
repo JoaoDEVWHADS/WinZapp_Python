@@ -45,17 +45,23 @@ if __name__ == "__main__":
     kill_process_by_name("chromium")
     kill_process_by_name("node start.js")
     
-    # 2. Remover as pastas de sessões salvas
+    # 2. Remover as pastas de sessões salvas e tokens
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    user_data_dir = os.path.join(base_dir, "client", "api", "userDataDir")
-    if os.path.exists(user_data_dir):
-        print(f"Cleaning all WPPConnect sessions in {user_data_dir}...")
-        try:
-            shutil.rmtree(user_data_dir)
-            os.makedirs(user_data_dir, exist_ok=True)
-            print("Successfully cleared all sessions.")
-        except Exception as e:
-            print(f"Failed to clear sessions: {e}")
-    else:
-        os.makedirs(user_data_dir, exist_ok=True)
-        print("Sessions folder was already empty.")
+    folders_to_clean = [
+        os.path.join(base_dir, "client", "api", "userDataDir"),
+        os.path.join(base_dir, "client", "api", "tokens"),
+        os.path.join(base_dir, "client", "api", "wppconnect_tokens")
+    ]
+    
+    for folder in folders_to_clean:
+        if os.path.exists(folder):
+            print(f"Cleaning folder: {folder}...")
+            try:
+                shutil.rmtree(folder)
+                os.makedirs(folder, exist_ok=True)
+                print(f"Successfully cleared: {os.path.basename(folder)}")
+            except Exception as e:
+                print(f"Failed to clear {os.path.basename(folder)}: {e}")
+        else:
+            os.makedirs(folder, exist_ok=True)
+            print(f"Created empty folder: {os.path.basename(folder)}")
