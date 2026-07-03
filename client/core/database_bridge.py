@@ -230,6 +230,9 @@ class DatabaseBridge:
     def set_lid_mapping(self, lid_jid: str, phone_jid: str) -> None:
         return self._call(self._db.set_lid_mapping(lid_jid, phone_jid))
 
+    def delete_lid_mapping(self, lid_jid: str) -> None:
+        return self._call(self._db.delete_lid_mapping(lid_jid))
+
     def add_unresolvable_lid(self, jid: str) -> None:
         return self._call(self._db.add_unresolvable_lid(jid))
 

@@ -624,6 +624,16 @@ class DatabaseManager:
             )
             await conn.commit()
 
+    async def delete_lid_mapping(self, lid_jid: str) -> None:
+        """Delete a single JID mapping."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "DELETE FROM lid_mappings WHERE lid_jid = ?",
+                (lid_jid,),
+            )
+            await conn.commit()
+
     async def get_unresolvable_lids(self) -> tuple[set[str], set[str]]:
         """Return ``(set_of_lids, set_of_names)``."""
         conn = await self._ensure_conn()

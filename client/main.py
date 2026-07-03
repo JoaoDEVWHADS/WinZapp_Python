@@ -6416,18 +6416,48 @@ class MainWindow(wx.Frame):
                         
                         # Clean up any bad mappings where normalized_phone or normalized_lid were mapped to other contacts
                         if hasattr(self, "_lid_to_phone"):
-                            # If my own LID JID was mapped to another phone number, delete it
+                            # 1. If another LID was mapped to our phone, delete it (from memory and DB)
+                            bad_lids = [k for k, v in self._lid_to_phone.items() if v == normalized_phone and k != normalized_lid]
+                            for bad_lid in bad_lids:
+                                self._lid_to_phone.pop(bad_lid, None)
+                                self._phone_to_lid.pop(normalized_phone, None)
+                                try:
+                                    self.db.delete_lid_mapping(bad_lid)
+                                except Exception as _e:
+                                    pass
+                                logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: {bad_lid} was mapped to our phone {normalized_phone}")
+
+                            # 2. If our LID JID was mapped to another phone number, delete it
                             old_phone = self._lid_to_phone.get(normalized_lid)
                             if old_phone and old_phone != normalized_phone:
                                 self._lid_to_phone.pop(normalized_lid, None)
                                 self._phone_to_lid.pop(old_phone, None)
+                                try:
+                                    self.db.delete_lid_mapping(normalized_lid)
+                                except Exception as _e:
+                                    pass
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
                             
-                            # If my own phone JID was mapped to another LID, delete it
+                            # 3. If another phone JID was mapped to our LID, delete it
+                            bad_phones = [k for k, v in self._phone_to_lid.items() if v == normalized_lid and k != normalized_phone]
+                            for bad_phone in bad_phones:
+                                self._phone_to_lid.pop(bad_phone, None)
+                                self._lid_to_phone.pop(normalized_lid, None)
+                                try:
+                                    self.db.delete_lid_mapping(normalized_lid)
+                                except Exception as _e:
+                                    pass
+                                logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: our LID {normalized_lid} was mapped to another phone {bad_phone}")
+
+                            # 4. If our phone JID was mapped to another LID, delete it
                             old_lid = self._phone_to_lid.get(normalized_phone)
                             if old_lid and old_lid != normalized_lid:
                                 self._phone_to_lid.pop(old_lid, None)
                                 self._lid_to_phone.pop(old_lid, None)
+                                try:
+                                    self.db.delete_lid_mapping(old_lid)
+                                except Exception as _e:
+                                    pass
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_phone} was mapped to {old_lid}")
 
                         self.register_jid_mapping(normalized_lid, normalized_phone)
