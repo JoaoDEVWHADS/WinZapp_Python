@@ -2944,6 +2944,7 @@ class MainWindow(wx.Frame):
                     data = response.json()
                     hash_token = data.get("token")
                     if hash_token:
+                        hash_token = hash_token.replace("/", "_").replace("+", "-")
                         token = f"{token}:{hash_token}"
                         self.settings["privateinfo"]["WA_token"] = token
                         self.save_settings()
@@ -2957,7 +2958,7 @@ class MainWindow(wx.Frame):
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
-        self.token = token
+        self.token = token.replace("/", "_").replace("+", "-")
 
     def prepare_sync(self):
         os.makedirs(data_path(), exist_ok=True)
