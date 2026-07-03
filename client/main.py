@@ -1317,7 +1317,7 @@ class MainWindow(wx.Frame):
         # which otherwise left _get_participant_name() falling through to a
         # saved contact name (e.g. a self-addressed contact literally named
         # "Eu") instead of honouring the "Como se referir a mim?" setting.
-        if from_me and participant_raw.endswith("@lid") and my_lid != participant_raw:
+        if from_me and participant_raw.endswith("@lid") and not getattr(self, "my_lid", "") and my_lid != participant_raw:
             self.my_lid = my_lid = participant_raw
             if my_jid:
                 self.register_jid_mapping(participant_raw, my_jid)
