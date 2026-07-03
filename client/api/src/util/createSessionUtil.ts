@@ -55,9 +55,16 @@ export default class CreateSessionUtil {
       this.startChatWootClient(client);
 
       if (req.serverOptions.customUserDataDir) {
-        req.serverOptions.createOptions.puppeteerOptions = {
-          userDataDir: req.serverOptions.customUserDataDir + session,
-        };
+        req.serverOptions.createOptions.puppeteerOptions = Object.assign(
+          { protocolTimeout: 120000 },
+          req.serverOptions.createOptions.puppeteerOptions || {},
+          { userDataDir: req.serverOptions.customUserDataDir + session }
+        );
+      } else {
+        req.serverOptions.createOptions.puppeteerOptions = Object.assign(
+          { protocolTimeout: 120000 },
+          req.serverOptions.createOptions.puppeteerOptions || {}
+        );
       }
 
       const wppClient = await create(
