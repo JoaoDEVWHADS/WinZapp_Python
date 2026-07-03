@@ -43,6 +43,9 @@ if __name__ == "__main__":
     kill_port(6300)
     kill_process_by_name("chrome")
     kill_process_by_name("chromium")
+    # Garante a eliminação do processo Node específico da API
+    kill_process_by_name("node start.js")
+    
     # Also clean SingletonLock in userDataDir
     user_data_dir = os.path.join(os.path.dirname(__file__), "client", "api", "userDataDir")
     if os.path.exists(user_data_dir):
