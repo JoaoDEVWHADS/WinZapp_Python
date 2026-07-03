@@ -1316,9 +1316,12 @@ class ConversationsPanel(wx.Panel):
                             daemon=True,
                         ).start()
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
+                if self.conversation:
+                    self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window._schedule_set_chats()
+
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
@@ -1327,6 +1330,8 @@ class ConversationsPanel(wx.Panel):
                 msg["_local_pending"] = False
                 msg["_send_failed"]   = True
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
+                if self.conversation:
+                    self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
 
     def refresh_message_status(self, msg_id: str, status: str):
