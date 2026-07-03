@@ -4407,13 +4407,19 @@ class MainWindow(wx.Frame):
         # message timestamp descending (newest first), then alphabetically.
         def _chat_last_ts(c):
             ts = int(c.get("t", 0) or 0)
+            if ts > 1_000_000_000_000:
+                ts //= 1000
             lm = c.get("lastMessage")
             if isinstance(lm, dict):
                 lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
+                if lm_ts > 1_000_000_000_000:
+                    lm_ts //= 1000
                 if lm_ts > ts:
                     ts = lm_ts
             for m in c.get("messages", {}).get("messages", {}).get("records", []):
                 t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                if t > 1_000_000_000_000:
+                    t //= 1000
                 if t > ts:
                     ts = t
             return ts if ts else 1
@@ -7878,7 +7884,10 @@ class MainWindow(wx.Frame):
             if ts:
                 try:
                     from datetime import datetime as _dt
-                    dt    = _dt.fromtimestamp(int(ts))
+                    ts_val = int(ts)
+                    if ts_val > 1_000_000_000_000:
+                        ts_val //= 1000
+                    dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
                         time_str = dt.strftime("%H:%M")
@@ -8026,7 +8035,10 @@ class MainWindow(wx.Frame):
         if ts:
             try:
                 from datetime import datetime as _dt
-                dt    = _dt.fromtimestamp(int(ts))
+                ts_val = int(ts)
+                if ts_val > 1_000_000_000_000:
+                    ts_val //= 1000
+                dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
                     time_str = dt.strftime("%H:%M")

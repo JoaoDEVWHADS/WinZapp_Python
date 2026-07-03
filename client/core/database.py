@@ -122,7 +122,10 @@ def _timestamp(msg: dict) -> int:
     """Extract numeric timestamp from a message dict (0 if missing)."""
     ts = msg.get("messageTimestamp", 0)
     try:
-        return int(ts)
+        ts = int(ts)
+        if ts > 1_000_000_000_000:
+            ts //= 1000
+        return ts
     except (TypeError, ValueError):
         return 0
 
@@ -286,6 +289,8 @@ class DatabaseManager:
             if isinstance(last_msg, dict):
                 try:
                     t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                    if t > 1_000_000_000_000:
+                        t //= 1000
                 except (TypeError, ValueError):
                     t = 0
             result[jid] = {
