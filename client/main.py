@@ -5010,16 +5010,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
-        # Check if the latest message on the server matches the latest message in our local cache.
-        last_msg = chat.get("lastMessage")
-        if isinstance(last_msg, dict):
-            last_msg_key = last_msg.get("key", {})
-            last_msg_id = last_msg_key.get("id")
-            if last_msg_id:
-                records = chat.get("messages", {}).get("messages", {}).get("records", [])
-                if any(r.get("key", {}).get("id") == last_msg_id for r in records):
-                    logging.info(f"[sync_chat_messages] Skipping sync for {remote_jid} — already up to date (last message matches)")
-                    return
+        # Always sync with WPPConnect API to ensure no messages are lost or missed due to stale lastMessage cache.
 
         all_messages = []
         api_ok = False
