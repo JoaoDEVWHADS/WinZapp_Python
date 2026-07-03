@@ -212,6 +212,9 @@ class DatabaseBridge:
     def delete_chat(self, jid: str) -> None:
         return self._call(self._db.delete_chat(jid))
 
+    def has_message(self, remote_jid: str, message_id: str) -> bool:
+        return self._call(self._db.has_message(remote_jid, message_id))
+
     def delete_message(self, remote_jid: str, message_id: str) -> None:
         return self._call(self._db.delete_message(remote_jid, message_id))
 
@@ -226,6 +229,9 @@ class DatabaseBridge:
 
     def set_lid_mapping(self, lid_jid: str, phone_jid: str) -> None:
         return self._call(self._db.set_lid_mapping(lid_jid, phone_jid))
+
+    def delete_lid_mapping(self, lid_jid: str) -> None:
+        return self._call(self._db.delete_lid_mapping(lid_jid))
 
     def add_unresolvable_lid(self, jid: str) -> None:
         return self._call(self._db.add_unresolvable_lid(jid))

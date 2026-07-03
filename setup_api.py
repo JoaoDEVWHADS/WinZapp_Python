@@ -91,7 +91,8 @@ def main():
             "src/middleware/statusConnection.ts",
             "src/controller/deviceController.ts",
             "src/controller/messageController.ts",
-            "src/controller/sessionController.ts"
+            "src/controller/sessionController.ts",
+            "decrypt.js"
         ]
         custom_contents = {}
         for rel_path in custom_files:
@@ -206,6 +207,24 @@ def main():
             _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+
+        # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
+        try:
+            import shutil as _shutil
+            custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
+            decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
+            if os.path.isfile(custom_decrypt):
+                print("[INFO] Copying custom decrypt.js patch to node_modules...")
+                # Ensure the destination directory exists (should exist due to npm install)
+                os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
+                _shutil.copy2(custom_decrypt, decrypt_js_path)
+                print("[OK] Copied decrypt.js patch successfully.")
+            else:
+                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
+        except Exception as e:
+            print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
+
+
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")

@@ -1232,6 +1232,18 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
+        try:
+            self.db.delete_chat(lid_jid)
+        except Exception as e:
+            logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
+
+        
+        # Redirect active conversation if it was the merged LID chat
+        if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
+            active_jid = self.conversations_panel.conversation.get("remoteJid", "")
+            if active_jid == lid_jid:
+                self.conversations_panel.conversation = self.chats[phone_jid]
+                wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
 
     def on_new_message(self, msg: dict):
         """
@@ -1305,13 +1317,15 @@ class MainWindow(wx.Frame):
         # which otherwise left _get_participant_name() falling through to a
         # saved contact name (e.g. a self-addressed contact literally named
         # "Eu") instead of honouring the "Como se referir a mim?" setting.
-        if from_me and participant_raw.endswith("@lid") and my_lid != participant_raw:
+        if from_me and participant_raw.endswith("@lid") and not getattr(self, "my_lid", "") and my_lid != participant_raw:
             self.my_lid = my_lid = participant_raw
             if my_jid:
                 self.register_jid_mapping(participant_raw, my_jid)
 
         digits_self_referential = bool(part_digits and remote_digits == part_digits)
-        is_self_referential = digits_self_referential and (is_group_jid or from_me)
+        is_self_referential = digits_self_referential and (
+            is_group_jid or (from_me and my_jid and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0]))
+        )
         is_self_phone_group = bool(
             is_group_jid and my_jid
             and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0])
@@ -1484,6 +1498,10 @@ class MainWindow(wx.Frame):
                     records[:] = [r for r in records
                                   if r.get("key", {}).get("id") != msg_id]
                 records.append(pending_msg)
+                try:
+                    self.db.insert_message(remote_jid, pending_msg)
+                except Exception as e:
+                    logging.error(f"[on_new_message] Failed to insert pending message to DB: {e}")
                 
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
@@ -1502,6 +1520,8 @@ class MainWindow(wx.Frame):
                 if existing.get("key", {}).get("id") == msg_id:
                     return  # already stored
 
+
+
         # Ignore stale re-deliveries of messages the user already cleared.
         if self._is_cleared_message(remote_jid, msg):
             return
@@ -1509,6 +1529,10 @@ class MainWindow(wx.Frame):
         # Slim any bloated quoted-message payload before persisting.
         prune_message_record(msg)
         records.append(msg)
+        try:
+            self.db.insert_message(remote_jid, msg)
+        except Exception as e:
+            logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
 
         # ── Update unread count (only for messages we received) ───────────────
         if not from_me:
@@ -3720,6 +3744,7 @@ class MainWindow(wx.Frame):
                 is_self_referential = any(
                     r.get("key", {}).get("fromMe")
                     and r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
+                    and (cand_jid.endswith("@g.us") or self._phone_digits_equivalent(cand_digits, my_jid_digits))
                     for r in records
                     if r.get("key", {}).get("participant")
                 )
@@ -3852,6 +3877,13 @@ class MainWindow(wx.Frame):
                 lid_chat["remoteJid"] = alt_jid
                 chats[alt_jid] = lid_chat
             del chats[lid_jid]
+            
+            # Redirect active conversation if it was the merged LID chat
+            if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
+                active_jid = self.conversations_panel.conversation.get("remoteJid", "")
+                if active_jid == lid_jid:
+                    self.conversations_panel.conversation = chats[alt_jid]
+                    wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
 
         return chats
 
@@ -4365,6 +4397,8 @@ class MainWindow(wx.Frame):
 
     def _apply_chat_lists(self, main_chats, main_names, arch_chats, arch_names):
         """Apply sorted chat lists to panels and refresh UI. Must run on main thread."""
+        if not hasattr(self, "conversations_panel"):
+            return  # UI not yet initialized; skip silently
         self.chat_names = main_names
 
         # Save focused JIDs from the CURRENT (old) displayed lists BEFORE
@@ -4981,16 +5015,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
-        # Check if the latest message on the server matches the latest message in our local cache.
-        last_msg = chat.get("lastMessage")
-        if isinstance(last_msg, dict):
-            last_msg_key = last_msg.get("key", {})
-            last_msg_id = last_msg_key.get("id")
-            if last_msg_id:
-                records = chat.get("messages", {}).get("messages", {}).get("records", [])
-                if any(r.get("key", {}).get("id") == last_msg_id for r in records):
-                    logging.info(f"[sync_chat_messages] Skipping sync for {remote_jid} — already up to date (last message matches)")
-                    return
+        # Always sync with WPPConnect API to ensure no messages are lost or missed due to stale lastMessage cache.
 
         all_messages = []
         api_ok = False
@@ -5648,24 +5673,78 @@ class MainWindow(wx.Frame):
         if not msg_id or not status:
             return
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+        logging.info(f"[on_message_status_update] msg_id={msg_id} status={status} remote_jid={remote_jid}")
+
+        # Try all known JID forms (@lid <-> @s.whatsapp.net) to find the chat
+        candidates = [remote_jid]
         if remote_jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
             if phone_jid:
-                remote_jid = phone_jid
-        if remote_jid not in self.chats:
-            return
-        records = (
-            self.chats[remote_jid]
-                .get("messages", {})
-                .get("messages", {})
-                .get("records", [])
-        )
-        for msg in records:
-            if msg.get("key", {}).get("id") == msg_id:
-                msg.setdefault("MessageUpdate", []).append({"status": status})
-                break
+                candidates.append(phone_jid)
+        elif remote_jid.endswith("@s.whatsapp.net"):
+            lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+            if lid:
+                candidates.append(lid)
+
+        chat_jid = next((j for j in candidates if j in self.chats), None)
+        found_msg = None
+        found_chat_jid = None
+
+        if chat_jid:
+            records = (
+                self.chats[chat_jid]
+                    .get("messages", {})
+                    .get("messages", {})
+                    .get("records", [])
+            )
+            for msg in records:
+                if msg.get("key", {}).get("id") == msg_id:
+                    msg.setdefault("MessageUpdate", []).append({"status": status})
+                    found_msg = msg
+                    found_chat_jid = chat_jid
+                    logging.info(f"[on_message_status_update] Updated status to {status} for msg_id={msg_id} in records of chat={chat_jid}")
+                    break
+            if not found_msg:
+                logging.warning(f"[on_message_status_update] Message {msg_id} not found in records of chat {chat_jid}")
+        else:
+            logging.warning(f"[on_message_status_update] Chat not found in self.chats for candidates: {candidates}")
+
+        # ── Fallback: scan all chats in memory when the initial candidates miss ──
+        # This happens when a status event arrives with remote_jid equal to our own
+        # LID (the account LID), not the recipient's JID, so none of the candidates
+        # matched. The message is actually stored in the recipient's chat.
+        if not found_msg:
+            for jid, chat_data in self.chats.items():
+                if jid in candidates:
+                    continue
+                recs = (
+                    chat_data.get("messages", {})
+                             .get("messages", {})
+                             .get("records", [])
+                )
+                for msg in recs:
+                    if msg.get("key", {}).get("id") == msg_id:
+                        msg.setdefault("MessageUpdate", []).append({"status": status})
+                        found_msg = msg
+                        found_chat_jid = jid
+                        logging.info(
+                            f"[on_message_status_update] Fallback: updated status to {status} "
+                            f"for msg_id={msg_id} in chat={jid}"
+                        )
+                        break
+                if found_msg:
+                    break
+
+        # ── Persist updated message record to DB ─────────────────────────────────
+        if found_msg and found_chat_jid:
+            try:
+                self.db.insert_message(found_chat_jid, found_msg)
+            except Exception as e:
+                logging.error(f"[on_message_status_update] Failed to persist status update to DB: {e}")
+
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.refresh_message_status(msg_id, status)
+
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback)."""
@@ -6392,18 +6471,48 @@ class MainWindow(wx.Frame):
                         
                         # Clean up any bad mappings where normalized_phone or normalized_lid were mapped to other contacts
                         if hasattr(self, "_lid_to_phone"):
-                            # If my own LID JID was mapped to another phone number, delete it
+                            # 1. If another LID was mapped to our phone, delete it (from memory and DB)
+                            bad_lids = [k for k, v in self._lid_to_phone.items() if v == normalized_phone and k != normalized_lid]
+                            for bad_lid in bad_lids:
+                                self._lid_to_phone.pop(bad_lid, None)
+                                self._phone_to_lid.pop(normalized_phone, None)
+                                try:
+                                    self.db.delete_lid_mapping(bad_lid)
+                                except Exception as _e:
+                                    pass
+                                logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: {bad_lid} was mapped to our phone {normalized_phone}")
+
+                            # 2. If our LID JID was mapped to another phone number, delete it
                             old_phone = self._lid_to_phone.get(normalized_lid)
                             if old_phone and old_phone != normalized_phone:
                                 self._lid_to_phone.pop(normalized_lid, None)
                                 self._phone_to_lid.pop(old_phone, None)
+                                try:
+                                    self.db.delete_lid_mapping(normalized_lid)
+                                except Exception as _e:
+                                    pass
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_lid} was mapped to {old_phone}")
                             
-                            # If my own phone JID was mapped to another LID, delete it
+                            # 3. If another phone JID was mapped to our LID, delete it
+                            bad_phones = [k for k, v in self._phone_to_lid.items() if v == normalized_lid and k != normalized_phone]
+                            for bad_phone in bad_phones:
+                                self._phone_to_lid.pop(bad_phone, None)
+                                self._lid_to_phone.pop(normalized_lid, None)
+                                try:
+                                    self.db.delete_lid_mapping(normalized_lid)
+                                except Exception as _e:
+                                    pass
+                                logging.warning(f"[Self LID Resolution] Deleted corrupt mapping: our LID {normalized_lid} was mapped to another phone {bad_phone}")
+
+                            # 4. If our phone JID was mapped to another LID, delete it
                             old_lid = self._phone_to_lid.get(normalized_phone)
                             if old_lid and old_lid != normalized_lid:
                                 self._phone_to_lid.pop(old_lid, None)
                                 self._lid_to_phone.pop(old_lid, None)
+                                try:
+                                    self.db.delete_lid_mapping(old_lid)
+                                except Exception as _e:
+                                    pass
                                 logging.warning(f"[Self LID Resolution] Cleaned corrupt mapping: {normalized_phone} was mapped to {old_lid}")
 
                         self.register_jid_mapping(normalized_lid, normalized_phone)
@@ -6523,71 +6632,97 @@ class MainWindow(wx.Frame):
                             canonical_jid = self._normalize_jid(pn_jid)
                             if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
                                 self.register_jid_mapping(lid_jid, canonical_jid)
+                        
+                        # Try to resolve contact name/pushname directly from pn-lid mapping response
+                        contact_obj = res_data.get("contact") or {}
+                        res_name = contact_obj.get("name") or contact_obj.get("pushname") or contact_obj.get("pushName") or contact_obj.get("displayName")
+                        if res_name and res_name != "Contato sem nome" and not is_phone_like(res_name):
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {}
+                            self.contacts[lid_jid]["name"] = res_name
+                            self.contacts[lid_jid]["pushName"] = res_name
+                            
+                            if not hasattr(self, "_presence_pushname_map"):
+                                self._presence_pushname_map = {}
+                            self._presence_pushname_map[lid_jid] = res_name
+                            
+                            if canonical_jid:
+                                if canonical_jid not in self.contacts:
+                                    self.contacts[canonical_jid] = {}
+                                self.contacts[canonical_jid]["name"] = res_name
+                                self.contacts[canonical_jid]["pushName"] = res_name
+                                self._presence_pushname_map[canonical_jid] = res_name
+                            
+                            # Resolved the name successfully, no need to query profile
+                            query_name = False
                 
-                # Fetch profile info for name caching
-                # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
-                target_jid = canonical_jid if canonical_jid else lid_jid
-                url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
-                logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
-                resp_profile = requests.get(url_profile, headers=headers, timeout=4)
-                # Check profile response
-                if (query_name or (query_pn and canonical_jid)) and resp_profile.status_code in (200, 201):
-                    res_prof = resp_profile.json() or {}
-                    res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
-                    if not isinstance(res_data, dict):
-                        res_data = {}
-                        
-                    # Resolve JID mapping from contact details
-                    profile_pn_jid = None
-                    id_obj = res_data.get("id") or {}
-                    if isinstance(id_obj, dict):
-                        ser_id = id_obj.get("_serialized") or ""
-                        if ser_id.endswith(("@c.us", "@s.whatsapp.net")):
-                            profile_pn_jid = ser_id
-                    if not profile_pn_jid:
-                        pn_obj = res_data.get("phoneNumber") or {}
-                        if isinstance(pn_obj, dict):
-                            profile_pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
-                        elif isinstance(pn_obj, str):
-                            profile_pn_jid = pn_obj
-                    if not profile_pn_jid:
-                        profile_pn_jid = res_data.get("pnJid")
-                    if not profile_pn_jid:
-                        profile_pn_jid = res_data.get("phone")
-                        
-                    if profile_pn_jid:
-                        profile_canonical = self._normalize_jid(profile_pn_jid)
-                        if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
-                            self.register_jid_mapping(lid_jid, profile_canonical)
-                            if not canonical_jid:
-                                canonical_jid = profile_canonical
-                    name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
-                    if name and name != "Contato sem nome" and not is_phone_like(name):
-                        if lid_jid not in self.contacts:
-                            self.contacts[lid_jid] = {}
-                        self.contacts[lid_jid]["name"] = name
-                        self.contacts[lid_jid]["pushName"] = name
-                        
-                        # Also save to presence pushname map to ensure UI functions find it
-                        if not hasattr(self, "_presence_pushname_map"):
-                            self._presence_pushname_map = {}
-                        self._presence_pushname_map[lid_jid] = name
-                        
-                        # Also copy to phone contact cache if mapped
-                        if canonical_jid:
-                            if canonical_jid not in self.contacts:
-                                self.contacts[canonical_jid] = {}
-                            self.contacts[canonical_jid]["name"] = name
-                            self.contacts[canonical_jid]["pushName"] = name
-                            self._presence_pushname_map[canonical_jid] = name
+                if query_name:
+                    # Fetch profile info for name caching
+                    # If we mapped it to a phone JID, fetch that. Otherwise fetch the lid JID directly.
+                    target_jid = canonical_jid if canonical_jid else lid_jid
+                    url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
+                    logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
+                    resp_profile = requests.get(url_profile, headers=headers, timeout=4)
+                    # Check profile response
+                    if resp_profile.status_code in (200, 201):
+                        res_prof = resp_profile.json() or {}
+                        res_data = res_prof.get("response") if isinstance(res_prof.get("response"), dict) else res_prof
+                        if not isinstance(res_data, dict):
+                            res_data = {}
+                            
+                        # Resolve JID mapping from contact details
+                        profile_pn_jid = None
+                        id_obj = res_data.get("id") or {}
+                        if isinstance(id_obj, dict):
+                            ser_id = id_obj.get("_serialized") or ""
+                            if ser_id.endswith(("@c.us", "@s.whatsapp.net")):
+                                profile_pn_jid = ser_id
+                        if not profile_pn_jid:
+                            pn_obj = res_data.get("phoneNumber") or {}
+                            if isinstance(pn_obj, dict):
+                                profile_pn_jid = pn_obj.get("_serialized") or pn_obj.get("id")
+                            elif isinstance(pn_obj, str):
+                                profile_pn_jid = pn_obj
+                        if not profile_pn_jid:
+                            profile_pn_jid = res_data.get("pnJid")
+                        if not profile_pn_jid:
+                            profile_pn_jid = res_data.get("phone")
+                            
+                        if profile_pn_jid:
+                            profile_canonical = self._normalize_jid(profile_pn_jid)
+                            if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
+                                self.register_jid_mapping(lid_jid, profile_canonical)
+                                if not canonical_jid:
+                                    canonical_jid = profile_canonical
+                        name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
+                        if name and name != "Contato sem nome" and not is_phone_like(name):
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {}
+                            self.contacts[lid_jid]["name"] = name
+                            self.contacts[lid_jid]["pushName"] = name
+                            
+                            # Also save to presence pushname map to ensure UI functions find it
+                            if not hasattr(self, "_presence_pushname_map"):
+                                self._presence_pushname_map = {}
+                            self._presence_pushname_map[lid_jid] = name
+                            
+                            # Also copy to phone contact cache if mapped
+                            if canonical_jid:
+                                if canonical_jid not in self.contacts:
+                                    self.contacts[canonical_jid] = {}
+                                self.contacts[canonical_jid]["name"] = name
+                                self.contacts[canonical_jid]["pushName"] = name
+                                self._presence_pushname_map[canonical_jid] = name
+                        else:
+                            logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
                     else:
-                        logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
-                else:
-                    logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
-                    # If the API returns 404/500 indicating the session was closed/disconnected, stop making calls immediately
-                    if resp_profile.status_code in (404, 500) or "session is not active" in resp_profile.text.lower():
-                        logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
-                        break
+                        logging.error(f"[LID Resolution] fetchProfile API error {resp_profile.status_code} for {target_jid}: {resp_profile.text}")
+                        # If the API returns 404/500 indicating the session was closed/disconnected, stop making calls immediately
+                        if resp_profile.status_code in (404, 500) or "session is not active" in resp_profile.text.lower():
+                            logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
+                            break
+                # Throttle query loop so Puppeteer isn't overwhelmed and can prioritize message sending
+                time.sleep(0.5)
             except Exception as e:
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
             finally:
@@ -8083,6 +8218,7 @@ class MainWindow(wx.Frame):
 
         if target_idx != -1:
             if _lst_had_focus:
+                panel.conversations_list.SetFocus()
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
                 if not panel.conversations_list.IsSelected(target_idx):
@@ -8106,6 +8242,7 @@ class MainWindow(wx.Frame):
                 neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
             if neighbor_idx < 0:
                 neighbor_idx = 0
+            panel.conversations_list.SetFocus()
             panel.conversations_list.Focus(neighbor_idx)
             panel.conversations_list.Select(neighbor_idx)
             panel.conversations_list.EnsureVisible(neighbor_idx)
