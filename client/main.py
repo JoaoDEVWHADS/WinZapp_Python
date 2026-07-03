@@ -1323,7 +1323,9 @@ class MainWindow(wx.Frame):
                 self.register_jid_mapping(participant_raw, my_jid)
 
         digits_self_referential = bool(part_digits and remote_digits == part_digits)
-        is_self_referential = digits_self_referential and (is_group_jid or from_me)
+        is_self_referential = digits_self_referential and (
+            is_group_jid or (from_me and my_jid and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0]))
+        )
         is_self_phone_group = bool(
             is_group_jid and my_jid
             and self._phone_digits_equivalent(remote_digits, my_jid.split("@", 1)[0])
@@ -1496,6 +1498,10 @@ class MainWindow(wx.Frame):
                     records[:] = [r for r in records
                                   if r.get("key", {}).get("id") != msg_id]
                 records.append(pending_msg)
+                try:
+                    self.db.insert_message(remote_jid, pending_msg)
+                except Exception as e:
+                    logging.error(f"[on_new_message] Failed to insert pending message to DB: {e}")
                 
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
@@ -1529,6 +1535,10 @@ class MainWindow(wx.Frame):
         # Slim any bloated quoted-message payload before persisting.
         prune_message_record(msg)
         records.append(msg)
+        try:
+            self.db.insert_message(remote_jid, msg)
+        except Exception as e:
+            logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
 
         # ── Update unread count (only for messages we received) ───────────────
         if not from_me:
@@ -3740,6 +3750,7 @@ class MainWindow(wx.Frame):
                 is_self_referential = any(
                     r.get("key", {}).get("fromMe")
                     and r.get("key", {}).get("participant", "").split("@", 1)[0] == cand_digits
+                    and (cand_jid.endswith("@g.us") or self._phone_digits_equivalent(cand_digits, my_jid_digits))
                     for r in records
                     if r.get("key", {}).get("participant")
                 )
@@ -5676,6 +5687,9 @@ class MainWindow(wx.Frame):
                 candidates.append(lid)
 
         chat_jid = next((j for j in candidates if j in self.chats), None)
+        found_msg = None
+        found_chat_jid = None
+
         if chat_jid:
             records = (
                 self.chats[chat_jid]
@@ -5683,20 +5697,54 @@ class MainWindow(wx.Frame):
                     .get("messages", {})
                     .get("records", [])
             )
-            found = False
             for msg in records:
                 if msg.get("key", {}).get("id") == msg_id:
                     msg.setdefault("MessageUpdate", []).append({"status": status})
-                    found = True
+                    found_msg = msg
+                    found_chat_jid = chat_jid
                     logging.info(f"[on_message_status_update] Updated status to {status} for msg_id={msg_id} in records of chat={chat_jid}")
                     break
-            if not found:
+            if not found_msg:
                 logging.warning(f"[on_message_status_update] Message {msg_id} not found in records of chat {chat_jid}")
         else:
             logging.warning(f"[on_message_status_update] Chat not found in self.chats for candidates: {candidates}")
 
+        # ── Fallback: scan all chats in memory when the initial candidates miss ──
+        # This happens when a status event arrives with remote_jid equal to our own
+        # LID (the account LID), not the recipient's JID, so none of the candidates
+        # matched. The message is actually stored in the recipient's chat.
+        if not found_msg:
+            for jid, chat_data in self.chats.items():
+                if jid in candidates:
+                    continue
+                recs = (
+                    chat_data.get("messages", {})
+                             .get("messages", {})
+                             .get("records", [])
+                )
+                for msg in recs:
+                    if msg.get("key", {}).get("id") == msg_id:
+                        msg.setdefault("MessageUpdate", []).append({"status": status})
+                        found_msg = msg
+                        found_chat_jid = jid
+                        logging.info(
+                            f"[on_message_status_update] Fallback: updated status to {status} "
+                            f"for msg_id={msg_id} in chat={jid}"
+                        )
+                        break
+                if found_msg:
+                    break
+
+        # ── Persist updated message record to DB ─────────────────────────────────
+        if found_msg and found_chat_jid:
+            try:
+                self.db.insert_message(found_chat_jid, found_msg)
+            except Exception as e:
+                logging.error(f"[on_message_status_update] Failed to persist status update to DB: {e}")
+
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.refresh_message_status(msg_id, status)
+
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback)."""
