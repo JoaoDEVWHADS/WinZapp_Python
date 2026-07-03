@@ -5316,33 +5316,47 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_for_send(self, jid: str) -> str:
         """
-        Translate a @lid JID to its @s.whatsapp.net equivalent before sending,
-        or translate our own JID (self-chat) to our own @lid JID so WPPConnect can find it.
-        Returns immediately — NEVER blocks on HTTP. If the @lid is not yet in
-        the local cache, a background resolution is triggered and the send
-        proceeds with the @lid as-is (WPPConnect handles many @lid sends fine).
+        Translate a phone JID (e.g. @s.whatsapp.net / @c.us) to its @lid equivalent (if available in cache)
+        for opening chats, sending messages, and setting states, because WPPConnect
+        expects the @lid JID for LID-enabled chats in browser memory.
+        If already @lid or not in cache, return as-is.
         """
+        if not jid:
+            return jid
         if self._is_self_jid(jid) and getattr(self, "my_lid", ""):
             return self.my_lid
+        if jid.endswith("@lid"):
+            return jid
+        clean_jid = jid.replace("@c.us", "@s.whatsapp.net")
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(clean_jid, "")
+        if lid_jid:
+            return lid_jid
+        return jid
+
+    def _resolve_jid_to_phone(self, jid: str) -> str:
+        """
+        Translate a @lid JID to its phone JID equivalent (@s.whatsapp.net) if available in cache,
+        specifically for message keys/IDs since WPPConnect/WhatsApp Web store indexes message keys
+        under their phone JID form.
+        """
+        if not jid:
+            return jid
         if not jid.endswith("@lid"):
             return jid
         phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
         if phone_jid:
             return phone_jid
-        # Not in cache — fire a background resolution so NEXT send will have it,
-        # but DO NOT block the current send waiting for HTTP.
+        # Not in cache — fire a background resolution so NEXT query will have it
         unresolvable = getattr(self, "_unresolvable_lids", set())
         resolving = getattr(self, "_resolving_lids", set())
         if jid not in unresolvable and jid not in resolving:
-            logging.info("[_resolve_jid_for_send] @lid %s not in cache — queuing background resolve", jid)
+            logging.info("[_resolve_jid_to_phone] @lid %s not in cache — queuing background resolve", jid)
             threading.Thread(
                 target=self._bg_resolve_lid_for_send,
                 args=(jid,),
                 daemon=True,
                 name=f"lid-resolve-{jid[:12]}",
             ).start()
-        else:
-            logging.info("[_resolve_jid_for_send] @lid %s already being resolved or unresolvable — sending as-is", jid)
         return jid
 
     def _bg_resolve_lid_for_send(self, jid: str):
@@ -5361,10 +5375,8 @@ class MainWindow(wx.Frame):
 
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
-        # Only resolve @lid to phone JID if NOT replying/quoting.
-        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
-        if not quoted:
-            remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        remote_jid = self._resolve_jid_for_send(remote_jid)
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -5483,10 +5495,8 @@ class MainWindow(wx.Frame):
         """
         from core.ogg_opus import encode_wav_to_ogg_opus
 
-        # Only resolve @lid to phone JID if NOT replying/quoting.
-        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
-        if not quoted:
-            remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        remote_jid = self._resolve_jid_for_send(remote_jid)
 
         try:
             with open(wav_path, "rb") as fh:
@@ -5555,7 +5565,7 @@ class MainWindow(wx.Frame):
         by the phone-number form of the JID, not the device-linked LID.
         """
         # Always resolve remote_jid to phone JID for message keys
-        remote_jid = self._resolve_jid_for_send(remote_jid)
+        remote_jid = self._resolve_jid_to_phone(remote_jid)
         lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
@@ -5594,7 +5604,7 @@ class MainWindow(wx.Frame):
                     or ""
                 )
             # Resolve group participant JID to phone JID for WPPConnect's index lookup
-            resolved_raw = self._resolve_jid_for_send(raw)
+            resolved_raw = self._resolve_jid_to_phone(raw)
             participant = _resolve_jid(resolved_raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
@@ -6280,14 +6290,13 @@ class MainWindow(wx.Frame):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
         
-        # Use remote_jid as-is (e.g. @lid or phone JID) for the URL parameter.
-        # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs
-        # to avoid TypeErrors.
-        phone = remote_jid.replace("@s.whatsapp.net", "@c.us")
+        # Use remote_jid resolved to @lid (if available) for the URL parameter.
+        # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs.
+        phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
 
         # Resolve remote_jid to phone JID (@c.us) specifically for the message ID key
         # because WPPConnect browser store indexes all message keys under their phone JID.
-        resolved_phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
+        resolved_phone = self._resolve_jid_to_phone(remote_jid).replace("@s.whatsapp.net", "@c.us")
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
@@ -6313,7 +6322,7 @@ class MainWindow(wx.Frame):
                     p_raw = parts[3]
             if p_raw:
                 # Group participant JIDs must also be resolved to phone JIDs (@c.us) for lookup
-                participant = self._resolve_jid_for_send(p_raw).replace("@s.whatsapp.net", "@c.us")
+                participant = self._resolve_jid_to_phone(p_raw).replace("@s.whatsapp.net", "@c.us")
 
         if participant:
             serialized_id = f"{prefix}_{resolved_phone}_{raw_id}_{participant}"
@@ -7412,10 +7421,8 @@ class MainWindow(wx.Frame):
         (no 33 % overhead, no JSON body-size limit).
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
-        # Only resolve @lid to phone JID if NOT replying/quoting.
-        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
-        if not quoted:
-            remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         import mimetypes
         try:
             file_size = os.path.getsize(file_path)
@@ -7532,10 +7539,8 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
-        # Only resolve @lid to phone JID if NOT replying/quoting.
-        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
-        if not quoted:
-            remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         is_group = remote_jid.endswith("@g.us")
         if is_group:
             remote_jid = remote_jid.split("@")[0]
