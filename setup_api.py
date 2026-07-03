@@ -85,6 +85,7 @@ def main():
         # Additional custom files to backup and restore
         custom_files = [
             "src/config.ts",
+            "src/index.ts",
             "src/util/createSessionUtil.ts",
             "src/util/functions.ts",
             "src/middleware/statusConnection.ts",
