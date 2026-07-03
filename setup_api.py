@@ -92,6 +92,7 @@ def main():
             "src/controller/deviceController.ts",
             "src/controller/messageController.ts",
             "src/controller/sessionController.ts",
+            "src/routes/index.ts",
             "decrypt.js"
         ]
         custom_contents = {}
