@@ -5404,6 +5404,8 @@ class MainWindow(wx.Frame):
         """
         if not jid:
             return jid
+        if jid.endswith(("@g.us", "@broadcast")):
+            return jid
         if self._is_self_jid(jid) and getattr(self, "my_lid", ""):
             return self.my_lid
         if jid.endswith("@lid"):
@@ -5710,9 +5712,13 @@ class MainWindow(wx.Frame):
         lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
-            """Keep @lid JIDs as-is, normalise @s.whatsapp.net → @c.us."""
+            """Resolve @lid to phone JID, and normalise @s.whatsapp.net → @c.us."""
             if not jid:
                 return jid
+            if jid.endswith("@lid"):
+                phone = lid_to_phone.get(jid, "")
+                if phone:
+                    jid = phone
             jid = jid.replace("@s.whatsapp.net", "@c.us")
             return jid
 
