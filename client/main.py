@@ -8318,6 +8318,10 @@ class MainWindow(wx.Frame):
         # ── Full rebuild path: JID order or count changed ────────────────────
         focus_allowed = self._allow_ui_focus_changes()
         _lst_had_focus = (wx.Window.FindFocus() is lst)
+        if _lst_had_focus:
+            # Set focus to parent panel temporarily to prevent OS from auto-focusing
+            # item 0 during DeleteAllItems/Append when the control has focus.
+            self.conversations_panel.SetFocus()
         if focused_idx != -1:
             try:
                 # Clear focus state before DeleteAllItems to prevent NVDA COMError/freeze
@@ -8356,13 +8360,13 @@ class MainWindow(wx.Frame):
                     break
 
         if target_idx != -1:
+            if panel.conversations_list.GetFocusedItem() != target_idx:
+                panel.conversations_list.Focus(target_idx)
             if _lst_had_focus:
-                panel.conversations_list.SetFocus()
-                if panel.conversations_list.GetFocusedItem() != target_idx:
-                    panel.conversations_list.Focus(target_idx)
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
                 panel.conversations_list.EnsureVisible(target_idx)
+                panel.conversations_list.SetFocus()
             elif panel.conversation is not None:
                 if not panel.conversations_list.IsSelected(target_idx):
                     panel.conversations_list.Select(target_idx)
@@ -8381,10 +8385,10 @@ class MainWindow(wx.Frame):
                 neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
             if neighbor_idx < 0:
                 neighbor_idx = 0
-            panel.conversations_list.SetFocus()
             panel.conversations_list.Focus(neighbor_idx)
             panel.conversations_list.Select(neighbor_idx)
             panel.conversations_list.EnsureVisible(neighbor_idx)
+            panel.conversations_list.SetFocus()
         elif getattr(self, "_initial_sync_running", False):
             # Skip selection/focus restoration during active initial background sync to prevent screen readers loop
             pass
