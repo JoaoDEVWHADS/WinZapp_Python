@@ -1241,11 +1241,13 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_bg_delete_chat, daemon=True).start()
 
         
-        # Redirect active conversation if it was the merged LID chat
+        # Redirect active conversation if it was the merged LID chat, or refresh if it is the destination phone chat
         if hasattr(self, "conversations_panel") and self.conversations_panel.conversation:
             active_jid = self.conversations_panel.conversation.get("remoteJid", "")
             if active_jid == lid_jid:
                 self.conversations_panel.conversation = self.chats[phone_jid]
+                wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
+            elif active_jid == phone_jid:
                 wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
 
     def on_new_message(self, msg: dict):
@@ -5389,6 +5391,22 @@ class MainWindow(wx.Frame):
         lid_jid = getattr(self, "_phone_to_lid", {}).get(clean_jid, "")
         if lid_jid:
             return lid_jid
+        
+        # If not in cache, try to resolve it via API (safe since message sending runs on a background thread)
+        try:
+            pn_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{clean_jid}"
+            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+            pn_resp = requests.get(pn_url, headers=headers, timeout=5)
+            if pn_resp.ok:
+                pn_data = pn_resp.json()
+                lid_obj = pn_data.get("lid") or {}
+                resolved_lid = lid_obj.get("_serialized") or lid_obj.get("id") or ""
+                if resolved_lid:
+                    self.register_jid_mapping(resolved_lid, clean_jid)
+                    return resolved_lid
+        except Exception as e:
+            logging.warning("[_resolve_jid_for_send] Failed to resolve JID mapping dynamically: %s", e)
+            
         return jid
 
 

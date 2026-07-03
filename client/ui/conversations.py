@@ -6134,7 +6134,16 @@ class ConversationsPanel(wx.Panel):
         """
         if self.conversation is None:
             return
-        if self.conversation.get("remoteJid", "") != remote_jid:
+        
+        conv_jid = self.conversation.get("remoteJid", "")
+        jids_match = (conv_jid == remote_jid)
+        if not jids_match:
+            mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
+            mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
+            if (mapped_lid and mapped_lid == remote_jid) or (mapped_phone and mapped_phone == remote_jid):
+                jids_match = True
+
+        if not jids_match:
             return
         # ── Reaction messages: update reaction_map and re-render original ────
         if msg.get("messageType") == "reactionMessage":
