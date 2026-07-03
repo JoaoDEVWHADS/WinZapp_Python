@@ -5316,11 +5316,14 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_for_send(self, jid: str) -> str:
         """
-        Translate a @lid JID to its @s.whatsapp.net equivalent before sending.
+        Translate a @lid JID to its @s.whatsapp.net equivalent before sending,
+        or translate our own JID (self-chat) to our own @lid JID so WPPConnect can find it.
         Returns immediately — NEVER blocks on HTTP. If the @lid is not yet in
         the local cache, a background resolution is triggered and the send
         proceeds with the @lid as-is (WPPConnect handles many @lid sends fine).
         """
+        if self._is_self_jid(jid) and getattr(self, "my_lid", ""):
+            return self.my_lid
         if not jid.endswith("@lid"):
             return jid
         phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
@@ -5588,7 +5591,9 @@ class MainWindow(wx.Frame):
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            participant = _resolve_jid(raw)
+            # Resolve group participant JID to phone JID for WPPConnect's index lookup
+            resolved_raw = self._resolve_jid_for_send(raw)
+            participant = _resolve_jid(resolved_raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
