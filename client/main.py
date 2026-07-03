@@ -5607,6 +5607,15 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
 
+        # For audio messages, play the sent sound HERE — not only inside
+        # _mark_message_sent — because the upload can take several seconds.
+        # If the user navigated to another conversation before the API
+        # confirmed the send, local_id is no longer in _sorted_messages and
+        # _mark_message_sent would silently skip the sound.  Playing it here
+        # guarantees the "tac" always fires the moment the API says "sent".
+        if audio_path and hasattr(self, "message_sent_sound"):
+            self.message_sent_sound.play()
+
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
 

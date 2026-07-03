@@ -1318,8 +1318,12 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 # Play sent sound — fires only when the originating conversation
                 # is still the active one (otherwise local_id is not found here).
+                # Audio messages are excluded: their sound is played by
+                # _on_message_sent at API-confirmation time, guaranteeing it
+                # fires even if the user navigated away during the upload.
                 if hasattr(self.main_window, "message_sent_sound"):
-                    self.main_window.message_sent_sound.play()
+                    if msg.get("messageType") != "audioMessage":
+                        self.main_window.message_sent_sound.play()
                 break
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window._schedule_set_chats()
