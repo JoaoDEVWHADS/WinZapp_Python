@@ -1261,6 +1261,11 @@ class ConversationsPanel(wx.Panel):
         if local_id and any(r.get("_local_id") == local_id for r in records):
             return  # already registered
         records.append(virtual_msg)
+        
+        # Update chat timestamp (t) so the sending chat floats to the top immediately
+        msg_ts = int(virtual_msg.get("messageTimestamp", 0) or time.time())
+        if msg_ts > int(chat.get("t", 0) or 0):
+            chat["t"] = msg_ts
 
     def _mark_message_sent(self, local_id: str, real_id: str = None):
         """

@@ -1232,10 +1232,13 @@ class MainWindow(wx.Frame):
             lid_chat["remoteJid"] = phone_jid
             self.chats[phone_jid] = lid_chat
         self.chats.pop(lid_jid, None)
-        try:
-            self.db.delete_chat(lid_jid)
-        except Exception as e:
-            logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
+        
+        def _bg_delete_chat():
+            try:
+                self.db.delete_chat(lid_jid)
+            except Exception as e:
+                logging.error(f"[merge_lid] Failed to delete merged LID chat {lid_jid}: {e}")
+        threading.Thread(target=_bg_delete_chat, daemon=True).start()
 
         
         # Redirect active conversation if it was the merged LID chat
@@ -1434,6 +1437,11 @@ class MainWindow(wx.Frame):
                 self._resolve_group_name_async(remote_jid)
 
         chat = self.chats[remote_jid]
+        
+        # Update chat timestamp (t) so it sorts correctly to the top
+        msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
+        if msg_ts > int(chat.get("t", 0) or 0):
+            chat["t"] = msg_ts
 
         # ── Avoid duplicate insertions or resolve pending ones ────────────────
         records = (
@@ -1498,10 +1506,13 @@ class MainWindow(wx.Frame):
                     records[:] = [r for r in records
                                   if r.get("key", {}).get("id") != msg_id]
                 records.append(pending_msg)
-                try:
-                    self.db.insert_message(remote_jid, pending_msg)
-                except Exception as e:
-                    logging.error(f"[on_new_message] Failed to insert pending message to DB: {e}")
+                
+                def _bg_insert_pending():
+                    try:
+                        self.db.insert_message(remote_jid, pending_msg)
+                    except Exception as e:
+                        logging.error(f"[on_new_message] Failed to insert pending message to DB: {e}")
+                threading.Thread(target=_bg_insert_pending, daemon=True).start()
                 
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
@@ -1529,10 +1540,13 @@ class MainWindow(wx.Frame):
         # Slim any bloated quoted-message payload before persisting.
         prune_message_record(msg)
         records.append(msg)
-        try:
-            self.db.insert_message(remote_jid, msg)
-        except Exception as e:
-            logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
+        
+        def _bg_insert_msg():
+            try:
+                self.db.insert_message(remote_jid, msg)
+            except Exception as e:
+                logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
+        threading.Thread(target=_bg_insert_msg, daemon=True).start()
 
         # ── Update unread count (only for messages we received) ───────────────
         if not from_me:
@@ -5279,6 +5293,9 @@ class MainWindow(wx.Frame):
             return None
         # key.remoteJid can be empty for own messages in local cache, fallback to current conversation JID
         remote_jid = raw_key.get("remoteJid") or fallback_jid or ""
+        # Swap self-JID with fallback_jid (the other person in the 1-on-1 chat) to prevent WPPConnect lookup fail
+        if self._is_self_jid(remote_jid) and fallback_jid:
+            remote_jid = fallback_jid
         return self._serialize_msg_id(remote_jid, raw_key)
 
     def _canonical_mention_jids(self, mentioned_jids):
@@ -5481,7 +5498,7 @@ class MainWindow(wx.Frame):
         audio_b64 = base64.b64encode(ogg_bytes).decode("utf-8")
 
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-voice-base64"
-        quoted_id = self._serialize_quoted_id(quoted) if quoted else None
+        quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
         payload = {
             "phone": [remote_jid],
             "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
@@ -7383,7 +7400,7 @@ class MainWindow(wx.Frame):
             "type":     _wpp_type,
         }
         if quoted:
-            quoted_id = self._serialize_quoted_id(quoted)
+            quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
             if quoted_id:
                 data["quotedMessageId"] = quoted_id
         # Scale timeout with file size: at least 1 s per 100 KB, min 120 s, max 30 min.
@@ -7484,7 +7501,7 @@ class MainWindow(wx.Frame):
             "contactsId":  [f"{phone_raw}@c.us"],
         }
         if quoted:
-            quoted_id = self._serialize_quoted_id(quoted)
+            quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
             if quoted_id:
                 payload["quotedMessageId"] = quoted_id
         headers = {
