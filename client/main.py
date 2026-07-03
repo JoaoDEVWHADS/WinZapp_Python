@@ -4409,11 +4409,11 @@ class MainWindow(wx.Frame):
             ts = int(c.get("t", 0) or 0)
             lm = c.get("lastMessage")
             if isinstance(lm, dict):
-                lm_ts = int(lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
+                lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
                 if lm_ts > ts:
                     ts = lm_ts
             for m in c.get("messages", {}).get("messages", {}).get("records", []):
-                t = int(m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
                 if t > ts:
                     ts = t
             return ts if ts else 1
