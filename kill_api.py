@@ -47,7 +47,8 @@ if __name__ == "__main__":
     kill_process_by_name("node start.js")
     
     # Also clean SingletonLock in userDataDir
-    user_data_dir = os.path.join(os.path.dirname(__file__), "client", "api", "userDataDir")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    user_data_dir = os.path.join(base_dir, "client", "api", "userDataDir")
     if os.path.exists(user_data_dir):
         print("Cleaning SingletonLock files...")
         for root, dirs, files in os.walk(user_data_dir):
@@ -58,4 +59,20 @@ if __name__ == "__main__":
                         print(f"Deleted lock: {os.path.join(root, file)}")
                     except Exception as e:
                         print(f"Failed to delete lock: {e}")
-    print("Done killing API and Chrome processes.")
+                        
+    # Clean log files in client/api/log/ and root log/ folders
+    api_log_dir = os.path.join(base_dir, "client", "api", "log")
+    root_log_dir = os.path.join(base_dir, "log")
+    for log_dir in (api_log_dir, root_log_dir):
+        if os.path.exists(log_dir):
+            print(f"Cleaning log files in {log_dir}...")
+            for file in os.listdir(log_dir):
+                file_path = os.path.join(log_dir, file)
+                if os.path.isfile(file_path):
+                    try:
+                        os.unlink(file_path)
+                        print(f"Deleted log: {file_path}")
+                    except Exception as e:
+                        print(f"Failed to delete log {file_path}: {e}")
+                        
+    print("Done killing API and Chrome processes, and cleaning logs.")
