@@ -5333,31 +5333,7 @@ class MainWindow(wx.Frame):
             return lid_jid
         return jid
 
-    def _resolve_jid_to_phone(self, jid: str) -> str:
-        """
-        Translate a @lid JID to its phone JID equivalent (@s.whatsapp.net) if available in cache,
-        specifically for message keys/IDs since WPPConnect/WhatsApp Web store indexes message keys
-        under their phone JID form.
-        """
-        if not jid:
-            return jid
-        if not jid.endswith("@lid"):
-            return jid
-        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
-        if phone_jid:
-            return phone_jid
-        # Not in cache — fire a background resolution so NEXT query will have it
-        unresolvable = getattr(self, "_unresolvable_lids", set())
-        resolving = getattr(self, "_resolving_lids", set())
-        if jid not in unresolvable and jid not in resolving:
-            logging.info("[_resolve_jid_to_phone] @lid %s not in cache — queuing background resolve", jid)
-            threading.Thread(
-                target=self._bg_resolve_lid_for_send,
-                args=(jid,),
-                daemon=True,
-                name=f"lid-resolve-{jid[:12]}",
-            ).start()
-        return jid
+
 
     def _bg_resolve_lid_for_send(self, jid: str):
         """Background helper: resolve a single @lid and log the result."""
@@ -5564,8 +5540,8 @@ class MainWindow(wx.Frame):
         @lid JIDs must be resolved to @c.us because WPPConnect indexes messages
         by the phone-number form of the JID, not the device-linked LID.
         """
-        # Always resolve remote_jid to phone JID for message keys
-        remote_jid = self._resolve_jid_to_phone(remote_jid)
+        # Always resolve remote_jid to the active chat JID (LID if available)
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
@@ -5603,8 +5579,8 @@ class MainWindow(wx.Frame):
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            # Resolve group participant JID to phone JID for WPPConnect's index lookup
-            resolved_raw = self._resolve_jid_to_phone(raw)
+            # Resolve group participant JID to LID JID if available
+            resolved_raw = self._resolve_jid_for_send(raw)
             participant = _resolve_jid(resolved_raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
@@ -6294,9 +6270,8 @@ class MainWindow(wx.Frame):
         # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs.
         phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
 
-        # Resolve remote_jid to phone JID (@c.us) specifically for the message ID key
-        # because WPPConnect browser store indexes all message keys under their phone JID.
-        resolved_phone = self._resolve_jid_to_phone(remote_jid).replace("@s.whatsapp.net", "@c.us")
+        # The message ID key in WPPConnect's browser store also matches the chat JID (LID if available).
+        resolved_phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
@@ -6308,8 +6283,7 @@ class MainWindow(wx.Frame):
             raw_id = parts[2] if len(parts) > 2 else parts[-1]
 
         # WPPConnect's getMessages ?id= param expects the FULLY serialized message key
-        # (e.g. "true_553499325163@c.us_3EB0D3BCB679BFCAFD2D39").
-        # We must reconstruct the correct serialized key using the phone JID.
+        # (e.g. "true_226465287282814@lid_3EB0D3BCB679BFCAFD2D39").
         from_me = bool(_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
         
@@ -6321,8 +6295,8 @@ class MainWindow(wx.Frame):
                 if len(parts) > 3:
                     p_raw = parts[3]
             if p_raw:
-                # Group participant JIDs must also be resolved to phone JIDs (@c.us) for lookup
-                participant = self._resolve_jid_to_phone(p_raw).replace("@s.whatsapp.net", "@c.us")
+                # Group participant JIDs must also be resolved using _resolve_jid_for_send
+                participant = self._resolve_jid_for_send(p_raw).replace("@s.whatsapp.net", "@c.us")
 
         if participant:
             serialized_id = f"{prefix}_{resolved_phone}_{raw_id}_{participant}"
@@ -6345,8 +6319,8 @@ class MainWindow(wx.Frame):
                 alternate_jid = ""
                 if remote_jid.endswith("@lid"):
                     # Fallback to resolved phone JID if LID query failed
-                    resolved = self._resolve_jid_for_send(remote_jid)
-                    if resolved != remote_jid:
+                    resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+                    if resolved:
                         alternate_jid = resolved.replace("@s.whatsapp.net", "@c.us")
                 else:
                     alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
