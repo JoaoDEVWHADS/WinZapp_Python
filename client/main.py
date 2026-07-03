@@ -1438,8 +1438,9 @@ class MainWindow(wx.Frame):
 
         chat = self.chats[remote_jid]
         
-        # Update chat timestamp (t) so it sorts correctly to the top
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
+        if msg_ts > 1_000_000_000_000:
+            msg_ts //= 1000
         if msg_ts > int(chat.get("t", 0) or 0):
             chat["t"] = msg_ts
 

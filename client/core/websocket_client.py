@@ -763,7 +763,7 @@ class WebSocketClient:
                     }
                 },
                 "messageType": "reactionMessage",
-                "messageTimestamp": payload.get("timestamp") or int(time.time()),
+                "messageTimestamp": (payload.get("timestamp") // 1000 if (payload.get("timestamp") or 0) > 1_000_000_000_000 else (payload.get("timestamp") or int(time.time()))),
             }
             if reactor_participant:
                 normalized["key"]["participant"] = reactor_participant
@@ -849,6 +849,8 @@ class WebSocketClient:
             status_participant = ""
 
         ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
+        if ts > 1_000_000_000_000:
+            ts //= 1000
 
         msg_type = wpp_msg.get("type", "chat")
         conversation = wpp_msg.get("body", "")
