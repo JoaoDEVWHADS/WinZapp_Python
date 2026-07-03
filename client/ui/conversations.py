@@ -2829,11 +2829,22 @@ class ConversationsPanel(wx.Panel):
         if not self.conversation or not self._all_sorted_messages:
             return
         
-        # Get oldest non-separator message ID
-        oldest_msg = self._all_sorted_messages[0]
-        if oldest_msg.get("_type") == "unread_separator" and len(self._all_sorted_messages) > 1:
-            oldest_msg = self._all_sorted_messages[1]
-            
+        # Get oldest non-separator and non-pending message ID
+        oldest_msg = None
+        for m in self._all_sorted_messages:
+            if m.get("_type") == "unread_separator":
+                continue
+            m_id = m.get("key", {}).get("id", "")
+            # Skip local pending/virtual messages (UUIDs contain hyphens or start with 'pending-')
+            if m.get("_local_pending") or m_id.startswith("pending-") or "-" in m_id:
+                continue
+            oldest_msg = m
+            break
+
+        if oldest_msg is None:
+            # Fallback to the first message if all are pending/separators
+            oldest_msg = self._all_sorted_messages[0]
+
         oldest_id = oldest_msg.get("key", {}).get("id", "")
         if not oldest_id:
             return
