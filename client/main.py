@@ -5613,13 +5613,22 @@ class MainWindow(wx.Frame):
             logging.error("[send_reaction] exception: %s", exc)
             return False
 
-    def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None):
+    def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None, remote_jid: str = None):
         """
         Called on the main thread after a queued message is successfully sent.
         Updates the UI status label and cleans up any temporary audio file.
         real_id is the WhatsApp message ID returned by the API; it replaces the
         local UUID in the virtual message so playback can find the message in the DB.
         """
+        if real_id and remote_jid:
+            def _bg_update_db():
+                try:
+                    import asyncio
+                    asyncio.run(self.db.update_message_id(remote_jid, local_id, real_id))
+                except Exception as e:
+                    logging.error("[_on_message_sent] failed to update database message ID: %s", e)
+            threading.Thread(target=_bg_update_db, daemon=True).start()
+
         # Save or copy the local audio copy under the real ID *before* calling _mark_message_sent
         # to prevent background media sync from downloading a file we already have.
         if audio_path and os.path.isfile(audio_path):
@@ -7210,18 +7219,14 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_api, daemon=True).start()
 
     def _resolve_jid_for_chat_state(self, jid: str) -> str:
-        """Resolve @lid to phone JID and convert to @c.us for WPPConnect chat-state endpoints."""
-        resolved = jid
-        if resolved.endswith("@lid"):
-            resolved = getattr(self, "_lid_to_phone", {}).get(resolved, resolved)
+        """Resolve to the active chat JID (LID if available) and convert to @c.us format."""
+        resolved = self._resolve_jid_for_send(jid)
         return resolved.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
         """Notify WPPConnect that the user started or stopped typing."""
         def _api():
             phone = self._resolve_jid_for_chat_state(jid)
-            if phone.endswith("@lid"):
-                return  # unresolved @lid — skip silently
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/typing"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
@@ -7239,8 +7244,6 @@ class MainWindow(wx.Frame):
         """Notify WPPConnect that the user started or stopped recording audio."""
         def _api():
             phone = self._resolve_jid_for_chat_state(jid)
-            if phone.endswith("@lid"):
-                return  # unresolved @lid — skip silently
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/recording"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:

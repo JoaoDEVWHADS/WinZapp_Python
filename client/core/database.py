@@ -507,17 +507,32 @@ class DatabaseManager:
                 await conn.rollback()
                 raise
 
-    async def update_message_status(
-        self, remote_jid: str, message_id: str, status: int
+    async def update_message_id(
+        self, remote_jid: str, old_id: str, new_id: str
     ) -> None:
-        """Update delivery/read status for a message."""
+        """Update a message's ID from old_id to new_id in the database."""
         async with self._write_lock:
             conn = await self._ensure_conn()
-            await conn.execute(
-                "UPDATE messages SET status=? WHERE message_id=? AND remote_jid=?",
-                (status, message_id, remote_jid),
+            # First, check if the new_id already exists (to prevent duplicates)
+            cursor = await conn.execute(
+                "SELECT 1 FROM messages WHERE remote_jid=? AND message_id=?",
+                (remote_jid, new_id),
             )
+            exists = await cursor.fetchone()
+            if exists:
+                # If the new ID already exists, delete the old UUID message
+                await conn.execute(
+                    "DELETE FROM messages WHERE remote_jid=? AND message_id=?",
+                    (remote_jid, old_id),
+                )
+            else:
+                # Otherwise, update the message ID
+                await conn.execute(
+                    "UPDATE messages SET message_id=? WHERE remote_jid=? AND message_id=?",
+                    (new_id, remote_jid, old_id),
+                )
             await conn.commit()
+
 
     async def delete_message(self, remote_jid: str, message_id: str) -> None:
         """Delete a single message by remote_jid + message_id."""
