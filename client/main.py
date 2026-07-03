@@ -1491,7 +1491,8 @@ class MainWindow(wx.Frame):
                         self._own_sent_ids.discard(next(iter(self._own_sent_ids)))
                 
                 if hasattr(self, "conversations_panel"):
-                    wx.CallAfter(self.conversations_panel._mark_message_sent, local_id, real_id=msg_id)
+                    # _no_sound: MessageQueue's _on_message_sent will play sound
+                    wx.CallAfter(self.conversations_panel._mark_message_sent_no_sound, local_id, real_id=msg_id)
                 
                 self._schedule_save(dirty_jid=remote_jid)
                 self._schedule_set_chats()
@@ -5639,14 +5640,24 @@ class MainWindow(wx.Frame):
         if not msg_id or not status:
             return
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+
+        # Try all known JID forms (@lid <-> @s.whatsapp.net) to find the chat
+        candidates = [remote_jid]
         if remote_jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
             if phone_jid:
-                remote_jid = phone_jid
-        if remote_jid not in self.chats:
+                candidates.append(phone_jid)
+        elif remote_jid.endswith("@s.whatsapp.net"):
+            lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+            if lid:
+                candidates.append(lid)
+
+        chat_jid = next((j for j in candidates if j in self.chats), None)
+        if not chat_jid:
             return
+
         records = (
-            self.chats[remote_jid]
+            self.chats[chat_jid]
                 .get("messages", {})
                 .get("messages", {})
                 .get("records", [])

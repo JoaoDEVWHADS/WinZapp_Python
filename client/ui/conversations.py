@@ -1324,6 +1324,23 @@ class ConversationsPanel(wx.Panel):
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window._schedule_set_chats()
 
+    def _mark_message_sent_no_sound(self, local_id: str, real_id: str = None):
+        """Same as _mark_message_sent but does NOT play the sent sound.
+        Called from the WebSocket fromMe echo path to avoid the duplicate sound
+        that occurs because MessageQueue's _on_message_sent also calls
+        _mark_message_sent (which plays the sound) for the same message."""
+        # Temporarily suppress the sound by patching message_sent_sound
+        _orig = getattr(self.main_window, "message_sent_sound", None)
+        class _NoPlay:
+            def play(self): pass
+        if _orig:
+            self.main_window.message_sent_sound = _NoPlay()
+        try:
+            self._mark_message_sent(local_id, real_id=real_id)
+        finally:
+            if _orig:
+                self.main_window.message_sent_sound = _orig
+
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
         for i, msg in enumerate(self._sorted_messages):
