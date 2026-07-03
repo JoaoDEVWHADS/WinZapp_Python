@@ -9,6 +9,8 @@ client/data/media/
 client/data/voice_messages/
 client/data/log/
 client/logs/
+/log/
+
 
 # Bundled Node.js runtime (binary distribution, ~50 MB)
 /client/node/
@@ -190,6 +192,8 @@ celerybeat.pid
 
 # Logs (general)
 *.log
+*.logg
+
 
 # SQLite
 db.sqlite3
