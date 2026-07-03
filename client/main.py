@@ -3010,6 +3010,13 @@ class MainWindow(wx.Frame):
         except Exception as e:
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
 
+    def trigger_sync_if_needed(self):
+        # Trigger sync only if it hasn't completed, isn't already running, and we are connected.
+        if getattr(self, "_wa_connected", False) and not getattr(self, "_sync_completed", False) and not getattr(self, "_initial_sync_running", False):
+            logging.info("[trigger_sync_if_needed] WhatsApp connected and sync is incomplete. Triggering sync thread...")
+            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+            self.sync_thread.start()
+
     def start_sync(self):
         # Block until init_UI() completes.  This prevents wx.CallAfter calls
         # below from referencing panels that don't exist yet (which happens when
@@ -3139,7 +3146,11 @@ class MainWindow(wx.Frame):
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
-        if len(self.chats) > 0:
+        # Mark sync as done for this session ONLY if we actually had an active
+        # WhatsApp connection to query new messages. If we synced while disconnected,
+        # we only loaded the local cache, so keep _sync_completed = False so we can
+        # trigger a real sync once WhatsApp connects.
+        if len(self.chats) > 0 and getattr(self, "_wa_connected", False):
             self._sync_completed = True
         else:
             self._sync_completed = False

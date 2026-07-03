@@ -70,8 +70,11 @@ class WebSocketClient:
     def _recheck_connection_after_connect(self):
         try:
             self.main_window.check_wa_connection_http()
-            if getattr(self.main_window, "_wa_connected", False) and hasattr(self.main_window, "message_queue"):
-                self.main_window.message_queue.flush()
+            if getattr(self.main_window, "_wa_connected", False):
+                if hasattr(self.main_window, "message_queue"):
+                    self.main_window.message_queue.flush()
+                if hasattr(self.main_window, "trigger_sync_if_needed"):
+                    self.main_window.trigger_sync_if_needed()
         except Exception as e:
             print(f"[WebSocketClient] _recheck_connection_after_connect error: {e}")
 
@@ -99,6 +102,10 @@ class WebSocketClient:
                 self.main_window._set_status("")
             if hasattr(self.main_window, "message_queue"):
                 self.main_window.message_queue.flush()
+            
+            # Trigger sync if it was previously incomplete/skipped due to connection delay
+            if hasattr(self.main_window, "trigger_sync_if_needed"):
+                self.main_window.trigger_sync_if_needed()
             
             # Save the paired status so next startup knows pairing was fully completed.
             pi = self.main_window.settings.setdefault("privateinfo", {})
@@ -260,12 +267,10 @@ class WebSocketClient:
         messageType, messageTimestamp, ...).
         """
         try:
-            # Ignore new-message events until the initial conversation sync has
-            # fully finished (i.e. we are neither "preparing to sync" nor
-            # "synchronizing"). Otherwise a message arriving mid-sync would
-            # create/insert a conversation in the list before the old-message
-            # history sync even started, leaving the UI in an inconsistent state.
-            if not getattr(self.main_window, "_sync_completed", False):
+            # Ignore new-message events ONLY while the initial conversation sync is
+            # actively running. If the sync has finished or aborted, we must process
+            # real-time messages so the user doesn't lose incoming messages.
+            if getattr(self.main_window, "_initial_sync_running", False):
                 return
 
             msg = info.get("data", {})
