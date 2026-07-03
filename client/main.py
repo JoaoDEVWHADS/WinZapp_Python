@@ -1520,12 +1520,6 @@ class MainWindow(wx.Frame):
                 if existing.get("key", {}).get("id") == msg_id:
                     return  # already stored
 
-            try:
-                if hasattr(self, "db") and self.db is not None:
-                    if self.db.has_message(remote_jid, msg_id):
-                        return  # already stored in database
-            except Exception as e:
-                logging.error(f"[on_new_message] Error checking message existence in DB: {e}")
 
 
         # Ignore stale re-deliveries of messages the user already cleared.
