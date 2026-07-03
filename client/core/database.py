@@ -282,6 +282,12 @@ class DatabaseManager:
             jid = row["jid"]
             last_msg = self._decrypt_json(row["last_message_json"])
             msgs = await self._build_message_wrapper(jid)
+            t = 0
+            if isinstance(last_msg, dict):
+                try:
+                    t = int(last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                except (TypeError, ValueError):
+                    t = 0
             result[jid] = {
                 "remoteJid": row["remote_jid"],
                 "unreadCount": row["unread_count"],
@@ -289,6 +295,7 @@ class DatabaseManager:
                 "name": row["name"] or "",
                 "messages": msgs,
                 "lastMessage": last_msg,
+                "t": t,
                 "archived": bool(row["archived"]),
                 "archive": bool(row["archived"]),
                 "type": row["chat_type"] or "chat",
