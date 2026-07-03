@@ -1200,6 +1200,7 @@ class ConversationsPanel(wx.Panel):
                 "stanzaId":      _qk.get("id", ""),
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": self._quoted_message.get("message") or {},
+                "_quotedFromMe": bool(_qk.get("fromMe", False)),  # local hint for immediate render
             }
         if _mentioned:
             virtual_msg.setdefault("contextInfo", {})["mentionedJid"] = _mentioned
@@ -1582,6 +1583,7 @@ class ConversationsPanel(wx.Panel):
                 "stanzaId":      _qk.get("id", ""),
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": self._quoted_message.get("message") or {},
+                "_quotedFromMe": bool(_qk.get("fromMe", False)),  # local hint for immediate render
             }
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
@@ -4211,6 +4213,13 @@ class ConversationsPanel(wx.Panel):
         participant = ctx.get("participant", "")
 
         if not participant:
+            # Fast path: use local hint set when building virtual reply message.
+            if "_quotedFromMe" in ctx:
+                return mw.self_reference_label() if ctx["_quotedFromMe"] else (
+                    mw._resolve_contact_name(self.conversation or {})
+                    or (self.conversation or {}).get("pushName", "")
+                    or ""
+                )
             # 1:1 chat: Baileys leaves participant empty; resolve by stanzaId lookup.
             stanza_id = ctx.get("stanzaId", "")
             if stanza_id:

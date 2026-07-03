@@ -533,6 +533,17 @@ class DatabaseManager:
                 )
             await conn.commit()
 
+    async def update_message_status(
+        self, remote_jid: str, message_id: str, status: int
+    ) -> None:
+        """Update delivery/read status for a message."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "UPDATE messages SET status=? WHERE message_id=? AND remote_jid=?",
+                (status, message_id, remote_jid),
+            )
+            await conn.commit()
 
     async def delete_message(self, remote_jid: str, message_id: str) -> None:
         """Delete a single message by remote_jid + message_id."""
