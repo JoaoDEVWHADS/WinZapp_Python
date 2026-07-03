@@ -47,7 +47,10 @@ def _fmt_last_seen(ts, i18n) -> str:
         return ""
     try:
         from datetime import datetime as _dt, timedelta as _td
-        dt       = _dt.fromtimestamp(int(ts))
+        ts_val = int(ts)
+        if ts_val > 1_000_000_000_000:
+            ts_val //= 1000
+        dt       = _dt.fromtimestamp(ts_val)
         now      = _dt.now()
         time_str = dt.strftime("%H:%M")
         if dt.date() == now.date():
@@ -1265,7 +1268,12 @@ class ConversationsPanel(wx.Panel):
         
         # Update chat timestamp (t) so the sending chat floats to the top immediately
         msg_ts = int(virtual_msg.get("messageTimestamp", 0) or time.time())
-        if msg_ts > int(chat.get("t", 0) or 0):
+        if msg_ts > 1_000_000_000_000:
+            msg_ts //= 1000
+        current_t = int(chat.get("t", 0) or 0)
+        if current_t > 1_000_000_000_000:
+            current_t //= 1000
+        if msg_ts > current_t:
             chat["t"] = msg_ts
 
     def _mark_message_sent(self, local_id: str, real_id: str = None):
@@ -3641,7 +3649,10 @@ class ConversationsPanel(wx.Panel):
         if ts is None:
             return None
         try:
-            return int(ts)
+            ts_val = int(ts)
+            if ts_val > 1_000_000_000_000:
+                ts_val //= 1000
+            return ts_val
         except Exception:
             return None
 
@@ -3649,7 +3660,10 @@ class ConversationsPanel(wx.Panel):
         if not ts:
             return ""
         try:
-            dt    = datetime.fromtimestamp(int(ts))
+            ts_val = int(ts)
+            if ts_val > 1_000_000_000_000:
+                ts_val //= 1000
+            dt    = datetime.fromtimestamp(ts_val)
             today = datetime.now()
             if dt.date() == today.date():
                 return dt.strftime("%H:%M")
