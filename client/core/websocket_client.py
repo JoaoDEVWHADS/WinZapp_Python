@@ -274,6 +274,17 @@ class WebSocketClient:
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
 
+            # ── Skip history-sync echoes ───────────────────────────────────────
+            # WPPConnect/Baileys fires messages.upsert for historical messages
+            # (isMdHistoryMsg=True) during its initial sync phase. These are the
+            # same records already fetched by sync_chat_messages via the REST API
+            # and placed in the correct chronological position. Treating them as
+            # live new messages appends them at the bottom of the conversation
+            # as if they had just been sent. Drop them here — the REST sync
+            # handles history; this handler is for real-time arrivals only.
+            if msg.get("isMdHistoryMsg"):
+                return
+
             # Extract JID mapping from WebSocket message
             self.main_window._extract_lid_mapping(msg)
             # fromMe=True can mean two things:
