@@ -5712,13 +5712,9 @@ class MainWindow(wx.Frame):
         lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
-            """Resolve @lid to phone JID, and normalise @s.whatsapp.net → @c.us."""
+            """Keep @lid JIDs as-is, normalise @s.whatsapp.net → @c.us."""
             if not jid:
                 return jid
-            if jid.endswith("@lid"):
-                phone = lid_to_phone.get(jid, "")
-                if phone:
-                    jid = phone
             jid = jid.replace("@s.whatsapp.net", "@c.us")
             return jid
 
