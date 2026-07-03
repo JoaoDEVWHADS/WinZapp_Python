@@ -267,11 +267,8 @@ class WebSocketClient:
         messageType, messageTimestamp, ...).
         """
         try:
-            # Ignore new-message events ONLY while the initial conversation sync is
-            # actively running. If the sync has finished or aborted, we must process
-            # real-time messages so the user doesn't lose incoming messages.
-            if getattr(self.main_window, "_initial_sync_running", False):
-                return
+            # Process real-time messages directly. Main window's on_new_message
+            # already deduplicates based on the message ID to prevent duplicate historical entries.
 
             msg = info.get("data", {})
             if not isinstance(msg, dict) or not msg.get("key"):
