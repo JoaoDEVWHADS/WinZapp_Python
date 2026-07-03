@@ -28,6 +28,7 @@ client/logs/
 !/client/api/src/
 /client/api/src/*
 !/client/api/src/config.ts
+!/client/api/src/index.ts
 !/client/api/src/controller/
 /client/api/src/controller/*
 !/client/api/src/controller/deviceController.ts
