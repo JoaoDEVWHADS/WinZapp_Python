@@ -4366,6 +4366,8 @@ class MainWindow(wx.Frame):
 
     def _apply_chat_lists(self, main_chats, main_names, arch_chats, arch_names):
         """Apply sorted chat lists to panels and refresh UI. Must run on main thread."""
+        if not hasattr(self, "conversations_panel"):
+            return  # UI not yet initialized; skip silently
         self.chat_names = main_names
 
         # Save focused JIDs from the CURRENT (old) displayed lists BEFORE
