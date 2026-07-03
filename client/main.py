@@ -5358,10 +5358,10 @@ class MainWindow(wx.Frame):
 
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
-        # Always send using the phone JID (@s.whatsapp.net / @g.us).
-        # WPPConnect's contactToArray normalises to @c.us internally; passing
-        # @lid JIDs breaks the server with HTTP 500 (confirmed in production logs).
-        remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Only resolve @lid to phone JID if NOT replying/quoting.
+        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
+        if not quoted:
+            remote_jid = self._resolve_jid_for_send(remote_jid)
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -5480,7 +5480,10 @@ class MainWindow(wx.Frame):
         """
         from core.ogg_opus import encode_wav_to_ogg_opus
 
-        remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Only resolve @lid to phone JID if NOT replying/quoting.
+        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
+        if not quoted:
+            remote_jid = self._resolve_jid_for_send(remote_jid)
 
         try:
             with open(wav_path, "rb") as fh:
@@ -6269,25 +6272,45 @@ class MainWindow(wx.Frame):
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
-        # Always resolve @lid to phone JID for WPPConnect's getMessages API.
-        # WPPConnect returns HTTP 401 TypeError if queried with a @lid.
-        phone = self._resolve_jid_for_send(remote_jid)
-        if phone.endswith("@s.whatsapp.net"):
-            phone = phone.split("@")[0] + "@c.us"
-
+        
+        # Use remote_jid as-is (e.g. @lid or phone JID).
+        # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs
+        # to avoid TypeErrors, but it requires the queried chat JID to match the JID in the serialized message key.
+        phone = remote_jid.replace("@s.whatsapp.net", "@c.us")
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
-        # WPPConnect's getMessages ?id= param expects ONLY the raw message ID
-        # (e.g. "3EB0D3BCB679BFCAFD2D39"), not the full serialised key.
-        # Sending the reconstructed key caused WPPConnect to parse the last
-        # underscore-segment as a chat JID → "Chat not found" error.
+        
+        # Get raw message ID from key
+        raw_id = msg_id
         if msg_id and "_" in msg_id:
             parts = msg_id.split("_")
-            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+            raw_id = parts[2] if len(parts) > 2 else parts[-1]
+
+        # WPPConnect's getMessages ?id= param expects the FULLY serialized message key
+        # (e.g. "true_553499325163@c.us_3EB0D3BCB679BFCAFD2D39" or "true_226465287282814@lid_3EB0D3BCB679BFCAFD2D39").
+        # If we pass just raw_id, WPPConnect throws a TypeError ('_serialized' of undefined).
+        # We must reconstruct the correct serialized key using the chat JID being queried.
+        from_me = bool(_key.get("fromMe", False))
+        prefix = "true" if from_me else "false"
+        
+        participant = ""
+        if phone.endswith("@g.us"):
+            p_raw = _key.get("participant") or oldest_msg.get("participant") or ""
+            if msg_id and msg_id.startswith(("true_", "false_")):
+                parts = msg_id.split("_")
+                if len(parts) > 3:
+                    p_raw = parts[3]
+            if p_raw:
+                participant = self._resolve_jid_for_send(p_raw).replace("@s.whatsapp.net", "@c.us")
+
+        if participant:
+            serialized_id = f"{prefix}_{phone}_{raw_id}_{participant}"
+        else:
+            serialized_id = f"{prefix}_{phone}_{raw_id}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={msg_id}"
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -6301,12 +6324,20 @@ class MainWindow(wx.Frame):
             if response.status_code not in (200, 201):
                 alternate_jid = ""
                 if remote_jid.endswith("@lid"):
-                    alternate_jid = remote_jid
+                    # Fallback to resolved phone JID if LID query failed
+                    resolved = self._resolve_jid_for_send(remote_jid)
+                    if resolved != remote_jid:
+                        alternate_jid = resolved.replace("@s.whatsapp.net", "@c.us")
                 else:
-                    alternate_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-                
+                    alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+                    if alt_lid:
+                        alternate_jid = alt_lid
+
                 if alternate_jid and alternate_jid != phone:
-                    alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}&direction=before&id={msg_id}"
+                    alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}"
+                    if participant and alternate_jid.endswith("@g.us"):
+                        alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}_{participant}"
+                    alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}&direction=before&id={alt_serialized_id}"
                     logging.info(f"[fetch_older_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
                     try:
                         alt_response = requests.get(alt_url, headers=headers, timeout=30)
@@ -7370,7 +7401,10 @@ class MainWindow(wx.Frame):
         (no 33 % overhead, no JSON body-size limit).
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
-        remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Only resolve @lid to phone JID if NOT replying/quoting.
+        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
+        if not quoted:
+            remote_jid = self._resolve_jid_for_send(remote_jid)
         import mimetypes
         try:
             file_size = os.path.getsize(file_path)
@@ -7487,7 +7521,10 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
-        remote_jid = self._resolve_jid_for_send(remote_jid)
+        # Only resolve @lid to phone JID if NOT replying/quoting.
+        # WPPConnect needs the LID JID to find the active chat in browser memory when replying.
+        if not quoted:
+            remote_jid = self._resolve_jid_for_send(remote_jid)
         is_group = remote_jid.endswith("@g.us")
         if is_group:
             remote_jid = remote_jid.split("@")[0]
