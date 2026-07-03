@@ -8142,6 +8142,7 @@ class MainWindow(wx.Frame):
 
         if target_idx != -1:
             if _lst_had_focus:
+                panel.conversations_list.SetFocus()
                 if panel.conversations_list.GetFocusedItem() != target_idx:
                     panel.conversations_list.Focus(target_idx)
                 if not panel.conversations_list.IsSelected(target_idx):
@@ -8165,6 +8166,7 @@ class MainWindow(wx.Frame):
                 neighbor_idx = min(focused_idx, len(displayed_chats) - 1)
             if neighbor_idx < 0:
                 neighbor_idx = 0
+            panel.conversations_list.SetFocus()
             panel.conversations_list.Focus(neighbor_idx)
             panel.conversations_list.Select(neighbor_idx)
             panel.conversations_list.EnsureVisible(neighbor_idx)
