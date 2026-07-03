@@ -5267,26 +5267,44 @@ class MainWindow(wx.Frame):
     def _resolve_jid_for_send(self, jid: str) -> str:
         """
         Translate a @lid JID to its @s.whatsapp.net equivalent before sending.
-        Returns the original jid unchanged for @g.us / @s.whatsapp.net / @c.us.
+        Returns immediately — NEVER blocks on HTTP. If the @lid is not yet in
+        the local cache, a background resolution is triggered and the send
+        proceeds with the @lid as-is (WPPConnect handles many @lid sends fine).
         """
         if not jid.endswith("@lid"):
             return jid
         phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
         if phone_jid:
             return phone_jid
-        # Not in cache — attempt a live resolution (blocks briefly, happens at
-        # most once per unknown LID since resolve_lid_jids_via_api stores the result).
-        logging.info("[_resolve_jid_for_send] @lid %s not in cache — resolving via API", jid)
+        # Not in cache — fire a background resolution so NEXT send will have it,
+        # but DO NOT block the current send waiting for HTTP.
+        unresolvable = getattr(self, "_unresolvable_lids", set())
+        resolving = getattr(self, "_resolving_lids", set())
+        if jid not in unresolvable and jid not in resolving:
+            logging.info("[_resolve_jid_for_send] @lid %s not in cache — queuing background resolve", jid)
+            threading.Thread(
+                target=self._bg_resolve_lid_for_send,
+                args=(jid,),
+                daemon=True,
+                name=f"lid-resolve-{jid[:12]}",
+            ).start()
+        else:
+            logging.info("[_resolve_jid_for_send] @lid %s already being resolved or unresolvable — sending as-is", jid)
+        return jid
+
+    def _bg_resolve_lid_for_send(self, jid: str):
+        """Background helper: resolve a single @lid and log the result."""
         try:
             self.resolve_lid_jids_via_api([jid])
         except Exception as exc:
-            logging.warning("[_resolve_jid_for_send] resolve_lid_jids_via_api failed for %s: %s", jid, exc)
+            logging.warning("[_resolve_jid_for_send] background resolve failed for %s: %s", jid, exc)
         phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
         if phone_jid:
-            logging.info("[_resolve_jid_for_send] Resolved %s → %s", jid, phone_jid)
-            return phone_jid
-        logging.warning("[_resolve_jid_for_send] Could not resolve @lid %s — sending as-is (will likely fail)", jid)
-        return jid
+            logging.info("[_resolve_jid_for_send] Background resolved %s → %s", jid, phone_jid)
+        else:
+            if hasattr(self, "_unresolvable_lids"):
+                self._unresolvable_lids.add(jid)
+            logging.warning("[_resolve_jid_for_send] Background resolve failed for %s — marked unresolvable", jid)
 
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
@@ -6471,7 +6489,7 @@ class MainWindow(wx.Frame):
                     # First, resolve pn-lid mapping
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
                     logging.info(f"[LID Resolution] Querying WPPConnect pn-lid mapping for {lid_jid}...")
-                    response = requests.get(url, headers=headers, timeout=10)
+                    response = requests.get(url, headers=headers, timeout=4)
                     if response.status_code in (200, 201):
                         res = response.json() or {}
                         logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
@@ -6494,7 +6512,7 @@ class MainWindow(wx.Frame):
                 target_jid = canonical_jid if canonical_jid else lid_jid
                 url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
                 logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
-                resp_profile = requests.get(url_profile, headers=headers, timeout=10)
+                resp_profile = requests.get(url_profile, headers=headers, timeout=4)
                 # Check profile response
                 if (query_name or (query_pn and canonical_jid)) and resp_profile.status_code in (200, 201):
                     res_prof = resp_profile.json() or {}
