@@ -1346,8 +1346,20 @@ class ConversationsPanel(wx.Panel):
         """Update the status icon for a single sent message without full redraw."""
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
-                msg.setdefault("MessageUpdate", []).append({"status": status})
+                # NOTE: MessageUpdate was already appended by on_message_status_update
+                # in main.py before this method is called. Do NOT append again here
+                # or the status history grows with duplicates on every update.
+                # Just re-render the row and force an immediate visual repaint.
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
+                # RefreshItem ensures the list control repaints this row immediately.
+                # Without it, SetItemText updates the internal data but Windows may
+                # defer the visual update until the next full paint cycle — making
+                # the status icon appear frozen until the user leaves and re-enters
+                # the conversation.
+                try:
+                    self.messages_list.RefreshItem(i)
+                except Exception:
+                    pass
                 break
 
     # ── Voice recording ──────────────────────────────────────────────────────
