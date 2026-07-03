@@ -5662,6 +5662,7 @@ class MainWindow(wx.Frame):
         if not msg_id or not status:
             return
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+        logging.info(f"[on_message_status_update] msg_id={msg_id} status={status} remote_jid={remote_jid}")
 
         # Try all known JID forms (@lid <-> @s.whatsapp.net) to find the chat
         candidates = [remote_jid]
@@ -5675,19 +5676,25 @@ class MainWindow(wx.Frame):
                 candidates.append(lid)
 
         chat_jid = next((j for j in candidates if j in self.chats), None)
-        if not chat_jid:
-            return
+        if chat_jid:
+            records = (
+                self.chats[chat_jid]
+                    .get("messages", {})
+                    .get("messages", {})
+                    .get("records", [])
+            )
+            found = False
+            for msg in records:
+                if msg.get("key", {}).get("id") == msg_id:
+                    msg.setdefault("MessageUpdate", []).append({"status": status})
+                    found = True
+                    logging.info(f"[on_message_status_update] Updated status to {status} for msg_id={msg_id} in records of chat={chat_jid}")
+                    break
+            if not found:
+                logging.warning(f"[on_message_status_update] Message {msg_id} not found in records of chat {chat_jid}")
+        else:
+            logging.warning(f"[on_message_status_update] Chat not found in self.chats for candidates: {candidates}")
 
-        records = (
-            self.chats[chat_jid]
-                .get("messages", {})
-                .get("messages", {})
-                .get("records", [])
-        )
-        for msg in records:
-            if msg.get("key", {}).get("id") == msg_id:
-                msg.setdefault("MessageUpdate", []).append({"status": status})
-                break
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.refresh_message_status(msg_id, status)
 
