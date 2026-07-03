@@ -5554,6 +5554,8 @@ class MainWindow(wx.Frame):
         @lid JIDs must be resolved to @c.us because WPPConnect indexes messages
         by the phone-number form of the JID, not the device-linked LID.
         """
+        # Always resolve remote_jid to phone JID for message keys
+        remote_jid = self._resolve_jid_for_send(remote_jid)
         lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
@@ -5591,7 +5593,9 @@ class MainWindow(wx.Frame):
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            participant = _resolve_jid(raw)
+            # Resolve group participant JID to phone JID for WPPConnect's index lookup
+            resolved_raw = self._resolve_jid_for_send(raw)
+            participant = _resolve_jid(resolved_raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
@@ -6276,10 +6280,14 @@ class MainWindow(wx.Frame):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
         
-        # Use remote_jid as-is (e.g. @lid or phone JID).
+        # Use remote_jid as-is (e.g. @lid or phone JID) for the URL parameter.
         # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs
-        # to avoid TypeErrors, but it requires the queried chat JID to match the JID in the serialized message key.
+        # to avoid TypeErrors.
         phone = remote_jid.replace("@s.whatsapp.net", "@c.us")
+
+        # Resolve remote_jid to phone JID (@c.us) specifically for the message ID key
+        # because WPPConnect browser store indexes all message keys under their phone JID.
+        resolved_phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
@@ -6291,9 +6299,8 @@ class MainWindow(wx.Frame):
             raw_id = parts[2] if len(parts) > 2 else parts[-1]
 
         # WPPConnect's getMessages ?id= param expects the FULLY serialized message key
-        # (e.g. "true_553499325163@c.us_3EB0D3BCB679BFCAFD2D39" or "true_226465287282814@lid_3EB0D3BCB679BFCAFD2D39").
-        # If we pass just raw_id, WPPConnect throws a TypeError ('_serialized' of undefined).
-        # We must reconstruct the correct serialized key using the chat JID being queried.
+        # (e.g. "true_553499325163@c.us_3EB0D3BCB679BFCAFD2D39").
+        # We must reconstruct the correct serialized key using the phone JID.
         from_me = bool(_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
         
@@ -6305,12 +6312,13 @@ class MainWindow(wx.Frame):
                 if len(parts) > 3:
                     p_raw = parts[3]
             if p_raw:
-                participant = p_raw.replace("@s.whatsapp.net", "@c.us")
+                # Group participant JIDs must also be resolved to phone JIDs (@c.us) for lookup
+                participant = self._resolve_jid_for_send(p_raw).replace("@s.whatsapp.net", "@c.us")
 
         if participant:
-            serialized_id = f"{prefix}_{phone}_{raw_id}_{participant}"
+            serialized_id = f"{prefix}_{resolved_phone}_{raw_id}_{participant}"
         else:
-            serialized_id = f"{prefix}_{phone}_{raw_id}"
+            serialized_id = f"{prefix}_{resolved_phone}_{raw_id}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"
