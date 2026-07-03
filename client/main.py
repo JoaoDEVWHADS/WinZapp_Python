@@ -5562,31 +5562,61 @@ class MainWindow(wx.Frame):
         }
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code in (200, 201):
-                self._wa_connected = True
-                try:
-                    body = response.json()
-                    resp = body.get("response", {})
-                    if isinstance(resp, list) and len(resp) > 0:
-                        resp = resp[0]
-                    if isinstance(resp, dict):
-                        msg_id = resp.get("id")
-                        if isinstance(msg_id, dict):
-                            msg_id = msg_id.get("_serialized", "")
-                        parts = msg_id.split("_") if msg_id else []
-                        clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
-                        return clean_id or True
-                    return True
-                except Exception:
-                    return True
-            err = f"HTTP {response.status_code}: {response.text[:300]}"
-            logging.error("[send_audio_message] %s for %s", err, remote_jid)
-            self._check_wa_connection_closed(response)
-            return {"ok": False, "error": err, "retry": False}
+            if response.status_code not in (200, 201):
+                err = f"HTTP {response.status_code}: {response.text[:300]}"
+                logging.error("[send_audio_message] %s for %s", err, remote_jid)
+
+                # Fallback: If the @lid returned "número não existe", the chat is just not loaded
+                # in Puppeteer yet. Silently retry with the phone JID.
+                if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
+                    orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+                    if orig_jid:
+                        fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
+                        logging.warning("[send_audio_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
+                        retry_payload = {
+                            "phone": [fb_phone],
+                            "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
+                            "isGroup": fb_phone.endswith("@g.us"),
+                        }
+                        if quoted_id:
+                            retry_payload["quotedMessageId"] = quoted_id
+                        response = requests.post(url, json=retry_payload, headers=headers, timeout=30)
+                        if response.status_code in (200, 201):
+                            logging.info("[send_audio_message] Retry with %s succeeded", fb_phone)
+                            # fall through to normal response parsing below
+                        else:
+                            err = f"HTTP {response.status_code}: {response.text[:300]}"
+                            logging.error("[send_audio_message] Retry also failed: %s", err)
+                            self._check_wa_connection_closed(response)
+                            return {"ok": False, "error": err, "retry": True}
+                    else:
+                        self._check_wa_connection_closed(response)
+                        return {"ok": False, "error": err, "retry": False}
+                else:
+                    self._check_wa_connection_closed(response)
+                    return {"ok": False, "error": err, "retry": False}
+
+            self._wa_connected = True
+            try:
+                body = response.json()
+                resp = body.get("response", {})
+                if isinstance(resp, list) and len(resp) > 0:
+                    resp = resp[0]
+                if isinstance(resp, dict):
+                    msg_id = resp.get("id")
+                    if isinstance(msg_id, dict):
+                        msg_id = msg_id.get("_serialized", "")
+                    parts = msg_id.split("_") if msg_id else []
+                    clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                    return clean_id or True
+                return True
+            except Exception:
+                return True
         except Exception as e:
             err = str(e)[:200]
             logging.error("[send_audio_message] exception for %s: %s", remote_jid, err)
             return {"ok": False, "error": err, "retry": True}
+
 
     def _serialize_msg_id(self, remote_jid: str, msg_key: dict) -> str:
         """
