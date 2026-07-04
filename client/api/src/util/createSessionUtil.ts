@@ -167,9 +167,10 @@ export default class CreateSessionUtil {
       // Poll every 2s: if shouldClose was set while create() is blocked, close browser immediately
       const shouldClosePoller = setInterval(() => {
         if ((client as any).shouldClose) {
-          req.logger.info(`[${session}] shouldClose detected by poller. Closing browser.`);
+          req.logger.info(`[${session}] shouldClose detected by poller. Force-killing browser.`);
           clearInterval(shouldClosePoller);
           try { wppClient.close(); } catch (e) {}
+          forceKillByUserDataDir(`userDataDir/${session}`);
           clientsArray[session] = undefined;
         }
       }, 2000);
