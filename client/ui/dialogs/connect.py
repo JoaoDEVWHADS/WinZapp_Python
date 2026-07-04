@@ -416,6 +416,11 @@ class Connect:
             if self.main_window.token.startswith(session_name):
                 self.main_window.token = ""
             
+            # Clear from settings as well to prevent stale reuse on switch
+            if self.main_window.settings.get("privateinfo", {}).get("WA_token", "").startswith(session_name):
+                self.main_window.settings["privateinfo"]["WA_token"] = ""
+                self.main_window.save_settings()
+            
             def _close_api_session():
                 try:
                     close_url = (
