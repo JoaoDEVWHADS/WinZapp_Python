@@ -261,7 +261,9 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
     } else {
       (clientsArray as any)[session] = { status: null };
 
-      await req.client.close();
+      if (req.client && typeof req.client.close === 'function') {
+        await req.client.close();
+      }
       req.io.emit('whatsapp-status', false);
       callWebHook(req.client, req, 'closesession', {
         message: `Session: ${session} disconnected`,
@@ -395,6 +397,13 @@ export async function downloadMediaByMessage(req: Request, res: Response) {
   const client = req.client;
   const { messageId } = req.body;
 
+  if (!client || typeof client.getMessageById !== 'function') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'The WhatsApp session is not active.',
+    });
+  }
+
   let message;
 
   try {
@@ -449,32 +458,119 @@ export async function getMediaByMessage(req: Request, res: Response) {
   const client = req.client;
   const { messageId } = req.params;
 
+  if (!client || typeof client.getMessageById !== 'function') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'The WhatsApp session is not active.',
+    });
+  }
+
   try {
-    const message = await client.getMessageById(messageId);
+    let message: any = null;
 
-    if (!message)
-      res.status(400).json({
+    // If details are provided in the request body (e.g. POST request with local cache), use them directly.
+    if (req.body && (req.body.mediaKey || req.body.clientUrl)) {
+      req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
+      message = req.body;
+      // Normalise key types and structures if needed by decryptFile
+      if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
+        message.mediaKey = Buffer.from(message.mediaKey.data);
+      } else if (typeof message.mediaKey === 'string') {
+        message.mediaKey = Buffer.from(message.mediaKey, 'base64');
+      }
+    } else {
+      message = await client.getMessageById(messageId);
+
+      // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
+      // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
+      // and load earlier messages to force sync it.
+      if (!message && messageId) {
+        const parts = messageId.split('_');
+        if (parts.length >= 2) {
+          const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
+          if (chatId && typeof client.loadEarlierMessages === 'function') {
+            req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+            try {
+              // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
+              await client.loadEarlierMessages(chatId);
+              // Query again
+              message = await client.getMessageById(messageId);
+            } catch (loadErr) {
+              req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+            }
+          }
+        }
+      }
+    }
+
+    if (!message) {
+      return res.status(400).json({
         status: 'error',
-        message: 'Message not found',
+        message: `Message ${messageId} not found`,
       });
+    }
 
-    if (!(message['mimetype'] || message.isMedia || message.isMMS))
-      res.status(400).json({
+    // Ensure it contains media properties or has mimetype
+    const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
+    if (!mediaUrl) {
+      if (typeof (client as any).downloadMedia === 'function') {
+        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
+        try {
+          let base64: string = await (client as any).downloadMedia(messageId);
+          if (base64) {
+            let mimetype = message.mimetype || 'audio/ogg';
+            if (base64.startsWith('data:')) {
+              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+              if (matches) {
+                mimetype = matches[1];
+                base64 = matches[2];
+              }
+            }
+            return res.status(200).json({ base64, mimetype });
+          }
+        } catch (downloadErr) {
+          req.logger.error(`Error in client.downloadMedia fallback: ${downloadErr}`);
+        }
+      }
+      return res.status(400).json({
         status: 'error',
-        message: 'Message does not contain media',
+        message: 'Message does not contain media download URL',
       });
+    }
 
-    const buffer = await client.decryptFile(message);
-
-    res
-      .status(200)
-      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype });
+    try {
+      const buffer = await client.decryptFile(message);
+      res
+        .status(200)
+        .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
+    } catch (decryptErr) {
+      req.logger.error(`decryptFile failed, trying client.downloadMedia as fallback: ${decryptErr}`);
+      if (typeof (client as any).downloadMedia === 'function') {
+        try {
+          let base64: string = await (client as any).downloadMedia(messageId);
+          if (base64) {
+            let mimetype = message.mimetype || 'audio/ogg';
+            if (base64.startsWith('data:')) {
+              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+              if (matches) {
+                mimetype = matches[1];
+                base64 = matches[2];
+              }
+            }
+            return res.status(200).json({ base64, mimetype });
+          }
+        } catch (downloadErr) {
+          req.logger.error(`Error in client.downloadMedia fallback after decryption error: ${downloadErr}`);
+        }
+      }
+      throw decryptErr; // rethrow to trigger the 500 block if both failed
+    }
   } catch (ex) {
     req.logger.error(ex);
     res.status(500).json({
       status: 'error',
-      message: 'The session is not active',
-      error: ex,
+      message: 'Failed to decrypt file',
+      error: ex instanceof Error ? ex.message : ex,
     });
   }
 }

@@ -186,34 +186,32 @@ class Connect:
                         self.main_window.save_settings()
                     return True
 
-                # status:false — session offline but may have valid token in store.
-                # If paired=True, trust the local flag and let the app reconnect.
-                if is_paired:
-                    logging.info("[check_connection_status] Session offline but paired=True. Retaining token.")
-                    return True
-
-                logging.warning(
-                    "[check_connection_status] check-connection-session returned false and paired=False. "
-                    "Session is unlinked or incomplete. Clearing WA_token and wiping local data."
-                )
-                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
-                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
-                self.main_window.save_settings()
-                # Clear all cached chats/contacts/media to avoid cross-account data leakage
-                self.main_window.clear_local_data()
-                # Best-effort delete of orphaned instance
-                if token:
-                    def _close(t=token):
-                        try:
-                            requests.post(
-                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
-                                headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
-                                timeout=5,
-                            )
-                        except Exception:
-                            pass
-                    threading.Thread(target=_close, daemon=True).start()
-                return False
+                # status:false — session offline or unauthenticated.
+                # Do NOT immediately return True. Instead, fall through to check status-session
+                # so we can confirm if it is temporarily offline (reconnecting) or permanently unlinked.
+                if not is_paired:
+                    logging.warning(
+                        "[check_connection_status] check-connection-session returned false and paired=False. "
+                        "Session is unlinked or incomplete. Clearing WA_token and wiping local data."
+                    )
+                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                    self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                    self.main_window.save_settings()
+                    # Clear all cached chats/contacts/media to avoid cross-account data leakage
+                    self.main_window.clear_local_data()
+                    # Best-effort delete of orphaned instance
+                    if token:
+                        def _close(t=token):
+                            try:
+                                requests.post(
+                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
+                                    headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
+                                    timeout=5,
+                                )
+                            except Exception:
+                                pass
+                        threading.Thread(target=_close, daemon=True).start()
+                    return False
 
             # Fallback/Safety Check: also check general status-session
             url = (
@@ -238,7 +236,7 @@ class Connect:
                         self.main_window.settings.setdefault("privateinfo", {})["paired"] = True
                         self.main_window.save_settings()
                     return True
-                _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", ""}
+                _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", "notLogged", ""}
                 if status not in _INCOMPLETE and is_paired:
                     # Session is connected or closed (but closed is allowed if still paired)
                     return True
