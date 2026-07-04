@@ -7142,9 +7142,15 @@ class MainWindow(wx.Frame):
         """Subscribe to presence events for a contact via WPPConnect API (non-blocking)."""
         if not jid or jid.endswith("@newsletter"):
             return
+        
+        # Translate phone JID to LID JID if available to prevent "Chat not found" errors
+        # on modern WhatsApp Web clients.
+        phone_to_lid = getattr(self, "_phone_to_lid", {})
+        target_jid = phone_to_lid.get(jid, jid)
+        
         def _api():
-            is_group = jid.endswith("@g.us")
-            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            is_group = target_jid.endswith("@g.us")
+            phone = target_jid.replace("@s.whatsapp.net", "@c.us")
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
