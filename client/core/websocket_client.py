@@ -233,9 +233,11 @@ class WebSocketClient:
                 if hasattr(self.connect, "pairing_code_field") and self.connect.pairing_code_field:
                     try:
                         if not wx.IsDestroyed(self.connect.pairing_code_field):
-                            self.main_window.pairing_code_updated_sound.play()
-                            self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
-                            self.connect.pairing_code_field.SetValue(pairing_code)
+                            current_val = self.connect.pairing_code_field.GetValue().strip()
+                            if current_val != pairing_code.strip():
+                                self.main_window.pairing_code_updated_sound.play()
+                                self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
+                                self.connect.pairing_code_field.SetValue(pairing_code)
                     except Exception:
                         pass
 
