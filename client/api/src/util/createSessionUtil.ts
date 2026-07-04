@@ -112,6 +112,7 @@ export default class CreateSessionUtil {
             },
             statusFind: (statusFind: StatusFind) => {
               try {
+                if ((client as any).shouldClose) return;
                 eventEmitter.emit(
                   `status-${client.session}`,
                   client,
@@ -136,6 +137,18 @@ export default class CreateSessionUtil {
           }
         )
       );
+
+      if (clientsArray[session] && (clientsArray[session] as any).shouldClose) {
+        req.logger.info(`[${session}] Session was closed during initialization. Terminating browser.`);
+        try {
+          await wppClient.close();
+        } catch (e) {}
+        clientsArray[session] = undefined;
+        if (res && !res.headersSent) {
+          res.status(200).json({ status: false, message: 'Session closed during initialization' });
+        }
+        return;
+      }
 
       client = clientsArray[session] = Object.assign(wppClient, client);
       await this.start(req, client);
@@ -178,6 +191,7 @@ export default class CreateSessionUtil {
     client: WhatsAppServer,
     res?: any
   ) {
+    if ((client as any).shouldClose) return;
     eventEmitter.emit(`phoneCode-${client.session}`, phoneCode, client);
 
     Object.assign(client, {
@@ -214,6 +228,7 @@ export default class CreateSessionUtil {
     client: WhatsAppServer,
     res?: any
   ) {
+    if ((client as any).shouldClose) return;
     eventEmitter.emit(`qrcode-${client.session}`, qrCode, urlCode, client);
     Object.assign(client, {
       status: 'QRCODE',
