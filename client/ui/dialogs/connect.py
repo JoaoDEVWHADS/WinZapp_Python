@@ -1005,11 +1005,7 @@ class Connect:
         token = getattr(self.main_window, 'token', '')
         if token:
             session_name = token.split(':')[0]
-            bearer_token = token.split(':')[1] if ':' in token else token
-            headers = {
-                "Authorization": f"Bearer {bearer_token}",
-                "Content-Type": "application/json"
-            }
+            headers = self._wpp_headers(use_global_key=True)
             def _close_api_session():
                 try:
                     close_url = (
