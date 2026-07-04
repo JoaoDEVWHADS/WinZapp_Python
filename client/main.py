@@ -3091,12 +3091,17 @@ class MainWindow(wx.Frame):
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
                 elif status in ("CLOSED", "DESTROYED", ""):
                     # Status is CLOSED or unknown: safe to start a new session.
-                    try:
-                        start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
-                        requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
-                        logging.info("[check_wa_connection_http] Sent auto-start session command")
-                    except Exception as e:
-                        logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
+                    # But skip if the connection dialog is currently open (pairing in progress)
+                    # to avoid spawning a duplicate Chrome alongside the one the pairing flow manages.
+                    if getattr(self.connect, 'connection_dial', None) and self.connect.connection_dial.IsShown() if hasattr(self.connect, 'connection_dial') and self.connect.connection_dial else False:
+                        logging.info("[check_wa_connection_http] Skipping auto-start — pairing dialog is active.")
+                    else:
+                        try:
+                            start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
+                            requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
+                            logging.info("[check_wa_connection_http] Sent auto-start session command")
+                        except Exception as e:
+                            logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
                 else:
                     # Instance is in some active state (e.g. notLogged, inChat, QRCODE, INITIALIZING, etc.)
                     # We should NOT call start-session to avoid launching duplicate Puppeteer tabs.
