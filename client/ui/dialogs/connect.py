@@ -661,6 +661,9 @@ class Connect:
                     self.main_window.settings["status"]["messages_set_completed"] = False
                     self.main_window.clear_local_data()
 
+                # Capture the previous token to close it, preventing conflict
+                _old_token = self.main_window.token or ""
+                
                 if _instance_exists:
                     self.main_window.token = existing_token
                 else:
@@ -684,9 +687,9 @@ class Connect:
                 # will ignore new start-session requests, and the pairing code will never generate.
                 # We fire close-session and immediately set up the WebSocket in parallel to avoid
                 # the 2s blocking wait — the Node side handles the close asynchronously.
-                _current_token = self.main_window.token or ""
-                _session_name = _current_token.split(':')[0] if _current_token else ""
-                _bearer = _current_token.split(':')[1] if ':' in _current_token else _current_token
+                _close_token = _old_token
+                _session_name = _close_token.split(':')[0] if _close_token else ""
+                _bearer = _close_token.split(':')[1] if ':' in _close_token else _close_token
                 _close_headers = {
                     "Authorization": f"Bearer {_bearer}",
                     "Content-Type": "application/json"
@@ -694,13 +697,16 @@ class Connect:
                 close_done = threading.Event()
 
                 def _close_and_signal():
+                    if not _session_name:
+                        close_done.set()
+                        return
                     try:
                         close_url = (
                             f"{self.main_window.wpp_server}"
                             f":{self.main_window.wpp_port}/api/{_session_name}/close-session"
                         )
                         requests.post(close_url, headers=_close_headers, timeout=10)
-                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
+                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code: %s", _session_name)
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
                     finally:
