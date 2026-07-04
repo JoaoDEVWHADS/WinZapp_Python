@@ -124,7 +124,12 @@ export default class CreateSessionUtil {
             },
             statusFind: (statusFind: StatusFind) => {
               try {
-                if ((client as any).shouldClose) return;
+                if ((client as any).shouldClose) {
+                  req.logger.info(`[${session}] shouldClose detected in statusFind. Closing browser.`);
+                  try { wppClient.close(); } catch (e) {}
+                  clientsArray[session] = undefined;
+                  return;
+                }
                 eventEmitter.emit(
                   `status-${client.session}`,
                   client,
