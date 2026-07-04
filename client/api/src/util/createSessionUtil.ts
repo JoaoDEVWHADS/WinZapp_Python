@@ -50,6 +50,7 @@ export default class CreateSessionUtil {
       if (client.status != null && client.status !== 'CLOSED') return;
       client.status = 'INITIALIZING';
       client.config = req.body;
+      req.logger.info(`[${session}] Initializing session with config: ${JSON.stringify(client.config)}`);
 
       const tokenStore = new Factory();
       const myTokenStore = tokenStore.createTokenStory(client);
