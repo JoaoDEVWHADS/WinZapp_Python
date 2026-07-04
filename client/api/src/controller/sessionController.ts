@@ -479,7 +479,11 @@ export async function getMediaByMessage(req: Request, res: Response) {
         message.mediaKey = Buffer.from(message.mediaKey, 'base64');
       }
     } else {
-      message = await client.getMessageById(messageId);
+      try {
+        message = await client.getMessageById(messageId);
+      } catch (err: any) {
+        req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
+      }
 
       // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
       // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
@@ -494,7 +498,11 @@ export async function getMediaByMessage(req: Request, res: Response) {
               // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
               await client.loadEarlierMessages(chatId);
               // Query again
-              message = await client.getMessageById(messageId);
+              try {
+                message = await client.getMessageById(messageId);
+              } catch (retryErr: any) {
+                req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
+              }
             } catch (loadErr) {
               req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
             }

@@ -5723,7 +5723,6 @@ class MainWindow(wx.Frame):
         """
         # Always resolve remote_jid to the active chat JID (LID if available)
         remote_jid = self._resolve_jid_for_send(remote_jid)
-        lid_to_phone = getattr(self, "_lid_to_phone", {})
 
         def _resolve_jid(jid: str) -> str:
             """Keep @lid JIDs as-is, normalise @s.whatsapp.net → @c.us."""
