@@ -977,4 +977,14 @@ class Connect:
         event.Skip()
 
     def on_quit_from_connect(self, event):
+        # Synchronously close the active API session before exiting to prevent orphans
+        token_to_close = getattr(self, 'raw_token', '')
+        if not token_to_close:
+            token_to_close = getattr(self.main_window, 'token', '').split(':')[0]
+        if token_to_close:
+            try:
+                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token_to_close}/close-session"
+                requests.post(url, headers={"Authorization": f"Bearer {token_to_close}", "Content-Type": "application/json"}, timeout=2)
+            except Exception:
+                pass
         sys.exit()
