@@ -97,6 +97,12 @@ export default class CreateSessionUtil {
                   'WPPConnect-Server'
                 : undefined,
             catchLinkCode: (code: string) => {
+              if ((client as any).shouldClose) {
+                req.logger.info(`[${session}] shouldClose detected in catchLinkCode, closing browser.`);
+                try { wppClient.close(); } catch (e) {}
+                clientsArray[session] = undefined;
+                return;
+              }
               this.exportPhoneCode(req, client.config.phone, code, client, res);
             },
             catchQR: (
@@ -105,6 +111,12 @@ export default class CreateSessionUtil {
               attempt: any,
               urlCode: string
             ) => {
+              if ((client as any).shouldClose) {
+                req.logger.info(`[${session}] shouldClose detected in catchQR, closing browser.`);
+                try { wppClient.close(); } catch (e) {}
+                clientsArray[session] = undefined;
+                return;
+              }
               this.exportQR(req, base64Qr, urlCode, client, res);
             },
             onLoadingScreen: (percent: string, message: string) => {
