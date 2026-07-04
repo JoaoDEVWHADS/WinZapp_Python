@@ -4350,7 +4350,12 @@ class MainWindow(wx.Frame):
                 continue  # duplicate – already shown via the other JID
 
     
-            records   = chat.get("messages", {}).get("messages", {}).get("records", [])
+            records_wrapper = chat.get("messages") or {}
+            records = []
+            if isinstance(records_wrapper, dict):
+                inner_wrapper = records_wrapper.get("messages") or {}
+                if isinstance(inner_wrapper, dict):
+                    records = inner_wrapper.get("records") or []
             last_msg  = chat.get("lastMessage")
             unread    = int(chat.get("unreadCount", 0) or 0)
             is_pinned = jid in pinned
@@ -4469,13 +4474,18 @@ class MainWindow(wx.Frame):
                 if lm_ts > ts:
                     ts = lm_ts
             # Copy the records list to prevent RuntimeError during concurrent modifications
-            records_copy = list(c.get("messages", {}).get("messages", {}).get("records", []))
-            for m in records_copy:
-                t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
-                if t > 1_000_000_000_000:
-                    t //= 1000
-                if t > ts:
-                    ts = t
+            records_wrapper = c.get("messages") or {}
+            if isinstance(records_wrapper, dict):
+                inner_wrapper = records_wrapper.get("messages") or {}
+                if isinstance(inner_wrapper, dict):
+                    records_copy = list(inner_wrapper.get("records") or [])
+                    for m in records_copy:
+                        if isinstance(m, dict):
+                            t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                            if t > 1_000_000_000_000:
+                                t //= 1000
+                            if t > ts:
+                                ts = t
             return ts if ts else 1
 
         def _sort_key(pair):
@@ -4578,8 +4588,8 @@ class MainWindow(wx.Frame):
                 # message, and rebuilt in full only at startup (set_chats calls).
                 result = self._compute_chat_lists()
                 wx.CallAfter(self._apply_chat_lists, *result)
-            except Exception as e:
-                print(f"[_do_scheduled_set_chats] error: {e}")
+            except Exception:
+                logging.exception("[_do_scheduled_set_chats] Unhandled error during scheduled set_chats")
         threading.Thread(target=_bg, daemon=True).start()
 
     def _build_lid_to_phone_cache(self):
@@ -7913,11 +7923,12 @@ class MainWindow(wx.Frame):
         Returns "" if no messages are found.
         Format: "[você: ]{content} {timestamp}"
         """
-        records = list(
-            chat.get("messages", {})
-                .get("messages", {})
-                .get("records", [])
-        )
+        records_wrapper = chat.get("messages") or {}
+        records = []
+        if isinstance(records_wrapper, dict):
+            inner_wrapper = records_wrapper.get("messages") or {}
+            if isinstance(inner_wrapper, dict):
+                records = list(inner_wrapper.get("records") or [])
         if not records:
             return ""
 
@@ -7955,10 +7966,16 @@ class MainWindow(wx.Frame):
                 return p_type in (3, "REVOKE", "revoke")
             return True
 
+        def _get_ts(m):
+            if not isinstance(m, dict):
+                return 0
+            val = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+            return val // 1000 if val > 1_000_000_000_000 else val
+
         try:
             last = max(
                 (m for m in records if is_displayable(m)),
-                key=lambda m: int(m.get("messageTimestamp", 0) or 0),
+                key=_get_ts,
                 default=None,
             )
         except Exception:
