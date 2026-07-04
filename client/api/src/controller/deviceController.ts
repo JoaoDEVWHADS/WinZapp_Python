@@ -1453,10 +1453,18 @@ export async function getMessages(req: Request, res: Response) {
     if (direction === 'before' && id) {
       req.logger.info(`Fetching older messages before ${id} for ${phone} using browser-side sync...`);
       response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
+        const getMsgSafe = async (msgId: string) => {
+          try {
+            return (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+          } catch (e) {
+            return null;
+          }
+        };
+
         // 1. Check if the target anchor message exists in the browser Store
         let anchorExists = false;
         if (id) {
-          const msg = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(id) : null;
+          const msg = await getMsgSafe(id);
           if (msg) {
             anchorExists = true;
           }
@@ -1490,7 +1498,7 @@ export async function getMessages(req: Request, res: Response) {
             break;
           }
           
-          const checkMsg = await (window as any).WPP.chat.getMessageById(id);
+          const checkMsg = await getMsgSafe(id);
           if (checkMsg) {
             anchorExists = true;
             break;
