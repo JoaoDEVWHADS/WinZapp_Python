@@ -958,6 +958,11 @@ class Connect:
 
         self.main_window.waiting_pairing_sound.play()
         self.pairing_dial.ShowModal()
+        try:
+            self.pairing_dial.Destroy()
+        except Exception:
+            pass
+        self.cleanup_pairing_session()
 
     def update_pairing_code(self, code):
         """Refresh the pairing dialog when WPPConnect emits a new phoneCode.
@@ -989,10 +994,11 @@ class Connect:
     def on_cancel_pairing(self, event):
         try:
             if hasattr(self, "pairing_dial") and self.pairing_dial:
-                self.pairing_dial.Destroy()
+                self.pairing_dial.EndModal(wx.ID_CANCEL)
         except RuntimeError:
             pass
-        
+
+    def cleanup_pairing_session(self):
         # Disconnect WebSocket
         if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:
