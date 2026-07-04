@@ -150,7 +150,18 @@ export default class CreateSessionUtil {
         )
       );
 
+      // Poll every 2s: if shouldClose was set while create() is blocked, close browser immediately
+      const shouldClosePoller = setInterval(() => {
+        if ((client as any).shouldClose) {
+          req.logger.info(`[${session}] shouldClose detected by poller. Closing browser.`);
+          clearInterval(shouldClosePoller);
+          try { wppClient.close(); } catch (e) {}
+          clientsArray[session] = undefined;
+        }
+      }, 2000);
+
       if (clientsArray[session] && (clientsArray[session] as any).shouldClose) {
+        clearInterval(shouldClosePoller);
         req.logger.info(`[${session}] Session was closed during initialization. Terminating browser.`);
         try {
           await wppClient.close();
@@ -161,6 +172,7 @@ export default class CreateSessionUtil {
         }
         return;
       }
+      clearInterval(shouldClosePoller);
 
       client = clientsArray[session] = Object.assign(wppClient, client);
       await this.start(req, client);
