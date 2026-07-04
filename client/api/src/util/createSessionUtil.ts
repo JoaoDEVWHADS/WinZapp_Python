@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 import { create, SocketState, StatusFind } from '@wppconnect-team/wppconnect';
+import { exec } from 'child_process';
 import { Request } from 'express';
 
 import { download } from '../controller/sessionController';
@@ -22,6 +23,11 @@ import chatWootClient from './chatWootClient';
 import { autoDownload, callWebHook, startHelper } from './functions';
 import { clientsArray, eventEmitter } from './sessionUtil';
 import Factory from './tokenStore/factory';
+
+function forceKillByUserDataDir(userDataDir: string) {
+  if (!userDataDir) return;
+  exec(`pkill -9 -f "${userDataDir}"`, () => {});
+}
 
 export default class CreateSessionUtil {
   startChatWootClient(client: any) {
@@ -98,8 +104,9 @@ export default class CreateSessionUtil {
                 : undefined,
             catchLinkCode: (code: string) => {
               if ((client as any).shouldClose) {
-                req.logger.info(`[${session}] shouldClose detected in catchLinkCode, closing browser.`);
+                req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
                 try { wppClient.close(); } catch (e) {}
+                forceKillByUserDataDir(`userDataDir/${session}`);
                 clientsArray[session] = undefined;
                 return;
               }
@@ -112,8 +119,9 @@ export default class CreateSessionUtil {
               urlCode: string
             ) => {
               if ((client as any).shouldClose) {
-                req.logger.info(`[${session}] shouldClose detected in catchQR, closing browser.`);
+                req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
                 try { wppClient.close(); } catch (e) {}
+                forceKillByUserDataDir(`userDataDir/${session}`);
                 clientsArray[session] = undefined;
                 return;
               }
@@ -125,8 +133,9 @@ export default class CreateSessionUtil {
             statusFind: (statusFind: StatusFind) => {
               try {
                 if ((client as any).shouldClose) {
-                  req.logger.info(`[${session}] shouldClose detected in statusFind. Closing browser.`);
+                  req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
                   try { wppClient.close(); } catch (e) {}
+                  forceKillByUserDataDir(`userDataDir/${session}`);
                   clientsArray[session] = undefined;
                   return;
                 }
