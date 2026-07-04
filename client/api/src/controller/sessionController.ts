@@ -261,8 +261,8 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
         .json({ status: true, message: 'Session successfully closed' });
     }
 
-    if (client.status === null || client.status === 'STARTING' || client.status === 'INITIALIZING') {
-      req.logger.info(`[${session}] Force killing session during initialization`);
+    if (client.status !== 'CONNECTED' && client.status !== 'open') {
+      req.logger.info(`[${session}] Force killing session because status is ${client.status}`);
       client.shouldClose = true;
       try {
         SessionUtil.forceKillSession(session);
@@ -270,7 +270,7 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
       (clientsArray as any)[session] = undefined;
       return await res
         .status(200)
-        .json({ status: true, message: 'Session force closed during initialization' });
+        .json({ status: true, message: 'Session force closed' });
     }
 
     (clientsArray as any)[session] = { status: null };
