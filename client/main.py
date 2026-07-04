@@ -5721,6 +5721,9 @@ class MainWindow(wx.Frame):
         @lid JIDs must be resolved to @c.us because WPPConnect indexes messages
         by the phone-number form of the JID, not the device-linked LID.
         """
+        # Always resolve remote_jid to the active chat JID (LID if available)
+        remote_jid = self._resolve_jid_for_send(remote_jid)
+
         def _resolve_jid(jid: str) -> str:
             """Keep @lid JIDs as-is, normalise @s.whatsapp.net → @c.us."""
             if not jid:
@@ -5756,7 +5759,9 @@ class MainWindow(wx.Frame):
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            participant = _resolve_jid(raw)
+            # Resolve group participant JID to LID JID if available
+            resolved_raw = self._resolve_jid_for_send(raw)
+            participant = _resolve_jid(resolved_raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
