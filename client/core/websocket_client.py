@@ -429,6 +429,9 @@ class WebSocketClient:
                 # WPPConnect/WhatsApp Web uses "typing" where Baileys uses "composing"
                 if s == "typing":
                     return "composing"
+                # Map WPPConnect recording_audio to recording
+                if s == "recording_audio":
+                    return "recording"
                 if s not in ("available", "unavailable", "composing", "recording", "paused"):
                     # Unknown/unexpected chat-state value — log it so a real-world
                     # mismatch (e.g. a different literal used for audio recording)
