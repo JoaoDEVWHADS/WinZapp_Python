@@ -406,6 +406,11 @@ class Connect:
             token = getattr(self.main_window, 'token', '')
         if token:
             session_name = token.split(':')[0]
+            bearer_token = token.split(':')[1] if ':' in token else token
+            headers = {
+                "Authorization": f"Bearer {bearer_token}",
+                "Content-Type": "application/json"
+            }
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
             if self.main_window.token.startswith(session_name):
@@ -417,7 +422,6 @@ class Connect:
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    headers = self._wpp_headers(use_global_key=True)
                     requests.post(close_url, headers=headers, timeout=5)
                 except Exception:
                     pass
@@ -965,13 +969,17 @@ class Connect:
         token = getattr(self.main_window, 'token', '')
         if token:
             session_name = token.split(':')[0]
+            bearer_token = token.split(':')[1] if ':' in token else token
+            headers = {
+                "Authorization": f"Bearer {bearer_token}",
+                "Content-Type": "application/json"
+            }
             def _close_api_session():
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    headers = self._wpp_headers(use_global_key=True)
                     requests.post(close_url, headers=headers, timeout=5)
                 except Exception:
                     pass
@@ -990,13 +998,17 @@ class Connect:
         token = getattr(self.main_window, 'token', '')
         if token:
             session_name = token.split(':')[0]
+            bearer_token = token.split(':')[1] if ':' in token else token
+            headers = {
+                "Authorization": f"Bearer {bearer_token}",
+                "Content-Type": "application/json"
+            }
             def _close_api_session():
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    headers = self._wpp_headers(use_global_key=True)
                     requests.post(close_url, headers=headers, timeout=5)
                 except Exception:
                     pass
@@ -1006,12 +1018,18 @@ class Connect:
     def on_quit_from_connect(self, event):
         # Synchronously close the active API session before exiting to prevent orphans
         token_to_close = getattr(self, 'raw_token', '')
+        token = getattr(self.main_window, 'token', '')
         if not token_to_close:
-            token_to_close = getattr(self.main_window, 'token', '').split(':')[0]
+            token_to_close = token.split(':')[0]
         if token_to_close:
             try:
+                # Use the session-specific token to extract the hash
+                bearer_token = token.split(':')[1] if ':' in token else token_to_close
+                headers = {
+                    "Authorization": f"Bearer {bearer_token}",
+                    "Content-Type": "application/json"
+                }
                 url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token_to_close}/close-session"
-                headers = self._wpp_headers(use_global_key=True)
                 requests.post(url, headers=headers, timeout=2)
             except Exception:
                 pass
