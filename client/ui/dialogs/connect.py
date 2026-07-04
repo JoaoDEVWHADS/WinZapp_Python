@@ -463,6 +463,12 @@ class Connect:
 
             # Set websocket client and connect BEFORE querying status so we
             # don't miss the qrCode Socket.IO event that comes asynchronously.
+            if hasattr(self.main_window, 'ws') and self.main_window.ws:
+                try:
+                    self.main_window.ws.sio.disconnect()
+                except Exception:
+                    pass
+                self.main_window.ws = None
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
 
             try:
@@ -610,6 +616,12 @@ class Connect:
                 close_done.wait(timeout=3)
 
                 # Set up the websocket client (but do not connect yet)
+                if hasattr(self.main_window, 'ws') and self.main_window.ws:
+                    try:
+                        self.main_window.ws.sio.disconnect()
+                    except Exception:
+                        pass
+                    self.main_window.ws = None
                 self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
                 if self.main_window.ws:
                     self.main_window.ws._phone_code_event.clear()
@@ -885,8 +897,12 @@ class Connect:
             pass
         
         # Disconnect WebSocket
-        if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
-            self.main_window.ws.sio.disconnect()
+        if hasattr(self.main_window, 'ws') and self.main_window.ws:
+            try:
+                self.main_window.ws.sio.disconnect()
+            except Exception:
+                pass
+            self.main_window.ws = None
 
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
@@ -905,8 +921,12 @@ class Connect:
 
     def on_dialog_close(self, event):
         # Disconnect WebSocket if connected
-        if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
-            self.main_window.ws.sio.disconnect()
+        if hasattr(self.main_window, 'ws') and self.main_window.ws:
+            try:
+                self.main_window.ws.sio.disconnect()
+            except Exception:
+                pass
+            self.main_window.ws = None
         
         # Call close-session API endpoint to terminate the headless browser
         token = getattr(self.main_window, 'token', '')

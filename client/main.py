@@ -522,6 +522,12 @@ class MainWindow(wx.Frame):
         self.retrieve_token()
         #Initialize websocket
         logging.info("MainWindow: Initializing WebSocketClient...")
+        if hasattr(self, 'ws') and self.ws:
+            try:
+                self.ws.sio.disconnect()
+            except Exception:
+                pass
+            self.ws = None
         self.ws = WebSocketClient(self, self.connect, self.token)
 
         logging.info("MainWindow: Preparing sync...")
