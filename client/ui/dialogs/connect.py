@@ -728,7 +728,7 @@ class Connect:
                     f"{self.main_window.wpp_server}"
                     f":{self.main_window.wpp_port}/api/{self.main_window.token}/start-session"
                 )
-                payload = {"phone": self.phone_number, "waitQrCode": True}
+                payload = {"phone": self.phone_number, "waitQrCode": False}
                 ws_ref = self.main_window.ws  # capture before thread starts
                 headers = self._wpp_headers(use_global_key=True)
 
