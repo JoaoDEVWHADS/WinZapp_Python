@@ -45,7 +45,6 @@ export default {
   },
   createOptions: {
     autoClose: 0,
-    waitForLogin: false,
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',
