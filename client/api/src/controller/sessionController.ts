@@ -261,7 +261,7 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
         .json({ status: true, message: 'Session successfully closed' });
     }
 
-    if (client.status === null || client.status === 'STARTING') {
+    if (client.status === null || client.status === 'STARTING' || client.status === 'INITIALIZING') {
       req.logger.info(`[${session}] Marking session to be closed after initialization`);
       client.shouldClose = true;
       return await res
