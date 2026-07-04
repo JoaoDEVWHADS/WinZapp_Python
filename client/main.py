@@ -7150,11 +7150,12 @@ class MainWindow(wx.Frame):
         
         def _api():
             is_group = target_jid.endswith("@g.us")
+            is_lid = target_jid.endswith("@lid")
             phone = target_jid.replace("@s.whatsapp.net", "@c.us")
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                requests.post(url, json={"phone": phone, "isGroup": is_group}, headers=headers, timeout=10)
+                requests.post(url, json={"phone": phone, "isGroup": is_group, "isLid": is_lid}, headers=headers, timeout=10)
             except Exception:
                 pass
         threading.Thread(target=_api, daemon=True).start()
