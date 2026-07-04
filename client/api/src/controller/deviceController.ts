@@ -1514,7 +1514,7 @@ export async function getMessages(req: Request, res: Response) {
           }
         }
 
-        return (window as any).WPP.chat.getMessages(chatId, {
+        return (window as any).WAPI.getMessages(chatId, {
           count: targetCount,
           direction: 'before',
           id: queryId
