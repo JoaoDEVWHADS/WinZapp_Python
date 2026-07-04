@@ -6,7 +6,7 @@ export default {
   port: '6300',
   deviceName: 'WppConnect',
   poweredBy: 'WPPConnect-Server',
-  startAllSession: true,
+  startAllSession: false,
   tokenStoreType: 'file',
   maxListeners: 15,
   customUserDataDir: './userDataDir/',
@@ -44,7 +44,7 @@ export default {
     logger: ['console', 'file'],
   },
   createOptions: {
-    autoClose: false,
+    autoClose: 0,
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',

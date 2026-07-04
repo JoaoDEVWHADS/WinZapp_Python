@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 import { create, SocketState, StatusFind } from '@wppconnect-team/wppconnect';
+import { exec } from 'child_process';
 import { Request } from 'express';
 
 import { download } from '../controller/sessionController';
@@ -23,7 +24,16 @@ import { autoDownload, callWebHook, startHelper } from './functions';
 import { clientsArray, eventEmitter } from './sessionUtil';
 import Factory from './tokenStore/factory';
 
+function forceKillByUserDataDir(userDataDir: string) {
+  if (!userDataDir) return;
+  exec(`pkill -9 -f "${userDataDir}"`, () => {});
+}
+
 export default class CreateSessionUtil {
+  forceKillSession(session: string) {
+    forceKillByUserDataDir(`userDataDir/${session}`);
+  }
+
   startChatWootClient(client: any) {
     if (client.config.chatWoot && !client._chatWootClient)
       client._chatWootClient = new chatWootClient(
@@ -97,6 +107,13 @@ export default class CreateSessionUtil {
                   'WPPConnect-Server'
                 : undefined,
             catchLinkCode: (code: string) => {
+              if ((client as any).shouldClose) {
+                req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
+                try { wppClient.close(); } catch (e) {}
+                forceKillByUserDataDir(`userDataDir/${session}`);
+                clientsArray[session] = undefined;
+                return;
+              }
               this.exportPhoneCode(req, client.config.phone, code, client, res);
             },
             catchQR: (
@@ -105,6 +122,13 @@ export default class CreateSessionUtil {
               attempt: any,
               urlCode: string
             ) => {
+              if ((client as any).shouldClose) {
+                req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
+                try { wppClient.close(); } catch (e) {}
+                forceKillByUserDataDir(`userDataDir/${session}`);
+                clientsArray[session] = undefined;
+                return;
+              }
               this.exportQR(req, base64Qr, urlCode, client, res);
             },
             onLoadingScreen: (percent: string, message: string) => {
@@ -112,6 +136,13 @@ export default class CreateSessionUtil {
             },
             statusFind: (statusFind: StatusFind) => {
               try {
+                if ((client as any).shouldClose) {
+                  req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
+                  try { wppClient.close(); } catch (e) {}
+                  forceKillByUserDataDir(`userDataDir/${session}`);
+                  clientsArray[session] = undefined;
+                  return;
+                }
                 eventEmitter.emit(
                   `status-${client.session}`,
                   client,
@@ -136,6 +167,31 @@ export default class CreateSessionUtil {
           }
         )
       );
+
+      // Poll every 2s: if shouldClose was set while create() is blocked, close browser immediately
+      const shouldClosePoller = setInterval(() => {
+        if ((client as any).shouldClose) {
+          req.logger.info(`[${session}] shouldClose detected by poller. Force-killing browser.`);
+          clearInterval(shouldClosePoller);
+          try { wppClient.close(); } catch (e) {}
+          forceKillByUserDataDir(`userDataDir/${session}`);
+          clientsArray[session] = undefined;
+        }
+      }, 2000);
+
+      if (clientsArray[session] && (clientsArray[session] as any).shouldClose) {
+        clearInterval(shouldClosePoller);
+        req.logger.info(`[${session}] Session was closed during initialization. Terminating browser.`);
+        try {
+          await wppClient.close();
+        } catch (e) {}
+        clientsArray[session] = undefined;
+        if (res && !res.headersSent) {
+          res.status(200).json({ status: false, message: 'Session closed during initialization' });
+        }
+        return;
+      }
+      clearInterval(shouldClosePoller);
 
       client = clientsArray[session] = Object.assign(wppClient, client);
       await this.start(req, client);
@@ -178,6 +234,7 @@ export default class CreateSessionUtil {
     client: WhatsAppServer,
     res?: any
   ) {
+    if ((client as any).shouldClose) return;
     eventEmitter.emit(`phoneCode-${client.session}`, phoneCode, client);
 
     Object.assign(client, {
@@ -214,6 +271,7 @@ export default class CreateSessionUtil {
     client: WhatsAppServer,
     res?: any
   ) {
+    if ((client as any).shouldClose) return;
     eventEmitter.emit(`qrcode-${client.session}`, qrCode, urlCode, client);
     Object.assign(client, {
       status: 'QRCODE',

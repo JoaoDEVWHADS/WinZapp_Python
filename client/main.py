@@ -388,6 +388,7 @@ class MainWindow(wx.Frame):
 
         #Initialize helper classes
         logging.info("MainWindow: Initializing Connect/I18n helpers...")
+        self.token = ""
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
@@ -514,14 +515,26 @@ class MainWindow(wx.Frame):
             if not self.connect.check_connection_status():
                 logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
                 self.connect.show_connection_dial()
+                if not self.connect.check_connection_status():
+                    logging.info("Connection dialog closed without pairing. Exiting application.")
+                    sys.exit()
                 if self.ws:
                     self.ws.sio.disconnect()
                 self._just_paired = True
         
         logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
+        if not self.token:
+            logging.error("No token retrieved. Exiting application.")
+            sys.exit()
         #Initialize websocket
         logging.info("MainWindow: Initializing WebSocketClient...")
+        if hasattr(self, 'ws') and self.ws:
+            try:
+                self.ws.sio.disconnect()
+            except Exception:
+                pass
+            self.ws = None
         self.ws = WebSocketClient(self, self.connect, self.token)
 
         logging.info("MainWindow: Preparing sync...")
@@ -541,14 +554,20 @@ class MainWindow(wx.Frame):
             # If the instance does not exist on the server (e.g. database recreated/wiped),
             # it returns "Invalid namespace". We should fallback to the connection dialog silently.
             if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                logging.info("WebSocket namespace is invalid (instance does not exist). Showing connection dialog silently.")
+                logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
+                wx.MessageBox(
+                    self.i18n.t("device_logged_out"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                self._on_disconnect()
             else:
                 wx.MessageBox(
                     self.i18n.t("websocket_failed_reconnect"),
                     self.i18n.t("connection_error"),
                     wx.OK | wx.ICON_WARNING,
                 )
-            self.connect.show_connection_dial()
+                self.connect.show_connection_dial()
             self._just_paired = True
         
         logging.info("MainWindow: Initializing User Interface...")
@@ -3020,6 +3039,17 @@ class MainWindow(wx.Frame):
         }
         try:
             response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code in (401, 403):
+                logging.warning("[check_wa_connection_http] Token is unauthorized (HTTP %s). Triggering logout.", response.status_code)
+                self.error_sound.play()
+                wx.MessageBox(
+                    self.i18n.t("device_logged_out"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                self._on_disconnect()
+                return
+
             if response.status_code in (200, 201):
                 data = response.json()
                 # WPPConnect /status-session returns {"status": "CONNECTED"} — the key is
@@ -3062,12 +3092,17 @@ class MainWindow(wx.Frame):
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
                 elif status in ("CLOSED", "DESTROYED", ""):
                     # Status is CLOSED or unknown: safe to start a new session.
-                    try:
-                        start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
-                        requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
-                        logging.info("[check_wa_connection_http] Sent auto-start session command")
-                    except Exception as e:
-                        logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
+                    # But skip if the connection dialog is currently open (pairing in progress)
+                    # to avoid spawning a duplicate Chrome alongside the one the pairing flow manages.
+                    if getattr(self.connect, 'connection_dial', None) and self.connect.connection_dial.IsShown() if hasattr(self.connect, 'connection_dial') and self.connect.connection_dial else False:
+                        logging.info("[check_wa_connection_http] Skipping auto-start — pairing dialog is active.")
+                    else:
+                        try:
+                            start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
+                            requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=10)
+                            logging.info("[check_wa_connection_http] Sent auto-start session command")
+                        except Exception as e:
+                            logging.error("[check_wa_connection_http] Failed to auto-start session: %s", e)
                 else:
                     # Instance is in some active state (e.g. notLogged, inChat, QRCODE, INITIALIZING, etc.)
                     # We should NOT call start-session to avoid launching duplicate Puppeteer tabs.

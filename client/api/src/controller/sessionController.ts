@@ -254,16 +254,30 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
    */
   const session = req.session;
   try {
-    if ((clientsArray as any)[session].status === null) {
+    const client = (clientsArray as any)[session];
+    if (!client) {
       return await res
         .status(200)
         .json({ status: true, message: 'Session successfully closed' });
-    } else {
-      (clientsArray as any)[session] = { status: null };
+    }
 
-      if (req.client && typeof req.client.close === 'function') {
-        await req.client.close();
-      }
+    if (client.status !== 'CONNECTED' && client.status !== 'open') {
+      req.logger.info(`[${session}] Force killing session because status is ${client.status}`);
+      client.shouldClose = true;
+      try {
+        SessionUtil.forceKillSession(session);
+      } catch (e) {}
+      (clientsArray as any)[session] = undefined;
+      return await res
+        .status(200)
+        .json({ status: true, message: 'Session force closed' });
+    }
+
+    (clientsArray as any)[session] = { status: null };
+
+    if (req.client && typeof req.client.close === 'function') {
+      await req.client.close();
+    }
       req.io.emit('whatsapp-status', false);
       callWebHook(req.client, req, 'closesession', {
         message: `Session: ${session} disconnected`,
@@ -273,7 +287,6 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
       return await res
         .status(200)
         .json({ status: true, message: 'Session successfully closed' });
-    }
   } catch (error) {
     req.logger.error(error);
     return await res
