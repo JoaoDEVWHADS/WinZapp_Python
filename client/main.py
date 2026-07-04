@@ -877,7 +877,7 @@ class MainWindow(wx.Frame):
         title   = self.i18n.t("app_name")
         deleted = set(self.settings.get("deleted_chats", []))
         unread_chats = sum(
-            1 for jid, chat in self.chats.items()
+            1 for jid, chat in list(self.chats.items())
             if jid not in deleted and effective_unread_count(chat) > 0
         )
         if unread_chats:
@@ -3997,7 +3997,7 @@ class MainWindow(wx.Frame):
         the sync.
         """
         unresolved = [
-            jid for jid, chat in self.chats.items()
+            jid for jid, chat in list(self.chats.items())
             if jid.endswith("@g.us") and not (chat.get("name") or chat.get("subject") or "").strip()
         ]
         if not unresolved:
@@ -4589,7 +4589,7 @@ class MainWindow(wx.Frame):
         which version of the API produced the stored messages.
         """
         cache = getattr(self, "_lid_to_phone", {}).copy()
-        for chat in self.chats.values():
+        for chat in list(self.chats.values()):
             for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
                 key    = msg.get("key", {})
                 remote = key.get("remoteJid", "")
@@ -5301,6 +5301,8 @@ class MainWindow(wx.Frame):
             return
 
         msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id or "-" in msg_id or msg.get("_local_pending"):
+            return
 
         # Skip IDs that previously returned 403/410 (expired CDN URL).
         if msg_id and msg_id in self._media_failed_ids:
@@ -5518,9 +5520,32 @@ class MainWindow(wx.Frame):
             # reduces how often that false-timeout/duplicate-send scenario happens.
             response = requests.post(url, json=payload, headers=headers, timeout=25)
             if response.status_code not in (200, 201):
-                # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
-                # try sending it as a plain message instead of leaving it pending forever.
-                if quoted_id:
+                # 1. If it's a @lid "number not exists" error, try to resolve to phone JID first (preserving the quote)
+                if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
+                    orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+                    if orig_jid:
+                        fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
+                        logging.warning("[send_text_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
+                        retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
+                        if quoted_id:
+                            retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
+                            retry_payload = {
+                                "phone": [fb_phone], "message": text,
+                                "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
+                                "options": {"linkPreview": False}
+                            }
+                        else:
+                            retry_payload = {
+                                "phone": [fb_phone], "message": text,
+                                "isGroup": fb_phone.endswith("@g.us"),
+                                "options": {"linkPreview": False}
+                            }
+                        response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
+                        if response.status_code in (200, 201):
+                            logging.info("[send_text_message] Retry with %s succeeded", fb_phone)
+
+                # 2. If it's still failing and we had a quote, strip the quote and try plain send
+                if response.status_code not in (200, 201) and quoted_id:
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote...", response.status_code)
                     wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
@@ -5536,48 +5561,28 @@ class MainWindow(wx.Frame):
                         }
                     }
                     response = requests.post(url, json=payload, headers=headers, timeout=25)
-                
-                if response.status_code not in (200, 201):
-                    err = f"HTTP {response.status_code}: {response.text[:300]}"
-                    logging.error("[send_text_message] %s for %s", err, remote_jid)
-
-                    # If the @lid returned "número não existe", the chat is just not loaded
-                    # in Puppeteer yet — do NOT invalidate the cache mapping (it's valid).
-                    # Silently retry with the phone JID so the message goes through.
+                    # If the plain send also failed because @lid is not loaded, retry it with phone JID
                     if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
                         orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
                         if orig_jid:
                             fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
-                            logging.warning("[send_text_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
+                            logging.warning("[send_text_message] @lid %s not loaded in browser yet (plain fallback) — retrying with %s (cache preserved)", remote_jid, fb_phone)
                             retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
-                            if quoted_id:
-                                retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
-                                retry_payload = {
-                                    "phone": [fb_phone], "message": text,
-                                    "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
-                                    "options": {"linkPreview": False}
-                                }
-                            else:
-                                retry_payload = {
-                                    "phone": [fb_phone], "message": text,
-                                    "isGroup": fb_phone.endswith("@g.us"),
-                                    "options": {"linkPreview": False}
-                                }
+                            retry_payload = {
+                                "phone": [fb_phone], "message": text,
+                                "isGroup": fb_phone.endswith("@g.us"),
+                                "options": {"linkPreview": False}
+                            }
                             response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
-                            if response.status_code in (200, 201):
-                                logging.info("[send_text_message] Retry with %s succeeded", fb_phone)
-                                # fall through to normal response parsing below
-                            else:
-                                err = f"HTTP {response.status_code}: {response.text[:300]}"
-                                logging.error("[send_text_message] Retry also failed: %s", err)
-                                self._check_wa_connection_closed(response)
-                                return {"ok": False, "error": err, "retry": True}
-                        else:
-                            self._check_wa_connection_closed(response)
-                            return {"ok": False, "error": err, "retry": False}
-                    else:
-                        self._check_wa_connection_closed(response)
-                        return {"ok": False, "error": err, "retry": False}
+
+                # 3. Final error handling if all retries failed
+                if response.status_code not in (200, 201):
+                    err = f"HTTP {response.status_code}: {response.text[:300]}"
+                    logging.error("[send_text_message] All send attempts failed: %s for %s", err, remote_jid)
+                    self._check_wa_connection_closed(response)
+                    # If it's a transient error, mark retryable
+                    is_retryable = response.status_code in (408, 429, 500, 502, 503, 504)
+                    return {"ok": False, "error": err, "retry": is_retryable}
 
 
             self._wa_connected = True
