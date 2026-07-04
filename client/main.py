@@ -3471,7 +3471,12 @@ class MainWindow(wx.Frame):
                         continue
                     break
                 try:
-                    body = response.json()
+                    resp_text = response.text.strip() if response.text else ""
+                    if not resp_text or resp_text == "undefined" or resp_text == "null":
+                        logging.warning("[get_remote_chats] Server returned empty or undefined response.")
+                        body = []
+                    else:
+                        body = response.json()
                 except Exception as json_err:
                     logging.error(
                         "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
