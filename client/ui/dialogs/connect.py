@@ -399,7 +399,34 @@ class Connect:
 
         self.connection_dial.ShowModal()
 
+    def _close_active_session(self):
+        # Retrieve the active token from the dialog state
+        token = getattr(self, 'raw_token', '')
+        if not token:
+            token = getattr(self.main_window, 'token', '')
+        if token:
+            session_name = token.split(':')[0]
+            # Clear reference so we don't try to reuse/double-close this token
+            self.raw_token = None
+            if self.main_window.token.startswith(session_name):
+                self.main_window.token = ""
+            
+            def _close_api_session():
+                try:
+                    close_url = (
+                        f"{self.main_window.wpp_server}"
+                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
+                    )
+                    headers = self._wpp_headers(use_global_key=True)
+                    requests.post(close_url, headers=headers, timeout=5)
+                except Exception:
+                    pass
+            threading.Thread(target=_close_api_session, daemon=True).start()
+
     def on_switch_to_phone(self, event):
+        # Close the active QR code session first
+        self._close_active_session()
+
         # Set connection mode to phone
         self.connection_mode = "phone"
 
@@ -413,8 +440,10 @@ class Connect:
         self.phone_field.SetFocus()
         self.phone_field.SetInsertionPointEnd()
 
-
     def on_switch_to_qrcode(self, event):
+        # Close the active phone code session first
+        self._close_active_session()
+
         # Set connection mode to qrcode
         self.connection_mode = "qrcode"
 
@@ -422,12 +451,8 @@ class Connect:
         self.qrcode_panel.Show()
         self.connection_dial.Layout()
 
-        if not hasattr(self, 'qrcode_connection_started'):
-            # First time: start full QR-CODE connection
-            self.start_qrcode_connection()
-        else:
-            # Already tried QR-CODE before: just reconnect WebSocket
-            self.reconnect_websocket()
+        # Always start a fresh QR-CODE connection
+        self.start_qrcode_connection()
 
         self.main_window.qrcode_loaded_sound.play()
         self.main_window.output(self.i18n.t("qrcode_instructions"))
