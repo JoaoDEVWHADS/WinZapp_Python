@@ -1,0 +1,209 @@
+# ── WinZapp: project-specific ignores ────────────────────────────────────────
+
+# User data / secrets (generated at runtime, never committed)
+client/data/messages.db
+client/data/settings.json
+client/data/settings_default.json
+client/data/secret.key
+client/data/media/
+client/data/voice_messages/
+client/data/log/
+client/logs/
+/log/
+
+
+# Bundled Node.js runtime (binary distribution, ~50 MB)
+/client/node/
+/client/node-v24.15.0-win-x64.zip
+
+/client/api/*
+!/client/api/start.js
+!/client/api/.env
+!/client/api/package.json
+!/client/api/config.json
+!/client/api/decrypt.js
+
+
+# Custom patches on top of upstream wppconnect-server — setup_api.py stashes
+# and restores these across re-clones, but that only works when they already
+# exist on disk. Without tracking them, a fresh checkout (including the CI
+# release build) has nothing to restore, so the officially published
+# installer/ZIP silently ships vanilla, unpatched WPPConnect Server code.
+!/client/api/src/
+/client/api/src/*
+!/client/api/src/config.ts
+!/client/api/src/index.ts
+!/client/api/src/controller/
+/client/api/src/controller/*
+!/client/api/src/controller/deviceController.ts
+!/client/api/src/controller/messageController.ts
+!/client/api/src/controller/sessionController.ts
+!/client/api/src/middleware/
+/client/api/src/middleware/*
+!/client/api/src/middleware/statusConnection.ts
+!/client/api/src/util/
+/client/api/src/util/*
+!/client/api/src/util/createSessionUtil.ts
+!/client/api/src/util/functions.ts
+!/client/api/src/routes/
+/client/api/src/routes/*
+!/client/api/src/routes/index.ts
+
+
+# Build intermediates and distribution artefacts
+/build/
+/dist/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+client/__pycache__/
+client/core/__pycache__/
+client/ui/__pycache__/
+client/ui/dialogs/__pycache__/
+*.py[codz]
+*$py.class
+node_modules/
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre / pytype
+.pyre/
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Ruff
+.ruff_cache/
+
+# pdm / pixi
+.pdm-python
+.pdm-build/
+.pixi
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# PyPI config
+.pypirc
+
+# ── Windows / C build ────────────────────────────────────────────────────────
+
+# PyInstaller / Windows manifests
+# *.manifest is kept generic to ignore Nuitka/PyInstaller output, but the
+# hand-written installer manifest must stay tracked.
+*.manifest
+!installer/installer.manifest
+
+# Compiled object files and binaries produced by build.py
+*.o
+*.exe
+*.pdb
+
+# ── Editors / IDEs ───────────────────────────────────────────────────────────
+
+# VS Code local settings (share .vscode/extensions.json if desired)
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Cursor
+.cursorignore
+.cursorindexingignore
+
+# JetBrains / PyCharm
+.idea/
+
+# VS Code / Cursor local history
+.history/
+
+# Abstra
+.abstra/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+
+# Logs (general)
+*.log
+*.logg
+
+
+# SQLite
+db.sqlite3
+db.sqlite3-journal
+
+# Jupyter
+.ipynb_checkpoints
