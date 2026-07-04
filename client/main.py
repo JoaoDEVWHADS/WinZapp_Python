@@ -6138,6 +6138,8 @@ class MainWindow(wx.Frame):
             return
 
         chat_jid_norm = self._normalize_jid(jid)
+        if chat_jid_norm.endswith("@lid"):
+            chat_jid_norm = self._lid_to_phone.get(chat_jid_norm, chat_jid_norm)
 
         composing_chats = getattr(self, "_composing_chats", None)
         if composing_chats is None:
@@ -7140,13 +7142,20 @@ class MainWindow(wx.Frame):
         """Subscribe to presence events for a contact via WPPConnect API (non-blocking)."""
         if not jid or jid.endswith("@newsletter"):
             return
+        
+        # Translate phone JID to LID JID if available to prevent "Chat not found" errors
+        # on modern WhatsApp Web clients.
+        phone_to_lid = getattr(self, "_phone_to_lid", {})
+        target_jid = phone_to_lid.get(jid, jid)
+        
         def _api():
-            is_group = jid.endswith("@g.us")
-            phone = jid.replace("@s.whatsapp.net", "@c.us")
+            is_group = target_jid.endswith("@g.us")
+            is_lid = target_jid.endswith("@lid")
+            phone = target_jid.replace("@s.whatsapp.net", "@c.us")
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                requests.post(url, json={"phone": phone, "isGroup": is_group}, headers=headers, timeout=10)
+                requests.post(url, json={"phone": phone, "isGroup": is_group, "isLid": is_lid}, headers=headers, timeout=10)
             except Exception:
                 pass
         threading.Thread(target=_api, daemon=True).start()
