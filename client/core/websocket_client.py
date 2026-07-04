@@ -463,6 +463,8 @@ class WebSocketClient:
                 }
 
             if presences:
+                import logging
+                logging.info(f"[WebSocketClient] on_wpp_presence_changed JID: {chat_jid}, presences: {presences}")
                 wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
