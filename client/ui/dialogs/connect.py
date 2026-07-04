@@ -220,12 +220,11 @@ class Connect:
                     # Best-effort delete of orphaned instance
                     if token:
                         _s = token.split(':')[0]
-                        _b = token.split(':')[1] if ':' in token else token
-                        def _close(s=_s, b=_b):
+                        def _close(s=_s):
                             try:
                                 requests.post(
                                     f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
-                                    headers={"Authorization": f"Bearer {b}", "Content-Type": "application/json"},
+                                    headers=self._wpp_headers(use_global_key=True),
                                     timeout=5,
                                 )
                                 logging.info("[check_connection_status] Closed orphaned session: %s", s)
@@ -293,11 +292,12 @@ class Connect:
                     self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
-                    def _close(t=token):
+                    _s = token.split(':')[0]
+                    def _close(s=_s):
                         try:
                             requests.post(
-                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
-                                headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
+                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
+                                headers=self._wpp_headers(use_global_key=True),
                                 timeout=5,
                             )
                         except Exception:
@@ -411,11 +411,7 @@ class Connect:
             token = getattr(self.main_window, 'token', '')
         if token:
             session_name = token.split(':')[0]
-            bearer_token = token.split(':')[1] if ':' in token else token
-            headers = {
-                "Authorization": f"Bearer {bearer_token}",
-                "Content-Type": "application/json"
-            }
+            headers = self._wpp_headers(use_global_key=True)
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
             if self.main_window.token.startswith(session_name):
@@ -529,12 +525,11 @@ class Connect:
             _prev_token = getattr(self, '_last_started_qr_token', '')
             if _prev_token and _prev_token != self.main_window.token:
                 _prev_session = _prev_token.split(':')[0]
-                _prev_bearer = _prev_token.split(':')[1] if ':' in _prev_token else _prev_token
                 def _close_prev():
                     try:
                         requests.post(
                             f"{server_base}/api/{_prev_session}/close-session",
-                            headers={"Authorization": f"Bearer {_prev_bearer}", "Content-Type": "application/json"},
+                            headers=self._wpp_headers(use_global_key=True),
                             timeout=5
                         )
                         logging.info("[start_qrcode_connection] Closed previous QR session: %s", _prev_session)
@@ -646,6 +641,8 @@ class Connect:
 
         def _bg_pairing_flow():
             try:
+                # Capture the old token to close it, preventing conflict
+                _old_token = self.main_window.token or ""
                 # Normalise stored number to digits-only for comparison
                 stored_raw = "".join(
                     c for c in self.main_window.settings.get("privateinfo", {}).get(
@@ -685,22 +682,22 @@ class Connect:
                 # We fire close-session and immediately set up the WebSocket in parallel to avoid
                 # the 2s blocking wait — the Node side handles the close asynchronously.
                 _current_token = self.main_window.token or ""
-                _session_name = _current_token.split(':')[0] if _current_token else ""
-                _bearer = _current_token.split(':')[1] if ':' in _current_token else _current_token
-                _close_headers = {
-                    "Authorization": f"Bearer {_bearer}",
-                    "Content-Type": "application/json"
-                }
+                # Close the actual old session instead of the new session
+                _session_name = _old_token.split(':')[0] if _old_token else ""
+                _close_headers = self._wpp_headers(use_global_key=True)
                 close_done = threading.Event()
 
                 def _close_and_signal():
+                    if not _session_name:
+                        close_done.set()
+                        return
                     try:
                         close_url = (
                             f"{self.main_window.wpp_server}"
                             f":{self.main_window.wpp_port}/api/{_session_name}/close-session"
                         )
                         requests.post(close_url, headers=_close_headers, timeout=10)
-                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
+                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code: %s", _session_name)
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
                     finally:
@@ -1031,15 +1028,10 @@ class Connect:
                 pass
             self.main_window.ws = None
         
-        # Call close-session API endpoint to terminate the headless browser
         token = getattr(self.main_window, 'token', '')
         if token:
             session_name = token.split(':')[0]
-            bearer_token = token.split(':')[1] if ':' in token else token
-            headers = {
-                "Authorization": f"Bearer {bearer_token}",
-                "Content-Type": "application/json"
-            }
+            headers = self._wpp_headers(use_global_key=True)
             def _close_api_session():
                 try:
                     close_url = (
@@ -1060,12 +1052,7 @@ class Connect:
             token_to_close = token.split(':')[0]
         if token_to_close:
             try:
-                # Use the session-specific token to extract the hash
-                bearer_token = token.split(':')[1] if ':' in token else token_to_close
-                headers = {
-                    "Authorization": f"Bearer {bearer_token}",
-                    "Content-Type": "application/json"
-                }
+                headers = self._wpp_headers(use_global_key=True)
                 url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token_to_close}/close-session"
                 requests.post(url, headers=headers, timeout=2)
             except Exception:
