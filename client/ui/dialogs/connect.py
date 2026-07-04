@@ -412,7 +412,7 @@ class Connect:
         logging.info("[_close_active_session] Active token retrieved: %s", token)
         if token:
             session_name = token.split(':')[0]
-            headers = self._wpp_headers(use_global_key=True)
+            headers = self._wpp_headers(use_global_key=False)
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
             mw_token = getattr(self.main_window, 'token', '')
@@ -431,7 +431,7 @@ class Connect:
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
+                        f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
                     logging.info("[_close_active_session] Sending close-session request to: %s", close_url)
                     resp = requests.post(close_url, headers=headers, timeout=5)
@@ -1018,13 +1018,12 @@ class Connect:
         token = getattr(self.main_window, 'token', '')
         logging.info("[cleanup_pairing_session] Retrieved token: %s", token)
         if token:
-            session_name = token.split(':')[0]
-            headers = self._wpp_headers(use_global_key=True)
+            headers = self._wpp_headers(use_global_key=False)
             def _close_api_session():
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
+                        f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
                     logging.info("[cleanup_pairing_session] Sending close-session request to: %s", close_url)
                     resp = requests.post(close_url, headers=headers, timeout=5)
@@ -1047,12 +1046,11 @@ class Connect:
         token = getattr(self.main_window, 'token', '')
         logging.info("[on_dialog_close] Retrieved token: %s", token)
         if token:
-            session_name = token.split(':')[0]
-            headers = self._wpp_headers(use_global_key=True)
+            headers = self._wpp_headers(use_global_key=False)
             try:
                 close_url = (
                     f"{self.main_window.wpp_server}"
-                    f":{self.main_window.wpp_port}/api/{session_name}/close-session"
+                    f":{self.main_window.wpp_port}/api/{token}/close-session"
                 )
                 logging.info("[on_dialog_close] Sending close-session request to: %s", close_url)
                 resp = requests.post(close_url, headers=headers, timeout=3)
@@ -1062,15 +1060,11 @@ class Connect:
         event.Skip()
 
     def on_quit_from_connect(self, event):
-        # Synchronously close the active API session before exiting to prevent orphans
-        token_to_close = getattr(self, 'raw_token', '')
         token = getattr(self.main_window, 'token', '')
-        if not token_to_close:
-            token_to_close = token.split(':')[0]
-        if token_to_close:
+        if token:
             try:
-                headers = self._wpp_headers(use_global_key=True)
-                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token_to_close}/close-session"
+                headers = self._wpp_headers(use_global_key=False)
+                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token}/close-session"
                 requests.post(url, headers=headers, timeout=2)
             except Exception:
                 pass
