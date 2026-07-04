@@ -1036,16 +1036,14 @@ class Connect:
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=True)
-            def _close_api_session():
-                try:
-                    close_url = (
-                        f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
-                    )
-                    requests.post(close_url, headers=headers, timeout=5)
-                except Exception:
-                    pass
-            threading.Thread(target=_close_api_session, daemon=True).start()
+            try:
+                close_url = (
+                    f"{self.main_window.wpp_server}"
+                    f":{self.main_window.wpp_port}/api/{session_name}/close-session"
+                )
+                requests.post(close_url, headers=headers, timeout=3)
+            except Exception:
+                pass
         event.Skip()
 
     def on_quit_from_connect(self, event):
