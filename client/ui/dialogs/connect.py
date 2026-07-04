@@ -414,8 +414,10 @@ class Connect:
             headers = self._wpp_headers(use_global_key=True)
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
-            if self.main_window.token.startswith(session_name):
-                self.main_window.token = ""
+            mw_token = getattr(self.main_window, 'token', '')
+            if mw_token.startswith(session_name):
+                if hasattr(self.main_window, 'token'):
+                    self.main_window.token = ""
             
             # Clear from settings as well to prevent stale reuse on switch
             if self.main_window.settings.get("privateinfo", {}).get("WA_token", "").startswith(session_name):
