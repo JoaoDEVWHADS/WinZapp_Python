@@ -725,22 +725,29 @@ class Connect:
                     self.main_window.ws._phone_code_value = ""
 
                 # Call /start-session in a background thread. This immediately registers the namespace on Node side.
+                _start_session = self.main_window.token.split(':')[0] if self.main_window.token else ""
+                _start_bearer = self.main_window.token.split(':')[1] if ':' in (self.main_window.token or '') else (self.main_window.token or '')
                 url = (
                     f"{self.main_window.wpp_server}"
-                    f":{self.main_window.wpp_port}/api/{self.main_window.token}/start-session"
+                    f":{self.main_window.wpp_port}/api/{_start_session}/start-session"
                 )
+                _start_headers = {
+                    "Authorization": f"Bearer {_start_bearer}",
+                    "Content-Type": "application/json"
+                }
                 payload = {"phone": self.phone_number, "waitQrCode": True}
                 ws_ref = self.main_window.ws  # capture before thread starts
 
                 def _call_start_session():
                     try:
-                        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+                        resp = requests.post(url, json=payload, headers=_start_headers, timeout=120)
                         # If the code came back inline (rare), unblock the wait loop.
                         inline_code = resp.json().get("phoneCode", "")
                         if inline_code and not ws_ref._phone_code_event.is_set():
                             ws_ref._phone_code_value = str(inline_code)
                             ws_ref._phone_code_event.set()
-                    except Exception:
+                    except Exception as e:
+                        logging.warning("[_bg_pairing_flow] _call_start_session error: %s", e)
                         # Signal the event so the main thread doesn't wait forever.
                         ws_ref._phone_code_event.set()
 
