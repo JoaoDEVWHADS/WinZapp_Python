@@ -163,11 +163,13 @@ class Connect:
         # We query the specific check-connection-session endpoint which tells us if the WhatsApp
         # account is genuinely authenticated/linked.
         try:
+            _session_name = token.split(':')[0]
+            _bearer = token.split(':')[1] if ':' in token else token
             check_url = (
                 f"{self.main_window.wpp_server}"
-                f":{self.main_window.wpp_port}/api/{token}/check-connection-session"
+                f":{self.main_window.wpp_port}/api/{_session_name}/check-connection-session"
             )
-            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"Bearer {_bearer}", "Content-Type": "application/json"}
             check_resp = requests.get(check_url, headers=headers, timeout=5)
             is_paired = private_info.get("paired", False)
             if check_resp.status_code in (401, 403):
@@ -217,13 +219,16 @@ class Connect:
                     self.main_window.clear_local_data()
                     # Best-effort delete of orphaned instance
                     if token:
-                        def _close(t=token):
+                        _s = token.split(':')[0]
+                        _b = token.split(':')[1] if ':' in token else token
+                        def _close(s=_s, b=_b):
                             try:
                                 requests.post(
-                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
-                                    headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
+                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
+                                    headers={"Authorization": f"Bearer {b}", "Content-Type": "application/json"},
                                     timeout=5,
                                 )
+                                logging.info("[check_connection_status] Closed orphaned session: %s", s)
                             except Exception:
                                 pass
                         threading.Thread(target=_close, daemon=True).start()
