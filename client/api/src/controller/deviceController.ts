@@ -1450,51 +1450,88 @@ export async function getMessages(req: Request, res: Response) {
   try {
     let response: any;
     const targetCount = parseInt(count as string);
-    if (phone && phone.endsWith('@lid')) {
-      // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
-      response = await req.client.page.evaluate(({ chatId, params }) => {
-        return (window as any).WAPI.getMessages(chatId, params);
-      }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
-    } else {
-      response = await req.client.getMessages(`${phone}`, {
-        count: targetCount,
-        direction: direction.toString() as any,
-        id: id as string,
-      });
-    }
-
-    if (direction === 'before' && response && response.length < targetCount) {
-      req.logger.info(`getMessages returned ${response.length} messages, target is ${targetCount}. Loading earlier messages from server...`);
-      let attempts = 0;
-      const maxAttempts = 5;
-      while (response.length < targetCount && attempts < maxAttempts) {
-        try {
-          const loaded = await req.client.loadEarlierMessages(phone);
-          if (!loaded || loaded.length === 0) {
-            req.logger.info(`loadEarlierMessages returned 0 messages. Reached the end of chat history.`);
-            break;
+    if (direction === 'before' && id) {
+      req.logger.info(`Fetching older messages before ${id} for ${phone} using browser-side sync...`);
+      response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
+        // 1. Check if the target anchor message exists in the browser Store
+        let anchorExists = false;
+        if (id) {
+          const msg = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(id) : null;
+          if (msg) {
+            anchorExists = true;
           }
-          let newResponse;
-          if (phone && phone.endsWith('@lid')) {
-            newResponse = await req.client.page.evaluate(({ chatId, params }) => {
-              return (window as any).WAPI.getMessages(chatId, params);
-            }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
-          } else {
-            newResponse = await req.client.getMessages(`${phone}`, {
-              count: targetCount,
-              direction: direction.toString() as any,
-              id: id as string,
-            });
-          }
-          if (newResponse.length <= response.length) {
-            break;
-          }
-          response = newResponse;
-          attempts++;
-        } catch (loadErr) {
-          req.logger.error(`Error loading earlier messages: ${loadErr}`);
-          break;
         }
+
+        // 2. If the anchor doesn't exist, load history from the server page-by-page
+        let attempts = 0;
+        const maxAttempts = 5;
+        
+        while (id && !anchorExists && attempts < maxAttempts) {
+          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+          if (!currentMsgs || currentMsgs.length === 0) {
+            break;
+          }
+          
+          let oldestMsg = currentMsgs[0];
+          for (const m of currentMsgs) {
+            if (m.t < oldestMsg.t) {
+              oldestMsg = m;
+            }
+          }
+          
+          const oldestId = oldestMsg.id._serialized || oldestMsg.id;
+          const loaded = await (window as any).WPP.chat.getMessages(chatId, {
+            count: 50,
+            direction: 'before',
+            id: oldestId
+          });
+          
+          if (!loaded || loaded.length === 0) {
+            break;
+          }
+          
+          const checkMsg = await (window as any).WPP.chat.getMessageById(id);
+          if (checkMsg) {
+            anchorExists = true;
+            break;
+          }
+          
+          attempts++;
+        }
+
+        // 3. Now query the final response
+        let queryId = id;
+        if (id && !anchorExists) {
+          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+          if (currentMsgs && currentMsgs.length > 0) {
+            let oldestMsg = currentMsgs[0];
+            for (const m of currentMsgs) {
+              if (m.t < oldestMsg.t) {
+                oldestMsg = m;
+              }
+            }
+            queryId = oldestMsg.id._serialized || oldestMsg.id;
+          }
+        }
+
+        return (window as any).WPP.chat.getMessages(chatId, {
+          count: targetCount,
+          direction: 'before',
+          id: queryId
+        });
+      }, { chatId: phone, targetCount, id: id as string });
+    } else {
+      if (phone && phone.endsWith('@lid')) {
+        // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
+        response = await req.client.page.evaluate(({ chatId, params }) => {
+          return (window as any).WAPI.getMessages(chatId, params);
+        }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
+      } else {
+        response = await req.client.getMessages(`${phone}`, {
+          count: targetCount,
+          direction: direction.toString() as any,
+          id: id as string,
+        });
       }
     }
     res.status(200).json({ status: 'success', response: response });
