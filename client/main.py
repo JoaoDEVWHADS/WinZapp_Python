@@ -514,12 +514,18 @@ class MainWindow(wx.Frame):
             if not self.connect.check_connection_status():
                 logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
                 self.connect.show_connection_dial()
+                if not self.connect.check_connection_status():
+                    logging.info("Connection dialog closed without pairing. Exiting application.")
+                    sys.exit()
                 if self.ws:
                     self.ws.sio.disconnect()
                 self._just_paired = True
         
         logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
+        if not self.token:
+            logging.error("No token retrieved. Exiting application.")
+            sys.exit()
         #Initialize websocket
         logging.info("MainWindow: Initializing WebSocketClient...")
         if hasattr(self, 'ws') and self.ws:
