@@ -1024,15 +1024,18 @@ class Connect:
             threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_dialog_close(self, event):
+        logging.info("[on_dialog_close] Dialog close event triggered.")
         # Disconnect WebSocket if connected
         if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:
+                logging.info("[on_dialog_close] Disconnecting WebSocket...")
                 self.main_window.ws.sio.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error("[on_dialog_close] Error disconnecting WebSocket: %s", e)
             self.main_window.ws = None
         
         token = getattr(self.main_window, 'token', '')
+        logging.info("[on_dialog_close] Retrieved token: %s", token)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=True)
@@ -1041,9 +1044,11 @@ class Connect:
                     f"{self.main_window.wpp_server}"
                     f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                 )
-                requests.post(close_url, headers=headers, timeout=3)
-            except Exception:
-                pass
+                logging.info("[on_dialog_close] Sending close-session request to: %s", close_url)
+                resp = requests.post(close_url, headers=headers, timeout=3)
+                logging.info("[on_dialog_close] close-session response status: %s", resp.status_code)
+            except Exception as e:
+                logging.error("[on_dialog_close] Error sending close-session request: %s", e)
         event.Skip()
 
     def on_quit_from_connect(self, event):
