@@ -659,16 +659,22 @@ class Connect:
                 # will ignore new start-session requests, and the pairing code will never generate.
                 # We fire close-session and immediately set up the WebSocket in parallel to avoid
                 # the 2s blocking wait — the Node side handles the close asynchronously.
-                headers = self._wpp_headers(use_global_key=True)
+                _current_token = self.main_window.token or ""
+                _session_name = _current_token.split(':')[0] if _current_token else ""
+                _bearer = _current_token.split(':')[1] if ':' in _current_token else _current_token
+                _close_headers = {
+                    "Authorization": f"Bearer {_bearer}",
+                    "Content-Type": "application/json"
+                }
                 close_done = threading.Event()
 
                 def _close_and_signal():
                     try:
                         close_url = (
                             f"{self.main_window.wpp_server}"
-                            f":{self.main_window.wpp_port}/api/{self.main_window.token}/close-session"
+                            f":{self.main_window.wpp_port}/api/{_session_name}/close-session"
                         )
-                        requests.post(close_url, headers=headers, timeout=10)
+                        requests.post(close_url, headers=_close_headers, timeout=10)
                         logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
