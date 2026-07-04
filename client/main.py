@@ -4569,7 +4569,11 @@ class MainWindow(wx.Frame):
         # still running — it would show partially-resolved names/placeholders
         # for chats that haven't synced yet. start_sync() already triggers the
         # real renders once sync completes.
-        if not getattr(self, "_sync_completed", False) and getattr(self, "_initial_sync_running", False):
+        sync_completed = getattr(self, "_sync_completed", False)
+        initial_sync_running = getattr(self, "_initial_sync_running", False)
+        logging.info("[_schedule_set_chats] sync_completed=%s, initial_sync_running=%s", sync_completed, initial_sync_running)
+        if not sync_completed and initial_sync_running:
+            logging.info("[_schedule_set_chats] Skipping rebuild because initial sync is still running.")
             return
         if getattr(self, "_set_chats_pending", False):
             return
