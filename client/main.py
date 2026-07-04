@@ -1708,7 +1708,7 @@ class MainWindow(wx.Frame):
             chat = self.chats.get(cj)
             if not chat:
                 continue
-            for r in chat.get("messages", {}).get("messages", {}).get("records", []):
+            for r in list(chat.get("messages", {}).get("messages", {}).get("records", [])):
                 if r.get("key", {}).get("id") == orig_id:
                     try:
                         return (format_notification_body(r, self, self.i18n) or "")[:120]
@@ -4590,7 +4590,7 @@ class MainWindow(wx.Frame):
         """
         cache = getattr(self, "_lid_to_phone", {}).copy()
         for chat in list(self.chats.values()):
-            for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+            for msg in list(chat.get("messages", {}).get("messages", {}).get("records", [])):
                 key    = msg.get("key", {})
                 remote = key.get("remoteJid", "")
                 alt    = key.get("remoteJidAlt", "")
