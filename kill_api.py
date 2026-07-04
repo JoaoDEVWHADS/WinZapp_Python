@@ -37,7 +37,7 @@ def kill_process_by_name(name):
     if sys.platform == "win32":
         os.system(f"taskkill /F /IM {name}.exe /T")
     else:
-        os.system(f"pkill -9 -f {name}")
+        os.system(f"pkill -9 -f '{name}'")
 
 if __name__ == "__main__":
     kill_port(6300)

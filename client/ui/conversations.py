@@ -1253,7 +1253,7 @@ class ConversationsPanel(wx.Panel):
         remote_jid = virtual_msg.get("key", {}).get("remoteJid", "")
         if not remote_jid:
             return
-        chat = self.main_window.chats.get(remote_jid)
+        chat = self.main_window.get_chat(remote_jid)
         if chat is None:
             return
         records = (
@@ -5782,7 +5782,7 @@ class ConversationsPanel(wx.Panel):
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
         # can reflect it after a conversation close/reopen.
-        chat = self.main_window.chats.get(jid)
+        chat = self.main_window.get_chat(jid)
         if chat:
             reaction_record = {
                 "messageType": "reactionMessage",
@@ -6119,7 +6119,7 @@ class ConversationsPanel(wx.Panel):
         """Navigate to the conversation with the contact from the selected message."""
         if not self._contact_msg_jid:
             return
-        chat = self.main_window.chats.get(self._contact_msg_jid)
+        chat = self.main_window.get_chat(self._contact_msg_jid)
         if chat is not None:
             self.navigate_to_conversation(chat)
 
@@ -6134,7 +6134,16 @@ class ConversationsPanel(wx.Panel):
         """
         if self.conversation is None:
             return
-        if self.conversation.get("remoteJid", "") != remote_jid:
+        
+        conv_jid = self.conversation.get("remoteJid", "")
+        jids_match = (conv_jid == remote_jid)
+        if not jids_match:
+            mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
+            mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
+            if (mapped_lid and mapped_lid == remote_jid) or (mapped_phone and mapped_phone == remote_jid):
+                jids_match = True
+
+        if not jids_match:
             return
         # ── Reaction messages: update reaction_map and re-render original ────
         if msg.get("messageType") == "reactionMessage":
