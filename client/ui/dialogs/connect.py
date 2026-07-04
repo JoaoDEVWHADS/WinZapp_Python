@@ -409,6 +409,7 @@ class Connect:
         token = getattr(self, 'raw_token', '')
         if not token:
             token = getattr(self.main_window, 'token', '')
+        logging.info("[_close_active_session] Active token retrieved: %s", token)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=True)
@@ -417,10 +418,12 @@ class Connect:
             mw_token = getattr(self.main_window, 'token', '')
             if mw_token.startswith(session_name):
                 if hasattr(self.main_window, 'token'):
+                    logging.info("[_close_active_session] Clearing self.main_window.token")
                     self.main_window.token = ""
             
             # Clear from settings as well to prevent stale reuse on switch
             if self.main_window.settings.get("privateinfo", {}).get("WA_token", "").startswith(session_name):
+                logging.info("[_close_active_session] Clearing WA_token in settings")
                 self.main_window.settings["privateinfo"]["WA_token"] = ""
                 self.main_window.save_settings()
             
@@ -430,9 +433,11 @@ class Connect:
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    requests.post(close_url, headers=headers, timeout=5)
-                except Exception:
-                    pass
+                    logging.info("[_close_active_session] Sending close-session request to: %s", close_url)
+                    resp = requests.post(close_url, headers=headers, timeout=5)
+                    logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
+                except Exception as e:
+                    logging.error("[_close_active_session] Error sending close-session request: %s", e)
             threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_switch_to_phone(self, event):
@@ -999,16 +1004,19 @@ class Connect:
             pass
 
     def cleanup_pairing_session(self):
+        logging.info("[cleanup_pairing_session] Cleanup pairing session triggered.")
         # Disconnect WebSocket
         if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:
+                logging.info("[cleanup_pairing_session] Disconnecting WebSocket...")
                 self.main_window.ws.sio.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error("[cleanup_pairing_session] Error disconnecting WebSocket: %s", e)
             self.main_window.ws = None
 
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
+        logging.info("[cleanup_pairing_session] Retrieved token: %s", token)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=True)
@@ -1018,9 +1026,11 @@ class Connect:
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    requests.post(close_url, headers=headers, timeout=5)
-                except Exception:
-                    pass
+                    logging.info("[cleanup_pairing_session] Sending close-session request to: %s", close_url)
+                    resp = requests.post(close_url, headers=headers, timeout=5)
+                    logging.info("[cleanup_pairing_session] close-session response status: %s", resp.status_code)
+                except Exception as e:
+                    logging.error("[cleanup_pairing_session] Error sending close-session request: %s", e)
             threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_dialog_close(self, event):
