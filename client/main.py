@@ -388,6 +388,7 @@ class MainWindow(wx.Frame):
 
         #Initialize helper classes
         logging.info("MainWindow: Initializing Connect/I18n helpers...")
+        self.token = ""
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
