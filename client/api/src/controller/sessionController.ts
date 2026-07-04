@@ -513,17 +513,58 @@ export async function getMediaByMessage(req: Request, res: Response) {
     // Ensure it contains media properties or has mimetype
     const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
     if (!mediaUrl) {
+      if (typeof (client as any).downloadMedia === 'function') {
+        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
+        try {
+          let base64: string = await (client as any).downloadMedia(messageId);
+          if (base64) {
+            let mimetype = message.mimetype || 'audio/ogg';
+            if (base64.startsWith('data:')) {
+              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+              if (matches) {
+                mimetype = matches[1];
+                base64 = matches[2];
+              }
+            }
+            return res.status(200).json({ base64, mimetype });
+          }
+        } catch (downloadErr) {
+          req.logger.error(`Error in client.downloadMedia fallback: ${downloadErr}`);
+        }
+      }
       return res.status(400).json({
         status: 'error',
         message: 'Message does not contain media download URL',
       });
     }
 
-    const buffer = await client.decryptFile(message);
-
-    res
-      .status(200)
-      .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
+    try {
+      const buffer = await client.decryptFile(message);
+      res
+        .status(200)
+        .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
+    } catch (decryptErr) {
+      req.logger.error(`decryptFile failed, trying client.downloadMedia as fallback: ${decryptErr}`);
+      if (typeof (client as any).downloadMedia === 'function') {
+        try {
+          let base64: string = await (client as any).downloadMedia(messageId);
+          if (base64) {
+            let mimetype = message.mimetype || 'audio/ogg';
+            if (base64.startsWith('data:')) {
+              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+              if (matches) {
+                mimetype = matches[1];
+                base64 = matches[2];
+              }
+            }
+            return res.status(200).json({ base64, mimetype });
+          }
+        } catch (downloadErr) {
+          req.logger.error(`Error in client.downloadMedia fallback after decryption error: ${downloadErr}`);
+        }
+      }
+      throw decryptErr; // rethrow to trigger the 500 block if both failed
+    }
   } catch (ex) {
     req.logger.error(ex);
     res.status(500).json({

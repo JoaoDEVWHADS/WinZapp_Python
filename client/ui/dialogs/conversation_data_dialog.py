@@ -29,7 +29,10 @@ def _fmt_ts(ts, i18n):
     if not ts:
         return ""
     try:
-        dt = datetime.fromtimestamp(int(ts))
+        ts_val = int(ts)
+        if ts_val > 1_000_000_000_000:
+            ts_val //= 1000
+        dt = datetime.fromtimestamp(ts_val)
         return dt.strftime(i18n.t("datetime_fmt"))
     except Exception:
         return str(ts)

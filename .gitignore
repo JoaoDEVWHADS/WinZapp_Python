@@ -9,6 +9,8 @@ client/data/media/
 client/data/voice_messages/
 client/data/log/
 client/logs/
+/log/
+
 
 # Bundled Node.js runtime (binary distribution, ~50 MB)
 /client/node/
@@ -19,6 +21,8 @@ client/logs/
 !/client/api/.env
 !/client/api/package.json
 !/client/api/config.json
+!/client/api/decrypt.js
+
 
 # Custom patches on top of upstream wppconnect-server — setup_api.py stashes
 # and restores these across re-clones, but that only works when they already
@@ -28,6 +32,7 @@ client/logs/
 !/client/api/src/
 /client/api/src/*
 !/client/api/src/config.ts
+!/client/api/src/index.ts
 !/client/api/src/controller/
 /client/api/src/controller/*
 !/client/api/src/controller/deviceController.ts
@@ -40,6 +45,10 @@ client/logs/
 /client/api/src/util/*
 !/client/api/src/util/createSessionUtil.ts
 !/client/api/src/util/functions.ts
+!/client/api/src/routes/
+/client/api/src/routes/*
+!/client/api/src/routes/index.ts
+
 
 # Build intermediates and distribution artefacts
 /build/
@@ -189,6 +198,8 @@ celerybeat.pid
 
 # Logs (general)
 *.log
+*.logg
+
 
 # SQLite
 db.sqlite3

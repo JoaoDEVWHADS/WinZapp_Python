@@ -57,6 +57,26 @@ class WebSocketClient:
         # Record when we connected so on_messages_upsert can use a stable
         # cutoff time rather than the ever-advancing time.time().
         self._connect_time = time.time()
+        # This fires both on the initial connect and on every automatic
+        # reconnect after a transport-level drop. on_disconnect() pauses the
+        # MessageQueue by setting _wa_connected = False, but nothing else
+        # reliably flips it back to True on a plain reconnect (WPPConnect
+        # only re-emits "session-logged" around pairing/login, not on every
+        # reconnect) — so a brief network blip could pause sending forever
+        # even though WhatsApp itself never actually disconnected. Re-check
+        # via HTTP and flush the queue so it self-heals like a manual resync.
+        threading.Thread(target=self._recheck_connection_after_connect, daemon=True).start()
+
+    def _recheck_connection_after_connect(self):
+        try:
+            self.main_window.check_wa_connection_http()
+            if getattr(self.main_window, "_wa_connected", False):
+                if hasattr(self.main_window, "message_queue"):
+                    self.main_window.message_queue.flush()
+                if hasattr(self.main_window, "trigger_sync_if_needed"):
+                    self.main_window.trigger_sync_if_needed()
+        except Exception as e:
+            print(f"[WebSocketClient] _recheck_connection_after_connect error: {e}")
 
     def on_disconnect(self):
         print("WebSocket disconnected.")
@@ -82,6 +102,10 @@ class WebSocketClient:
                 self.main_window._set_status("")
             if hasattr(self.main_window, "message_queue"):
                 self.main_window.message_queue.flush()
+            
+            # Trigger sync if it was previously incomplete/skipped due to connection delay
+            if hasattr(self.main_window, "trigger_sync_if_needed"):
+                self.main_window.trigger_sync_if_needed()
             
             # Save the paired status so next startup knows pairing was fully completed.
             pi = self.main_window.settings.setdefault("privateinfo", {})
@@ -243,16 +267,22 @@ class WebSocketClient:
         messageType, messageTimestamp, ...).
         """
         try:
-            # Ignore new-message events until the initial conversation sync has
-            # fully finished (i.e. we are neither "preparing to sync" nor
-            # "synchronizing"). Otherwise a message arriving mid-sync would
-            # create/insert a conversation in the list before the old-message
-            # history sync even started, leaving the UI in an inconsistent state.
-            if not getattr(self.main_window, "_sync_completed", False):
-                return
+            # Process real-time messages directly. Main window's on_new_message
+            # already deduplicates based on the message ID to prevent duplicate historical entries.
 
             msg = info.get("data", {})
             if not isinstance(msg, dict) or not msg.get("key"):
+                return
+
+            # ── Skip history-sync echoes ───────────────────────────────────────
+            # WPPConnect/Baileys fires messages.upsert for historical messages
+            # (isMdHistoryMsg=True) during its initial sync phase. These are the
+            # same records already fetched by sync_chat_messages via the REST API
+            # and placed in the correct chronological position. Treating them as
+            # live new messages appends them at the bottom of the conversation
+            # as if they had just been sent. Drop them here — the REST sync
+            # handles history; this handler is for real-time arrivals only.
+            if msg.get("isMdHistoryMsg"):
                 return
 
             # Extract JID mapping from WebSocket message
@@ -399,6 +429,9 @@ class WebSocketClient:
                 # WPPConnect/WhatsApp Web uses "typing" where Baileys uses "composing"
                 if s == "typing":
                     return "composing"
+                # Map WPPConnect recording_audio to recording
+                if s == "recording_audio":
+                    return "recording"
                 if s not in ("available", "unavailable", "composing", "recording", "paused"):
                     # Unknown/unexpected chat-state value — log it so a real-world
                     # mismatch (e.g. a different literal used for audio recording)
@@ -433,6 +466,8 @@ class WebSocketClient:
                 }
 
             if presences:
+                import logging
+                logging.info(f"[WebSocketClient] on_wpp_presence_changed JID: {chat_jid}, presences: {presences}")
                 wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
         except Exception as e:
             print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
@@ -733,7 +768,7 @@ class WebSocketClient:
                     }
                 },
                 "messageType": "reactionMessage",
-                "messageTimestamp": payload.get("timestamp") or int(time.time()),
+                "messageTimestamp": (payload.get("timestamp") // 1000 if (payload.get("timestamp") or 0) > 1_000_000_000_000 else (payload.get("timestamp") or int(time.time()))),
             }
             if reactor_participant:
                 normalized["key"]["participant"] = reactor_participant
@@ -819,6 +854,8 @@ class WebSocketClient:
             status_participant = ""
 
         ts = wpp_msg.get("timestamp") or wpp_msg.get("t", int(time.time()))
+        if ts > 1_000_000_000_000:
+            ts //= 1000
 
         msg_type = wpp_msg.get("type", "chat")
         conversation = wpp_msg.get("body", "")

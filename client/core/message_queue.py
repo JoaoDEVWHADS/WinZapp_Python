@@ -152,13 +152,12 @@ class MessageQueue:
                                     self.main_window._own_sent_ids.discard(
                                         next(iter(self.main_window._own_sent_ids))
                                     )
-                        # Pass the real WhatsApp message ID so _mark_message_sent
-                        # can update the virtual message's key.id for playback.
                         wx.CallAfter(
                             self.main_window._on_message_sent,
                             msg.local_id,
                             msg.audio_path,
                             real_id if isinstance(real_id, str) else None,
+                            msg.jid,
                         )
                     else:
                         msg.fail_count += 1
