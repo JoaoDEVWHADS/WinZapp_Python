@@ -518,6 +518,26 @@ class Connect:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
+            # Close any previous session that may still be alive on the server
+            # (different token from the one we're about to start). This prevents
+            # orphaned Chrome processes when reopening the dialog or switching modes.
+            _prev_token = getattr(self, '_last_started_qr_token', '')
+            if _prev_token and _prev_token != self.main_window.token:
+                _prev_session = _prev_token.split(':')[0]
+                _prev_bearer = _prev_token.split(':')[1] if ':' in _prev_token else _prev_token
+                def _close_prev():
+                    try:
+                        requests.post(
+                            f"{server_base}/api/{_prev_session}/close-session",
+                            headers={"Authorization": f"Bearer {_prev_bearer}", "Content-Type": "application/json"},
+                            timeout=5
+                        )
+                        logging.info("[start_qrcode_connection] Closed previous QR session: %s", _prev_session)
+                    except Exception:
+                        pass
+                threading.Thread(target=_close_prev, daemon=True).start()
+            self._last_started_qr_token = self.main_window.token
+
             # Always (re)start the session so WPPConnect launches Chrome and
             # emits qrCode. WPPConnect tolerates a start-session when a session
             # already exists — it will simply resume it (or show a new QR if
