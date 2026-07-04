@@ -170,6 +170,22 @@ class Connect:
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             check_resp = requests.get(check_url, headers=headers, timeout=5)
             is_paired = private_info.get("paired", False)
+            if check_resp.status_code in (401, 403):
+                logging.warning("[check_connection_status] check-connection-session returned unauthorized (HTTP %s).", check_resp.status_code)
+                if is_paired:
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("device_logged_out"),
+                        self.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
+                self.main_window.save_settings()
+                self.main_window.clear_local_data()
+                return False
+
             if check_resp.status_code in (200, 201):
                 check_data = check_resp.json()
                 # Only trust check-connection-session if the user actually completed pairing.
@@ -219,6 +235,22 @@ class Connect:
                 f":{self.main_window.wpp_port}/api/{token}/status-session"
             )
             resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code in (401, 403):
+                logging.warning("[check_connection_status] status-session returned unauthorized (HTTP %s).", resp.status_code)
+                if is_paired:
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("device_logged_out"),
+                        self.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
+                self.main_window.save_settings()
+                self.main_window.clear_local_data()
+                return False
+
             if resp.status_code in (200, 201):
                 data = resp.json()
                 status = (

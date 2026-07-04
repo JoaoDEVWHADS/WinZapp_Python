@@ -547,14 +547,20 @@ class MainWindow(wx.Frame):
             # If the instance does not exist on the server (e.g. database recreated/wiped),
             # it returns "Invalid namespace". We should fallback to the connection dialog silently.
             if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                logging.info("WebSocket namespace is invalid (instance does not exist). Showing connection dialog silently.")
+                logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
+                wx.MessageBox(
+                    self.i18n.t("device_logged_out"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                self._on_disconnect()
             else:
                 wx.MessageBox(
                     self.i18n.t("websocket_failed_reconnect"),
                     self.i18n.t("connection_error"),
                     wx.OK | wx.ICON_WARNING,
                 )
-            self.connect.show_connection_dial()
+                self.connect.show_connection_dial()
             self._just_paired = True
         
         logging.info("MainWindow: Initializing User Interface...")
@@ -3026,6 +3032,17 @@ class MainWindow(wx.Frame):
         }
         try:
             response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code in (401, 403):
+                logging.warning("[check_wa_connection_http] Token is unauthorized (HTTP %s). Triggering logout.", response.status_code)
+                self.error_sound.play()
+                wx.MessageBox(
+                    self.i18n.t("device_logged_out"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                self._on_disconnect()
+                return
+
             if response.status_code in (200, 201):
                 data = response.json()
                 # WPPConnect /status-session returns {"status": "CONNECTED"} — the key is
