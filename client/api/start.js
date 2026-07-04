@@ -1,22 +1,44 @@
 const path = require('path');
 const fs = require('fs');
 
-// Auto-instala o Chrome do Puppeteer caso não exista
+// Auto-instala o Chrome do Puppeteer caso não exista.
+// Procura pelo executável real (chrome.exe / chrome / Chromium), não apenas
+// por uma pasta não-vazia: um antivírus pode ter removido/colocado em
+// quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
+// checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
 const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
-let hasChrome = false;
-if (fs.existsSync(puppeteerCacheDir)) {
+
+function findChromeExecutable(dir, depth) {
+  if (depth > 6) return null;
+  let entries;
   try {
-    const files = fs.readdirSync(puppeteerCacheDir);
-    if (files.length > 0) {
-      hasChrome = true;
-    }
+    entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch (e) {
-    // ignore
+    return null;
   }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const found = findChromeExecutable(full, depth + 1);
+      if (found) return found;
+    } else if (
+      entry.name === 'chrome.exe' ||
+      entry.name === 'chrome' ||
+      entry.name === 'Chromium'
+    ) {
+      return full;
+    }
+  }
+  return null;
 }
 
+const chromeExecutable = fs.existsSync(puppeteerCacheDir)
+  ? findChromeExecutable(puppeteerCacheDir, 0)
+  : null;
+const hasChrome = !!chromeExecutable;
+
 if (!hasChrome) {
-  console.log('Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente...');
+  console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
     const { execSync } = require('child_process');
     const nodeDir = path.dirname(process.execPath);
@@ -34,9 +56,9 @@ if (!hasChrome) {
       stdio: 'inherit',
       env: env
     });
-    console.log('Navegador Chrome do Puppeteer instalado com sucesso!');
+    console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
   } catch (err) {
-    console.error('Falha ao instalar o Chrome automaticamente:', err);
+    console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err);
   }
 }
 

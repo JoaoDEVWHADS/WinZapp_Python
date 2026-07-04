@@ -122,7 +122,10 @@ def _timestamp(msg: dict) -> int:
     """Extract numeric timestamp from a message dict (0 if missing)."""
     ts = msg.get("messageTimestamp", 0)
     try:
-        return int(ts)
+        ts = int(ts)
+        if ts > 1_000_000_000_000:
+            ts //= 1000
+        return ts
     except (TypeError, ValueError):
         return 0
 
@@ -199,6 +202,10 @@ class DatabaseManager:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        # Without this, any external lock on the file (antivirus scanning
+        # messages.db/-wal, OneDrive sync, etc.) makes SQLite raise "database
+        # is locked" immediately instead of waiting briefly and retrying.
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(_SCHEMA_SQL)
         await self._conn.commit()
 
@@ -278,6 +285,14 @@ class DatabaseManager:
             jid = row["jid"]
             last_msg = self._decrypt_json(row["last_message_json"])
             msgs = await self._build_message_wrapper(jid)
+            t = 0
+            if isinstance(last_msg, dict):
+                try:
+                    t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                    if t > 1_000_000_000_000:
+                        t //= 1000
+                except (TypeError, ValueError):
+                    t = 0
             result[jid] = {
                 "remoteJid": row["remote_jid"],
                 "unreadCount": row["unread_count"],
@@ -285,6 +300,7 @@ class DatabaseManager:
                 "name": row["name"] or "",
                 "messages": msgs,
                 "lastMessage": last_msg,
+                "t": t,
                 "archived": bool(row["archived"]),
                 "archive": bool(row["archived"]),
                 "type": row["chat_type"] or "chat",
@@ -372,7 +388,18 @@ class DatabaseManager:
             await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
             await conn.commit()
 
+    async def has_message(self, remote_jid: str, message_id: str) -> bool:
+        """Return True if the message exists in the database."""
+        conn = await self._ensure_conn()
+        cursor = await conn.execute(
+            "SELECT 1 FROM messages WHERE remote_jid=? AND message_id=? LIMIT 1",
+            (remote_jid, message_id)
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
     # ── Messages ────────────────────────────────────────────────────────────
+
 
     async def get_messages(
         self, remote_jid: str, limit: int = 200, offset: int = 0
@@ -492,6 +519,32 @@ class DatabaseManager:
                 await conn.rollback()
                 raise
 
+    async def update_message_id(
+        self, remote_jid: str, old_id: str, new_id: str
+    ) -> None:
+        """Update a message's ID from old_id to new_id in the database."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            # First, check if the new_id already exists (to prevent duplicates)
+            cursor = await conn.execute(
+                "SELECT 1 FROM messages WHERE remote_jid=? AND message_id=?",
+                (remote_jid, new_id),
+            )
+            exists = await cursor.fetchone()
+            if exists:
+                # If the new ID already exists, delete the old UUID message
+                await conn.execute(
+                    "DELETE FROM messages WHERE remote_jid=? AND message_id=?",
+                    (remote_jid, old_id),
+                )
+            else:
+                # Otherwise, update the message ID
+                await conn.execute(
+                    "UPDATE messages SET message_id=? WHERE remote_jid=? AND message_id=?",
+                    (new_id, remote_jid, old_id),
+                )
+            await conn.commit()
+
     async def update_message_status(
         self, remote_jid: str, message_id: str, status: int
     ) -> None:
@@ -606,6 +659,16 @@ class DatabaseManager:
             await conn.execute(
                 "INSERT OR REPLACE INTO lid_mappings (lid_jid, phone_jid) VALUES (?, ?)",
                 (lid_jid, phone_jid),
+            )
+            await conn.commit()
+
+    async def delete_lid_mapping(self, lid_jid: str) -> None:
+        """Delete a single JID mapping."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute(
+                "DELETE FROM lid_mappings WHERE lid_jid = ?",
+                (lid_jid,),
             )
             await conn.commit()
 

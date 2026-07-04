@@ -29,7 +29,10 @@ def _fmt_ts(ts, i18n):
     if not ts:
         return ""
     try:
-        dt = datetime.fromtimestamp(int(ts))
+        ts_val = int(ts)
+        if ts_val > 1_000_000_000_000:
+            ts_val //= 1000
+        dt = datetime.fromtimestamp(ts_val)
         return dt.strftime(i18n.t("datetime_fmt"))
     except Exception:
         return str(ts)
@@ -216,7 +219,7 @@ class ConversationDataDialog(wx.Dialog):
 
     def _populate_personal(self, data: dict):
         """Fill the personal-chat TextCtrl (called on main thread)."""
-        if not self.IsShown():
+        if not self or not self.IsShown():
             return
         i18n  = self._i18n
         lines = []
@@ -268,7 +271,7 @@ class ConversationDataDialog(wx.Dialog):
 
     def _populate_group(self, data: dict):
         """Fill the group Notebook tabs (called on main thread)."""
-        if not self.IsShown():
+        if not self or not self.IsShown():
             return
 
         i18n = self._i18n

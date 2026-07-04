@@ -3,13 +3,15 @@ api_startup.py — WinZapp WPPConnect Server startup dialog.
 
 Displayed while the bundled Node / WPPConnect Server process is starting.
 A background thread polls the configured port every 500 ms for up to
-2 minutes.  The dialog has no Cancel button — starting the API is
+5 minutes — slower machines (HDD, antivirus scanning, or a first-run
+Puppeteer/Chrome download in start.js) can take well over 2 minutes to
+open the port.  The dialog has no Cancel button — starting the API is
 mandatory — but it closes itself automatically once the port is open
 (or after the timeout).
 
 Modal result:
   wx.ID_OK     — port opened; caller may proceed normally
-  wx.ID_CANCEL — 2-minute timeout elapsed; caller shows log and warns
+  wx.ID_CANCEL — timeout elapsed; caller shows log and warns
 """
 
 import socket
@@ -24,7 +26,7 @@ class ApiStartupDialog(wx.Dialog):
 
     _PULSE_MS        = 80     # gauge pulse interval
     _POLL_INTERVAL_S = 0.5    # how often to probe the port
-    _TIMEOUT_S       = 120    # 2 minutes
+    _TIMEOUT_S       = 300    # 5 minutes
 
     def __init__(self, parent, port):
         from core.i18n import I18n

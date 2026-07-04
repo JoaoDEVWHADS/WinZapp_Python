@@ -11,10 +11,18 @@ Single-instance mutex:
 
 import os
 import sys
+import hashlib
+from app_paths import data_path
 
 _AUTORUN_KEY  = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 _AUTORUN_NAME = "WinZapp"
-_MUTEX_NAME   = "Global\\WinZappSingleInstance"
+
+def _get_dynamic_mutex_name() -> str:
+    try:
+        path_hash = hashlib.md5(data_path().encode("utf-8")).hexdigest()
+        return f"Global\\WinZappSingleInstance_{path_hash}"
+    except Exception:
+        return "Global\\WinZappSingleInstance"
 
 # The module-level handle must stay alive for the lifetime of the process;
 # Windows releases the mutex when the process exits or the handle is closed.
@@ -96,7 +104,8 @@ def acquire_single_instance_mutex() -> bool:
     """
     import ctypes
     global _mutex_handle
-    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    mutex_name = _get_dynamic_mutex_name()
+    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, mutex_name)
     # ERROR_ALREADY_EXISTS (183) means a second instance tried to create the mutex
     return ctypes.windll.kernel32.GetLastError() != 183
 

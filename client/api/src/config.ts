@@ -3,7 +3,7 @@ import { ServerOptions } from './types/ServerOptions';
 export default {
   secretKey: 'THISISMYSECURETOKEN',
   host: 'http://localhost',
-  port: '21465',
+  port: '6300',
   deviceName: 'WppConnect',
   poweredBy: 'WPPConnect-Server',
   startAllSession: true,
@@ -44,6 +44,7 @@ export default {
     logger: ['console', 'file'],
   },
   createOptions: {
+    autoClose: false,
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',
