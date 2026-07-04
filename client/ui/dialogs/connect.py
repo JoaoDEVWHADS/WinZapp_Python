@@ -731,6 +731,7 @@ class Connect:
                 )
                 payload = {"phone": self.phone_number, "waitQrCode": True}
                 ws_ref = self.main_window.ws  # capture before thread starts
+                headers = self._wpp_headers(use_global_key=True)
 
                 def _call_start_session():
                     try:
