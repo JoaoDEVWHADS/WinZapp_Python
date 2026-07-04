@@ -877,7 +877,7 @@ class MainWindow(wx.Frame):
         title   = self.i18n.t("app_name")
         deleted = set(self.settings.get("deleted_chats", []))
         unread_chats = sum(
-            1 for jid, chat in self.chats.items()
+            1 for jid, chat in list(self.chats.items())
             if jid not in deleted and effective_unread_count(chat) > 0
         )
         if unread_chats:
@@ -1708,7 +1708,7 @@ class MainWindow(wx.Frame):
             chat = self.chats.get(cj)
             if not chat:
                 continue
-            for r in chat.get("messages", {}).get("messages", {}).get("records", []):
+            for r in list(chat.get("messages", {}).get("messages", {}).get("records", [])):
                 if r.get("key", {}).get("id") == orig_id:
                     try:
                         return (format_notification_body(r, self, self.i18n) or "")[:120]
@@ -3471,7 +3471,12 @@ class MainWindow(wx.Frame):
                         continue
                     break
                 try:
-                    body = response.json()
+                    resp_text = response.text.strip() if response.text else ""
+                    if not resp_text or resp_text == "undefined" or resp_text == "null":
+                        logging.warning("[get_remote_chats] Server returned empty or undefined response.")
+                        body = []
+                    else:
+                        body = response.json()
                 except Exception as json_err:
                     logging.error(
                         "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
@@ -3997,7 +4002,7 @@ class MainWindow(wx.Frame):
         the sync.
         """
         unresolved = [
-            jid for jid, chat in self.chats.items()
+            jid for jid, chat in list(self.chats.items())
             if jid.endswith("@g.us") and not (chat.get("name") or chat.get("subject") or "").strip()
         ]
         if not unresolved:
@@ -4345,7 +4350,12 @@ class MainWindow(wx.Frame):
                 continue  # duplicate – already shown via the other JID
 
     
-            records   = chat.get("messages", {}).get("messages", {}).get("records", [])
+            records_wrapper = chat.get("messages") or {}
+            records = []
+            if isinstance(records_wrapper, dict):
+                inner_wrapper = records_wrapper.get("messages") or {}
+                if isinstance(inner_wrapper, dict):
+                    records = inner_wrapper.get("records") or []
             last_msg  = chat.get("lastMessage")
             unread    = int(chat.get("unreadCount", 0) or 0)
             is_pinned = jid in pinned
@@ -4464,13 +4474,18 @@ class MainWindow(wx.Frame):
                 if lm_ts > ts:
                     ts = lm_ts
             # Copy the records list to prevent RuntimeError during concurrent modifications
-            records_copy = list(c.get("messages", {}).get("messages", {}).get("records", []))
-            for m in records_copy:
-                t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
-                if t > 1_000_000_000_000:
-                    t //= 1000
-                if t > ts:
-                    ts = t
+            records_wrapper = c.get("messages") or {}
+            if isinstance(records_wrapper, dict):
+                inner_wrapper = records_wrapper.get("messages") or {}
+                if isinstance(inner_wrapper, dict):
+                    records_copy = list(inner_wrapper.get("records") or [])
+                    for m in records_copy:
+                        if isinstance(m, dict):
+                            t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                            if t > 1_000_000_000_000:
+                                t //= 1000
+                            if t > ts:
+                                ts = t
             return ts if ts else 1
 
         def _sort_key(pair):
@@ -4549,13 +4564,6 @@ class MainWindow(wx.Frame):
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
-        # Don't re-render the chat list from a stray WebSocket event (unread
-        # count, archive flag, contact name, ...) while the initial sync is
-        # still running — it would show partially-resolved names/placeholders
-        # for chats that haven't synced yet. start_sync() already triggers the
-        # real renders once sync completes.
-        if not getattr(self, "_sync_completed", False) and getattr(self, "_initial_sync_running", False):
-            return
         if getattr(self, "_set_chats_pending", False):
             return
         self._set_chats_pending = True
@@ -4573,8 +4581,8 @@ class MainWindow(wx.Frame):
                 # message, and rebuilt in full only at startup (set_chats calls).
                 result = self._compute_chat_lists()
                 wx.CallAfter(self._apply_chat_lists, *result)
-            except Exception as e:
-                print(f"[_do_scheduled_set_chats] error: {e}")
+            except Exception:
+                logging.exception("[_do_scheduled_set_chats] Unhandled error during scheduled set_chats")
         threading.Thread(target=_bg, daemon=True).start()
 
     def _build_lid_to_phone_cache(self):
@@ -4589,8 +4597,8 @@ class MainWindow(wx.Frame):
         which version of the API produced the stored messages.
         """
         cache = getattr(self, "_lid_to_phone", {}).copy()
-        for chat in self.chats.values():
-            for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+        for chat in list(self.chats.values()):
+            for msg in list(chat.get("messages", {}).get("messages", {}).get("records", [])):
                 key    = msg.get("key", {})
                 remote = key.get("remoteJid", "")
                 alt    = key.get("remoteJidAlt", "")
@@ -5301,6 +5309,8 @@ class MainWindow(wx.Frame):
             return
 
         msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id or "-" in msg_id or msg.get("_local_pending"):
+            return
 
         # Skip IDs that previously returned 403/410 (expired CDN URL).
         if msg_id and msg_id in self._media_failed_ids:
@@ -5518,9 +5528,32 @@ class MainWindow(wx.Frame):
             # reduces how often that false-timeout/duplicate-send scenario happens.
             response = requests.post(url, json=payload, headers=headers, timeout=25)
             if response.status_code not in (200, 201):
-                # Fallback: if we attempted to send a quoted message and failed (e.g. message not found in server memory),
-                # try sending it as a plain message instead of leaving it pending forever.
-                if quoted_id:
+                # 1. If it's a @lid "number not exists" error, try to resolve to phone JID first (preserving the quote)
+                if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
+                    orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+                    if orig_jid:
+                        fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
+                        logging.warning("[send_text_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
+                        retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
+                        if quoted_id:
+                            retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
+                            retry_payload = {
+                                "phone": [fb_phone], "message": text,
+                                "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
+                                "options": {"linkPreview": False}
+                            }
+                        else:
+                            retry_payload = {
+                                "phone": [fb_phone], "message": text,
+                                "isGroup": fb_phone.endswith("@g.us"),
+                                "options": {"linkPreview": False}
+                            }
+                        response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
+                        if response.status_code in (200, 201):
+                            logging.info("[send_text_message] Retry with %s succeeded", fb_phone)
+
+                # 2. If it's still failing and we had a quote, strip the quote and try plain send
+                if response.status_code not in (200, 201) and quoted_id:
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote...", response.status_code)
                     wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
@@ -5536,48 +5569,28 @@ class MainWindow(wx.Frame):
                         }
                     }
                     response = requests.post(url, json=payload, headers=headers, timeout=25)
-                
-                if response.status_code not in (200, 201):
-                    err = f"HTTP {response.status_code}: {response.text[:300]}"
-                    logging.error("[send_text_message] %s for %s", err, remote_jid)
-
-                    # If the @lid returned "número não existe", the chat is just not loaded
-                    # in Puppeteer yet — do NOT invalidate the cache mapping (it's valid).
-                    # Silently retry with the phone JID so the message goes through.
+                    # If the plain send also failed because @lid is not loaded, retry it with phone JID
                     if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
                         orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
                         if orig_jid:
                             fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
-                            logging.warning("[send_text_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
+                            logging.warning("[send_text_message] @lid %s not loaded in browser yet (plain fallback) — retrying with %s (cache preserved)", remote_jid, fb_phone)
                             retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
-                            if quoted_id:
-                                retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
-                                retry_payload = {
-                                    "phone": [fb_phone], "message": text,
-                                    "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
-                                    "options": {"linkPreview": False}
-                                }
-                            else:
-                                retry_payload = {
-                                    "phone": [fb_phone], "message": text,
-                                    "isGroup": fb_phone.endswith("@g.us"),
-                                    "options": {"linkPreview": False}
-                                }
+                            retry_payload = {
+                                "phone": [fb_phone], "message": text,
+                                "isGroup": fb_phone.endswith("@g.us"),
+                                "options": {"linkPreview": False}
+                            }
                             response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
-                            if response.status_code in (200, 201):
-                                logging.info("[send_text_message] Retry with %s succeeded", fb_phone)
-                                # fall through to normal response parsing below
-                            else:
-                                err = f"HTTP {response.status_code}: {response.text[:300]}"
-                                logging.error("[send_text_message] Retry also failed: %s", err)
-                                self._check_wa_connection_closed(response)
-                                return {"ok": False, "error": err, "retry": True}
-                        else:
-                            self._check_wa_connection_closed(response)
-                            return {"ok": False, "error": err, "retry": False}
-                    else:
-                        self._check_wa_connection_closed(response)
-                        return {"ok": False, "error": err, "retry": False}
+
+                # 3. Final error handling if all retries failed
+                if response.status_code not in (200, 201):
+                    err = f"HTTP {response.status_code}: {response.text[:300]}"
+                    logging.error("[send_text_message] All send attempts failed: %s for %s", err, remote_jid)
+                    self._check_wa_connection_closed(response)
+                    # If it's a transient error, mark retryable
+                    is_retryable = response.status_code in (408, 429, 500, 502, 503, 504)
+                    return {"ok": False, "error": err, "retry": is_retryable}
 
 
             self._wa_connected = True
@@ -7903,11 +7916,12 @@ class MainWindow(wx.Frame):
         Returns "" if no messages are found.
         Format: "[você: ]{content} {timestamp}"
         """
-        records = list(
-            chat.get("messages", {})
-                .get("messages", {})
-                .get("records", [])
-        )
+        records_wrapper = chat.get("messages") or {}
+        records = []
+        if isinstance(records_wrapper, dict):
+            inner_wrapper = records_wrapper.get("messages") or {}
+            if isinstance(inner_wrapper, dict):
+                records = list(inner_wrapper.get("records") or [])
         if not records:
             return ""
 
@@ -7945,10 +7959,16 @@ class MainWindow(wx.Frame):
                 return p_type in (3, "REVOKE", "revoke")
             return True
 
+        def _get_ts(m):
+            if not isinstance(m, dict):
+                return 0
+            val = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+            return val // 1000 if val > 1_000_000_000_000 else val
+
         try:
             last = max(
                 (m for m in records if is_displayable(m)),
-                key=lambda m: int(m.get("messageTimestamp", 0) or 0),
+                key=_get_ts,
                 default=None,
             )
         except Exception:
