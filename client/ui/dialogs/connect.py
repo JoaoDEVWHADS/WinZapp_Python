@@ -939,13 +939,14 @@ class Connect:
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
         if token:
+            session_name = token.split(':')[0]
             def _close_api_session():
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{token}/close-session"
+                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                    headers = self._wpp_headers(use_global_key=True)
                     requests.post(close_url, headers=headers, timeout=5)
                 except Exception:
                     pass
@@ -963,13 +964,14 @@ class Connect:
         # Call close-session API endpoint to terminate the headless browser
         token = getattr(self.main_window, 'token', '')
         if token:
+            session_name = token.split(':')[0]
             def _close_api_session():
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{token}/close-session"
+                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
-                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                    headers = self._wpp_headers(use_global_key=True)
                     requests.post(close_url, headers=headers, timeout=5)
                 except Exception:
                     pass
@@ -984,7 +986,8 @@ class Connect:
         if token_to_close:
             try:
                 url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token_to_close}/close-session"
-                requests.post(url, headers={"Authorization": f"Bearer {token_to_close}", "Content-Type": "application/json"}, timeout=2)
+                headers = self._wpp_headers(use_global_key=True)
+                requests.post(url, headers=headers, timeout=2)
             except Exception:
                 pass
         sys.exit()
