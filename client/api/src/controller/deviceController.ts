@@ -227,17 +227,18 @@ export async function listChats(req: Request, res: Response) {
       withLabels,
     } = req.body;
 
-    const response = await req.client.listChats({
-      id: id,
-      count: count,
-      direction: direction,
-      onlyGroups: onlyGroups,
-      onlyUsers: onlyUsers,
-      onlyWithUnreadMessage: onlyWithUnreadMessage,
-      withLabels: withLabels,
-    });
+    const options: any = {};
+    if (id !== undefined) options.id = id;
+    if (count !== undefined) options.count = count;
+    if (direction !== undefined) options.direction = direction;
+    if (onlyGroups !== undefined) options.onlyGroups = onlyGroups;
+    if (onlyUsers !== undefined) options.onlyUsers = onlyUsers;
+    if (onlyWithUnreadMessage !== undefined) options.onlyWithUnreadMessage = onlyWithUnreadMessage;
+    if (withLabels !== undefined) options.withLabels = withLabels;
 
-    res.status(200).json(response);
+    const response = await req.client.listChats(options);
+
+    res.status(200).json(response || []);
   } catch (e) {
     req.logger.error(e);
     res
