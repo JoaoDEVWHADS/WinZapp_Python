@@ -44,6 +44,7 @@ export default {
     logger: ['console', 'file'],
   },
   createOptions: {
+    autoClose: false,
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',

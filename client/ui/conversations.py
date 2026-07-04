@@ -47,7 +47,10 @@ def _fmt_last_seen(ts, i18n) -> str:
         return ""
     try:
         from datetime import datetime as _dt, timedelta as _td
-        dt       = _dt.fromtimestamp(int(ts))
+        ts_val = int(ts)
+        if ts_val > 1_000_000_000_000:
+            ts_val //= 1000
+        dt       = _dt.fromtimestamp(ts_val)
         now      = _dt.now()
         time_str = dt.strftime("%H:%M")
         if dt.date() == now.date():
@@ -1200,6 +1203,7 @@ class ConversationsPanel(wx.Panel):
                 "stanzaId":      _qk.get("id", ""),
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": self._quoted_message.get("message") or {},
+                "_quotedFromMe": bool(_qk.get("fromMe", False)),  # local hint for immediate render
             }
         if _mentioned:
             virtual_msg.setdefault("contextInfo", {})["mentionedJid"] = _mentioned
@@ -1249,7 +1253,7 @@ class ConversationsPanel(wx.Panel):
         remote_jid = virtual_msg.get("key", {}).get("remoteJid", "")
         if not remote_jid:
             return
-        chat = self.main_window.chats.get(remote_jid)
+        chat = self.main_window.get_chat(remote_jid)
         if chat is None:
             return
         records = (
@@ -1261,6 +1265,16 @@ class ConversationsPanel(wx.Panel):
         if local_id and any(r.get("_local_id") == local_id for r in records):
             return  # already registered
         records.append(virtual_msg)
+        
+        # Update chat timestamp (t) so the sending chat floats to the top immediately
+        msg_ts = int(virtual_msg.get("messageTimestamp", 0) or time.time())
+        if msg_ts > 1_000_000_000_000:
+            msg_ts //= 1000
+        current_t = int(chat.get("t", 0) or 0)
+        if current_t > 1_000_000_000_000:
+            current_t //= 1000
+        if msg_ts > current_t:
+            chat["t"] = msg_ts
 
     def _mark_message_sent(self, local_id: str, real_id: str = None):
         """
@@ -1318,11 +1332,18 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 # Play sent sound — fires only when the originating conversation
                 # is still the active one (otherwise local_id is not found here).
+                # Audio messages are excluded: their sound is played by
+                # _on_message_sent at API-confirmation time, guaranteeing it
+                # fires even if the user navigated away during the upload.
                 if hasattr(self.main_window, "message_sent_sound"):
-                    self.main_window.message_sent_sound.play()
+                    if msg.get("messageType") != "audioMessage":
+                        self.main_window.message_sent_sound.play()
+                if self.conversation:
+                    self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window._schedule_set_chats()
+
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
@@ -1331,14 +1352,28 @@ class ConversationsPanel(wx.Panel):
                 msg["_local_pending"] = False
                 msg["_send_failed"]   = True
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
+                if self.conversation:
+                    self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
 
     def refresh_message_status(self, msg_id: str, status: str):
         """Update the status icon for a single sent message without full redraw."""
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
-                msg.setdefault("MessageUpdate", []).append({"status": status})
+                # NOTE: MessageUpdate was already appended by on_message_status_update
+                # in main.py before this method is called. Do NOT append again here
+                # or the status history grows with duplicates on every update.
+                # Just re-render the row and force an immediate visual repaint.
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
+                # RefreshItem ensures the list control repaints this row immediately.
+                # Without it, SetItemText updates the internal data but Windows may
+                # defer the visual update until the next full paint cycle — making
+                # the status icon appear frozen until the user leaves and re-enters
+                # the conversation.
+                try:
+                    self.messages_list.RefreshItem(i)
+                except Exception:
+                    pass
                 break
 
     # ── Voice recording ──────────────────────────────────────────────────────
@@ -1556,6 +1591,7 @@ class ConversationsPanel(wx.Panel):
                 "stanzaId":      _qk.get("id", ""),
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": self._quoted_message.get("message") or {},
+                "_quotedFromMe": bool(_qk.get("fromMe", False)),  # local hint for immediate render
             }
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
@@ -1916,6 +1952,8 @@ class ConversationsPanel(wx.Panel):
             if "_" in msg_id:
                 parts = msg_id.split("_")
                 clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+            import logging
+            logging.info(f"[UI Audio Activation] msg_id={msg_id}, clean_msg_id={clean_msg_id}, duration={duration}, file={data_path('voice_messages', f'{clean_msg_id}.msv')}")
             self._toggle_playback(
                 msg_id, duration, msg,
                 file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
@@ -2801,11 +2839,22 @@ class ConversationsPanel(wx.Panel):
         if not self.conversation or not self._all_sorted_messages:
             return
         
-        # Get oldest non-separator message ID
-        oldest_msg = self._all_sorted_messages[0]
-        if oldest_msg.get("_type") == "unread_separator" and len(self._all_sorted_messages) > 1:
-            oldest_msg = self._all_sorted_messages[1]
-            
+        # Get oldest non-separator and non-pending message ID
+        oldest_msg = None
+        for m in self._all_sorted_messages:
+            if m.get("_type") == "unread_separator":
+                continue
+            m_id = m.get("key", {}).get("id", "")
+            # Skip local pending/virtual messages (UUIDs contain hyphens or start with 'pending-')
+            if m.get("_local_pending") or m_id.startswith("pending-") or "-" in m_id:
+                continue
+            oldest_msg = m
+            break
+
+        if oldest_msg is None:
+            # Fallback to the first message if all are pending/separators
+            oldest_msg = self._all_sorted_messages[0]
+
         oldest_id = oldest_msg.get("key", {}).get("id", "")
         if not oldest_id:
             return
@@ -3303,6 +3352,8 @@ class ConversationsPanel(wx.Panel):
                 self.main_window.output(self.main_window.i18n.t("downloading"))
                 return
 
+            import logging
+            logging.info(f"[UI Audio Playback] File not found local, launching download thread. file_path={file_path}")
             self.main_window.output(self.main_window.i18n.t("downloading"))
             self._downloading_audio_ids.add(msg_id)
 
@@ -3312,17 +3363,22 @@ class ConversationsPanel(wx.Panel):
                     try:
                         if msg_type == "audioMessage":
                             if msg is not None:
+                                logging.info(f"[UI Audio Playback] Calling handle_audio_message for {msg_id}")
                                 self.main_window.handle_audio_message(msg)
                         else:
                             if msg is not None:
+                                logging.info(f"[UI Audio Playback] Calling handle_media_message for {msg_id}")
                                 self.main_window.handle_media_message(msg)
-                    except Exception:
+                    except Exception as e:
                         logging.warning(
-                            "[_download_and_play] download failed for %s", msg_id,
+                            "[_download_and_play] download failed for %s: %s", msg_id, e,
                             exc_info=True,
                         )
                     # Only play if the file was actually downloaded (non-empty)
-                    if os.path.isfile(file_path) and os.path.getsize(file_path) > 16:
+                    exists = os.path.isfile(file_path)
+                    size = os.path.getsize(file_path) if exists else 0
+                    logging.info(f"[UI Audio Playback] Finished download try. exists={exists}, size={size}")
+                    if exists and size > 16:
                         wx.CallAfter(
                             self._play_audio, msg_id, duration_seconds, file_path, audio_ext
                         )
@@ -3348,11 +3404,19 @@ class ConversationsPanel(wx.Panel):
         try:
             with open(file_path, "rb") as fh:
                 content = decrypt_bytes(fh.read(), self.main_window.key)
+            import logging
+            logging.info(
+                f"[UI Audio Playback] Decrypted {len(content)} bytes. "
+                f"Header hex: {content[:16].hex()} "
+                f"(OGG magic = 4f676753, Opus head = 4f707573)"
+            )
             tmp = tempfile.NamedTemporaryFile(suffix=audio_ext, delete=False)
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.exception(f"[UI Audio Playback] Error decrypting or creating temp audio file: {e}")
             self._stop_audio()
             return
 
@@ -3380,7 +3444,9 @@ class ConversationsPanel(wx.Panel):
                 self._audio_stream = sl_stream.FileStream(
                     file=self._audio_temp_file
                 )
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.exception(f"[UI Audio Playback] Error creating fallback FileStream: {e}")
                 self._stop_audio()
                 return
 
@@ -3402,7 +3468,9 @@ class ConversationsPanel(wx.Panel):
                 except Exception:
                     pass
             playback_ctrl.play()
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.exception(f"[UI Audio Playback] Error starting playback: {e}")
             self._stop_audio()
             return
 
@@ -3581,7 +3649,10 @@ class ConversationsPanel(wx.Panel):
         if ts is None:
             return None
         try:
-            return int(ts)
+            ts_val = int(ts)
+            if ts_val > 1_000_000_000_000:
+                ts_val //= 1000
+            return ts_val
         except Exception:
             return None
 
@@ -3589,7 +3660,10 @@ class ConversationsPanel(wx.Panel):
         if not ts:
             return ""
         try:
-            dt    = datetime.fromtimestamp(int(ts))
+            ts_val = int(ts)
+            if ts_val > 1_000_000_000_000:
+                ts_val //= 1000
+            dt    = datetime.fromtimestamp(ts_val)
             today = datetime.now()
             if dt.date() == today.date():
                 return dt.strftime("%H:%M")
@@ -4153,6 +4227,13 @@ class ConversationsPanel(wx.Panel):
         participant = ctx.get("participant", "")
 
         if not participant:
+            # Fast path: use local hint set when building virtual reply message.
+            if "_quotedFromMe" in ctx:
+                return mw.self_reference_label() if ctx["_quotedFromMe"] else (
+                    mw._resolve_contact_name(self.conversation or {})
+                    or (self.conversation or {}).get("pushName", "")
+                    or ""
+                )
             # 1:1 chat: Baileys leaves participant empty; resolve by stanzaId lookup.
             stanza_id = ctx.get("stanzaId", "")
             if stanza_id:
@@ -5701,7 +5782,7 @@ class ConversationsPanel(wx.Panel):
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
         # can reflect it after a conversation close/reopen.
-        chat = self.main_window.chats.get(jid)
+        chat = self.main_window.get_chat(jid)
         if chat:
             reaction_record = {
                 "messageType": "reactionMessage",
@@ -6038,7 +6119,7 @@ class ConversationsPanel(wx.Panel):
         """Navigate to the conversation with the contact from the selected message."""
         if not self._contact_msg_jid:
             return
-        chat = self.main_window.chats.get(self._contact_msg_jid)
+        chat = self.main_window.get_chat(self._contact_msg_jid)
         if chat is not None:
             self.navigate_to_conversation(chat)
 
@@ -6053,7 +6134,16 @@ class ConversationsPanel(wx.Panel):
         """
         if self.conversation is None:
             return
-        if self.conversation.get("remoteJid", "") != remote_jid:
+        
+        conv_jid = self.conversation.get("remoteJid", "")
+        jids_match = (conv_jid == remote_jid)
+        if not jids_match:
+            mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
+            mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
+            if (mapped_lid and mapped_lid == remote_jid) or (mapped_phone and mapped_phone == remote_jid):
+                jids_match = True
+
+        if not jids_match:
             return
         # ── Reaction messages: update reaction_map and re-render original ────
         if msg.get("messageType") == "reactionMessage":
@@ -6160,6 +6250,7 @@ class ConversationsPanel(wx.Panel):
         from the user a few seconds after a conversation was opened.
         """
         _preserved_msg_id = self._focused_msg_id() if preserve_focus else None
+        _had_focus = (wx.Window.FindFocus() is self.messages_list)
         self.messages_list.DeleteAllItems()
         self._unread_sep_idx = -1
         self._reaction_map = {}
@@ -6267,6 +6358,8 @@ class ConversationsPanel(wx.Panel):
         if _preserved_msg_id:
             for idx, msg in enumerate(self._sorted_messages):
                 if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
+                    if _had_focus:
+                        self.messages_list.SetFocus()
                     self.messages_list.EnsureVisible(idx)
                     self.messages_list.Focus(idx)
                     self.messages_list.Select(idx)
