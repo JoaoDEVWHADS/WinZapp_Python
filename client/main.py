@@ -4564,17 +4564,6 @@ class MainWindow(wx.Frame):
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
-        # Don't re-render the chat list from a stray WebSocket event (unread
-        # count, archive flag, contact name, ...) while the initial sync is
-        # still running — it would show partially-resolved names/placeholders
-        # for chats that haven't synced yet. start_sync() already triggers the
-        # real renders once sync completes.
-        sync_completed = getattr(self, "_sync_completed", False)
-        initial_sync_running = getattr(self, "_initial_sync_running", False)
-        logging.info("[_schedule_set_chats] sync_completed=%s, initial_sync_running=%s", sync_completed, initial_sync_running)
-        if not sync_completed and initial_sync_running:
-            logging.info("[_schedule_set_chats] Skipping rebuild because initial sync is still running.")
-            return
         if getattr(self, "_set_chats_pending", False):
             return
         self._set_chats_pending = True
