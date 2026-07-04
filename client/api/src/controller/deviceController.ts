@@ -1448,18 +1448,54 @@ export async function getMessages(req: Request, res: Response) {
   const { phone } = req.params;
   const { count = 20, direction = 'before', id = null } = req.query;
   try {
-    let response;
+    let response: any;
+    const targetCount = parseInt(count as string);
     if (phone && phone.endsWith('@lid')) {
       // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
       response = await req.client.page.evaluate(({ chatId, params }) => {
         return (window as any).WAPI.getMessages(chatId, params);
-      }, { chatId: phone, params: { count: parseInt(count as string), direction: direction.toString() as any, id: id as string } });
+      }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
     } else {
       response = await req.client.getMessages(`${phone}`, {
-        count: parseInt(count as string),
+        count: targetCount,
         direction: direction.toString() as any,
         id: id as string,
       });
+    }
+
+    if (direction === 'before' && response && response.length < targetCount) {
+      req.logger.info(`getMessages returned ${response.length} messages, target is ${targetCount}. Loading earlier messages from server...`);
+      let attempts = 0;
+      const maxAttempts = 5;
+      while (response.length < targetCount && attempts < maxAttempts) {
+        try {
+          const loaded = await req.client.loadEarlierMessages(phone);
+          if (!loaded || loaded.length === 0) {
+            req.logger.info(`loadEarlierMessages returned 0 messages. Reached the end of chat history.`);
+            break;
+          }
+          let newResponse;
+          if (phone && phone.endsWith('@lid')) {
+            newResponse = await req.client.page.evaluate(({ chatId, params }) => {
+              return (window as any).WAPI.getMessages(chatId, params);
+            }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
+          } else {
+            newResponse = await req.client.getMessages(`${phone}`, {
+              count: targetCount,
+              direction: direction.toString() as any,
+              id: id as string,
+            });
+          }
+          if (newResponse.length <= response.length) {
+            break;
+          }
+          response = newResponse;
+          attempts++;
+        } catch (loadErr) {
+          req.logger.error(`Error loading earlier messages: ${loadErr}`);
+          break;
+        }
+      }
     }
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
