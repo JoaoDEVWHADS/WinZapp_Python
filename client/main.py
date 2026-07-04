@@ -6138,6 +6138,8 @@ class MainWindow(wx.Frame):
             return
 
         chat_jid_norm = self._normalize_jid(jid)
+        if chat_jid_norm.endswith("@lid"):
+            chat_jid_norm = self._lid_to_phone.get(chat_jid_norm, chat_jid_norm)
 
         composing_chats = getattr(self, "_composing_chats", None)
         if composing_chats is None:
