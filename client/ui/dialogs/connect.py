@@ -163,13 +163,31 @@ class Connect:
         # We query the specific check-connection-session endpoint which tells us if the WhatsApp
         # account is genuinely authenticated/linked.
         try:
+            _session_name = token.split(':')[0]
+            _bearer = token.split(':')[1] if ':' in token else token
             check_url = (
                 f"{self.main_window.wpp_server}"
-                f":{self.main_window.wpp_port}/api/{token}/check-connection-session"
+                f":{self.main_window.wpp_port}/api/{_session_name}/check-connection-session"
             )
-            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"Bearer {_bearer}", "Content-Type": "application/json"}
             check_resp = requests.get(check_url, headers=headers, timeout=5)
             is_paired = private_info.get("paired", False)
+            if check_resp.status_code in (401, 403):
+                logging.warning("[check_connection_status] check-connection-session returned unauthorized (HTTP %s).", check_resp.status_code)
+                if is_paired:
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("device_logged_out"),
+                        self.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
+                self.main_window.save_settings()
+                self.main_window.clear_local_data()
+                return False
+
             if check_resp.status_code in (200, 201):
                 check_data = check_resp.json()
                 # Only trust check-connection-session if the user actually completed pairing.
@@ -201,13 +219,15 @@ class Connect:
                     self.main_window.clear_local_data()
                     # Best-effort delete of orphaned instance
                     if token:
-                        def _close(t=token):
+                        _s = token.split(':')[0]
+                        def _close(s=_s):
                             try:
                                 requests.post(
-                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
-                                    headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
+                                    f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
+                                    headers=self._wpp_headers(use_global_key=True),
                                     timeout=5,
                                 )
+                                logging.info("[check_connection_status] Closed orphaned session: %s", s)
                             except Exception:
                                 pass
                         threading.Thread(target=_close, daemon=True).start()
@@ -219,6 +239,22 @@ class Connect:
                 f":{self.main_window.wpp_port}/api/{token}/status-session"
             )
             resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code in (401, 403):
+                logging.warning("[check_connection_status] status-session returned unauthorized (HTTP %s).", resp.status_code)
+                if is_paired:
+                    self.main_window.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("device_logged_out"),
+                        self.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+                self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
+                self.main_window.save_settings()
+                self.main_window.clear_local_data()
+                return False
+
             if resp.status_code in (200, 201):
                 data = resp.json()
                 status = (
@@ -256,11 +292,12 @@ class Connect:
                     self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
-                    def _close(t=token):
+                    _s = token.split(':')[0]
+                    def _close(s=_s):
                         try:
                             requests.post(
-                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{t}/close-session",
-                                headers={"Authorization": f"Bearer {t}", "Content-Type": "application/json"},
+                                f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{s}/close-session",
+                                headers=self._wpp_headers(use_global_key=True),
                                 timeout=5,
                             )
                         except Exception:
@@ -367,7 +404,46 @@ class Connect:
 
         self.connection_dial.ShowModal()
 
+    def _close_active_session(self):
+        # Retrieve the active token from the dialog state
+        token = getattr(self, 'raw_token', '')
+        if not token:
+            token = getattr(self.main_window, 'token', '')
+        logging.info("[_close_active_session] Active token retrieved: %s", token)
+        if token:
+            session_name = token.split(':')[0]
+            headers = self._wpp_headers(use_global_key=False)
+            # Clear reference so we don't try to reuse/double-close this token
+            self.raw_token = None
+            mw_token = getattr(self.main_window, 'token', '')
+            if mw_token.startswith(session_name):
+                if hasattr(self.main_window, 'token'):
+                    logging.info("[_close_active_session] Clearing self.main_window.token")
+                    self.main_window.token = ""
+            
+            # Clear from settings as well to prevent stale reuse on switch
+            if self.main_window.settings.get("privateinfo", {}).get("WA_token", "").startswith(session_name):
+                logging.info("[_close_active_session] Clearing WA_token in settings")
+                self.main_window.settings["privateinfo"]["WA_token"] = ""
+                self.main_window.save_settings()
+            
+            def _close_api_session():
+                try:
+                    close_url = (
+                        f"{self.main_window.wpp_server}"
+                        f":{self.main_window.wpp_port}/api/{token}/close-session"
+                    )
+                    logging.info("[_close_active_session] Sending close-session request to: %s", close_url)
+                    resp = requests.post(close_url, headers=headers, timeout=5)
+                    logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
+                except Exception as e:
+                    logging.error("[_close_active_session] Error sending close-session request: %s", e)
+            threading.Thread(target=_close_api_session, daemon=True).start()
+
     def on_switch_to_phone(self, event):
+        # Close the active QR code session first
+        self._close_active_session()
+
         # Set connection mode to phone
         self.connection_mode = "phone"
 
@@ -381,8 +457,10 @@ class Connect:
         self.phone_field.SetFocus()
         self.phone_field.SetInsertionPointEnd()
 
-
     def on_switch_to_qrcode(self, event):
+        # Close the active phone code session first
+        self._close_active_session()
+
         # Set connection mode to qrcode
         self.connection_mode = "qrcode"
 
@@ -390,12 +468,8 @@ class Connect:
         self.qrcode_panel.Show()
         self.connection_dial.Layout()
 
-        if not hasattr(self, 'qrcode_connection_started'):
-            # First time: start full QR-CODE connection
-            self.start_qrcode_connection()
-        else:
-            # Already tried QR-CODE before: just reconnect WebSocket
-            self.reconnect_websocket()
+        # Always start a fresh QR-CODE connection
+        self.start_qrcode_connection()
 
         self.main_window.qrcode_loaded_sound.play()
         self.main_window.output(self.i18n.t("qrcode_instructions"))
@@ -452,6 +526,25 @@ class Connect:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
 
+            # Close any previous session that may still be alive on the server
+            # (different token from the one we're about to start). This prevents
+            # orphaned Chrome processes when reopening the dialog or switching modes.
+            _prev_token = getattr(self, '_last_started_qr_token', '')
+            if _prev_token and _prev_token != self.main_window.token:
+                _prev_session = _prev_token.split(':')[0]
+                def _close_prev():
+                    try:
+                        requests.post(
+                            f"{server_base}/api/{_prev_session}/close-session",
+                            headers=self._wpp_headers(use_global_key=True),
+                            timeout=5
+                        )
+                        logging.info("[start_qrcode_connection] Closed previous QR session: %s", _prev_session)
+                    except Exception:
+                        pass
+                threading.Thread(target=_close_prev, daemon=True).start()
+            self._last_started_qr_token = self.main_window.token
+
             # Always (re)start the session so WPPConnect launches Chrome and
             # emits qrCode. WPPConnect tolerates a start-session when a session
             # already exists — it will simply resume it (or show a new QR if
@@ -463,6 +556,12 @@ class Connect:
 
             # Set websocket client and connect BEFORE querying status so we
             # don't miss the qrCode Socket.IO event that comes asynchronously.
+            if hasattr(self.main_window, 'ws') and self.main_window.ws:
+                try:
+                    self.main_window.ws.sio.disconnect()
+                except Exception:
+                    pass
+                self.main_window.ws = None
             self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
 
             try:
@@ -549,6 +648,8 @@ class Connect:
 
         def _bg_pairing_flow():
             try:
+                # Capture the old token to close it, preventing conflict
+                _old_token = self.main_window.token or ""
                 # Normalise stored number to digits-only for comparison
                 stored_raw = "".join(
                     c for c in self.main_window.settings.get("privateinfo", {}).get(
@@ -587,17 +688,23 @@ class Connect:
                 # will ignore new start-session requests, and the pairing code will never generate.
                 # We fire close-session and immediately set up the WebSocket in parallel to avoid
                 # the 2s blocking wait — the Node side handles the close asynchronously.
-                headers = self._wpp_headers(use_global_key=True)
+                _current_token = self.main_window.token or ""
+                # Close the actual old session instead of the new session
+                _session_name = _old_token.split(':')[0] if _old_token else ""
+                _close_headers = self._wpp_headers(use_global_key=True)
                 close_done = threading.Event()
 
                 def _close_and_signal():
+                    if not _session_name:
+                        close_done.set()
+                        return
                     try:
                         close_url = (
                             f"{self.main_window.wpp_server}"
-                            f":{self.main_window.wpp_port}/api/{self.main_window.token}/close-session"
+                            f":{self.main_window.wpp_port}/api/{_session_name}/close-session"
                         )
-                        requests.post(close_url, headers=headers, timeout=10)
-                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code")
+                        requests.post(close_url, headers=_close_headers, timeout=10)
+                        logging.info("[_bg_pairing_flow] Closed existing session to prepare for pairing code: %s", _session_name)
                     except Exception as e:
                         logging.warning("[_bg_pairing_flow] Failed to close existing session: %s", e)
                     finally:
@@ -610,6 +717,12 @@ class Connect:
                 close_done.wait(timeout=3)
 
                 # Set up the websocket client (but do not connect yet)
+                if hasattr(self.main_window, 'ws') and self.main_window.ws:
+                    try:
+                        self.main_window.ws.sio.disconnect()
+                    except Exception:
+                        pass
+                    self.main_window.ws = None
                 self.main_window.ws = WebSocketClient(self.main_window, self, self.main_window.token)
                 if self.main_window.ws:
                     self.main_window.ws._phone_code_event.clear()
@@ -620,8 +733,9 @@ class Connect:
                     f"{self.main_window.wpp_server}"
                     f":{self.main_window.wpp_port}/api/{self.main_window.token}/start-session"
                 )
-                payload = {"phone": self.phone_number, "waitQrCode": True}
+                payload = {"phone": self.phone_number, "waitQrCode": False}
                 ws_ref = self.main_window.ws  # capture before thread starts
+                headers = self._wpp_headers(use_global_key=True)
 
                 def _call_start_session():
                     try:
@@ -849,6 +963,11 @@ class Connect:
 
         self.main_window.waiting_pairing_sound.play()
         self.pairing_dial.ShowModal()
+        try:
+            self.pairing_dial.Destroy()
+        except Exception:
+            pass
+        self.cleanup_pairing_session()
 
     def update_pairing_code(self, code):
         """Refresh the pairing dialog when WPPConnect emits a new phoneCode.
@@ -880,49 +999,73 @@ class Connect:
     def on_cancel_pairing(self, event):
         try:
             if hasattr(self, "pairing_dial") and self.pairing_dial:
-                self.pairing_dial.Destroy()
+                self.pairing_dial.EndModal(wx.ID_CANCEL)
         except RuntimeError:
             pass
-        
+
+    def cleanup_pairing_session(self):
+        logging.info("[cleanup_pairing_session] Cleanup pairing session triggered.")
         # Disconnect WebSocket
-        if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
-            self.main_window.ws.sio.disconnect()
+        if hasattr(self.main_window, 'ws') and self.main_window.ws:
+            try:
+                logging.info("[cleanup_pairing_session] Disconnecting WebSocket...")
+                self.main_window.ws.sio.disconnect()
+            except Exception as e:
+                logging.error("[cleanup_pairing_session] Error disconnecting WebSocket: %s", e)
+            self.main_window.ws = None
 
         # Call close-session API endpoint to terminate the headless browser and clear state
         token = getattr(self.main_window, 'token', '')
+        logging.info("[cleanup_pairing_session] Retrieved token: %s", token)
         if token:
+            headers = self._wpp_headers(use_global_key=False)
             def _close_api_session():
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
                         f":{self.main_window.wpp_port}/api/{token}/close-session"
                     )
-                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-                    requests.post(close_url, headers=headers, timeout=5)
-                except Exception:
-                    pass
+                    logging.info("[cleanup_pairing_session] Sending close-session request to: %s", close_url)
+                    resp = requests.post(close_url, headers=headers, timeout=5)
+                    logging.info("[cleanup_pairing_session] close-session response status: %s", resp.status_code)
+                except Exception as e:
+                    logging.error("[cleanup_pairing_session] Error sending close-session request: %s", e)
             threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_dialog_close(self, event):
+        logging.info("[on_dialog_close] Dialog close event triggered.")
         # Disconnect WebSocket if connected
-        if hasattr(self.main_window, 'ws') and self.main_window.ws and self.main_window.ws.sio.connected:
-            self.main_window.ws.sio.disconnect()
+        if hasattr(self.main_window, 'ws') and self.main_window.ws:
+            try:
+                logging.info("[on_dialog_close] Disconnecting WebSocket...")
+                self.main_window.ws.sio.disconnect()
+            except Exception as e:
+                logging.error("[on_dialog_close] Error disconnecting WebSocket: %s", e)
+            self.main_window.ws = None
         
-        # Call close-session API endpoint to terminate the headless browser
         token = getattr(self.main_window, 'token', '')
+        logging.info("[on_dialog_close] Retrieved token: %s", token)
         if token:
-            def _close_api_session():
-                try:
-                    close_url = (
-                        f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{token}/close-session"
-                    )
-                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-                    requests.post(close_url, headers=headers, timeout=5)
-                except Exception:
-                    pass
-            threading.Thread(target=_close_api_session, daemon=True).start()
+            headers = self._wpp_headers(use_global_key=False)
+            try:
+                close_url = (
+                    f"{self.main_window.wpp_server}"
+                    f":{self.main_window.wpp_port}/api/{token}/close-session"
+                )
+                logging.info("[on_dialog_close] Sending close-session request to: %s", close_url)
+                resp = requests.post(close_url, headers=headers, timeout=3)
+                logging.info("[on_dialog_close] close-session response status: %s", resp.status_code)
+            except Exception as e:
+                logging.error("[on_dialog_close] Error sending close-session request: %s", e)
         event.Skip()
 
     def on_quit_from_connect(self, event):
+        token = getattr(self.main_window, 'token', '')
+        if token:
+            try:
+                headers = self._wpp_headers(use_global_key=False)
+                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token}/close-session"
+                requests.post(url, headers=headers, timeout=2)
+            except Exception:
+                pass
         sys.exit()
