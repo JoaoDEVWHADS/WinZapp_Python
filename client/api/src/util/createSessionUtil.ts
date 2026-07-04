@@ -30,6 +30,10 @@ function forceKillByUserDataDir(userDataDir: string) {
 }
 
 export default class CreateSessionUtil {
+  forceKillSession(session: string) {
+    forceKillByUserDataDir(`userDataDir/${session}`);
+  }
+
   startChatWootClient(client: any) {
     if (client.config.chatWoot && !client._chatWootClient)
       client._chatWootClient = new chatWootClient(
