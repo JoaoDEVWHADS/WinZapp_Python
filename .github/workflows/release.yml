@@ -136,13 +136,19 @@ jobs:
           # Download Canonical's official minimal Ubuntu 22.04 LTS cloud image (QCOW2 format)
           Invoke-WebRequest -Uri "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img" -OutFile "client/system/ubuntu-22.04.qcow2"
           
+          # Generate SSH key pair for passwordless authentication
+          New-Item -ItemType Directory -Force -Path "$HOME/.ssh" | Out-Null
+          if (Test-Path "$HOME/.ssh/id_rsa") { Remove-Item -Force "$HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa.pub" }
+          ssh-keygen -t rsa -b 2048 -N "" -f "$HOME/.ssh/id_rsa"
+          $pubKey = (Get-Content "$HOME/.ssh/id_rsa.pub").Trim()
+
           # Create cloud-init configuration
           $userData = @"
           #cloud-config
           users:
             - name: user
-              ssh_pwauth: True
-              plain_text_passwd: 'password'
+              ssh_authorized_keys:
+                - $pubKey
               sudo: ['ALL=(ALL) NOPASSWD:ALL']
               groups: sudo
               shell: /bin/bash
