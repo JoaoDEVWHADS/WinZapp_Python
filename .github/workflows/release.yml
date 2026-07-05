@@ -204,19 +204,7 @@ jobs:
         run: |
           python -u setup_api.py
 
-      - name: Setup Docker Buildx & Cache
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker Image and export to tar
-        uses: docker/build-push-action@v5
-        with:
-          context: client/api
-          tags: wppconnect-api:latest
-          outputs: type=docker,dest=client/api/wppconnect-api.tar
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Injetar Imagem Docker no QCOW2
+       - name: Injetar Imagem Docker no QCOW2
         shell: pwsh
         run: |
           # Copy QEMU bin folder to PATH
@@ -229,10 +217,13 @@ jobs:
           # Wait 20 seconds for boot
           Start-Sleep -Seconds 20
           
-          # Transfer the Docker tar and execute docker load inside the VM
+          # Create and transfer WPPConnect context archive to the VM
+          tar -czf client/api.tar.gz -C client/api .
           $sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222"
-          scp $sshOpts client/api/wppconnect-api.tar user@127.0.0.1:/home/user/wppconnect-api.tar
-          ssh $sshOpts user@127.0.0.1 "docker load -i /home/user/wppconnect-api.tar && docker tag wppconnect-api:latest wppconnect-api:current && rm /home/user/wppconnect-api.tar"
+          scp $sshOpts client/api.tar.gz user@127.0.0.1:/home/user/api.tar.gz
+          
+          # Build Docker image natively inside the Ubuntu VM
+          ssh $sshOpts user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
           
           # Shutdown VM cleanly
           ssh $sshOpts user@127.0.0.1 "sudo poweroff"
