@@ -1707,6 +1707,110 @@ class MainWindow(wx.Frame):
         if hasattr(self, "notification_manager"):
             self.notification_manager.send(title, body, remote_jid)
 
+    def on_historical_message(self, msg: dict):
+        """
+        Processes historical/sync messages (isMdHistoryMsg=True) received via WebSocket.
+        Saves them to local storage, sorts records, and updates the lastMessage/t
+        of the chat if the incoming message is newer. Does not trigger notifications or sounds.
+        """
+        key        = msg.get("key", {})
+        remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+        msg_id     = key.get("id", "")
+
+        if not remote_jid or not msg_id:
+            return
+
+        # Statuses (stories) or channels ignored
+        if remote_jid.endswith("@broadcast") or remote_jid.endswith("@newsletter"):
+            return
+
+        # Normalize Alt JID mapping if present
+        self._extract_lid_mapping(msg)
+        alt_jid = self._normalize_jid(key.get("remoteJidAlt", ""))
+        if alt_jid:
+            self._extract_lid_mapping(msg)
+
+        # Retrieve/create local chat object
+        chat = self.chats.get(remote_jid)
+        if not chat:
+            chat = {
+                "remoteJid": remote_jid,
+                "unreadCount": 0,
+                "pushName": msg.get("pushName", "") or "",
+                "name": "",
+                "messages": {"messages": {"records": []}},
+                "lastMessage": None,
+                "t": 0,
+                "archived": False,
+                "archive": False,
+                "type": "group" if remote_jid.endswith("@g.us") else "chat",
+            }
+            if remote_jid.endswith("@g.us"):
+                chat["name"] = self._fill_group_name(remote_jid)
+            self.chats[remote_jid] = chat
+
+        records_wrapper = chat.setdefault("messages", {})
+        if not isinstance(records_wrapper, dict):
+            records_wrapper = chat["messages"] = {}
+        inner_wrapper = records_wrapper.setdefault("messages", {})
+        if not isinstance(inner_wrapper, dict):
+            inner_wrapper = records_wrapper["messages"] = {}
+        records = inner_wrapper.setdefault("records", [])
+        if not isinstance(records, list):
+            records = inner_wrapper["records"] = []
+
+        # Check if already present in memory records
+        if any(r.get("key", {}).get("id") == msg_id for r in records):
+            return
+
+        # Ignore stale re-deliveries of cleared messages
+        if self._is_cleared_message(remote_jid, msg):
+            return
+
+        # Slim the payload
+        prune_message_record(msg)
+        records.append(msg)
+
+        # Sort the records chronologically
+        try:
+            records.sort(key=lambda m: int(m.get("messageTimestamp") or m.get("timestamp") or 0))
+        except Exception as sort_err:
+            logging.error(f"[on_historical_message] Failed to sort records: {sort_err}")
+
+        # Update lastMessage and 't' (timestamp) if this message is newer
+        msg_ts = int(msg.get("messageTimestamp") or msg.get("timestamp") or 0)
+        current_lm = chat.get("lastMessage")
+        lm_ts = 0
+        if isinstance(current_lm, dict):
+            lm_ts = int(current_lm.get("messageTimestamp") or current_lm.get("timestamp") or 0)
+        if msg_ts >= lm_ts:
+            chat["lastMessage"] = msg
+            chat["t"] = msg_ts
+            # Save updated chat to DB
+            def _bg_upsert_chat():
+                try:
+                    self.db.upsert_chat(remote_jid, chat)
+                except Exception as db_err:
+                    logging.error(f"[on_historical_message] Failed to upsert chat to DB: {db_err}")
+            threading.Thread(target=_bg_upsert_chat, daemon=True).start()
+
+        # Insert message to DB in background
+        def _bg_insert_msg():
+            try:
+                self.db.insert_message(remote_jid, msg)
+            except Exception as e:
+                logging.error(f"[on_historical_message] Failed to insert message to DB: {e}")
+        threading.Thread(target=_bg_insert_msg, daemon=True).start()
+
+        # Debounced UI update
+        self._schedule_save(dirty_jid=remote_jid)
+        self._schedule_set_chats()
+
+        # Add message to the open conversation panel if it's currently selected
+        cp = getattr(self, "conversations_panel", None)
+        if cp and cp.conversation and cp.conversation.get("remoteJid") == remote_jid:
+            wx.CallAfter(cp.populate_messages, preserve_focus=True)
+
     def _reacted_message_preview(self, remote_jid: str, orig_id: str) -> str:
         """Return a short text preview of the original message a reaction targets."""
         if not orig_id:
@@ -5160,8 +5264,11 @@ class MainWindow(wx.Frame):
         api_ok = False
         # Skip API call entirely if session is known disconnected
         if getattr(self, "_wa_connected", False):
-            max_retries = 2
+            max_retries = 12
             for attempt in range(max_retries):
+                if not getattr(self, "_wa_connected", False):
+                    logging.info(f"[sync_chat_messages] Connection lost during sync retry loop for {remote_jid}, aborting sync.")
+                    break
                 try:
                     logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid} (attempt {attempt+1}/{max_retries})")
                     response = requests.get(url, headers=headers, timeout=30)
@@ -5189,7 +5296,13 @@ class MainWindow(wx.Frame):
                         # All are retryable — wait briefly and try again.
                         logging.warning(f"[sync_chat_messages] Retryable error {response.status_code} for {remote_jid} (attempt {attempt+1}/{max_retries}): {response.text[:120]}")
                         if attempt < max_retries - 1:
-                            time.sleep(3)
+                            sleep_time = min(5 * (attempt + 1), 30)
+                            logging.info(f"[sync_chat_messages] Sleeping {sleep_time} seconds before attempt {attempt+2} for {remote_jid}...")
+                            # Check connection repeatedly while sleeping
+                            for _ in range(sleep_time):
+                                if not getattr(self, "_wa_connected", False):
+                                    break
+                                time.sleep(1)
                         continue
                     else:
                         logging.error(f"[sync_chat_messages] API returned error status {response.status_code} for {remote_jid}: {response.text}")
