@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v1
+          key: qemu-ubuntu-base-cloud-v2
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -188,17 +188,51 @@ jobs:
           # Resize the cloud image to 10GB to have enough room for Docker layers
           & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
           
-          # Boot VM in background with the cloud-init configuration CD-ROM to auto-install Docker
+          # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH
           Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
-          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -display none" -PassThru
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -display none" -PassThru
           
-          # Wait 90 seconds for cloud-init to finish installing Docker/SSH
-          Start-Sleep -Seconds 90
+          # Wait for VM to boot and SSH to become fully responsive (Docker/SSH installs take some time)
+          Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
+          $sshTimeout = 150
+          $elapsed = 0
+          $sshReady = $false
+          while ($elapsed -lt $sshTimeout) {
+              try {
+                  $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 2222)
+                  if ($socket.Connected) {
+                      $socket.Close()
+                      # Try running a test command via SSH to verify connection
+                      $testSsh = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 -o ConnectTimeout=2 user@127.0.0.1 "echo OK" 2>$null
+                      if ($testSsh -eq "OK") {
+                          $sshReady = $true
+                          break
+                      }
+                  }
+              } catch {}
+              Start-Sleep -Seconds 2
+              $elapsed += 2
+          }
+          if ($sshReady -eq $false) {
+              Write-Error "[ERROR] VM SSH did not become ready during cloud-init in time."
+              exit 1
+          }
+          Write-Host "[OK] VM SSH is fully ready. Initiating clean poweroff shutdown..."
           
-          # Clean VM shutdown
-          Stop-Process -Id $qemuProcess.Id -Force -ErrorAction SilentlyContinue
+          # Shutdown VM cleanly to flush disk caches and prevent filesystem corruption
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff"
+          
+          # Wait up to 30 seconds for process exit, fallback to kill if needed
+          $waited = 0
+          while ($qemuProcess.HasExited -eq $false -and $waited -lt 30) {
+              Start-Sleep -Seconds 1
+              $waited++
+          }
+          if ($qemuProcess.HasExited -eq $false) {
+              Stop-Process -Id $qemuProcess.Id -Force -ErrorAction SilentlyContinue
+          }
           Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
-          Write-Host "[OK] Base virtual disk image created and cached successfully."
+          Write-Host "[OK] Base virtual disk image created cleanly and cached successfully."
 
       - name: Preparar contexto Docker da API
         run: |
