@@ -219,14 +219,13 @@ jobs:
           
           # Create and transfer WPPConnect context archive to the VM
           tar -czf client/api.tar.gz -C client/api .
-          $sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222"
-          scp $sshOpts client/api.tar.gz user@127.0.0.1:/home/user/api.tar.gz
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -P 2222 client/api.tar.gz user@127.0.0.1:/home/user/api.tar.gz
           
           # Build Docker image natively inside the Ubuntu VM
-          ssh $sshOpts user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
           
           # Shutdown VM cleanly
-          ssh $sshOpts user@127.0.0.1 "sudo poweroff"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff"
           
           # Wait up to 30 seconds for process exit, fallback to kill if needed
           $waited = 0
