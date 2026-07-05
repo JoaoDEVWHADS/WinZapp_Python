@@ -152,38 +152,57 @@ def main():
         except Exception:
             pass
 
-    if not already_cloned:
-        # Check if build configuration files (like tsconfig.json) exist.
-        # If they don't, we must clone to populate them.
-        if os.path.isfile(os.path.join(CLIENT_API_DIR, "tsconfig.json")):
-            print("[INFO] WPPConnect Server files already exist in client/api/, skipping clone.")
+    # If tsconfig.json does not exist, we must fetch the repository files
+    if not os.path.isfile(os.path.join(CLIENT_API_DIR, "tsconfig.json")):
+        print("[INFO] WPPConnect Server files are missing, fetching via temp clone...")
+        temp_dir = os.path.join(ROOT_DIR, "client", "api_temp")
+        if os.path.isdir(temp_dir):
+            shutil.rmtree(temp_dir, onerror=remove_readonly)
+        
+        # Clone to temp directory
+        _run(["git", "clone", WPPCONNECT_REPO, temp_dir])
+        
+        # Checkout tag if specified
+        if tag:
+            print(f"[INFO] Checking out tag: {tag}")
+            _run(["git", "checkout", "-f", tag], cwd=temp_dir)
         else:
-            print(f"[INFO] Cloning WPPConnect Server …")
-            if os.path.isdir(CLIENT_API_DIR):
-                shutil.rmtree(CLIENT_API_DIR, onerror=remove_readonly)
-            os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
-            _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+            print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
 
-    # Restore custom files
-    for rel_path, content in custom_contents.items():
-        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        with open(dest_path, "wb") as f:
-            f.write(content)
-        print(f"[INFO] Restored custom file: {rel_path}")
-
-    if tag:
-        print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
-        # Re-apply custom files
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Re-applied: {rel_path}")
+        # Copy files to client/api, skipping our custom files
+        print("[INFO] Copying repository files to client/api...")
+        for root, dirs, files in os.walk(temp_dir):
+            # Skip the .git directory
+            if ".git" in dirs:
+                dirs.remove(".git")
+            for file in files:
+                src_file = os.path.join(root, file)
+                rel_path = os.path.relpath(src_file, temp_dir)
+                norm_rel_path = rel_path.replace("\\", "/")
+                
+                # Skip stashed custom files so we don't overwrite them
+                if norm_rel_path in custom_files:
+                    continue
+                
+                dest_file = os.path.join(CLIENT_API_DIR, rel_path)
+                os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+                shutil.copy2(src_file, dest_file)
+        
+        # Clean up temp clone
+        print("[INFO] Cleaning up temporary clone...")
+        shutil.rmtree(temp_dir, onerror=remove_readonly)
     else:
-        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
+        print("[INFO] WPPConnect Server files already exist in client/api/, skipping clone.")
+        if tag and already_cloned:
+            print(f"[INFO] Checking out tag: {tag}")
+            _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+            # Re-apply custom files
+            for rel_path, content in custom_contents.items():
+                dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with open(dest_path, "wb") as f:
+                    f.write(content)
+                print(f"[INFO] Re-applied: {rel_path}")
 
     # Write out Dockerfile and docker-compose.yml
     print("[INFO] Writing Docker files for context...")
