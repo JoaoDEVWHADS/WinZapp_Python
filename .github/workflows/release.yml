@@ -214,8 +214,32 @@ jobs:
           # Start QEMU headless VM in background
           $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -display none" -PassThru
           
-          # Wait 20 seconds for boot
-          Start-Sleep -Seconds 20
+          # Wait for VM to boot and SSH to become fully responsive
+          Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
+          $sshTimeout = 90
+          $elapsed = 0
+          $sshReady = $false
+          while ($elapsed -lt $sshTimeout) {
+              try {
+                  $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 2222)
+                  if ($socket.Connected) {
+                      $socket.Close()
+                      # Try running a test command via SSH to verify connection
+                      $testSsh = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 -o ConnectTimeout=2 user@127.0.0.1 "echo OK" 2>$null
+                      if ($testSsh -eq "OK") {
+                          $sshReady = $true
+                          break
+                      }
+                  }
+              } catch {}
+              Start-Sleep -Seconds 2
+              $elapsed += 2
+          }
+          if ($sshReady -eq $false) {
+              Write-Error "[ERROR] VM SSH did not become ready in time."
+              exit 1
+          }
+          Write-Host "[OK] VM SSH is fully ready."
           
           # Create and transfer WPPConnect context archive to the VM
           tar -czf client/api.tar.gz -C client/api .
