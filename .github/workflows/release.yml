@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v15
+          key: qemu-ubuntu-base-cloud-v16
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -197,7 +197,7 @@ jobs:
           
           # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH, redirecting stdout/stderr for troubleshooting
           Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
-          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -NoNewWindow -RedirectStandardOutput qemu_boot.log -RedirectStandardError qemu_boot.log
+          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -NoNewWindow -RedirectStandardOutput qemu_boot.log -RedirectStandardError qemu_boot_err.log
           
           # Wait for VM to boot and SSH to become fully responsive (Docker/SSH installs take some time)
           Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
@@ -268,7 +268,7 @@ jobs:
           $env:PATH = "$qemuDir;$env:PATH"
           
           # Start QEMU headless VM
-          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -NoNewWindow -RedirectStandardOutput qemu_run.log -RedirectStandardError qemu_run.log
+          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -NoNewWindow -RedirectStandardOutput qemu_run.log -RedirectStandardError qemu_run_err.log
           
           # Wait for VM to boot and SSH to become fully responsive
           Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
