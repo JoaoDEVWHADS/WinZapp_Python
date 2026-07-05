@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v13
+          key: qemu-ubuntu-base-cloud-v14
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -213,7 +213,7 @@ jobs:
               }
               try {
                   # Run SSH test using a lightweight process with a strict 5-second WaitForExit
-                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 -o ConnectTimeout=2 user@127.0.0.1 `"echo OK`"" -PassThru -NoNewWindow -RedirectStandardOutput ssh_out.txt -ErrorAction SilentlyContinue
+                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o PasswordAuthentication=no -o ChallengeResponseAuthentication=no -o KeyboardInteractiveAuthentication=no -i `"$HOME/.ssh/id_rsa`" -p 2222 -o ConnectTimeout=2 user@127.0.0.1 `"echo OK`"" -PassThru -NoNewWindow -RedirectStandardOutput ssh_out.txt -ErrorAction SilentlyContinue
                   if ($sshProcess.WaitForExit(5000)) {
                       if (Test-Path ssh_out.txt) {
                           $testSsh = (Get-Content ssh_out.txt -Raw).Trim()
@@ -239,7 +239,8 @@ jobs:
           Write-Host "[OK] VM SSH is fully ready. Initiating clean poweroff shutdown..."
           
           # Shutdown VM cleanly in the background to prevent SSH client from hanging when guest interface drops
-          Start-Job -ScriptBlock { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff" } | Out-Null
+          $poweroffProcess = Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o PasswordAuthentication=no -o ChallengeResponseAuthentication=no -o KeyboardInteractiveAuthentication=no -i `"$HOME/.ssh/id_rsa`" -p 2222 user@127.0.0.1 `"sudo poweroff`"" -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+          $poweroffProcess.WaitForExit(5000)
           
           # Wait up to 30 seconds for process exit, fallback to kill if needed
           $waited = 0
@@ -283,7 +284,7 @@ jobs:
               }
               try {
                   # Run SSH test using a lightweight process with a strict 5-second WaitForExit
-                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 -o ConnectTimeout=2 user@127.0.0.1 `"echo OK`"" -PassThru -NoNewWindow -RedirectStandardOutput ssh_out.txt -ErrorAction SilentlyContinue
+                  $sshProcess = Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o PasswordAuthentication=no -o ChallengeResponseAuthentication=no -o KeyboardInteractiveAuthentication=no -i `"$HOME/.ssh/id_rsa`" -p 2222 -o ConnectTimeout=2 user@127.0.0.1 `"echo OK`"" -PassThru -NoNewWindow -RedirectStandardOutput ssh_out.txt -ErrorAction SilentlyContinue
                   if ($sshProcess.WaitForExit(5000)) {
                       if (Test-Path ssh_out.txt) {
                           $testSsh = (Get-Content ssh_out.txt -Raw).Trim()
@@ -310,13 +311,14 @@ jobs:
           
           # Create and transfer WPPConnect context archive to the VM
           tar -czf client/api.tar.gz -C client/api .
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -P 2222 client/api.tar.gz user@127.0.0.1:/home/user/api.tar.gz
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o PasswordAuthentication=no -o ChallengeResponseAuthentication=no -o KeyboardInteractiveAuthentication=no -i "$HOME/.ssh/id_rsa" -P 2222 client/api.tar.gz user@127.0.0.1:/home/user/api.tar.gz
           
           # Build Docker image natively inside the Ubuntu VM
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o PasswordAuthentication=no -o ChallengeResponseAuthentication=no -o KeyboardInteractiveAuthentication=no -i "$HOME/.ssh/id_rsa" -p 2222 user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
           
           # Shutdown VM cleanly in the background to prevent SSH client from hanging
-          Start-Job -ScriptBlock { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff" } | Out-Null
+          $poweroffProcess = Start-Process -FilePath "ssh" -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o PasswordAuthentication=no -o ChallengeResponseAuthentication=no -o KeyboardInteractiveAuthentication=no -i `"$HOME/.ssh/id_rsa`" -p 2222 user@127.0.0.1 `"sudo poweroff`"" -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+          $poweroffProcess.WaitForExit(5000)
           
           # Wait up to 30 seconds for process exit, fallback to kill if needed
           $waited = 0
