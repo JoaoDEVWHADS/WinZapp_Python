@@ -144,13 +144,23 @@ def main():
                 custom_contents[rel_path] = f.read()
             print(f"[INFO] Stashed custom file: {rel_path}")
 
+    def remove_readonly(func, path, excinfo):
+        import stat
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+
     if not already_cloned:
-        if os.path.isfile(os.path.join(CLIENT_API_DIR, "package.json")):
+        # Check if build configuration files (like tsconfig.json) exist.
+        # If they don't, we must clone to populate them.
+        if os.path.isfile(os.path.join(CLIENT_API_DIR, "tsconfig.json")):
             print("[INFO] WPPConnect Server files already exist in client/api/, skipping clone.")
         else:
             print(f"[INFO] Cloning WPPConnect Server …")
             if os.path.isdir(CLIENT_API_DIR):
-                shutil.rmtree(CLIENT_API_DIR)
+                shutil.rmtree(CLIENT_API_DIR, onerror=remove_readonly)
             os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
             _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
 
