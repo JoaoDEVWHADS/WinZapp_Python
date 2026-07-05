@@ -123,12 +123,10 @@ jobs:
         if: steps.cache-qemu-bin.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          choco install qemu --no-progress -y
           New-Item -ItemType Directory -Force -Path "client/qemu"
-          # Download portable QEMU windows binaries
-          Invoke-WebRequest -Uri "https://qemu.weilbach.de/w64/qemu-w64-setup-20231220.exe" -OutFile "qemu-setup.exe"
-          # Extract QEMU setup silently
-          Start-Process -FilePath "qemu-setup.exe" -ArgumentList "/S /D=$(Resolve-Path client/qemu)" -Wait
-          Remove-Item -Force "qemu-setup.exe"
+          Copy-Item "C:\Program Files\qemu\*" "client/qemu" -Recurse -Force
+          Write-Host "[OK] QEMU installed via Chocolatey and copied to client/qemu"
 
       - name: Construir Imagem Base QEMU Ubuntu se não houver Cache
         if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
