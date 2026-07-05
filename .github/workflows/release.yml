@@ -204,7 +204,7 @@ jobs:
         run: |
           python -u setup_api.py
 
-       - name: Injetar Imagem Docker no QCOW2
+      - name: Injetar Imagem Docker no QCOW2
         shell: pwsh
         run: |
           # Copy QEMU bin folder to PATH
