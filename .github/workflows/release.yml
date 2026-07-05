@@ -132,9 +132,6 @@ jobs:
         if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # Install cdrtools to get mkisofs for ISO generation
-          choco install cdrtools --no-progress -y
-          
           New-Item -ItemType Directory -Force -Path "client/system"
           # Download Canonical's official minimal Ubuntu 22.04 LTS cloud image (QCOW2 format)
           Invoke-WebRequest -Uri "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img" -OutFile "client/system/ubuntu-22.04.qcow2"
@@ -158,16 +155,31 @@ jobs:
             - systemctl enable ssh
             - systemctl start ssh
           "@
-          New-Item -ItemType Directory -Force -Path "cidata"
-          $userData | Out-File -FilePath "cidata/user-data" -Encoding utf8
+          $userData | Out-File -FilePath "user-data" -Encoding utf8
           
           $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
-          $metaData | Out-File -FilePath "cidata/meta-data" -Encoding utf8
+          $metaData | Out-File -FilePath "meta-data" -Encoding utf8
           
-          # Generate cidata.iso using mkisofs (from cdrtools)
-          # -V cidata sets volume label to cidata, required by cloud-init
-          # -r enables Rock Ridge, -J enables Joliet extensions
-          mkisofs -V cidata -r -J -o cidata.iso cidata
+          # Generate cidata.iso using Python's pycdlib with exception logging
+          $pythonCode = @"
+          import sys
+          import traceback
+          try:
+              import pycdlib
+              iso = pycdlib.PyCdlib()
+              iso.new(joliet=3)
+              iso.add_file('user-data', '/USER_DAT.;1', joliet_path='/user-data')
+              iso.add_file('meta-data', '/META_DAT.;1', joliet_path='/meta-data')
+              iso.write('cidata.iso')
+              iso.close()
+              print('[OK] cidata.iso created successfully')
+          except Exception as e:
+              print('[ERROR] pycdlib failed:', e)
+              traceback.print_exc()
+              sys.exit(1)
+          "@
+          $pythonCode | Out-File -FilePath "generate_iso.py" -Encoding utf8
+          ./venv/Scripts/python generate_iso.py
           
           # Add QEMU to path
           $qemuDir = "$(Resolve-Path client/qemu)"
@@ -185,7 +197,7 @@ jobs:
           
           # Clean VM shutdown
           Stop-Process -Id $qemuProcess.Id -Force
-          Remove-Item -Recurse -Force "cidata", "cidata.iso"
+          Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
           Write-Host "[OK] Base virtual disk image created and cached successfully."
 
       - name: Preparar contexto Docker da API
