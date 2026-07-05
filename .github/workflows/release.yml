@@ -110,23 +110,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v23
+          key: qemu-ubuntu-base-cloud-v24
 
-      - name: Instalar QEMU Portátil (Se não estiver em cache)
-        id: cache-qemu-bin
-        uses: actions/cache@v4
-        with:
-          path: client/qemu
-          key: qemu-portable-win-v2
-
-      - name: Baixar QEMU Portátil se não houver Cache
-        if: steps.cache-qemu-bin.outputs.cache-hit != 'true'
+      - name: Instalar QEMU via Chocolatey
         shell: pwsh
         run: |
           choco install qemu --no-progress -y
-          New-Item -ItemType Directory -Force -Path "client/qemu"
-          Copy-Item "C:\Program Files\qemu\*" "client/qemu" -Recurse -Force
-          Write-Host "[OK] QEMU installed via Chocolatey and copied to client/qemu"
+          # Add QEMU installation directory to GITHUB_PATH so it is available in all subsequent steps
+          "C:\Program Files\qemu" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "[OK] QEMU installed via Chocolatey and added to GITHUB_PATH"
 
       - name: Construir Imagem Base QEMU Ubuntu se não houver Cache
         if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
@@ -188,12 +180,8 @@ jobs:
           $pythonCode | Out-File -FilePath "generate_iso.py" -Encoding utf8
           ./venv/Scripts/python generate_iso.py
           
-          # Add QEMU to path
-          $qemuDir = "$(Resolve-Path client/qemu)"
-          $env:PATH = "$qemuDir;$env:PATH"
-          
           # Resize the cloud image to 10GB to have enough room for Docker layers
-          & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
+          qemu-img.exe resize client/system/ubuntu-22.04.qcow2 +8G
           
           # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH
           cmd /c "start /min /d $pwd cmd /c qemu-system-x86_64.exe -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_boot.log 2>&1"
@@ -265,10 +253,6 @@ jobs:
       - name: Injetar Imagem Docker no QCOW2
         shell: pwsh
         run: |
-          # Copy QEMU bin folder to PATH
-          $qemuDir = "$(Resolve-Path client/qemu)"
-          $env:PATH = "$qemuDir;$env:PATH"
-          
           # Start QEMU headless VM
           # Start QEMU headless VM
           cmd /c "start /min /d $pwd cmd /c qemu-system-x86_64.exe -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_run.log 2>&1"
