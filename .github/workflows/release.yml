@@ -174,14 +174,15 @@ jobs:
           ./venv/Scripts/python generate_iso.py
           
           # Add QEMU to path
-          $env:PATH = "$(Resolve-Path client/qemu);$env:PATH"
+          $qemuDir = "$(Resolve-Path client/qemu)"
+          $env:PATH = "$qemuDir;$env:PATH"
           
           # Resize the cloud image to 10GB to have enough room for Docker layers
-          qemu-img resize client/system/ubuntu-22.04.qcow2 +8G
+          & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
           
           # Boot VM in background with the cloud-init configuration CD-ROM to auto-install Docker
           Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
-          $qemuProcess = Start-Process -FilePath "qemu-system-x86_64" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -nographic" -PassThru
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -nographic" -PassThru
           
           # Wait 90 seconds for cloud-init to finish installing Docker/SSH
           Start-Sleep -Seconds 90
@@ -211,10 +212,11 @@ jobs:
         shell: pwsh
         run: |
           # Copy QEMU bin folder to PATH
-          $env:PATH = "$(Resolve-Path client/qemu);$env:PATH"
+          $qemuDir = "$(Resolve-Path client/qemu)"
+          $env:PATH = "$qemuDir;$env:PATH"
           
           # Start QEMU headless VM in background
-          $qemuProcess = Start-Process -FilePath "qemu-system-x86_64" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -PassThru
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -PassThru
           
           # Wait 20 seconds for boot
           Start-Sleep -Seconds 20
