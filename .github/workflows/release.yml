@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v9
+          key: qemu-ubuntu-base-cloud-v10
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -233,8 +233,8 @@ jobs:
           }
           Write-Host "[OK] VM SSH is fully ready. Initiating clean poweroff shutdown..."
           
-          # Shutdown VM cleanly to flush disk caches and prevent filesystem corruption
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff"
+          # Shutdown VM cleanly in the background to prevent SSH client from hanging when guest interface drops
+          Start-Job -ScriptBlock { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff" } | Out-Null
           
           # Wait up to 30 seconds for process exit, fallback to kill if needed
           $waited = 0
@@ -261,8 +261,7 @@ jobs:
           $qemuDir = "$(Resolve-Path client/qemu)"
           $env:PATH = "$qemuDir;$env:PATH"
           
-          # Start QEMU headless VM in background
-          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -display none" -PassThru
+          # Start QEMU headless VM            cmd /c "start /b `"$qemuDir/qemu-system-x86_64.exe`" -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_run.log 2>&1"
           
           # Wait for VM to boot and SSH to become fully responsive
           Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
@@ -270,6 +269,12 @@ jobs:
           $elapsed = 0
           $sshReady = $false
           while ($elapsed -lt $sshTimeout) {
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+              if ($qemuProcess -eq $null) {
+                  Write-Error "[ERROR] QEMU VM process exited unexpectedly!"
+                  if (Test-Path qemu_run.log) { Get-Content qemu_run.log }
+                  exit 1
+              }
               try {
                   $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 2222)
                   if ($socket.Connected) {
@@ -287,6 +292,7 @@ jobs:
           }
           if ($sshReady -eq $false) {
               Write-Error "[ERROR] VM SSH did not become ready in time."
+              if (Test-Path qemu_run.log) { Get-Content qemu_run.log }
               exit 1
           }
           Write-Host "[OK] VM SSH is fully ready."
@@ -298,17 +304,19 @@ jobs:
           # Build Docker image natively inside the Ubuntu VM
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
           
-          # Shutdown VM cleanly
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff"
+          # Shutdown VM cleanly in the background to prevent SSH client from hanging
+          Start-Job -ScriptBlock { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff" } | Out-Null
           
           # Wait up to 30 seconds for process exit, fallback to kill if needed
           $waited = 0
-          while ($qemuProcess.HasExited -eq $false -and $waited -lt 30) {
+          $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+          while ($qemuProcess -ne $null -and $waited -lt 30) {
               Start-Sleep -Seconds 1
               $waited++
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
           }
-          if ($qemuProcess.HasExited -eq $false) {
-              Stop-Process -Id $qemuProcess.Id -Force -ErrorAction SilentlyContinue
+          if ($qemuProcess -ne $null) {
+              Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
           }
 
       - name: Compilar WinZapp e Gerar Instalador
