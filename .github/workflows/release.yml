@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v20
+          key: qemu-ubuntu-base-cloud-v21
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -196,7 +196,7 @@ jobs:
           & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
           
           # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH
-          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -WorkingDirectory (Get-Location) -NoNewWindow -RedirectStandardOutput "$pwd/qemu_boot.log" -RedirectStandardError "$pwd/qemu_boot_err.log"
+          cmd /c "start /min cmd /c `"qemu-system-x86_64.exe -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_boot.log 2>&1`""
           
           # Give QEMU a moment to spin up and register in the OS process table
           Start-Sleep -Seconds 2
@@ -211,7 +211,6 @@ jobs:
               if ($qemuProcess -eq $null -or $qemuProcess.Count -eq 0) {
                   Write-Error "[ERROR] QEMU VM process exited unexpectedly!"
                   if (Test-Path qemu_boot.log) { Write-Host "=== qemu_boot.log ==="; Get-Content qemu_boot.log }
-                  if (Test-Path qemu_boot_err.log) { Write-Host "=== qemu_boot_err.log ==="; Get-Content qemu_boot_err.log }
                   exit 1
               }
               try {
@@ -237,7 +236,6 @@ jobs:
           if ($sshReady -eq $false) {
               Write-Error "[ERROR] VM SSH did not become ready during cloud-init in time."
               if (Test-Path qemu_boot.log) { Write-Host "=== qemu_boot.log ==="; Get-Content qemu_boot.log }
-              if (Test-Path qemu_boot_err.log) { Write-Host "=== qemu_boot_err.log ==="; Get-Content qemu_boot_err.log }
               exit 1
           }
           Write-Host "[OK] VM SSH is fully ready. Initiating clean poweroff shutdown..."
@@ -272,7 +270,7 @@ jobs:
           $env:PATH = "$qemuDir;$env:PATH"
           
           # Start QEMU headless VM
-          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -WorkingDirectory (Get-Location) -NoNewWindow -RedirectStandardOutput "$pwd/qemu_run.log" -RedirectStandardError "$pwd/qemu_run_err.log"
+          cmd /c "start /min cmd /c `"qemu-system-x86_64.exe -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_run.log 2>&1`""
           
           # Give QEMU a moment to spin up and register in the OS process table
           Start-Sleep -Seconds 2
@@ -287,7 +285,6 @@ jobs:
               if ($qemuProcess -eq $null -or $qemuProcess.Count -eq 0) {
                   Write-Error "[ERROR] QEMU VM process exited unexpectedly!"
                   if (Test-Path qemu_run.log) { Write-Host "=== qemu_run.log ==="; Get-Content qemu_run.log }
-                  if (Test-Path qemu_run_err.log) { Write-Host "=== qemu_run_err.log ==="; Get-Content qemu_run_err.log }
                   exit 1
               }
               try {
@@ -313,7 +310,6 @@ jobs:
           if ($sshReady -eq $false) {
               Write-Error "[ERROR] VM SSH did not become ready in time."
               if (Test-Path qemu_run.log) { Write-Host "=== qemu_run.log ==="; Get-Content qemu_run.log }
-              if (Test-Path qemu_run_err.log) { Write-Host "=== qemu_run_err.log ==="; Get-Content qemu_run_err.log }
               exit 1
           }
           Write-Host "[OK] VM SSH is fully ready."
