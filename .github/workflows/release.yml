@@ -81,7 +81,7 @@ jobs:
           python -m venv venv
           ./venv/Scripts/python -m pip install --upgrade pip
           ./venv/Scripts/pip install -r requirements.txt
-          ./venv/Scripts/pip install zstandard pyinstaller
+          ./venv/Scripts/pip install zstandard pyinstaller pycdlib
 
       - name: Configurar MSYS2 (para gcc, windres e opus)
         uses: msys2/setup-msys2@v2
@@ -110,15 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-v1
-
-      - name: Baixar Imagem Base QEMU se não houver Cache
-        if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "client/system"
-          # Download a pre-configured minimal Ubuntu 22.04 image with Docker pre-installed
-          Invoke-WebRequest -Uri "https://github.com/JoaoDEVWHADS/WinZapp_Python/releases/download/vbase-image/ubuntu-22.04-base.qcow2" -OutFile "client/system/ubuntu-22.04.qcow2"
+          key: qemu-ubuntu-base-cloud-v1
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -137,6 +129,69 @@ jobs:
           # Extract QEMU setup silently
           Start-Process -FilePath "qemu-setup.exe" -ArgumentList "/S /D=$(Resolve-Path client/qemu)" -Wait
           Remove-Item -Force "qemu-setup.exe"
+
+      - name: Construir Imagem Base QEMU Ubuntu se não houver Cache
+        if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "client/system"
+          # Download Canonical's official minimal Ubuntu 22.04 LTS cloud image (QCOW2 format)
+          Invoke-WebRequest -Uri "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img" -OutFile "client/system/ubuntu-22.04.qcow2"
+          
+          # Create cloud-init configuration
+          $userData = @"
+          #cloud-config
+          users:
+            - name: user
+              ssh_pwauth: True
+              plain_text_passwd: 'password'
+              sudo: ['ALL=(ALL) NOPASSWD:ALL']
+              groups: sudo
+              shell: /bin/bash
+          packages:
+            - docker.io
+            - openssh-server
+          runcmd:
+            - systemctl enable docker
+            - systemctl start docker
+            - systemctl enable ssh
+            - systemctl start ssh
+          "@
+          $userData | Out-File -FilePath "user-data" -Encoding utf8
+          
+          $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
+          $metaData | Out-File -FilePath "meta-data" -Encoding utf8
+          
+          # Generate cidata.iso using Python's pycdlib
+          $pythonCode = @"
+          import pycdlib
+          iso = pycdlib.PyCdlib()
+          iso.new(interchange_level=1)
+          iso.add_file('user-data', '/USER_DATA.;1')
+          iso.add_file('meta-data', '/META_DATA.;1')
+          iso.write('cidata.iso')
+          iso.close()
+          "@
+          $pythonCode | Out-File -FilePath "generate_iso.py" -Encoding utf8
+          ./venv/Scripts/python generate_iso.py
+          
+          # Add QEMU to path
+          $env:PATH = "$(Resolve-Path client/qemu);$env:PATH"
+          
+          # Resize the cloud image to 10GB to have enough room for Docker layers
+          qemu-img resize client/system/ubuntu-22.04.qcow2 +8G
+          
+          # Boot VM in background with the cloud-init configuration CD-ROM to auto-install Docker
+          Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
+          $qemuProcess = Start-Process -FilePath "qemu-system-x86_64" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -nographic" -PassThru
+          
+          # Wait 90 seconds for cloud-init to finish installing Docker/SSH
+          Start-Sleep -Seconds 90
+          
+          # Clean VM shutdown
+          Stop-Process -Id $qemuProcess.Id -Force
+          Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
+          Write-Host "[OK] Base virtual disk image created and cached successfully."
 
       - name: Preparar contexto Docker da API
         run: |
@@ -157,7 +212,7 @@ jobs:
       - name: Injetar Imagem Docker no QCOW2
         shell: pwsh
         run: |
-          # Copy QEMU bin folder to PATH for easy execution
+          # Copy QEMU bin folder to PATH
           $env:PATH = "$(Resolve-Path client/qemu);$env:PATH"
           
           # Start QEMU headless VM in background
@@ -166,9 +221,7 @@ jobs:
           # Wait 20 seconds for boot
           Start-Sleep -Seconds 20
           
-          # Transfer the Docker tar and execute docker load inside the VM (assumes default VM user/password)
-          # using pscp and plink (comes with Putty, or we can use native OpenSSH scp/ssh on Windows runner)
-          # OpenSSH is pre-installed on github actions windows runners.
+          # Transfer the Docker tar and execute docker load inside the VM
           $sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222"
           scp $sshOpts client/api/wppconnect-api.tar user@127.0.0.1:/home/user/wppconnect-api.tar
           ssh $sshOpts user@127.0.0.1 "docker load -i /home/user/wppconnect-api.tar && docker tag wppconnect-api:latest wppconnect-api:current && rm /home/user/wppconnect-api.tar"
