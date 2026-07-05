@@ -142,25 +142,26 @@ jobs:
           ssh-keygen -t rsa -b 2048 -N "" -f "$HOME/.ssh/id_rsa"
           $pubKey = (Get-Content "$HOME/.ssh/id_rsa.pub").Trim()
 
-          # Create cloud-init configuration
-          $userData = @"
-#cloud-config
-users:
-  - name: user
-    ssh_authorized_keys:
-      - $pubKey
-    sudo: ['ALL=(ALL) NOPASSWD:ALL']
-    groups: sudo
-    shell: /bin/bash
-packages:
-  - docker.io
-  - openssh-server
-runcmd:
-  - systemctl enable docker
-  - systemctl start docker
-  - systemctl enable ssh
-  - systemctl start ssh
-"@
+          # Create cloud-init configuration using string array to avoid column-1 indentation breaking YAML
+          $userDataLines = @(
+              "#cloud-config",
+              "users:",
+              "  - name: user",
+              "    ssh_authorized_keys:",
+              "      - $pubKey",
+              "    sudo: ['ALL=(ALL) NOPASSWD:ALL']",
+              "    groups: sudo",
+              "    shell: /bin/bash",
+              "packages:",
+              "  - docker.io",
+              "  - openssh-server",
+              "runcmd:",
+              "  - systemctl enable docker",
+              "  - systemctl start docker",
+              "  - systemctl enable ssh",
+              "  - systemctl start ssh"
+          )
+          $userData = $userDataLines -join "`n"
           $userData | Out-File -FilePath "user-data" -Encoding utf8
           
           $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
