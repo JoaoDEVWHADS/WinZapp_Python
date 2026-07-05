@@ -474,17 +474,20 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
         else:
-            # Check and install API modules if needed (first run only)
-            logging.info("MainWindow: Checking/installing API modules...")
-            self.ensure_api_modules_installed()
+            if os.environ.get("WINZAPP_CONTAINER_MODE") == "true":
+                logging.info("MainWindow: Container Mode active. Bypassing local Node setup and execution.")
+            else:
+                # Check and install API modules if needed (first run only)
+                logging.info("MainWindow: Checking/installing API modules...")
+                self.ensure_api_modules_installed()
 
-            # Check that the installed WPPConnect Server meets the minimum required version
-            logging.info("MainWindow: Checking WPPConnect Server version...")
-            self.ensure_wpp_version()
+                # Check that the installed WPPConnect Server meets the minimum required version
+                logging.info("MainWindow: Checking WPPConnect Server version...")
+                self.ensure_wpp_version()
 
-            # Start local WPPConnect Server (if bundled)
-            logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
-            self.ensure_wpp_running()
+                # Start local WPPConnect Server (if bundled)
+                logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
+                self.ensure_wpp_running()
 
         self.offline_mode = False
         # True while the Baileys/WhatsApp WebSocket is connected; False after a

@@ -81,6 +81,7 @@ jobs:
           python -m venv venv
           ./venv/Scripts/python -m pip install --upgrade pip
           ./venv/Scripts/pip install -r requirements.txt
+          ./venv/Scripts/pip install zstandard pyinstaller
 
       - name: Configurar MSYS2 (para gcc, windres e opus)
         uses: msys2/setup-msys2@v2
@@ -100,66 +101,83 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force client\lib | Out-Null
           Copy-Item "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin\libopus-0.dll" "client\lib\libopus-0.dll"
-          # bassopus.dll already committed in client/lib/ — verify both names exist
           if (Test-Path "client\lib\bass_opus.dll") {
             Copy-Item "client\lib\bass_opus.dll" "client\lib\bassopus.dll" -Force
-            Write-Output "[INFO] bassopus.dll copied from bass_opus.dll"
-          }
-          if (Test-Path "client\lib\bassopus.dll") {
-            Write-Output "[INFO] bassopus.dll is present in client/lib"
-          } else {
-            Write-Warning "[WARN] bassopus.dll not found in client/lib — OGG Opus playback will fail"
           }
 
-      - name: Cache Node.js Portátil
-        id: cache-node
+      - name: Cache Base QEMU Disk Image
+        id: cache-qemu-disk
         uses: actions/cache@v4
         with:
-          path: client/node
-          key: node-portable-v24.15.0
+          path: client/system/ubuntu-22.04.qcow2
+          key: qemu-ubuntu-base-v1
 
-      - name: Baixar e Extrair Node.js Portátil
-        if: steps.cache-node.outputs.cache-hit != 'true'
+      - name: Baixar Imagem Base QEMU se não houver Cache
+        if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "client/node"
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v24.15.0/node-v24.15.0-win-x64.zip" -OutFile "node-portable.zip"
-          Expand-Archive -Path "node-portable.zip" -DestinationPath "node-temp"
-          Copy-Item -Path "node-temp\node-v24.15.0-win-x64\*" -Destination "client/node" -Recurse -Force
-          Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
+          New-Item -ItemType Directory -Force -Path "client/system"
+          # Download a pre-configured minimal Ubuntu 22.04 image with Docker pre-installed
+          Invoke-WebRequest -Uri "https://github.com/JoaoDEVWHADS/WinZapp_Python/releases/download/vbase-image/ubuntu-22.04-base.qcow2" -OutFile "client/system/ubuntu-22.04.qcow2"
 
-      - name: Cache Node Modules da WPPConnect API
-        id: cache-api-modules
+      - name: Instalar QEMU Portátil (Se não estiver em cache)
+        id: cache-qemu-bin
         uses: actions/cache@v4
         with:
-          path: client/api/node_modules
-          key: npm-packages-${{ hashFiles('client/api/package.json') }}
-          restore-keys: |
-            npm-packages-
+          path: client/qemu
+          key: qemu-portable-win-v2
 
-      - name: Configurar WPPConnect API
+      - name: Baixar QEMU Portátil se não houver Cache
+        if: steps.cache-qemu-bin.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # 1. Clonar a API se não existir
+          New-Item -ItemType Directory -Force -Path "client/qemu"
+          # Download portable QEMU windows binaries
+          Invoke-WebRequest -Uri "https://qemu.weilbach.de/w64/qemu-w64-setup-20231220.exe" -OutFile "qemu-setup.exe"
+          # Extract QEMU setup silently
+          Start-Process -FilePath "qemu-setup.exe" -ArgumentList "/S /D=$(Resolve-Path client/qemu)" -Wait
+          Remove-Item -Force "qemu-setup.exe"
+
+      - name: Preparar contexto Docker da API
+        run: |
           python setup_api.py
-          
-          # 2. Configurar caminhos para usar o Node portátil para instalar dependências
-          cd client/api
-          $nodeExe = "../../client/node/node.exe"
-          $npmCli = "../../client/node/node_modules/npm/bin/npm-cli.js"
-          
-          # Adiciona o diretório do node ao PATH temporariamente
-          $env:PATH = "$(Resolve-Path ../../client/node);$env:PATH"
-          
-          # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
-          if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install --no-audit --no-fund
-          }
-          
-          # Compilar a API
-          &$nodeExe $npmCli run build
 
-      - name: Compilar WinZapp com PyInstaller e Gerar Instalador
+      - name: Setup Docker Buildx & Cache
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image and export to tar
+        uses: docker/build-push-action@v5
+        with:
+          context: client/api
+          tags: wppconnect-api:latest
+          outputs: type=docker,dest=client/api/wppconnect-api.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Injetar Imagem Docker no QCOW2
+        shell: pwsh
+        run: |
+          # Copy QEMU bin folder to PATH for easy execution
+          $env:PATH = "$(Resolve-Path client/qemu);$env:PATH"
+          
+          # Start QEMU headless VM in background
+          $qemuProcess = Start-Process -FilePath "qemu-system-x86_64" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -PassThru
+          
+          # Wait 20 seconds for boot
+          Start-Sleep -Seconds 20
+          
+          # Transfer the Docker tar and execute docker load inside the VM (assumes default VM user/password)
+          # using pscp and plink (comes with Putty, or we can use native OpenSSH scp/ssh on Windows runner)
+          # OpenSSH is pre-installed on github actions windows runners.
+          $sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222"
+          scp $sshOpts client/api/wppconnect-api.tar user@127.0.0.1:/home/user/wppconnect-api.tar
+          ssh $sshOpts user@127.0.0.1 "docker load -i /home/user/wppconnect-api.tar && docker tag wppconnect-api:latest wppconnect-api:current && rm /home/user/wppconnect-api.tar"
+          
+          # Shutdown VM cleanly
+          ssh $sshOpts user@127.0.0.1 "sudo poweroff"
+          Wait-Process -Id $qemuProcess.Id
+
+      - name: Compilar WinZapp e Gerar Instalador
         shell: pwsh
         run: |
           python build.py
