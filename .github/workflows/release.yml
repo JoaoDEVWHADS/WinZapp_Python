@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v18
+          key: qemu-ubuntu-base-cloud-v19
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -195,11 +195,8 @@ jobs:
           # Resize the cloud image to 10GB to have enough room for Docker layers
           & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
           
-          # Resolve absolute paths for QEMU drives to prevent Start-Process working directory issues
-          $diskPath = (Resolve-Path "client/system/ubuntu-22.04.qcow2").ProviderPath
-          $cidataPath = (Resolve-Path "cidata.iso").ProviderPath
-          
-          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=`"$diskPath`",format=qcow2 -drive file=`"$cidataPath`",format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -WorkingDirectory (Get-Location) -NoNewWindow -RedirectStandardOutput (Join-Path (Get-Location) "qemu_boot.log") -RedirectStandardError (Join-Path (Get-Location) "qemu_boot_err.log")
+          # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH
+          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -WorkingDirectory (Get-Location) -NoNewWindow -RedirectStandardOutput (Join-Path (Get-Location) "qemu_boot.log") -RedirectStandardError (Join-Path (Get-Location) "qemu_boot_err.log")
           
           # Give QEMU a moment to spin up and register in the OS process table
           Start-Sleep -Seconds 2
@@ -274,10 +271,8 @@ jobs:
           $qemuDir = "$(Resolve-Path client/qemu)"
           $env:PATH = "$qemuDir;$env:PATH"
           
-          # Resolve absolute paths for QEMU drives to prevent Start-Process working directory issues
-          $diskPath = (Resolve-Path "client/system/ubuntu-22.04.qcow2").ProviderPath
-          
-          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=`"$diskPath`",format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -WorkingDirectory (Get-Location) -NoNewWindow -RedirectStandardOutput (Join-Path (Get-Location) "qemu_run.log") -RedirectStandardError (Join-Path (Get-Location) "qemu_run_err.log")
+          # Start QEMU headless VM
+          Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -WorkingDirectory (Get-Location) -NoNewWindow -RedirectStandardOutput (Join-Path (Get-Location) "qemu_run.log") -RedirectStandardError (Join-Path (Get-Location) "qemu_run_err.log")
           
           # Give QEMU a moment to spin up and register in the OS process table
           Start-Sleep -Seconds 2
