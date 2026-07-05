@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: client/system/ubuntu-22.04.qcow2
-          key: qemu-ubuntu-base-cloud-v8
+          key: qemu-ubuntu-base-cloud-v9
 
       - name: Instalar QEMU Portátil (Se não estiver em cache)
         id: cache-qemu-bin
@@ -197,7 +197,7 @@ jobs:
           
           # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH, redirecting stdout/stderr for troubleshooting
           Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
-          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -display none" -PassThru -RedirectStandardOutput qemu_boot.log -RedirectStandardError qemu_boot_err.log
+          cmd /c "start /b `"$qemuDir/qemu-system-x86_64.exe`" -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_boot.log 2>&1"
           
           # Wait for VM to boot and SSH to become fully responsive (Docker/SSH installs take some time)
           Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
@@ -205,9 +205,9 @@ jobs:
           $elapsed = 0
           $sshReady = $false
           while ($elapsed -lt $sshTimeout) {
-              if ($qemuProcess.HasExited) {
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+              if ($qemuProcess -eq $null) {
                   Write-Error "[ERROR] QEMU VM process exited unexpectedly!"
-                  if (Test-Path qemu_boot_err.log) { Get-Content qemu_boot_err.log }
                   if (Test-Path qemu_boot.log) { Get-Content qemu_boot.log }
                   exit 1
               }
@@ -228,7 +228,6 @@ jobs:
           }
           if ($sshReady -eq $false) {
               Write-Error "[ERROR] VM SSH did not become ready during cloud-init in time."
-              if (Test-Path qemu_boot_err.log) { Get-Content qemu_boot_err.log }
               if (Test-Path qemu_boot.log) { Get-Content qemu_boot.log }
               exit 1
           }
@@ -239,12 +238,14 @@ jobs:
           
           # Wait up to 30 seconds for process exit, fallback to kill if needed
           $waited = 0
-          while ($qemuProcess.HasExited -eq $false -and $waited -lt 30) {
+          $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+          while ($qemuProcess -ne $null -and $waited -lt 30) {
               Start-Sleep -Seconds 1
               $waited++
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
           }
-          if ($qemuProcess.HasExited -eq $false) {
-              Stop-Process -Id $qemuProcess.Id -Force -ErrorAction SilentlyContinue
+          if ($qemuProcess -ne $null) {
+              Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
           }
           Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
           Write-Host "[OK] Base virtual disk image created cleanly and cached successfully."
