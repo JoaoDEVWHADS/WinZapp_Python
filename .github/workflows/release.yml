@@ -155,23 +155,14 @@ jobs:
             - systemctl enable ssh
             - systemctl start ssh
           "@
-          $userData | Out-File -FilePath "user-data" -Encoding utf8
+          New-Item -ItemType Directory -Force -Path "cidata"
+          $userData | Out-File -FilePath "cidata/user-data" -Encoding utf8
           
           $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
-          $metaData | Out-File -FilePath "meta-data" -Encoding utf8
+          $metaData | Out-File -FilePath "cidata/meta-data" -Encoding utf8
           
-          # Generate cidata.iso using Python's pycdlib
-          $pythonCode = @"
-          import pycdlib
-          iso = pycdlib.PyCdlib()
-          iso.new(joliet=3)
-          iso.add_file('user-data', '/USER_DAT.;1', joliet_path='/user-data')
-          iso.add_file('meta-data', '/META_DAT.;1', joliet_path='/meta-data')
-          iso.write('cidata.iso')
-          iso.close()
-          "@
-          $pythonCode | Out-File -FilePath "generate_iso.py" -Encoding utf8
-          ./venv/Scripts/python generate_iso.py
+          # Generate cidata.iso using native Windows oscdimg tool
+          oscdimg -n -m cidata cidata.iso
           
           # Add QEMU to path
           $qemuDir = "$(Resolve-Path client/qemu)"
@@ -189,7 +180,7 @@ jobs:
           
           # Clean VM shutdown
           Stop-Process -Id $qemuProcess.Id -Force
-          Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
+          Remove-Item -Recurse -Force "cidata", "cidata.iso"
           Write-Host "[OK] Base virtual disk image created and cached successfully."
 
       - name: Preparar contexto Docker da API
