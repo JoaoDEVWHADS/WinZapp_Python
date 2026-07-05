@@ -132,6 +132,9 @@ jobs:
         if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          # Install cdrtools to get mkisofs for ISO generation
+          choco install cdrtools --no-progress -y
+          
           New-Item -ItemType Directory -Force -Path "client/system"
           # Download Canonical's official minimal Ubuntu 22.04 LTS cloud image (QCOW2 format)
           Invoke-WebRequest -Uri "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img" -OutFile "client/system/ubuntu-22.04.qcow2"
@@ -161,8 +164,10 @@ jobs:
           $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
           $metaData | Out-File -FilePath "cidata/meta-data" -Encoding utf8
           
-          # Generate cidata.iso using native Windows oscdimg tool
-          oscdimg -n -m cidata cidata.iso
+          # Generate cidata.iso using mkisofs (from cdrtools)
+          # -V cidata sets volume label to cidata, required by cloud-init
+          # -r enables Rock Ridge, -J enables Joliet extensions
+          mkisofs -V cidata -r -J -o cidata.iso cidata
           
           # Add QEMU to path
           $qemuDir = "$(Resolve-Path client/qemu)"
