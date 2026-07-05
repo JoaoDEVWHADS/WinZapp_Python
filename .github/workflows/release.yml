@@ -201,8 +201,19 @@ jobs:
           Write-Host "[OK] Base virtual disk image created and cached successfully."
 
       - name: Preparar contexto Docker da API
+        shell: pwsh
         run: |
-          python -u setup_api.py
+          python -u setup_api.py 2>&1 | Out-File -FilePath "setup_api_log.txt" -Encoding utf8
+          Get-Content "setup_api_log.txt"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "[ERROR] setup_api.py failed! Committing log to repository for inspection..."
+              git config --global user.email "ci@winzapp.local"
+              git config --global user.name "CI Runner"
+              git add setup_api_log.txt
+              git commit -m "ci: commit setup_api.py crash log [skip ci]"
+              git push origin main
+              exit 1
+          }
 
       - name: Setup Docker Buildx & Cache
         uses: docker/setup-buildx-action@v3
