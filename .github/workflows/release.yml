@@ -164,9 +164,9 @@ jobs:
           $pythonCode = @"
           import pycdlib
           iso = pycdlib.PyCdlib()
-          iso.new(interchange_level=1)
-          iso.add_file('user-data', '/USER_DATA.;1')
-          iso.add_file('meta-data', '/META_DATA.;1')
+          iso.new(joliet=3)
+          iso.add_file('user-data', '/USER_DAT.;1', joliet_path='/user-data')
+          iso.add_file('meta-data', '/META_DAT.;1', joliet_path='/meta-data')
           iso.write('cidata.iso')
           iso.close()
           "@
