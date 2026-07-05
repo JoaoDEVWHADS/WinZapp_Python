@@ -282,9 +282,10 @@ class WebSocketClient:
             # same records already fetched by sync_chat_messages via the REST API
             # and placed in the correct chronological position. Treating them as
             # live new messages appends them at the bottom of the conversation
-            # as if they had just been sent. Drop them here — the REST sync
-            # handles history; this handler is for real-time arrivals only.
+            # as if they had just been sent. Dispatch them to the historical handler
+            # to be saved silently in the DB and update internal state.
             if msg.get("isMdHistoryMsg"):
+                wx.CallAfter(self.main_window.on_historical_message, msg)
                 return
 
             # Extract JID mapping from WebSocket message

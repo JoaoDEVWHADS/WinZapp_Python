@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS chats (
     archived        INTEGER DEFAULT 0,
     chat_type       TEXT DEFAULT 'chat',
     last_message_json TEXT DEFAULT '',
+    t               INTEGER DEFAULT 0,
     updated_at      TEXT DEFAULT (datetime('now'))
 );
 
@@ -207,6 +208,10 @@ class DatabaseManager:
         # is locked" immediately instead of waiting briefly and retrying.
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(_SCHEMA_SQL)
+        try:
+            await self._conn.execute("ALTER TABLE chats ADD COLUMN t INTEGER DEFAULT 0")
+        except Exception:
+            pass
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -286,7 +291,11 @@ class DatabaseManager:
             last_msg = self._decrypt_json(row["last_message_json"])
             msgs = await self._build_message_wrapper(jid)
             t = 0
-            if isinstance(last_msg, dict):
+            try:
+                t = int(row["t"] or 0)
+            except (IndexError, KeyError, TypeError, ValueError):
+                pass
+            if not t and isinstance(last_msg, dict):
                 try:
                     t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
                     if t > 1_000_000_000_000:
@@ -333,13 +342,27 @@ class DatabaseManager:
             last_msg = data.get("lastMessage")
             last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
 
+            t = 0
+            if "t" in data:
+                try:
+                    t = int(data.get("t") or 0)
+                except (TypeError, ValueError):
+                    t = 0
+            if not t and isinstance(last_msg, dict):
+                try:
+                    t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                except (TypeError, ValueError):
+                    t = 0
+            if t > 1_000_000_000_000:
+                t //= 1000
+
             await conn.execute(
                 """INSERT OR REPLACE INTO chats
                    (jid, remote_jid, unread_count, push_name, name,
-                    archived, chat_type, last_message_json, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    archived, chat_type, last_message_json, t, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (jid, remote_jid, unread, push_name, name,
-                 archived, chat_type, last_msg_enc, _now_ts()),
+                 archived, chat_type, last_msg_enc, t, _now_ts()),
             )
             await conn.commit()
 
@@ -358,13 +381,28 @@ class DatabaseManager:
                     chat_type = data.get("type", "chat")
                     last_msg = data.get("lastMessage")
                     last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
+
+                    t = 0
+                    if "t" in data:
+                        try:
+                            t = int(data.get("t") or 0)
+                        except (TypeError, ValueError):
+                            t = 0
+                    if not t and isinstance(last_msg, dict):
+                        try:
+                            t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                        except (TypeError, ValueError):
+                            t = 0
+                    if t > 1_000_000_000_000:
+                        t //= 1000
+
                     await conn.execute(
                         """INSERT OR REPLACE INTO chats
                            (jid, remote_jid, unread_count, push_name, name,
-                            archived, chat_type, last_message_json, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            archived, chat_type, last_message_json, t, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (jid, remote_jid, unread, push_name, name,
-                         archived, chat_type, last_msg_enc, _now_ts()),
+                         archived, chat_type, last_msg_enc, t, _now_ts()),
                     )
                 await conn.commit()
             except Exception:
@@ -793,13 +831,27 @@ class DatabaseManager:
                     last_msg    = chat.get("lastMessage")
                     last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
 
+                    t = 0
+                    if "t" in chat:
+                        try:
+                            t = int(chat.get("t") or 0)
+                        except (TypeError, ValueError):
+                            t = 0
+                    if not t and isinstance(last_msg, dict):
+                        try:
+                            t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+                        except (TypeError, ValueError):
+                            t = 0
+                    if t > 1_000_000_000_000:
+                        t //= 1000
+
                     await conn.execute(
                         """INSERT OR REPLACE INTO chats
                            (jid, remote_jid, unread_count, push_name, name,
-                            archived, chat_type, last_message_json, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            archived, chat_type, last_message_json, t, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (jid, remote_jid, unread, push_name, name,
-                         archived, chat_type, last_msg_enc, now),
+                         archived, chat_type, last_msg_enc, t, now),
                     )
                     total += 1
 
