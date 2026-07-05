@@ -190,13 +190,13 @@ jobs:
           
           # Boot VM in background with the cloud-init configuration CD-ROM to auto-install Docker
           Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
-          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -nographic" -PassThru
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -display none" -PassThru
           
           # Wait 90 seconds for cloud-init to finish installing Docker/SSH
           Start-Sleep -Seconds 90
           
           # Clean VM shutdown
-          Stop-Process -Id $qemuProcess.Id -Force
+          Stop-Process -Id $qemuProcess.Id -Force -ErrorAction SilentlyContinue
           Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
           Write-Host "[OK] Base virtual disk image created and cached successfully."
 
@@ -224,7 +224,7 @@ jobs:
           $env:PATH = "$qemuDir;$env:PATH"
           
           # Start QEMU headless VM in background
-          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -PassThru
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -display none" -PassThru
           
           # Wait 20 seconds for boot
           Start-Sleep -Seconds 20
@@ -236,7 +236,16 @@ jobs:
           
           # Shutdown VM cleanly
           ssh $sshOpts user@127.0.0.1 "sudo poweroff"
-          Wait-Process -Id $qemuProcess.Id
+          
+          # Wait up to 30 seconds for process exit, fallback to kill if needed
+          $waited = 0
+          while ($qemuProcess.HasExited -eq $false -and $waited -lt 30) {
+              Start-Sleep -Seconds 1
+              $waited++
+          }
+          if ($qemuProcess.HasExited -eq $false) {
+              Stop-Process -Id $qemuProcess.Id -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Compilar WinZapp e Gerar Instalador
         shell: pwsh
