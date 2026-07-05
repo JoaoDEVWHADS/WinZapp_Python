@@ -214,4 +214,10 @@ def main():
     print("[OK] WPPConnect Server Docker context prepared successfully.")
 
 if __name__ == "__main__":
-    main()
+    import traceback
+    try:
+        main()
+    except Exception as e:
+        print("[ERROR] setup_api.py crashed:", e)
+        traceback.print_exc()
+        sys.exit(1)

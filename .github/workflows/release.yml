@@ -202,7 +202,7 @@ jobs:
 
       - name: Preparar contexto Docker da API
         run: |
-          python setup_api.py
+          python -u setup_api.py
 
       - name: Setup Docker Buildx & Cache
         uses: docker/setup-buildx-action@v3
