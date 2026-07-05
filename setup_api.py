@@ -145,11 +145,14 @@ def main():
             print(f"[INFO] Stashed custom file: {rel_path}")
 
     if not already_cloned:
-        print(f"[INFO] Cloning WPPConnect Server …")
-        if os.path.isdir(CLIENT_API_DIR):
-            shutil.rmtree(CLIENT_API_DIR)
-        os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
-        _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+        if os.path.isfile(os.path.join(CLIENT_API_DIR, "package.json")):
+            print("[INFO] WPPConnect Server files already exist in client/api/, skipping clone.")
+        else:
+            print(f"[INFO] Cloning WPPConnect Server …")
+            if os.path.isdir(CLIENT_API_DIR):
+                shutil.rmtree(CLIENT_API_DIR)
+            os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
+            _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
 
     # Restore custom files
     for rel_path, content in custom_contents.items():
