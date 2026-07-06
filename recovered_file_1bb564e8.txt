@@ -1,0 +1,163 @@
+"""
+new_contact.py — WinZapp "Novo contato" dialog.
+
+Collects name, surname and phone number.  Stores the contact locally in
+main_window.contacts so it appears in future searches, then returns the
+WhatsApp JID via result_jid / result_name so the caller can navigate there.
+"""
+
+import logging
+import re
+import threading
+import wx
+
+
+class NewContactDialog(wx.Dialog):
+    """Dialog for adding a new WhatsApp contact."""
+
+    def __init__(self, main_window, parent=None, prefill_phone: str = "",
+                 prefill_name: str = "", prefill_surname: str = ""):
+        self._mw = main_window
+        self._prefill_phone   = prefill_phone
+        self._prefill_name    = prefill_name
+        self._prefill_surname = prefill_surname
+        i18n = main_window.i18n
+        super().__init__(
+            parent or main_window,
+            title=i18n.t("new_contact_title"),
+            style=wx.DEFAULT_DIALOG_STYLE,
+        )
+        self.result_jid:  str = ""
+        self.result_name: str = ""
+        self._build_ui(i18n)
+        self.SetMinSize((380, -1))
+        self.Fit()
+        self.CentreOnParent()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self, i18n):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Name
+        sizer.Add(wx.StaticText(panel, label=i18n.t("contact_name")), 0,
+                  wx.LEFT | wx.TOP, 10)
+        self._name_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
+        sizer.Add(self._name_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        # Surname
+        sizer.Add(wx.StaticText(panel, label=i18n.t("contact_surname")), 0,
+                  wx.LEFT | wx.TOP, 10)
+        self._surname_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
+        sizer.Add(self._surname_field, 0,
+                  wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        # Phone
+        sizer.Add(wx.StaticText(panel, label=i18n.t("phone_label")), 0,
+                  wx.LEFT | wx.TOP, 10)
+        self._phone_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
+        sizer.Add(self._phone_field, 0,
+                  wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        # Sync checkbox
+        self._sync_check = wx.CheckBox(panel, label=i18n.t("sync_contact_to_phone"))
+        self._sync_check.SetValue(True)
+        sizer.Add(self._sync_check, 0, wx.LEFT | wx.TOP, 10)
+
+        # Buttons
+        btn_sizer = wx.StdDialogButtonSizer()
+        ok_btn     = wx.Button(panel, wx.ID_OK,     label=i18n.t("create_contact"))
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
+        btn_sizer.AddButton(ok_btn)
+        btn_sizer.AddButton(cancel_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 10)
+
+        panel.SetSizer(sizer)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(outer)
+
+        ok_btn.Bind(wx.EVT_BUTTON, self._on_add)
+
+        if self._prefill_name:
+            self._name_field.SetValue(self._prefill_name)
+        if self._prefill_surname:
+            self._surname_field.SetValue(self._prefill_surname)
+        if self._prefill_phone:
+            self._phone_field.SetValue(self._prefill_phone)
+        self._name_field.SetFocus()
+
+    # ── Add contact ───────────────────────────────────────────────────────────
+
+    def _on_add(self, event):
+        i18n = self._mw.i18n
+
+        first   = self._name_field.GetValue().strip()
+        surname = self._surname_field.GetValue().strip()
+        phone   = re.sub(r"\D", "", self._phone_field.GetValue())
+
+        if not first:
+            wx.MessageBox(
+                i18n.t("contact_name"),
+                i18n.t("app_name"),
+                wx.OK | wx.ICON_WARNING,
+                self,
+            )
+            self._name_field.SetFocus()
+            return
+
+        if not phone or len(phone) < 7:
+            wx.MessageBox(
+                i18n.t("create_contact_error"),
+                i18n.t("app_name"),
+                wx.OK | wx.ICON_WARNING,
+                self,
+            )
+            self._phone_field.SetFocus()
+            return
+
+        full_name = f"{first} {surname}".strip()
+        jid       = phone + "@s.whatsapp.net"
+
+        # Store locally so future searches find this contact
+        entry = {
+            "remoteJid":  jid,
+            "name":       full_name,
+            "pushName":   full_name,
+        }
+        sync_to_phone = self._sync_check.GetValue()
+        if sync_to_phone:
+            entry["isSaved"] = True
+        self._mw.contacts[jid] = entry
+
+        # Persist to SQLite so the contact survives restarts
+        try:
+            self._mw.db.upsert_contact(jid, entry)
+        except Exception:
+            logging.exception("[new_contact] Failed to persist contact")
+
+        # When requested, actually save the contact on WhatsApp / the device
+        # address book via the API (previously this only set a local flag, so
+        # nothing was ever synced to the phone). Done off the UI thread.
+        if sync_to_phone:
+            threading.Thread(
+                target=self._mw.save_contact_to_phone,
+                args=(phone, first, surname, True),
+                daemon=True,
+            ).start()
+
+        # When requested, actually save the contact on WhatsApp / the device
+        # address book via the API (previously this only set a local flag, so
+        # nothing was ever synced to the phone). Done off the UI thread.
+        if sync_to_phone:
+            threading.Thread(
+                target=self._mw.save_contact_to_phone,
+                args=(phone, first, surname, True),
+                daemon=True,
+            ).start()
+
+        self.result_jid  = jid
+        self.result_name = full_name
+        self.EndModal(wx.ID_OK)
