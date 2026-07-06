@@ -219,6 +219,7 @@ jobs:
           }
           
           Write-Output "[INFO] Turbo encontrado em: $foundPath"
+          $env:PATH = "$foundPath;" + $env:PATH
           $turboExe = "$foundPath\turbo.exe"
 
           # 3. Garantir que o servico do Turbo.net esta rodando no runner
