@@ -2323,6 +2323,18 @@ class MainWindow(wx.Frame):
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs WPPConnect separately
         try:
+            # Clean up SingletonLock files in userDataDir to prevent session loss on unclean shutdowns (e.g. PC reboot)
+            user_data_dir = resource_path("api", "userDataDir")
+            if os.path.exists(user_data_dir):
+                for root, dirs, files in os.walk(user_data_dir):
+                    if "SingletonLock" in files:
+                        lock_path = os.path.join(root, "SingletonLock")
+                        try:
+                            os.remove(lock_path)
+                            logging.info("[startup] Removed SingletonLock file: %s", lock_path)
+                        except Exception as e:
+                            logging.warning("[startup] Could not remove SingletonLock: %s", e)
+
             from app_paths import log_path
             self._wpp_log_path = log_path("wppconnect.log")
             log_fh = open(self._wpp_log_path, "w",
