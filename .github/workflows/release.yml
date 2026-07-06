@@ -164,6 +164,24 @@ jobs:
         run: |
           python build.py
 
+      - name: Instalar Turbo CLI
+        shell: pwsh
+        run: |
+          Write-Output "[INFO] Instaland Turbo CLI via Chocolatey..."
+          choco install turbo -y --no-progress
+          refreshenv
+
+      - name: Preparar Estrutura de Arquivos e Compilar Container Turbo.net
+        shell: pwsh
+        run: |
+          Write-Output "[INFO] Preparando estrutura de arquivos para o Turbo..."
+          New-Item -ItemType Directory -Force -Path "Files\Default\@SYSDRIVE@\WinZapp"
+          Copy-Item -Path "build\staging_pyinstaller\*" -Destination "Files\Default\@SYSDRIVE@\WinZapp" -Recurse -Force
+
+          Write-Output "[INFO] Iniciando build do container virtualizado..."
+          turbo build WinZapp.me --output=dist/WinZappContainer.exe --overwrite
+          Write-Output "[INFO] Container gerado em dist/WinZappContainer.exe."
+
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
         with:
@@ -172,4 +190,6 @@ jobs:
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
+            dist/WinZappContainer.exe
           generate_release_notes: true
+
