@@ -193,8 +193,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path "Files\Default\@SYSDRIVE@\WinZapp"
           Copy-Item -Path "build\staging_pyinstaller\*" -Destination "Files\Default\@SYSDRIVE@\WinZapp" -Recurse -Force
 
+          Write-Output "[INFO] Gerando arquivo WinZapp.xappl dinamicamente..."
+          python generate_xappl.py
+
           Write-Output "[INFO] Iniciando build do container virtualizado..."
-          turbo build WinZapp.me --output=dist/WinZappContainer.exe --overwrite
+          turbo build WinZapp.xappl --output=dist/WinZappContainer.exe --overwrite
           Write-Output "[INFO] Container gerado em dist/WinZappContainer.exe."
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
