@@ -172,18 +172,33 @@ jobs:
           Write-Output "[INFO] Instalando Turbo CLI de forma silenciosa..."
           Start-Process msiexec.exe -ArgumentList '/i "turbo-client-installer.msi" /qn' -Wait
 
-          # Tenta encontrar o executavel turbo.exe e adiciona ao PATH
+          # Tenta encontrar o executavel turbo.exe (aguarda ate 60s se necessario)
           $paths = @(
               "C:\Program Files (x86)\Turbo",
               "C:\Program Files\Turbo",
               "$env:LocalAppData\Turbo"
           )
-          foreach ($p in $paths) {
-              if (Test-Path "$p\turbo.exe") {
-                  Write-Output "[INFO] Turbo encontrado em: $p"
-                  echo "$p" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-                  break
+          
+          $foundPath = $null
+          $timeout = 60
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+              foreach ($p in $paths) {
+                  if (Test-Path "$p\turbo.exe") {
+                      $foundPath = $p
+                      break
+                  }
               }
+              if ($foundPath) { break }
+              Start-Sleep -Seconds 2
+              $elapsed += 2
+          }
+
+          if ($foundPath) {
+              Write-Output "[INFO] Turbo encontrado em: $foundPath"
+              echo "$foundPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+              throw "[ERROR] turbo.exe nao foi instalado ou nao foi encontrado nas pastas padrao."
           }
 
       - name: Preparar Estrutura de Arquivos e Compilar Container Turbo.net
