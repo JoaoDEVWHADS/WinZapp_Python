@@ -167,9 +167,24 @@ jobs:
       - name: Instalar Turbo CLI
         shell: pwsh
         run: |
-          Write-Output "[INFO] Instalando Turbo CLI via Chocolatey..."
-          choco install turbo -y --no-progress
-          refreshenv
+          Write-Output "[INFO] Baixando instalador MSI do Turbo..."
+          Invoke-WebRequest -Uri "https://start.turbo.net/install?msi=" -OutFile "turbo-client-installer.msi"
+          Write-Output "[INFO] Instalando Turbo CLI de forma silenciosa..."
+          Start-Process msiexec.exe -ArgumentList '/i "turbo-client-installer.msi" /qn' -Wait
+
+          # Tenta encontrar o executavel turbo.exe e adiciona ao PATH
+          $paths = @(
+              "C:\Program Files (x86)\Turbo",
+              "C:\Program Files\Turbo",
+              "$env:LocalAppData\Turbo"
+          )
+          foreach ($p in $paths) {
+              if (Test-Path "$p\turbo.exe") {
+                  Write-Output "[INFO] Turbo encontrado em: $p"
+                  echo "$p" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  break
+              }
+          }
 
       - name: Preparar Estrutura de Arquivos e Compilar Container Turbo.net
         shell: pwsh
