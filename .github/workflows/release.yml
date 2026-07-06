@@ -164,15 +164,16 @@ jobs:
         run: |
           python build.py
 
-      - name: Instalar Turbo CLI
+      - name: Instalar Turbo CLI e Compilar Container Turbo.net
         shell: pwsh
         run: |
+          # 1. Baixar e instalar Turbo CLI silenciosamente
           Write-Output "[INFO] Baixando instalador MSI do Turbo..."
           Invoke-WebRequest -Uri "https://start.turbo.net/install?msi=" -OutFile "turbo-client-installer.msi"
           Write-Output "[INFO] Instalando Turbo CLI de forma silenciosa..."
           Start-Process msiexec.exe -ArgumentList '/i "turbo-client-installer.msi" /qn' -Wait
 
-          # Tenta encontrar o executavel turbo.exe (aguarda ate 60s se necessario)
+          # 2. Localizar o executavel turbo.exe (aguarda ate 60s se necessario)
           $paths = @(
               "C:\Program Files (x86)\Turbo",
               "C:\Program Files\Turbo",
@@ -194,11 +195,7 @@ jobs:
               $elapsed += 2
           }
 
-          if ($foundPath) {
-              Write-Output "[INFO] Turbo encontrado em: $foundPath"
-              echo "$foundPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          } else {
-              # Se nao encontrou nos caminhos padrao, faz uma busca recursiva nas pastas comuns
+          if (-not $foundPath) {
               Write-Output "[INFO] Nao encontrado nos caminhos padrao. Iniciando busca recursiva..."
               $searchRoots = @(
                   "C:\Program Files",
@@ -211,8 +208,6 @@ jobs:
                       $foundFile = Get-ChildItem -Path $root -Filter "turbo.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
                       if ($foundFile) {
                           $foundPath = $foundFile.DirectoryName
-                          Write-Output "[INFO] Turbo encontrado recursivamente em: $foundPath"
-                          echo "$foundPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
                           break
                       }
                   }
@@ -222,11 +217,11 @@ jobs:
           if (-not $foundPath) {
               throw "[ERROR] turbo.exe nao foi instalado ou nao foi encontrado no sistema."
           }
+          
+          Write-Output "[INFO] Turbo encontrado em: $foundPath"
+          $turboExe = "$foundPath\turbo.exe"
 
-      - name: Preparar Estrutura de Arquivos e Compilar Container Turbo.net
-        shell: pwsh
-        run: |
-          # 1. Garantir que o servico do Turbo.net esta rodando no runner
+          # 3. Garantir que o servico do Turbo.net esta rodando no runner
           Write-Output "[INFO] Verificando servico do Turbo.net..."
           $service = Get-Service -Name *turbo* -ErrorAction SilentlyContinue
           if ($service) {
@@ -239,23 +234,23 @@ jobs:
               Write-Warning "[WARN] Servico do Turbo nao encontrado no sistema."
           }
 
-          # 2. Preparar arquivos
+          # 4. Preparar arquivos
           Write-Output "[INFO] Preparando estrutura de arquivos para o Turbo..."
           New-Item -ItemType Directory -Force -Path "Files\Default\@SYSDRIVE@\WinZapp"
           Copy-Item -Path "build\staging_pyinstaller\*" -Destination "Files\Default\@SYSDRIVE@\WinZapp" -Recurse -Force
 
-          # 3. Gerar receita do container
+          # 5. Gerar receita do container
           Write-Output "[INFO] Gerando arquivo WinZapp.xappl dinamicamente..."
           python generate_xappl.py
 
-          # 4. Efetuar login no Turbo se a API key estiver configurada nos secrets do GitHub
+          # 6. Efetuar login no Turbo se a API key estiver configurada nos secrets do GitHub
           $apiKey = "${{ secrets.TURBO_API_KEY }}"
           if ([string]::IsNullOrEmpty($apiKey)) {
               $apiKey = "${{ secrets.TURBO_TOKEN }}"
           }
           if (-not [string]::IsNullOrEmpty($apiKey)) {
               Write-Output "[INFO] Efetuando login silencioso no Turbo.net..."
-              & turbo login --api-key=$apiKey
+              & $turboExe login --api-key=$apiKey
               if ($LastExitCode -eq 0) {
                   Write-Output "[INFO] Login realizado com sucesso!"
               } else {
@@ -265,10 +260,10 @@ jobs:
               Write-Warning "[WARN] Nenhuma API Key do Turbo encontrada nos secrets (TURBO_API_KEY ou TURBO_TOKEN)."
           }
 
-          # 5. Compilar container com captura de logs em caso de erro
+          # 7. Compilar container com captura de logs em caso de erro
           Write-Output "[INFO] Iniciando build do container virtualizado..."
           $logFile = "turbo_build_log.txt"
-          & turbo build WinZapp.xappl --output=dist/WinZappContainer.exe --overwrite > $logFile 2>&1
+          & $turboExe build WinZapp.xappl --output=dist/WinZappContainer.exe --overwrite > $logFile 2>&1
           $exitCode = $LastExitCode
 
           if ($exitCode -ne 0) {
