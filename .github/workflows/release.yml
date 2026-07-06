@@ -211,7 +211,24 @@ jobs:
           Write-Output "[INFO] Gerando arquivo WinZapp.xappl dinamicamente..."
           python generate_xappl.py
 
-          # 4. Compilar container com captura de logs em caso de erro
+          # 4. Efetuar login no Turbo se a API key estiver configurada nos secrets do GitHub
+          $apiKey = "${{ secrets.TURBO_API_KEY }}"
+          if ([string]::IsNullOrEmpty($apiKey)) {
+              $apiKey = "${{ secrets.TURBO_TOKEN }}"
+          }
+          if (-not [string]::IsNullOrEmpty($apiKey)) {
+              Write-Output "[INFO] Efetuando login silencioso no Turbo.net..."
+              & turbo login --api-key=$apiKey
+              if ($LastExitCode -eq 0) {
+                  Write-Output "[INFO] Login realizado com sucesso!"
+              } else {
+                  Write-Warning "[WARN] Falha ao realizar o login com a API key fornecida."
+              }
+          } else {
+              Write-Warning "[WARN] Nenhuma API Key do Turbo encontrada nos secrets (TURBO_API_KEY ou TURBO_TOKEN)."
+          }
+
+          # 5. Compilar container com captura de logs em caso de erro
           Write-Output "[INFO] Iniciando build do container virtualizado..."
           $logFile = "turbo_build_log.txt"
           & turbo build WinZapp.xappl --output=dist/WinZappContainer.exe --overwrite > $logFile 2>&1
