@@ -189,16 +189,44 @@ jobs:
       - name: Preparar Estrutura de Arquivos e Compilar Container Turbo.net
         shell: pwsh
         run: |
+          # 1. Garantir que o servico do Turbo.net esta rodando no runner
+          Write-Output "[INFO] Verificando servico do Turbo.net..."
+          $service = Get-Service -Name *turbo* -ErrorAction SilentlyContinue
+          if ($service) {
+              Write-Output "[INFO] Servico encontrado: $($service.Name) ($($service.Status))"
+              if ($service.Status -ne "Running") {
+                  Write-Output "[INFO] Iniciando servico do Turbo..."
+                  Start-Service -Name $service.Name -ErrorAction SilentlyContinue
+              }
+          } else {
+              Write-Warning "[WARN] Servico do Turbo nao encontrado no sistema."
+          }
+
+          # 2. Preparar arquivos
           Write-Output "[INFO] Preparando estrutura de arquivos para o Turbo..."
           New-Item -ItemType Directory -Force -Path "Files\Default\@SYSDRIVE@\WinZapp"
           Copy-Item -Path "build\staging_pyinstaller\*" -Destination "Files\Default\@SYSDRIVE@\WinZapp" -Recurse -Force
 
+          # 3. Gerar receita do container
           Write-Output "[INFO] Gerando arquivo WinZapp.xappl dinamicamente..."
           python generate_xappl.py
 
+          # 4. Compilar container com captura de logs em caso de erro
           Write-Output "[INFO] Iniciando build do container virtualizado..."
-          turbo build WinZapp.xappl --output=dist/WinZappContainer.exe --overwrite
-          Write-Output "[INFO] Container gerado em dist/WinZappContainer.exe."
+          $logFile = "turbo_build_log.txt"
+          & turbo build WinZapp.xappl --output=dist/WinZappContainer.exe --overwrite > $logFile 2>&1
+          $exitCode = $LastExitCode
+
+          if ($exitCode -ne 0) {
+              Write-Error "[ERROR] turbo build falhou com codigo de saida $exitCode"
+              if (Test-Path $logFile) {
+                  Write-Output "[LOGS DO TURBO BUILD]:"
+                  Get-Content $logFile
+              }
+              exit $exitCode
+          } else {
+              Write-Output "[INFO] Container gerado em dist/WinZappContainer.exe."
+          }
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
