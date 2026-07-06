@@ -167,7 +167,7 @@ jobs:
       - name: Instalar Turbo CLI
         shell: pwsh
         run: |
-          Write-Output "[INFO] Instaland Turbo CLI via Chocolatey..."
+          Write-Output "[INFO] Instalando Turbo CLI via Chocolatey..."
           choco install turbo -y --no-progress
           refreshenv
 
