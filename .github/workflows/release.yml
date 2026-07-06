@@ -340,6 +340,10 @@ jobs:
       - name: Compilar WinZapp e Gerar Instalador
         shell: pwsh
         run: |
+          # Copy QEMU binaries from Chocolatey installation to client/qemu for packaging
+          New-Item -ItemType Directory -Force -Path "client/qemu"
+          Copy-Item "C:\Program Files\qemu\*" "client/qemu" -Recurse -Force
+          
           python build.py
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
