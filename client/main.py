@@ -2323,8 +2323,34 @@ class MainWindow(wx.Frame):
         if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
             return  # Not bundled — developer runs WPPConnect separately
         try:
-            # Clean up SingletonLock files in userDataDir to prevent session loss on unclean shutdowns (e.g. PC reboot)
+            # Create a custom config.json to redirect userDataDir to the host's physical AppData directory
+            # This ensures that the WhatsApp session persists even if the container sandbox is reset or updated.
             user_data_dir = resource_path("api", "userDataDir")
+            real_appdata = os.environ.get("LOCALAPPDATA")
+            if real_appdata:
+                host_user_data_dir = os.path.join(real_appdata, "WinZapp", "userDataDir")
+                try:
+                    os.makedirs(host_user_data_dir, exist_ok=True)
+                    api_config_path = resource_path("api", "config.json")
+                    import json
+                    config_data = {}
+                    if os.path.exists(api_config_path):
+                        with open(api_config_path, "r", encoding="utf-8") as f:
+                            config_data = json.load(f)
+                    
+                    # Set customUserDataDir to the host path
+                    config_data["customUserDataDir"] = host_user_data_dir + os.sep
+                    
+                    with open(api_config_path, "w", encoding="utf-8") as f:
+                        json.dump(config_data, f, indent=2)
+                    logging.info("[startup] Redirected WPPConnect userDataDir to host: %s", host_user_data_dir)
+                    
+                    # Clean SingletonLock inside the new host path instead
+                    user_data_dir = host_user_data_dir
+                except Exception as e:
+                    logging.warning("[startup] Could not configure host userDataDir: %s", e)
+
+            # Clean up SingletonLock files in userDataDir to prevent session loss on unclean shutdowns (e.g. PC reboot)
             if os.path.exists(user_data_dir):
                 for root, dirs, files in os.walk(user_data_dir):
                     if "SingletonLock" in files:
