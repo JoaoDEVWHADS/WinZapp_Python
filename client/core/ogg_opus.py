@@ -248,15 +248,30 @@ def _to_mono(pcm_bytes: bytes, channels: int) -> bytes:
         return bytes(out)
 
 
+_resampler_logged = False
+
+
 def _resample(pcm_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
     """Mono int16 linear-interpolation resampler."""
+    global _resampler_logged
     if src_rate == dst_rate:
         return pcm_bytes
     try:
-        import audioop
+        try:
+            import audioop
+            resampler_type = "standard audioop"
+        except ImportError:
+            import audioop_lts as audioop
+            resampler_type = "audioop-lts"
         res, _ = audioop.ratecv(pcm_bytes, 2, 1, src_rate, dst_rate, None)
+        if not _resampler_logged:
+            logging.info("[ogg_opus] Using fast C-based resampler (%s)", resampler_type)
+            _resampler_logged = True
         return res
-    except Exception:
+    except Exception as exc:
+        if not _resampler_logged:
+            logging.warning("[ogg_opus] audioop/audioop-lts not available. Falling back to slow pure-Python resampler: %s", exc)
+            _resampler_logged = True
         src = array.array("h", pcm_bytes)
         n_in = len(src)
         if n_in == 0:
