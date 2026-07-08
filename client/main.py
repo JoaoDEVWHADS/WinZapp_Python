@@ -3775,8 +3775,17 @@ class MainWindow(wx.Frame):
                                 continue
                             if k == "name" and jid.endswith("@g.us") and not v:
                                 v = chat.get("subject", "")
-                            if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
-                                continue
+                            # Don't let the server overwrite a positive local
+                            # unreadCount with zero — the local counter may have
+                            # incremented since the server snapshot was taken.
+                            # But always accept a server-reported positive value
+                            # so that newly-arrived unread chats show up.
+                            if k == "unreadCount":
+                                server_val = int(v or 0)
+                                local_val  = int(chats[jid].get("unreadCount") or 0)
+                                if server_val == 0 and local_val > 0:
+                                    continue  # keep the higher local count
+                                # otherwise, trust the server (e.g. 0→N or N→M)
                             chats[jid][k] = v
                         # WPPConnect may return the group name only in "subject".
                         # If the existing entry still has no name, pull it from subject.
