@@ -5645,20 +5645,19 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_for_send(self, jid: str) -> str:
         """
-        Translate a phone JID (e.g. @s.whatsapp.net / @c.us) to its @lid equivalent (if available in cache)
-        for sending messages, because WPPConnect expects the @lid JID for LID-enabled chats in browser memory.
-        If already @lid, return as-is. If not in cache, fallback to @c.us.
+        Format the JID for WPPConnect API, keeping it as-is or converting to @c.us format,
+        bypassing forced LID conversion to avoid HTTP 500/400 retry latencies or crashes in private chats.
+        If a @lid JID is passed, translate it back to the phone JID using the cache.
         """
         if not jid:
             return jid
         if jid.endswith(("@g.us", "@broadcast")):
             return jid
         if jid.endswith("@lid"):
+            phone_net = getattr(self, "_lid_to_phone", {}).get(jid, jid)
+            if phone_net:
+                return phone_net.replace("@s.whatsapp.net", "@c.us")
             return jid
-        clean_jid = jid.replace("@c.us", "@s.whatsapp.net")
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(clean_jid, "")
-        if lid_jid:
-            return lid_jid
         if jid.endswith("@s.whatsapp.net"):
             return jid.replace("@s.whatsapp.net", "@c.us")
         return jid
@@ -7732,17 +7731,17 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_api, daemon=True).start()
 
     def _resolve_jid_for_chat_state(self, jid: str) -> str:
-        """Resolve to the active chat JID (using cached LID if available) and convert to @c.us format without blocking on API."""
+        """Resolve to @c.us format without doing LID mapping to avoid inconsistency and potential crashes."""
         if not jid:
             return jid
         if jid.endswith(("@g.us", "@broadcast")):
             return jid.replace("@s.whatsapp.net", "@c.us")
         if jid.endswith("@lid"):
-            resolved = jid
-        else:
-            clean_jid = jid.replace("@c.us", "@s.whatsapp.net")
-            resolved = getattr(self, "_phone_to_lid", {}).get(clean_jid, jid)
-        return resolved.replace("@s.whatsapp.net", "@c.us")
+            phone_net = getattr(self, "_lid_to_phone", {}).get(jid, jid)
+            if phone_net:
+                return phone_net.replace("@s.whatsapp.net", "@c.us")
+            return jid
+        return jid.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
         """Notify WPPConnect that the user started or stopped typing."""
