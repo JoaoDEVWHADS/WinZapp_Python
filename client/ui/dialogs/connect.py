@@ -785,11 +785,23 @@ class Connect:
         threading.Thread(target=_bg_pairing_flow, daemon=True).start()
 
     def _on_pairing_code_success(self, pairing_code):
+        if not self or not isinstance(self, wx.Window) or RuntimeError:
+            # Check if wx object is deleted
+            try:
+                if not self.continue_btn:
+                    return
+            except RuntimeError:
+                return
         self.continue_btn.Enable()
         self.continue_btn.SetLabel(self.i18n.t("continue"))
         self.show_pairing_dial(pairing_code)
 
     def _on_pairing_code_error(self):
+        try:
+            if not self or not self.continue_btn:
+                return
+        except RuntimeError:
+            return
         self.continue_btn.Enable()
         self.continue_btn.SetLabel(self.i18n.t("continue"))
         wx.MessageBox(
@@ -799,6 +811,11 @@ class Connect:
         )
 
     def _on_pairing_code_exception(self, err_msg):
+        try:
+            if not self or not self.continue_btn:
+                return
+        except RuntimeError:
+            return
         self.continue_btn.Enable()
         self.continue_btn.SetLabel(self.i18n.t("continue"))
         self.main_window.error_sound.play()
