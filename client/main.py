@@ -4577,7 +4577,7 @@ class MainWindow(wx.Frame):
             
             # Detailed logging for name resolution debugging
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
-                logging.info(
+                logging.debug(
                     f"[Name Resolution] jid={jid} phone_jid={phone_jid} "
                     f"resolved_name={resolved_name} "
                     f"msg_name={msg_push} "
@@ -4832,14 +4832,25 @@ class MainWindow(wx.Frame):
 
         if updated:
             # Propagate contact details from phone contact to LID contact to make it immediately available
+            contacts_to_update = {}
             for lid, phone in list(self._lid_to_phone.items()):
                 if phone in self.contacts and self.contacts[phone]:
                     if lid not in self.contacts or self.contacts[lid].get("name") in (None, "", "Contato sem nome"):
                         self.contacts[lid] = self.contacts[phone].copy()
                         self.contacts[lid]["id"] = lid
                         self.contacts[lid]["remoteJid"] = lid
+                        contacts_to_update[lid] = self.contacts[lid]
 
-            self.save_data(self.chats, self.contacts)
+            # Save mapping and updated contacts incrementally
+            try:
+                for lid, phone in list(self._lid_to_phone.items()):
+                    self.db.set_lid_mapping(lid, phone)
+                if contacts_to_update:
+                    self.db.upsert_contacts_batch(contacts_to_update)
+            except Exception as e:
+                logging.error(f"[LID Mapping] Incremental save in _extract_lid_mapping failed: {e}")
+                self.save_data(self.chats, self.contacts)
+
             wx.CallAfter(self._schedule_set_chats)
 
         # Extract mentions and resolve in background if they are not in mapping/contacts
@@ -4878,7 +4889,7 @@ class MainWindow(wx.Frame):
             if phone_jids_to_resolve:
                 logging.info(f"[Contact Resolution] Found unresolved mentioned phone JIDs in message: {phone_jids_to_resolve}")
                 def resolve_phones_in_bg():
-                    updated = False
+                    updated_contacts = {}
                     for p_jid in phone_jids_to_resolve:
                         try:
                             res = self.get_contact_profile(p_jid)
@@ -4892,15 +4903,19 @@ class MainWindow(wx.Frame):
                                             self.contacts[normalized] = {}
                                         self.contacts[normalized]["name"] = name
                                         self.contacts[normalized]["pushName"] = name
-
+ 
                                         if not hasattr(self, "_presence_pushname_map"):
                                             self._presence_pushname_map = {}
                                         self._presence_pushname_map[normalized] = name
-                                        updated = True
+                                        updated_contacts[normalized] = self.contacts[normalized]
                         except Exception as e:
                             logging.error(f"[Contact Resolution] Error resolving {p_jid}: {e}")
-                    if updated:
-                        self.save_data(self.chats, self.contacts)
+                    if updated_contacts:
+                        try:
+                            self.db.upsert_contacts_batch(updated_contacts)
+                        except Exception as e:
+                            logging.error(f"[Contact Resolution] Error saving contacts incrementally: {e}")
+                            self.save_data(self.chats, self.contacts)
                         wx.CallAfter(self._schedule_set_chats)
                         if hasattr(self, "conversations_panel"):
                             wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
@@ -4967,32 +4982,36 @@ class MainWindow(wx.Frame):
                 
             if phones_to_resolve:
                 logging.info(f"[Mentions Scan] Found {len(phones_to_resolve)} unresolved mentioned phone JIDs.")
-                updated = False
+                updated_contacts = {}
                 for p_jid in list(phones_to_resolve):
                     try:
-                        res = self.get_contact_profile(p_jid)
-                        if res:
-                            res_data = res.get("response", {})
-                            if isinstance(res_data, dict):
-                                name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
-                                if name and name != "Contato sem nome" and not is_phone_like(name):
-                                    normalized = self._normalize_jid(p_jid)
-                                    if normalized not in self.contacts:
-                                        self.contacts[normalized] = {}
-                                    self.contacts[normalized]["name"] = name
-                                    self.contacts[normalized]["pushName"] = name
-                                    if not hasattr(self, "_presence_pushname_map"):
-                                        self._presence_pushname_map = {}
-                                    self._presence_pushname_map[normalized] = name
-                                    updated = True
-                        time.sleep(0.1)  # Rate limiting
+                         res = self.get_contact_profile(p_jid)
+                         if res:
+                             res_data = res.get("response", {})
+                             if isinstance(res_data, dict):
+                                 name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
+                                 if name and name != "Contato sem nome" and not is_phone_like(name):
+                                     normalized = self._normalize_jid(p_jid)
+                                     if normalized not in self.contacts:
+                                         self.contacts[normalized] = {}
+                                     self.contacts[normalized]["name"] = name
+                                     self.contacts[normalized]["pushName"] = name
+                                     if not hasattr(self, "_presence_pushname_map"):
+                                         self._presence_pushname_map = {}
+                                     self._presence_pushname_map[normalized] = name
+                                     updated_contacts[normalized] = self.contacts[normalized]
+                         time.sleep(0.1)  # Rate limiting
                     except Exception as e:
-                        logging.error(f"[Mentions Scan] Error resolving phone {p_jid}: {e}")
-                if updated:
-                    self.save_data(self.chats, self.contacts)
-                    wx.CallAfter(self._schedule_set_chats)
-                    if hasattr(self, "conversations_panel"):
-                        wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+                         logging.error(f"[Mentions Scan] Error resolving phone {p_jid}: {e}")
+                if updated_contacts:
+                     try:
+                         self.db.upsert_contacts_batch(updated_contacts)
+                     except Exception as e:
+                         logging.error(f"[Mentions Scan] Error saving contacts incrementally: {e}")
+                         self.save_data(self.chats, self.contacts)
+                     wx.CallAfter(self._schedule_set_chats)
+                     if hasattr(self, "conversations_panel"):
+                         wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
             
             logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
 
@@ -6740,7 +6759,11 @@ class MainWindow(wx.Frame):
                             all_records = new_records + local_records
                             chat.setdefault("messages", {}).setdefault("messages", {})["records"] = all_records
                             chat["messages"]["messages"]["total"] = len(all_records)
-                            self.save_data(self.chats, self.contacts)
+                            try:
+                                self.db.upsert_chat(remote_jid, chat)
+                            except Exception as e:
+                                logging.error(f"[fetch_older_messages] Incremental save failed: {e}")
+                                self.save_data(self.chats, self.contacts)
                     return fetched_messages
             else:
                 logging.warning(
@@ -6980,7 +7003,7 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_resolve, daemon=True).start()
 
-    def register_jid_mapping(self, lid_jid, phone_jid):
+    def register_jid_mapping(self, lid_jid, phone_jid, save=True):
         """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it."""
         if not lid_jid or not phone_jid:
             return
@@ -7024,8 +7047,16 @@ class MainWindow(wx.Frame):
                     self.contacts[lid_jid]["id"] = lid_jid
                     self.contacts[lid_jid]["remoteJid"] = lid_jid
             
-            # Save the cache to disk
-            self.save_data(self.chats, self.contacts)
+            if save:
+                # Save the mapping to SQLite incrementally
+                try:
+                    self.db.set_lid_mapping(lid_jid, phone_jid)
+                    if lid_jid in self.contacts:
+                        self.db.upsert_contacts_batch({lid_jid: self.contacts[lid_jid]})
+                except Exception as exc:
+                    logging.warning("[LID Mapping] Failed to save mapping incrementally: %s", exc)
+                    # Fallback to save_data if incremental save fails
+                    self.save_data(self.chats, self.contacts)
             wx.CallAfter(self._schedule_set_chats)
 
     def resolve_lid_jids_via_api(self, jids):
@@ -7033,6 +7064,7 @@ class MainWindow(wx.Frame):
         if not jids:
             return
             
+        updated_contacts = {}
         for lid_jid in jids:
             if not lid_jid.endswith("@lid"):
                 continue
@@ -7093,7 +7125,11 @@ class MainWindow(wx.Frame):
                         if pn_jid:
                             canonical_jid = self._normalize_jid(pn_jid)
                             if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
-                                self.register_jid_mapping(lid_jid, canonical_jid)
+                                self.register_jid_mapping(lid_jid, canonical_jid, save=False)
+                                try:
+                                    self.db.set_lid_mapping(lid_jid, canonical_jid)
+                                except Exception as exc:
+                                    logging.warning("[LID Resolution] set_lid_mapping failed: %s", exc)
                         
                         # Try to resolve contact name/pushname directly from pn-lid mapping response
                         contact_obj = res_data.get("contact") or {}
@@ -7103,6 +7139,7 @@ class MainWindow(wx.Frame):
                                 self.contacts[lid_jid] = {}
                             self.contacts[lid_jid]["name"] = res_name
                             self.contacts[lid_jid]["pushName"] = res_name
+                            updated_contacts[lid_jid] = self.contacts[lid_jid]
                             
                             if not hasattr(self, "_presence_pushname_map"):
                                 self._presence_pushname_map = {}
@@ -7113,6 +7150,7 @@ class MainWindow(wx.Frame):
                                     self.contacts[canonical_jid] = {}
                                 self.contacts[canonical_jid]["name"] = res_name
                                 self.contacts[canonical_jid]["pushName"] = res_name
+                                updated_contacts[canonical_jid] = self.contacts[canonical_jid]
                                 self._presence_pushname_map[canonical_jid] = res_name
                             
                             # Resolved the name successfully, no need to query profile
@@ -7153,7 +7191,11 @@ class MainWindow(wx.Frame):
                         if profile_pn_jid:
                             profile_canonical = self._normalize_jid(profile_pn_jid)
                             if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
-                                self.register_jid_mapping(lid_jid, profile_canonical)
+                                self.register_jid_mapping(lid_jid, profile_canonical, save=False)
+                                try:
+                                    self.db.set_lid_mapping(lid_jid, profile_canonical)
+                                except Exception as exc:
+                                    logging.warning("[LID Resolution] set_lid_mapping (profile) failed: %s", exc)
                                 if not canonical_jid:
                                     canonical_jid = profile_canonical
                         name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
@@ -7162,6 +7204,7 @@ class MainWindow(wx.Frame):
                                 self.contacts[lid_jid] = {}
                             self.contacts[lid_jid]["name"] = name
                             self.contacts[lid_jid]["pushName"] = name
+                            updated_contacts[lid_jid] = self.contacts[lid_jid]
                             
                             # Also save to presence pushname map to ensure UI functions find it
                             if not hasattr(self, "_presence_pushname_map"):
@@ -7174,6 +7217,7 @@ class MainWindow(wx.Frame):
                                     self.contacts[canonical_jid] = {}
                                 self.contacts[canonical_jid]["name"] = name
                                 self.contacts[canonical_jid]["pushName"] = name
+                                updated_contacts[canonical_jid] = self.contacts[canonical_jid]
                                 self._presence_pushname_map[canonical_jid] = name
                         else:
                             logging.info(f"[LID Resolution] Profile name not resolved/accepted for {target_jid}. Original name field: {name}. Response data: {res_data}")
@@ -7196,14 +7240,27 @@ class MainWindow(wx.Frame):
                     self._resolving_lids.discard(lid_jid)
                     if query_pn and lid_jid not in getattr(self, "_lid_to_phone", {}):
                         self._unresolvable_lids.add(lid_jid)
+                        try:
+                            self.db.add_unresolvable_lid(lid_jid)
+                        except Exception as exc:
+                            logging.warning("[LID Resolution] add_unresolvable_lid failed: %s", exc)
                     if query_name:
                         contact_now = self.contacts.get(lid_jid, {})
                         has_name_now = contact_now.get("name") or contact_now.get("pushName")
                         if not has_name_now:
                             self._unresolvable_names.add(lid_jid)
+                            try:
+                                self.db.add_unresolvable_name(lid_jid)
+                            except Exception as exc:
+                                logging.warning("[LID Resolution] add_unresolvable_name failed: %s", exc)
                 time.sleep(0.5)
 
-        self.save_data(self.chats, self.contacts)
+        if updated_contacts:
+            try:
+                self.db.upsert_contacts_batch(updated_contacts)
+            except Exception as e:
+                logging.error(f"[LID Resolution] Error saving contacts incrementally: {e}")
+                self.save_data(self.chats, self.contacts)
         wx.CallAfter(self._schedule_set_chats)
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
@@ -7252,7 +7309,11 @@ class MainWindow(wx.Frame):
                         
                         # Trigger UI refresh and save mapped JIDs
                         wx.CallAfter(self._schedule_set_chats)
-                        self.save_data(self.chats, self.contacts)
+                        try:
+                            self.db.set_lid_mapping(original_jid, canonical_jid)
+                        except Exception as e:
+                            logging.error(f"[get_contact_profile] Error saving mapping incrementally: {e}")
+                            self.save_data(self.chats, self.contacts)
                 # The contact endpoint's top-level "status" is the API result
                 # ("success"), NOT the contact's About text. Fetch the real
                 # About/bio from the dedicated profile-status endpoint and expose
