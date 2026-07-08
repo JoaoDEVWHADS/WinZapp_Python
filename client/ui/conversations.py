@@ -1512,7 +1512,7 @@ class ConversationsPanel(wx.Panel):
         if not self._is_recording:
             return
         self.main_window.voicemsg_discard_sound.play()
-        self._stop_recording_stream()
+        threading.Thread(target=self._stop_recording_stream, daemon=True).start()
         self._is_recording     = False
         self._recording_paused = False
         self._recording_frames = []
@@ -1537,10 +1537,9 @@ class ConversationsPanel(wx.Panel):
         if not self._is_recording:
             return
 
-        # ── Phase 1: release audio device, play "tac" instantly ──────────────
-        # Stop the recording stream FIRST so the audio device is fully released
-        # before BASS tries to play the send sound — prevents device contention.
-        self._stop_recording_stream()
+        # Stop the recording stream in background FIRST so the audio device is fully released
+        # without blocking the UI thread before BASS plays the send sound.
+        threading.Thread(target=self._stop_recording_stream, daemon=True).start()
         self._is_recording     = False
         self._recording_paused = False
 
