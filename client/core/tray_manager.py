@@ -132,7 +132,10 @@ class TrayIcon(wx.adv.TaskBarIcon):
         status = getattr(self.main_window, "_tray_status", "")
         if status:
             parts.append(status)
-        prefix = " | ".join(parts) + " | "
+        prefix = " | ".join(parts)
+        if getattr(self.main_window, "_initial_sync_running", False):
+            return prefix[:127]
+        prefix += " | "
 
         if total == 0:
             return (prefix + i18n.t("tray_no_unread"))[:127]
