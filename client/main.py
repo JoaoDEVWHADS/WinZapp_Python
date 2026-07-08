@@ -5645,19 +5645,20 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_for_send(self, jid: str) -> str:
         """
-        Format the JID for WPPConnect API, keeping it as-is or converting to @c.us format,
-        bypassing forced LID conversion to avoid HTTP 400 retry latencies in private chats.
-        If a @lid JID is passed, translate it back to the phone JID using the cache.
+        Translate a phone JID (e.g. @s.whatsapp.net / @c.us) to its @lid equivalent (if available in cache)
+        for sending messages, because WPPConnect expects the @lid JID for LID-enabled chats in browser memory.
+        If already @lid, return as-is. If not in cache, fallback to @c.us.
         """
         if not jid:
             return jid
         if jid.endswith(("@g.us", "@broadcast")):
             return jid
         if jid.endswith("@lid"):
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
-            if phone_jid:
-                return phone_jid.replace("@s.whatsapp.net", "@c.us")
             return jid
+        clean_jid = jid.replace("@c.us", "@s.whatsapp.net")
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(clean_jid, "")
+        if lid_jid:
+            return lid_jid
         if jid.endswith("@s.whatsapp.net"):
             return jid.replace("@s.whatsapp.net", "@c.us")
         return jid
