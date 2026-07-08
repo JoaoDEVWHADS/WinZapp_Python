@@ -881,8 +881,6 @@ class MainWindow(wx.Frame):
         """Update window title and tray tooltip to reflect current status."""
         self._tray_status = status
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None:
-            self.tray_icon.update_tooltip()
 
     def _update_title(self):
         """
@@ -907,6 +905,8 @@ class MainWindow(wx.Frame):
         if self._tray_status:
             title += f" | {self._tray_status}"
         self.SetTitle(title)
+        if getattr(self, "tray_icon", None) is not None and (self._window_hidden or self.IsIconized() or not self.IsActive()):
+            self.tray_icon.update_tooltip()
 
     def _allow_ui_focus_changes(self) -> bool:
         """Return True only when WinZapp is already visible and active."""
