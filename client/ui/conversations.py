@@ -1448,13 +1448,13 @@ class ConversationsPanel(wx.Panel):
 
         self._is_recording = True
 
+        # UI: play sound, swap buttons, focus the configured recording action.
+        self.main_window.voicemsg_startrecording_sound.play()
+
         # Notify contacts that the user is recording audio
         _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
             self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
-
-        # UI: play sound, swap buttons, focus the configured recording action.
-        self.main_window.voicemsg_startrecording_sound.play()
         self.send_message_btn.Hide()
         self.record_voice_message_btn.Hide()
         self._add_attachment_btn.Hide()

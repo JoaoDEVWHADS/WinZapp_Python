@@ -7746,8 +7746,16 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_api, daemon=True).start()
 
     def _resolve_jid_for_chat_state(self, jid: str) -> str:
-        """Resolve to the active chat JID (LID if available) and convert to @c.us format."""
-        resolved = self._resolve_jid_for_send(jid)
+        """Resolve to the active chat JID (using cached LID if available) and convert to @c.us format without blocking on API."""
+        if not jid:
+            return jid
+        if jid.endswith(("@g.us", "@broadcast")):
+            return jid.replace("@s.whatsapp.net", "@c.us")
+        if jid.endswith("@lid"):
+            resolved = jid
+        else:
+            clean_jid = jid.replace("@c.us", "@s.whatsapp.net")
+            resolved = getattr(self, "_phone_to_lid", {}).get(clean_jid, jid)
         return resolved.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
