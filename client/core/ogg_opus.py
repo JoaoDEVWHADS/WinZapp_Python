@@ -229,6 +229,12 @@ def _to_mono(pcm_bytes: bytes, channels: int) -> bytes:
     if channels == 1:
         return pcm_bytes
     src = array.array("h", pcm_bytes)   # signed short (int16)
+    if channels == 2:
+        # Fast stereo downmixing using array slicing and zip
+        left = src[0::2]
+        right = src[1::2]
+        out = array.array("h", ((l + r) // 2 for l, r in zip(left, right)))
+        return bytes(out)
     n = len(src)
     out = array.array("h", [0] * (n // channels))
     for i in range(len(out)):

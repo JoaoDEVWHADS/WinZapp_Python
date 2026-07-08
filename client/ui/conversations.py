@@ -1409,11 +1409,13 @@ class ConversationsPanel(wx.Panel):
             return (None, pyaudio.paContinue)
 
         # Try each (rate, channels) combination in preference order.
+        # WhatsApp voice messages are natively 48 kHz Mono. Prioritizing Mono
+        # avoids CPU-intensive downmixing loops in pure Python.
         _configs = [
-            (48000, 2),   # 48 kHz stereo — highest quality
-            (48000, 1),   # 48 kHz mono   — if device is mono-only
+            (48000, 1),   # 48 kHz mono   — native for WhatsApp/Opus, fastest
+            (48000, 2),   # 48 kHz stereo
+            (44100, 1),   # 44.1 kHz mono
             (44100, 2),   # 44.1 kHz stereo
-            (44100, 1),   # 44.1 kHz mono  — last resort
         ]
         opened = False
         pa = pyaudio.PyAudio()
