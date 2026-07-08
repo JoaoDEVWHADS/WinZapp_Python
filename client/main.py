@@ -905,7 +905,7 @@ class MainWindow(wx.Frame):
         if self._tray_status:
             title += f" | {self._tray_status}"
         self.SetTitle(title)
-        if getattr(self, "tray_icon", None) is not None and (self._window_hidden or self.IsIconized() or not self.IsActive()):
+        if getattr(self, "tray_icon", None) is not None:
             self.tray_icon.update_tooltip()
 
     def _allow_ui_focus_changes(self) -> bool:
@@ -933,8 +933,6 @@ class MainWindow(wx.Frame):
             if getattr(self, "message_queue", None) is not None:
                 self.message_queue.flush()
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None and (self._window_hidden or self.IsIconized() or not self.IsActive()):
-            self.tray_icon.update_tooltip()
         if getattr(self, "_sync_offline_menu_item", None) is not None:
             self._sync_offline_menu_item.Check(bool(self.offline_mode))
 
@@ -4729,8 +4727,6 @@ class MainWindow(wx.Frame):
         # visible the title already shows unread counts, and RemoveIcon/SetIcon
         # disrupts NVDA focus (see tray_manager.py update_tooltip docstring).
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None and (self._window_hidden or self.IsIconized() or not self.IsActive()):
-            self.tray_icon.update_tooltip()
 
     def set_chats(self):
         # NOTE: _build_lid_to_phone_cache() is intentionally NOT called here.
