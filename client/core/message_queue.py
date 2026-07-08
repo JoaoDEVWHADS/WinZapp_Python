@@ -25,6 +25,7 @@ class PendingMessage:
     def __init__(self, local_id: str, jid: str,
                  text: str = None,
                  audio_path: str = None,
+                 ogg_bytes: bytes = None,
                  media_path: str = None,
                  media_type: str = None,
                  caption: str = None,
@@ -37,6 +38,7 @@ class PendingMessage:
         self.jid           = jid
         self.text          = text           # plain-text body
         self.audio_path    = audio_path     # path to recorded WAV
+        self.ogg_bytes     = ogg_bytes      # pre-encoded OGG Opus (skips encoding on send)
         self.media_path    = media_path     # path to attached file (image/video/doc/audio)
         self.media_type    = media_type     # "image"|"video"|"audio"|"document"
         self.caption       = caption or ""  # optional caption for media
@@ -112,7 +114,8 @@ class MessageQueue:
                 try:
                     if msg.audio_path:
                         real_id = self.main_window.send_audio_message(
-                            msg.jid, msg.audio_path, quoted=msg.quoted
+                            msg.jid, msg.audio_path, quoted=msg.quoted,
+                            ogg_bytes=msg.ogg_bytes,
                         )
                     elif msg.media_path:
                         real_id = self.main_window.send_media_attachment(
