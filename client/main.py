@@ -6797,6 +6797,7 @@ class MainWindow(wx.Frame):
                             chat["messages"]["messages"]["total"] = len(all_records)
                             try:
                                 self.db.upsert_chat(remote_jid, chat)
+                                self.db.insert_messages_batch(remote_jid, new_records)
                             except Exception as e:
                                 logging.error(f"[fetch_older_messages] Incremental save failed: {e}")
                                 self.save_data(self.chats, self.contacts)
