@@ -111,9 +111,25 @@ const optimizedBrowserArgs = [
   '--ignore-certificate-errors',
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
-  '--js-flags="--max-old-space-size=256"', // Limits V8 heap size to 256MB
+  '--js-flags="--max-old-space-size=350"', // Limits V8 heap size to 350MB
   '--no-zygote',
   '--disable-shared-workers',
+  '--disable-3d-apis',
+  '--disable-webgl',
+  '--disable-notifications',
+  '--disable-component-update',
+  '--disable-speech-api',
+  '--disable-voice-input',
+  '--disable-renderer-backgrounding',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
+  '--disable-software-rasterizer',
+  '--disable-ipc-flooding-protection',
+  '--disable-breakpad',
+  '--password-store=basic',
+  '--use-mock-keychain',
+  '--no-pings',
+  '--disable-client-side-phishing-detection',
 ];
 
 // Mesclagem simples recursiva para webhooks e outros objetos aninhados
