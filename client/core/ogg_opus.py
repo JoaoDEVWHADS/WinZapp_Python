@@ -228,41 +228,50 @@ def _to_mono(pcm_bytes: bytes, channels: int) -> bytes:
     """Average all channels into one mono int16 stream."""
     if channels == 1:
         return pcm_bytes
-    src = array.array("h", pcm_bytes)   # signed short (int16)
-    if channels == 2:
-        # Fast stereo downmixing using array slicing and zip
-        left = src[0::2]
-        right = src[1::2]
-        out = array.array("h", ((l + r) // 2 for l, r in zip(left, right)))
+    try:
+        import audioop
+        return audioop.tomono(pcm_bytes, 2, 0.5, 0.5)
+    except Exception:
+        src = array.array("h", pcm_bytes)   # signed short (int16)
+        if channels == 2:
+            # Fast stereo downmixing using array slicing and zip
+            left = src[0::2]
+            right = src[1::2]
+            out = array.array("h", ((l + r) // 2 for l, r in zip(left, right)))
+            return bytes(out)
+        n = len(src)
+        out = array.array("h", [0] * (n // channels))
+        for i in range(len(out)):
+            total = sum(src[i * channels + ch] for ch in range(channels))
+            val = total // channels
+            out[i] = max(-32768, min(32767, val))
         return bytes(out)
-    n = len(src)
-    out = array.array("h", [0] * (n // channels))
-    for i in range(len(out)):
-        total = sum(src[i * channels + ch] for ch in range(channels))
-        val = total // channels
-        out[i] = max(-32768, min(32767, val))
-    return bytes(out)
 
 
 def _resample(pcm_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
     """Mono int16 linear-interpolation resampler."""
     if src_rate == dst_rate:
         return pcm_bytes
-    src = array.array("h", pcm_bytes)
-    n_in = len(src)
-    if n_in == 0:
-        return pcm_bytes
-    n_out = int(round(n_in * dst_rate / src_rate))
-    out = array.array("h", [0] * n_out)
-    ratio = (n_in - 1) / max(n_out - 1, 1)
-    for i in range(n_out):
-        pos = i * ratio
-        lo  = int(pos)
-        hi  = min(lo + 1, n_in - 1)
-        frac = pos - lo
-        val  = int(src[lo] + frac * (src[hi] - src[lo]))
-        out[i] = max(-32768, min(32767, val))
-    return bytes(out)
+    try:
+        import audioop
+        res, _ = audioop.ratecv(pcm_bytes, 2, 1, src_rate, dst_rate, None)
+        return res
+    except Exception:
+        src = array.array("h", pcm_bytes)
+        n_in = len(src)
+        if n_in == 0:
+            return pcm_bytes
+        n_out = int(round(n_in * dst_rate / src_rate))
+        out = array.array("h", [0] * n_out)
+        ratio = (n_in - 1) / max(n_out - 1, 1)
+        for i in range(n_out):
+            pos = i * ratio
+            lo  = int(pos)
+            hi  = min(lo + 1, n_in - 1)
+            frac = pos - lo
+            val  = int(src[lo] + frac * (src[hi] - src[lo]))
+            out[i] = max(-32768, min(32767, val))
+        return bytes(out)
 
 
 def _pad_to_frames(pcm_bytes: bytes) -> bytes:
@@ -335,12 +344,11 @@ def encode_pcm_to_ogg_opus(
         n_frames  = n_samples // _FRAME_SIZE
         src = array.array("h", pcm_bytes)
 
+        src_addr, _ = src.buffer_info()
         for i in range(n_frames):
-            # Build a ctypes int16 array for this frame without copying via numpy
-            frame = src[i * _FRAME_SIZE:(i + 1) * _FRAME_SIZE]
-            # Use the array's buffer address directly
-            buf_addr, _ = frame.buffer_info()
-            c_pcm = ctypes.cast(buf_addr, ctypes.POINTER(ctypes.c_int16))
+            # Use direct memory address offset to avoid slow array slicing
+            frame_addr = src_addr + i * _FRAME_SIZE * 2
+            c_pcm = ctypes.cast(frame_addr, ctypes.POINTER(ctypes.c_int16))
 
             pkt_len = lib.opus_encode(enc, c_pcm, _FRAME_SIZE, out_buf, _MAX_PKT_BYTES)
             if pkt_len < 0:
