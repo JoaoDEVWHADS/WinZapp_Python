@@ -5439,7 +5439,7 @@ class MainWindow(wx.Frame):
     # loop for every expired URL, which starves the API thread pool and eventually
     # breaks sends.  Never request media older than this threshold.
     _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
-    _MEDIA_SYNC_WORKERS    = 3               # parallel workers during bulk sync — kept
+    _MEDIA_SYNC_WORKERS    = 2               # parallel workers during bulk sync — kept
                                               # low because WPPConnect proxies every
                                               # request through a single Puppeteer/Chrome
                                               # automation session; too many concurrent
@@ -5447,7 +5447,7 @@ class MainWindow(wx.Frame):
                                               # (send-seen, contact lookups) into sporadic
                                               # "session is not active" / "chat not found"
                                               # failures even though the session was fine.
-    _MEDIA_SYNC_TIMEOUT    = 20              # seconds per request during bulk sync
+    _MEDIA_SYNC_TIMEOUT    = 60              # seconds per request during bulk sync
 
     def _load_media_failed_ids(self) -> set:
         """Load the set of message IDs whose media CDN URL has previously expired."""

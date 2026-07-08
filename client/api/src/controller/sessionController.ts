@@ -537,7 +537,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
       if (typeof (client as any).downloadMedia === 'function') {
         req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
         try {
-          let base64: string = await (client as any).downloadMedia(messageId);
+          let timer: any;
+          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+            if (timer) clearTimeout(timer);
+          });
+          const timeoutPromise = new Promise<string>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
+          });
+          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
             let mimetype = message.mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
@@ -568,7 +575,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
       req.logger.error(`decryptFile failed, trying client.downloadMedia as fallback: ${decryptErr}`);
       if (typeof (client as any).downloadMedia === 'function') {
         try {
-          let base64: string = await (client as any).downloadMedia(messageId);
+          let timer: any;
+          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+            if (timer) clearTimeout(timer);
+          });
+          const timeoutPromise = new Promise<string>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
+          });
+          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
             let mimetype = message.mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
