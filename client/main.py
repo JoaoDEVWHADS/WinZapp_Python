@@ -881,7 +881,7 @@ class MainWindow(wx.Frame):
         """Update window title and tray tooltip to reflect current status."""
         self._tray_status = status
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None and self._window_hidden:
+        if getattr(self, "tray_icon", None) is not None:
             self.tray_icon.update_tooltip()
 
     def _update_title(self):
@@ -933,7 +933,7 @@ class MainWindow(wx.Frame):
             if getattr(self, "message_queue", None) is not None:
                 self.message_queue.flush()
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None and self._window_hidden:
+        if getattr(self, "tray_icon", None) is not None and (self._window_hidden or self.IsIconized()):
             self.tray_icon.update_tooltip()
         if getattr(self, "_sync_offline_menu_item", None) is not None:
             self._sync_offline_menu_item.Check(bool(self.offline_mode))
@@ -3244,8 +3244,7 @@ class MainWindow(wx.Frame):
             # since none of those status calls are inside a try/finally and a
             # thread that dies mid-sync never reaches its own clear-status line.
             self._initial_sync_running = False
-            if not self.background_mode:
-                wx.CallAfter(self._set_status, "")
+            wx.CallAfter(self._set_status, "")
 
     def _run_sync(self):
         logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
@@ -3276,8 +3275,7 @@ class MainWindow(wx.Frame):
             #  (c) we've exhausted retries.
             if has_local_chats or len(self.chats) > prev_len or attempt == _CHAT_RETRIES - 1:
                 break
-            if not self.background_mode:
-                wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+            wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
             time.sleep(_CHAT_DELAY)
         self.chats = self.normalize_chats(self.chats)
 
@@ -3288,8 +3286,8 @@ class MainWindow(wx.Frame):
         self.get_remote_contacts()
 
         self.synchronizing_sound.play()
+        wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
         if not self.background_mode:
-            wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
             self.output(self.i18n.t("synchronization_started"), interrupt=True)
 
         # ── Start background resolving of unknown LIDs ──────────────────
@@ -3335,20 +3333,18 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
         self.sync_complete_sound.play()
+        wx.CallAfter(self._set_status, "")
         if not self.background_mode:
-            wx.CallAfter(self._set_status, "")
             self.output(self.i18n.t("sync_complete"))
 
         # ── Phase 2: download media (silent) ──────────────────────────────
-        if not self.background_mode:
-            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+        wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
         self._media_sync_running = True
         try:
             self.sync_media_for_all_chats()
         finally:
             self._media_sync_running = False
-        if not self.background_mode:
-            wx.CallAfter(self._set_status, "")
+        wx.CallAfter(self._set_status, "")
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
 
@@ -3378,8 +3374,7 @@ class MainWindow(wx.Frame):
         # _initial_sync_running is reset by start_sync()'s finally block.
 
     def wait_messages_set(self):
-        if not self.background_mode:
-            self._set_status(self.i18n.t("preparing_to_sync"))
+        self._set_status(self.i18n.t("preparing_to_sync"))
         # Fallback: WPPConnect does not emit a messages.set WebSocket event.
         # Poll the API every 5 s for up to 60 s and start sync as soon as it
         # responds.  If the API never responds within the window, start sync
@@ -3399,7 +3394,7 @@ class MainWindow(wx.Frame):
                     # Sync is already running or completed — clear "preparing" status
                     # if it was left visible because the sync finished before this
                     # fallback thread checked in.
-                    if getattr(self, "_sync_completed", False) and not self.background_mode:
+                    if getattr(self, "_sync_completed", False):
                         wx.CallAfter(self._set_status, "")
                     return True
                 try:
@@ -4725,7 +4720,7 @@ class MainWindow(wx.Frame):
         # visible the title already shows unread counts, and RemoveIcon/SetIcon
         # disrupts NVDA focus (see tray_manager.py update_tooltip docstring).
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None and self._window_hidden:
+        if getattr(self, "tray_icon", None) is not None and (self._window_hidden or self.IsIconized()):
             self.tray_icon.update_tooltip()
 
     def set_chats(self):
