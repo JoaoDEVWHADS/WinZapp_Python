@@ -98,11 +98,12 @@ class TrayIcon(wx.adv.TaskBarIcon):
 
     def _get_unread_info(self):
         """Return (total_unread_count, [chat_names_with_unread])."""
+        from core.utils import effective_unread_count
         total = 0
         names = []
         mw = self.main_window
         for jid, chat in mw.chats.items():
-            unread = int(chat.get("unreadCount") or 0)
+            unread = effective_unread_count(chat)
             if unread > 0:
                 total += unread
                 name = (
