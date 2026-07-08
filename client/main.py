@@ -894,13 +894,14 @@ class MainWindow(wx.Frame):
           "WinZapp (3) | baixando mídias"
         """
         title   = self.i18n.t("app_name")
-        deleted = set(self.settings.get("deleted_chats", []))
-        unread_chats = sum(
-            1 for jid, chat in list(self.chats.items())
-            if jid not in deleted and effective_unread_count(chat) > 0
-        )
-        if unread_chats:
-            title += f" ({unread_chats})"
+        if not getattr(self, "_initial_sync_running", False):
+            deleted = set(self.settings.get("deleted_chats", []))
+            unread_chats = sum(
+                1 for jid, chat in list(self.chats.items())
+                if jid not in deleted and effective_unread_count(chat) > 0
+            )
+            if unread_chats:
+                title += f" ({unread_chats})"
         if self.offline_mode:
             title += f" | {self.i18n.t('tray_offline_mode')}"
         if self._tray_status:
