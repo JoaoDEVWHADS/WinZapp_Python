@@ -5663,21 +5663,8 @@ class MainWindow(wx.Frame):
         if lid_jid:
             return lid_jid
         
-        # If not in cache, try to resolve it via API (safe since message sending runs on a background thread)
-        try:
-            pn_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{clean_jid}"
-            headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-            pn_resp = requests.get(pn_url, headers=headers, timeout=5)
-            if pn_resp.ok:
-                pn_data = pn_resp.json()
-                lid_obj = pn_data.get("lid") or {}
-                resolved_lid = lid_obj.get("_serialized") or lid_obj.get("id") or ""
-                if resolved_lid:
-                    self.register_jid_mapping(resolved_lid, clean_jid)
-                    return resolved_lid
-        except Exception as e:
-            logging.warning("[_resolve_jid_for_send] Failed to resolve JID mapping dynamically: %s", e)
-            
+        # If not in cache, do NOT block the send pipeline with a synchronous network request.
+        # Fall back to using the phone JID directly, as WPPConnect handles it perfectly.
         return jid
 
 
