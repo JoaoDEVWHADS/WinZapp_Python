@@ -1526,10 +1526,17 @@ class ConversationsPanel(wx.Panel):
         """Stop recording and enqueue the audio for delivery."""
         if not self._is_recording:
             return
-        self.main_window.voicemsg_send_sound.play()
+
+        # Stop the recording stream FIRST so the audio device is fully released
+        # before BASS tries to play the send sound — prevents device contention
+        # that delays the "tac" sound.
         self._stop_recording_stream()
         self._is_recording     = False
         self._recording_paused = False
+
+        # Play the send sound immediately after releasing the mic device.
+        self.main_window.voicemsg_send_sound.play()
+
         # Notify contacts that recording stopped
         _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
@@ -1543,30 +1550,17 @@ class ConversationsPanel(wx.Panel):
             self.message_field.SetFocus()
             return
 
-        # Save recording to a temporary WAV file (deleted after successful upload).
-        # PCM_16 (16-bit integer) halves the file size vs float32 while remaining
-        # perceptually transparent at 48 / 44.1 kHz.
-        try:
-            audio_data  = b"".join(frames)
-            actual_rate = self._recording_actual_rate
-            actual_ch   = self._recording_actual_ch
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp.close()
-            with wave.open(tmp.name, "wb") as wf:
-                wf.setnchannels(actual_ch)
-                wf.setsampwidth(2)   # 16-bit PCM
-                wf.setframerate(actual_rate)
-                wf.writeframes(audio_data)
-            wav_path = tmp.name
-        except Exception:
-            self._hide_voice_panel()
-            self.message_field.SetFocus()
-            return
+        remote_jid      = self.conversation.get("remoteJid", "")
+        local_id        = str(uuid.uuid4())
+        actual_rate     = self._recording_actual_rate
+        actual_ch       = self._recording_actual_ch
+        bytes_per_frame = 2 * actual_ch
+        quoted_msg      = self._quoted_message
 
-        remote_jid   = self.conversation.get("remoteJid", "")
-        local_id     = str(uuid.uuid4())
-        bytes_per_frame = 2 * self._recording_actual_ch
-        duration_sec    = int(len(audio_data) / bytes_per_frame / self._recording_actual_rate)
+        # Join raw PCM frames now (fast, in-memory) to get duration for the
+        # virtual message shown immediately.
+        audio_data   = b"".join(frames)
+        duration_sec = int(len(audio_data) / bytes_per_frame / actual_rate)
 
         # Virtual message shown immediately as pending in the messages list.
         virtual_msg = {
@@ -1587,12 +1581,12 @@ class ConversationsPanel(wx.Panel):
             "messageTimestamp": int(time.time()),
             "pushName":         "",
         }
-        if self._quoted_message:
-            _qk = self._quoted_message.get("key", {})
+        if quoted_msg:
+            _qk = quoted_msg.get("key", {})
             virtual_msg["contextInfo"] = {
                 "stanzaId":      _qk.get("id", ""),
                 "participant":   _qk.get("participant", ""),
-                "quotedMessage": self._quoted_message.get("message") or {},
+                "quotedMessage": quoted_msg.get("message") or {},
                 "_quotedFromMe": bool(_qk.get("fromMe", False)),  # local hint for immediate render
             }
         self._sorted_messages.append(virtual_msg)
@@ -1601,29 +1595,54 @@ class ConversationsPanel(wx.Panel):
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
-        # Immediately save a local copy of this voice message as local_id.msv
-        try:
-            voice_messages_dir = data_path("voice_messages")
-            os.makedirs(voice_messages_dir, exist_ok=True)
-            local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
-            with open(wav_path, "rb") as f_in:
-                wav_data = f_in.read()
-            with open(local_audio_path, "wb") as f_out:
-                f_out.write(encrypt(wav_data, self.main_window.key))
-        except Exception as e:
-            print(f"[_send_voice_message] failed to save local audio copy: {e}")
-
-        # Enqueue for background upload.
-        pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=self._quoted_message)
-        self.main_window.message_queue.enqueue(pm)
-        self._on_cancel_reply()  # clear quoted state after send
-
         # Register the virtual message so the conversation list preview updates.
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
 
+        self._on_cancel_reply()  # clear quoted state after send
+
         self._hide_voice_panel()
         self.message_field.SetFocus()
+
+        # --- Heavy disk I/O in a background thread ----------------------------
+        # Writing the WAV file, encrypting the local .msv copy, and enqueueing
+        # the message are all moved off the UI thread so they don't block the
+        # event loop (and don't delay the sound already playing above).
+        mw       = self.main_window
+        enc_key  = mw.key
+
+        def _write_and_enqueue():
+            # 1. Write WAV to a temp file.
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                tmp.close()
+                with wave.open(tmp.name, "wb") as wf:
+                    wf.setnchannels(actual_ch)
+                    wf.setsampwidth(2)   # 16-bit PCM
+                    wf.setframerate(actual_rate)
+                    wf.writeframes(audio_data)
+                wav_path = tmp.name
+            except Exception as exc:
+                logging.error("[_send_voice_message] failed to write WAV: %s", exc)
+                return
+
+            # 2. Save an encrypted local copy (.msv) for offline playback.
+            try:
+                voice_messages_dir = data_path("voice_messages")
+                os.makedirs(voice_messages_dir, exist_ok=True)
+                local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
+                with open(wav_path, "rb") as f_in:
+                    wav_data_disk = f_in.read()
+                with open(local_audio_path, "wb") as f_out:
+                    f_out.write(encrypt(wav_data_disk, enc_key))
+            except Exception as exc:
+                logging.warning("[_send_voice_message] failed to save local audio copy: %s", exc)
+
+            # 3. Enqueue for background upload (now that the WAV file exists).
+            pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=quoted_msg)
+            mw.message_queue.enqueue(pm)
+
+        threading.Thread(target=_write_and_enqueue, daemon=True).start()
 
     def close_conversation(self, event=None):
         if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
