@@ -87,6 +87,7 @@ def main():
             "src/config.ts",
             "src/index.ts",
             "src/util/createSessionUtil.ts",
+            "src/util/sessionUtil.ts",
             "src/util/functions.ts",
             "src/middleware/statusConnection.ts",
             "src/controller/deviceController.ts",
