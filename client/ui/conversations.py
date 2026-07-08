@@ -193,6 +193,7 @@ class ConversationsPanel(wx.Panel):
         # Guard to prevent recursive load-more triggers during list rebuild
         self._is_loading_more: bool = False
 
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self.init_UI()
         self.create_accelerator_table()
         self.create_accel_conversation()
@@ -1418,7 +1419,14 @@ class ConversationsPanel(wx.Panel):
             (44100, 2),   # 44.1 kHz stereo
         ]
         opened = False
-        pa = pyaudio.PyAudio()
+        opened = False
+        if self._recording_pa is None:
+            try:
+                self._recording_pa = pyaudio.PyAudio()
+            except Exception as exc:
+                logging.error("[audio] Failed to initialize PyAudio: %s", exc)
+                return
+        pa = self._recording_pa
         for rate, ch in _configs:
             try:
                 stream = pa.open(
@@ -1434,7 +1442,6 @@ class ConversationsPanel(wx.Panel):
                 )
                 stream.start_stream()
                 self._recording_stream      = stream
-                self._recording_pa          = pa
                 self._recording_actual_rate = rate
                 self._recording_actual_ch   = ch
                 opened = True
@@ -1443,7 +1450,6 @@ class ConversationsPanel(wx.Panel):
                 self._recording_stream = None
 
         if not opened:
-            pa.terminate()
             return
 
         self._is_recording = True
@@ -1480,12 +1486,16 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 pass
             self._recording_stream = None
+
+    def _on_destroy(self, event):
+        """Clean up PyAudio resources when the panel is destroyed."""
         if self._recording_pa is not None:
             try:
                 self._recording_pa.terminate()
             except Exception:
                 pass
             self._recording_pa = None
+        event.Skip()
 
     def _hide_voice_panel(self):
         """Hide the voice panel and restore the record / send button visibility."""
