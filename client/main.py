@@ -4522,9 +4522,14 @@ class MainWindow(wx.Frame):
                     return ""
                 return val
 
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid) or self._find_alt_jid_from_messages(chat)
+            if jid.endswith("@lid"):
+                phone_jid = getattr(self, "_lid_to_phone", {}).get(jid) or self._find_alt_jid_from_messages(chat)
+            else:
+                phone_jid = jid
             
             is_group = jid.endswith("@g.us")
+            resolved_name = ""
+            msg_push = ""
         
             if is_group:
                 # Check both "name" and "subject" — WPPConnect uses either field
@@ -4543,15 +4548,10 @@ class MainWindow(wx.Frame):
                 # Chat individual: usar a lógica existente
                 resolved_name = self._resolve_contact_name(chat)
                 chat_push = get_valid_name(chat.get("pushName", ""))
-                msg_push = self.find_name_through_messages(chat)
-                chat_name_field = get_valid_name(chat.get("name", ""))
-                
-                name = (
-                    resolved_name
-                    or chat_push
-                    or msg_push
-                    or chat_name_field
-                )
+                name = resolved_name or chat_push
+                if not name:
+                    msg_push = self.find_name_through_messages(chat)
+                    name = msg_push or get_valid_name(chat.get("name", ""))
             
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
@@ -4579,8 +4579,8 @@ class MainWindow(wx.Frame):
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
                 logging.info(
                     f"[Name Resolution] jid={jid} phone_jid={phone_jid} "
-                    f"resolved_name={self._resolve_contact_name(chat)} "
-                    f"msg_name={self.find_name_through_messages(chat)} "
+                    f"resolved_name={resolved_name} "
+                    f"msg_name={msg_push} "
                     f"chat_name={chat.get('name')} push_name={chat.get('pushName')} -> final_name='{name}'"
                 )
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
@@ -4775,6 +4775,17 @@ class MainWindow(wx.Frame):
         remote = key.get("remoteJid", "")
         alt = key.get("remoteJidAlt", "")
         participant = key.get("participant", "")
+
+        # Invalidate the negative cache since a new message is added to this chat
+        if remote and hasattr(self, "_chats_without_alt_jid"):
+            self._chats_without_alt_jid.discard(remote)
+
+        # Cache pushName if present in the message
+        push_name = msg.get("pushName")
+        if push_name and remote and not remote.endswith("@g.us") and not is_phone_like(push_name):
+            if not hasattr(self, "_message_pushname_cache"):
+                self._message_pushname_cache = {}
+            self._message_pushname_cache[remote] = push_name
 
         # Guard against corrupt self-mappings: if any JID is ours, block cross-mapping with others
         if self._is_self_jid(remote) or self._is_self_jid(alt) or self._is_self_jid(participant):
@@ -4997,6 +5008,16 @@ class MainWindow(wx.Frame):
           NEW: remoteJid=phone,  remoteJidAlt=@lid                  → return remoteJid
         Returns the phone JID (@s.whatsapp.net) string, or None if not found.
         """
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return None
+
+        if not hasattr(self, "_chats_without_alt_jid"):
+            self._chats_without_alt_jid = set()
+
+        if jid in self._chats_without_alt_jid:
+            return None
+
         def _norm(j: str) -> str:
             if not j:
                 return j
@@ -5016,10 +5037,14 @@ class MainWindow(wx.Frame):
             alt    = _norm(key.get("remoteJidAlt", ""))
             # alt is the phone JID, remote is @lid (OLD format)
             if alt and alt.endswith("@s.whatsapp.net"):
+                self.register_jid_mapping(jid, alt)
                 return alt
             # remote is the phone JID, alt is @lid (NEW post-swap format)
             if remote and remote.endswith("@s.whatsapp.net") and alt and alt.endswith("@lid"):
+                self.register_jid_mapping(alt, remote)
                 return remote
+
+        self._chats_without_alt_jid.add(jid)
         return None
 
     def _format_jid_for_display(self, jid: str) -> str:
@@ -5155,14 +5180,23 @@ class MainWindow(wx.Frame):
         return None
 
     def find_name_through_messages(self, chat):
-        if chat.get("remoteJid", "").endswith("@g.us"):
+        jid = chat.get("remoteJid", "")
+        if not jid or jid.endswith("@g.us"):
             return None
+
+        if not hasattr(self, "_message_pushname_cache"):
+            self._message_pushname_cache = {}
+
+        if jid in self._message_pushname_cache:
+            return self._message_pushname_cache[jid]
+
         messages_obj = chat.get("messages") or {}
         for message in messages_obj.get("messages", {}).get("records", []):
             if message.get("key", {}).get("fromMe"):
                 continue
             push = message.get("pushName", "")
             if push and not is_phone_like(push):
+                self._message_pushname_cache[jid] = push
                 return push
         return None
 
@@ -7003,6 +7037,10 @@ class MainWindow(wx.Frame):
             if not lid_jid.endswith("@lid"):
                 continue
                 
+            if not getattr(self, "_wa_connected", False):
+                logging.warning("[LID Resolution] WhatsApp is not connected. Aborting loop.")
+                break
+
             # Check caches and active resolving list under lock
             if not hasattr(self, "_lid_resolution_lock"):
                 self._lid_resolution_lock = threading.Lock()
@@ -7147,6 +7185,10 @@ class MainWindow(wx.Frame):
                             break
                 # Throttle query loop so Puppeteer isn't overwhelmed and can prioritize message sending
                 time.sleep(0.5)
+            except requests.exceptions.RequestException as e:
+                logging.error(f"[LID Resolution] Network/API error during resolution of {lid_jid} (aborting loop): {e}")
+                # Abort the loop because the API is likely down, overloaded, or timing out.
+                break
             except Exception as e:
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
             finally:
