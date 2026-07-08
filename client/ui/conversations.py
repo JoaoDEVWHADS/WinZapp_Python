@@ -1527,17 +1527,16 @@ class ConversationsPanel(wx.Panel):
         if not self._is_recording:
             return
 
+        # ── Phase 1: release audio device, play "tac" instantly ──────────────
         # Stop the recording stream FIRST so the audio device is fully released
-        # before BASS tries to play the send sound — prevents device contention
-        # that delays the "tac" sound.
+        # before BASS tries to play the send sound — prevents device contention.
         self._stop_recording_stream()
         self._is_recording     = False
         self._recording_paused = False
 
-        # Play the send sound immediately after releasing the mic device.
         self.main_window.voicemsg_send_sound.play()
 
-        # Notify contacts that recording stopped
+        # Notify contacts that recording stopped (runs in its own thread).
         _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
             self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
@@ -1550,6 +1549,7 @@ class ConversationsPanel(wx.Panel):
             self.message_field.SetFocus()
             return
 
+        # ── Phase 2: instant UI update ────────────────────────────────────────
         remote_jid      = self.conversation.get("remoteJid", "")
         local_id        = str(uuid.uuid4())
         actual_rate     = self._recording_actual_rate
@@ -1557,12 +1557,10 @@ class ConversationsPanel(wx.Panel):
         bytes_per_frame = 2 * actual_ch
         quoted_msg      = self._quoted_message
 
-        # Join raw PCM frames now (fast, in-memory) to get duration for the
-        # virtual message shown immediately.
-        audio_data   = b"".join(frames)
-        duration_sec = int(len(audio_data) / bytes_per_frame / actual_rate)
+        # Duration from frame byte counts — no allocation, no join on UI thread.
+        total_bytes  = sum(len(f) for f in frames)
+        duration_sec = int(total_bytes / bytes_per_frame / actual_rate)
 
-        # Virtual message shown immediately as pending in the messages list.
         virtual_msg = {
             "_local_pending": True,
             "_local_id":      local_id,
@@ -1587,7 +1585,7 @@ class ConversationsPanel(wx.Panel):
                 "stanzaId":      _qk.get("id", ""),
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": quoted_msg.get("message") or {},
-                "_quotedFromMe": bool(_qk.get("fromMe", False)),  # local hint for immediate render
+                "_quotedFromMe": bool(_qk.get("fromMe", False)),
             }
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
@@ -1595,24 +1593,36 @@ class ConversationsPanel(wx.Panel):
         if last >= 0:
             self.messages_list.EnsureVisible(last)
 
-        # Register the virtual message so the conversation list preview updates.
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
-
-        self._on_cancel_reply()  # clear quoted state after send
-
+        self._on_cancel_reply()
         self._hide_voice_panel()
         self.message_field.SetFocus()
 
-        # --- Heavy disk I/O in a background thread ----------------------------
-        # Writing the WAV file, encrypting the local .msv copy, and enqueueing
-        # the message are all moved off the UI thread so they don't block the
-        # event loop (and don't delay the sound already playing above).
-        mw       = self.main_window
-        enc_key  = mw.key
+        # ── Phase 3: heavy work off UI thread ─────────────────────────────────
+        # • Join PCM frames
+        # • Encode OGG Opus directly from PCM (no WAV roundtrip for encoding)
+        # • Write WAV backup for .msv / retry
+        # • Encrypt + save .msv local copy
+        # • Enqueue with ogg_bytes already ready → worker only needs to POST
+        mw      = self.main_window
+        enc_key = mw.key
 
         def _write_and_enqueue():
-            # 1. Write WAV to a temp file.
+            from core.ogg_opus import encode_pcm_to_ogg_opus
+
+            # 1. Join raw PCM frames.
+            audio_data = b"".join(frames)
+
+            # 2. Encode OGG Opus from PCM directly (no WAV read-back).
+            ogg_bytes = None
+            try:
+                ogg_bytes = encode_pcm_to_ogg_opus(audio_data, actual_rate, actual_ch)
+            except Exception as exc:
+                logging.warning("[_send_voice_message] OGG pre-encode failed, "
+                                "queue will encode on send: %s", exc)
+
+            # 3. Write WAV temp file (for .msv backup and retry fallback).
             try:
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 tmp.close()
@@ -1626,20 +1636,19 @@ class ConversationsPanel(wx.Panel):
                 logging.error("[_send_voice_message] failed to write WAV: %s", exc)
                 return
 
-            # 2. Save an encrypted local copy (.msv) for offline playback.
+            # 4. Encrypt raw PCM and save as .msv for offline playback.
             try:
                 voice_messages_dir = data_path("voice_messages")
                 os.makedirs(voice_messages_dir, exist_ok=True)
                 local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
-                with open(wav_path, "rb") as f_in:
-                    wav_data_disk = f_in.read()
                 with open(local_audio_path, "wb") as f_out:
-                    f_out.write(encrypt(wav_data_disk, enc_key))
+                    f_out.write(encrypt(audio_data, enc_key))
             except Exception as exc:
                 logging.warning("[_send_voice_message] failed to save local audio copy: %s", exc)
 
-            # 3. Enqueue for background upload (now that the WAV file exists).
-            pm = PendingMessage(local_id, remote_jid, audio_path=wav_path, quoted=quoted_msg)
+            # 5. Enqueue — ogg_bytes pre-encoded so worker skips encoding, just POSTs.
+            pm = PendingMessage(local_id, remote_jid, audio_path=wav_path,
+                                ogg_bytes=ogg_bytes, quoted=quoted_msg)
             mw.message_queue.enqueue(pm)
 
         threading.Thread(target=_write_and_enqueue, daemon=True).start()

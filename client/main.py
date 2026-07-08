@@ -5847,28 +5847,35 @@ class MainWindow(wx.Frame):
             logging.error("[send_text_message] exception for %s: %s", remote_jid, err)
             return {"ok": False, "error": err, "retry": True}
 
-    def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
+    def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None,
+                           ogg_bytes: bytes = None) -> bool:
         """
         Encode a recorded WAV file to OGG Opus via libopus (pure Python, no
         FFmpeg) and send it as a PTT voice message using /send-voice-base64.
+
+        ogg_bytes: if provided (pre-encoded in background thread), skip the
+                   disk read and OGG encoding entirely — just base64 + POST.
+                   On retry (ogg_bytes=None) falls back to reading wav_path.
         """
         from core.ogg_opus import encode_wav_to_ogg_opus
 
         # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
         remote_jid = self._resolve_jid_for_send(remote_jid)
 
-        try:
-            with open(wav_path, "rb") as fh:
-                wav_bytes = fh.read()
-        except Exception as exc:
-            logging.error("[send_audio_message] cannot read WAV %s: %s", wav_path, exc)
-            return {"ok": False, "error": str(exc)[:200], "retry": False}
+        if ogg_bytes is None:
+            # Fallback path: read WAV from disk and encode (used on retries).
+            try:
+                with open(wav_path, "rb") as fh:
+                    wav_bytes = fh.read()
+            except Exception as exc:
+                logging.error("[send_audio_message] cannot read WAV %s: %s", wav_path, exc)
+                return {"ok": False, "error": str(exc)[:200], "retry": False}
 
-        try:
-            ogg_bytes = encode_wav_to_ogg_opus(wav_bytes)
-        except Exception as exc:
-            logging.error("[send_audio_message] OGG Opus encoding failed: %s", exc)
-            return {"ok": False, "error": str(exc)[:200], "retry": False}
+            try:
+                ogg_bytes = encode_wav_to_ogg_opus(wav_bytes)
+            except Exception as exc:
+                logging.error("[send_audio_message] OGG Opus encoding failed: %s", exc)
+                return {"ok": False, "error": str(exc)[:200], "retry": False}
 
         audio_b64 = base64.b64encode(ogg_bytes).decode("utf-8")
 
