@@ -3795,6 +3795,7 @@ class MainWindow(wx.Frame):
                 muted_chats = self.settings.setdefault("muted_chats", {})
                 pinned_chats = self.settings.setdefault("pinned_chats", [])
                 now = int(time.time())
+                settings_changed = False
                 for chat in response_data:
                     if not isinstance(chat, dict):
                         continue
@@ -3805,15 +3806,49 @@ class MainWindow(wx.Frame):
                     if "muteExpiration" in chat:
                         mute_expiry = chat["muteExpiration"]
                         if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
-                            muted_chats[jid] = int(mute_expiry)
+                            if muted_chats.get(jid) != int(mute_expiry):
+                                muted_chats[jid] = int(mute_expiry)
+                                settings_changed = True
                         elif jid in muted_chats:
                             del muted_chats[jid]
-                    is_pinned = bool(chat.get("pin")) or chat.get("pinned") is True
+                            settings_changed = True
+
+                    # Check if the JID starts with "0@" (official WhatsApp/system account)
+                    is_system = jid.startswith("0@")
+                    
+                    # Parse and clean pin values to prevent bool() truthiness bug on non-standard fields
+                    pin_val = chat.get("pin")
+                    if isinstance(pin_val, str):
+                        if pin_val.lower() == "true":
+                            pin_val = True
+                        elif pin_val.lower() == "false":
+                            pin_val = False
+                        else:
+                            try:
+                                pin_val = float(pin_val)
+                            except ValueError:
+                                pin_val = None
+
+                    is_pinned = False
+                    if not is_system:
+                        if isinstance(pin_val, bool):
+                            is_pinned = pin_val
+                        elif isinstance(pin_val, (int, float)):
+                            is_pinned = pin_val > 1000000
+                        
+                        if chat.get("pinned") is True:
+                            is_pinned = True
+
                     if is_pinned:
                         if jid not in pinned_chats:
                             pinned_chats.append(jid)
+                            settings_changed = True
                     elif jid in pinned_chats:
                         pinned_chats.remove(jid)
+                        settings_changed = True
+
+                if settings_changed:
+                    self._schedule_save_settings()
 
                 # Retroactively prune 1:1 phantom chats that slipped into the
                 # local cache before this filter existed: no local messages,
