@@ -6147,6 +6147,24 @@ class ConversationsPanel(wx.Panel):
 
         if not jids_match:
             return
+
+        # Get the top visible item before inserting the message
+        top_msg_id = None
+        top_idx = -1
+        if getattr(self.main_window, "_allow_ui_focus_changes", lambda: False)():
+            if hasattr(self.messages_list, "GetTopItem"):
+                top_idx = self.messages_list.GetTopItem()
+            else:
+                try:
+                    import ctypes
+                    hwnd = self.messages_list.GetHandle()
+                    top_idx = ctypes.windll.user32.SendMessageW(hwnd, 0x018E, 0, 0)
+                except Exception:
+                    pass
+            if top_idx != -1 and 0 <= top_idx < len(self._sorted_messages):
+                m = self._sorted_messages[top_idx]
+                if not self._is_separator(m):
+                    top_msg_id = m.get("key", {}).get("id", "")
         # ── Reaction messages: update reaction_map and re-render original ────
         if msg.get("messageType") == "reactionMessage":
             reaction = (msg.get("message") or {}).get("reactionMessage") or {}
@@ -6220,9 +6238,24 @@ class ConversationsPanel(wx.Panel):
         # Only scroll while WinZapp is already active; incoming notifications
         # must never move focus or alter the user's current foreground context.
         if getattr(self.main_window, "_allow_ui_focus_changes", lambda: False)():
-            last = self.messages_list.GetItemCount() - 1
-            if last >= 0:
-                self.messages_list.EnsureVisible(last)
+            scrolled = False
+            if top_msg_id:
+                is_near_bottom = False
+                last_idx_before = len(self._sorted_messages) - 2
+                if last_idx_before - top_idx < 15:
+                    is_near_bottom = True
+                
+                if not is_near_bottom:
+                    for idx, msg in enumerate(self._sorted_messages):
+                        if isinstance(msg, dict) and msg.get("key", {}).get("id") == top_msg_id:
+                            self.messages_list.EnsureVisible(idx)
+                            scrolled = True
+                            break
+            
+            if not scrolled:
+                last = self.messages_list.GetItemCount() - 1
+                if last >= 0:
+                    self.messages_list.EnsureVisible(last)
 
     def navigate_to_jid(self, jid: str):
         """Select and open the conversation matching jid, clearing any search."""
@@ -6253,6 +6286,24 @@ class ConversationsPanel(wx.Panel):
         """
         _preserved_msg_id = self._focused_msg_id() if preserve_focus else None
         _had_focus = (wx.Window.FindFocus() is self.messages_list)
+
+        top_msg_id = None
+        if preserve_focus:
+            top_idx = -1
+            if hasattr(self.messages_list, "GetTopItem"):
+                top_idx = self.messages_list.GetTopItem()
+            else:
+                try:
+                    import ctypes
+                    hwnd = self.messages_list.GetHandle()
+                    top_idx = ctypes.windll.user32.SendMessageW(hwnd, 0x018E, 0, 0)
+                except Exception:
+                    pass
+            if top_idx != -1 and 0 <= top_idx < len(self._sorted_messages):
+                m = self._sorted_messages[top_idx]
+                if not self._is_separator(m):
+                    top_msg_id = m.get("key", {}).get("id", "")
+
         self.messages_list.DeleteAllItems()
         self._unread_sep_idx = -1
         self._reaction_map = {}
@@ -6352,6 +6403,15 @@ class ConversationsPanel(wx.Panel):
         for msg in paginated:
             self.messages_list.Append((self._render_message_line(msg),))
 
+        # Restore scroll position if preserve_focus is True and we tracked a top visible message
+        scrolled = False
+        if preserve_focus and top_msg_id:
+            for idx, msg in enumerate(self._sorted_messages):
+                if isinstance(msg, dict) and msg.get("key", {}).get("id") == top_msg_id:
+                    self.messages_list.EnsureVisible(idx)
+                    scrolled = True
+                    break
+
         # A background refresh (preserve_focus=True) should keep the user's
         # current position instead of jumping back to the separator/last
         # message — only fall back to the default placement below if the
@@ -6362,26 +6422,28 @@ class ConversationsPanel(wx.Panel):
                 if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
                     if _had_focus:
                         self.messages_list.SetFocus()
-                    self.messages_list.EnsureVisible(idx)
                     self.messages_list.Focus(idx)
                     self.messages_list.Select(idx)
+                    if not scrolled:
+                        self.messages_list.EnsureVisible(idx)
                     return
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
-        if self._unread_sep_idx >= 0:
-            last = self.messages_list.GetItemCount() - 1
-            target_visible = min(self._unread_sep_idx + 3, last)
-            if target_visible >= 0:
-                self.messages_list.EnsureVisible(target_visible)
-            self.messages_list.EnsureVisible(self._unread_sep_idx)
-            self.messages_list.Focus(self._unread_sep_idx)
-            self.messages_list.Select(self._unread_sep_idx)
-        else:
-            last = self.messages_list.GetItemCount() - 1
-            if last >= 0:
-                self.messages_list.EnsureVisible(last)
-                self.messages_list.Focus(last)
-                self.messages_list.Select(last)
+        if not scrolled:
+            if self._unread_sep_idx >= 0:
+                last = self.messages_list.GetItemCount() - 1
+                target_visible = min(self._unread_sep_idx + 3, last)
+                if target_visible >= 0:
+                    self.messages_list.EnsureVisible(target_visible)
+                self.messages_list.EnsureVisible(self._unread_sep_idx)
+                self.messages_list.Focus(self._unread_sep_idx)
+                self.messages_list.Select(self._unread_sep_idx)
+            else:
+                last = self.messages_list.GetItemCount() - 1
+                if last >= 0:
+                    self.messages_list.EnsureVisible(last)
+                    self.messages_list.Focus(last)
+                    self.messages_list.Select(last)
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────
