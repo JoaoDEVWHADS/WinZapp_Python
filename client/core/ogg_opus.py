@@ -29,6 +29,24 @@ import struct
 import sys
 import wave
 
+# Check fast resampler availability on import
+_resampler_available = False
+_resampler_type = None
+try:
+    import audioop
+    _resampler_available = True
+    _resampler_type = "standard audioop"
+except ImportError:
+    try:
+        import audioop_lts as audioop
+        _resampler_available = True
+        _resampler_type = "audioop-lts"
+    except ImportError as e:
+        logging.warning("[ogg_opus] audioop/audioop-lts not available. Falling back to slow pure-Python resampler: %s", e)
+
+if _resampler_available:
+    logging.info("[ogg_opus] Fast C-based resampler available (%s)", _resampler_type)
+
 # ---------------------------------------------------------------------------
 # libopus constants
 # ---------------------------------------------------------------------------
@@ -248,45 +266,36 @@ def _to_mono(pcm_bytes: bytes, channels: int) -> bytes:
         return bytes(out)
 
 
-_resampler_logged = False
-
-
 def _resample(pcm_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
     """Mono int16 linear-interpolation resampler."""
-    global _resampler_logged
     if src_rate == dst_rate:
         return pcm_bytes
-    try:
+    if _resampler_available:
         try:
-            import audioop
-            resampler_type = "standard audioop"
-        except ImportError:
-            import audioop_lts as audioop
-            resampler_type = "audioop-lts"
-        res, _ = audioop.ratecv(pcm_bytes, 2, 1, src_rate, dst_rate, None)
-        if not _resampler_logged:
-            logging.info("[ogg_opus] Using fast C-based resampler (%s)", resampler_type)
-            _resampler_logged = True
-        return res
-    except Exception as exc:
-        if not _resampler_logged:
-            logging.warning("[ogg_opus] audioop/audioop-lts not available. Falling back to slow pure-Python resampler: %s", exc)
-            _resampler_logged = True
-        src = array.array("h", pcm_bytes)
-        n_in = len(src)
-        if n_in == 0:
-            return pcm_bytes
-        n_out = int(round(n_in * dst_rate / src_rate))
-        out = array.array("h", [0] * n_out)
-        ratio = (n_in - 1) / max(n_out - 1, 1)
-        for i in range(n_out):
-            pos = i * ratio
-            lo  = int(pos)
-            hi  = min(lo + 1, n_in - 1)
-            frac = pos - lo
-            val  = int(src[lo] + frac * (src[hi] - src[lo]))
-            out[i] = max(-32768, min(32767, val))
-        return bytes(out)
+            if _resampler_type == "standard audioop":
+                import audioop
+            else:
+                import audioop_lts as audioop
+            res, _ = audioop.ratecv(pcm_bytes, 2, 1, src_rate, dst_rate, None)
+            return res
+        except Exception as exc:
+            logging.warning("[ogg_opus] Failed to use fast resampler: %s", exc)
+
+    src = array.array("h", pcm_bytes)
+    n_in = len(src)
+    if n_in == 0:
+        return pcm_bytes
+    n_out = int(round(n_in * dst_rate / src_rate))
+    out = array.array("h", [0] * n_out)
+    ratio = (n_in - 1) / max(n_out - 1, 1)
+    for i in range(n_out):
+        pos = i * ratio
+        lo  = int(pos)
+        hi  = min(lo + 1, n_in - 1)
+        frac = pos - lo
+        val  = int(src[lo] + frac * (src[hi] - src[lo]))
+        out[i] = max(-32768, min(32767, val))
+    return bytes(out)
 
 
 def _pad_to_frames(pcm_bytes: bytes) -> bytes:
