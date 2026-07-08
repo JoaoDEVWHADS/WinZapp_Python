@@ -2742,7 +2742,7 @@ class ConversationsPanel(wx.Panel):
             if self._messages_offset > 0:
                 self._load_more_messages()
             else:
-                self._load_older_messages_from_server()
+                self._load_older_messages()
 
         # Unread-separator dismiss logic:
         # - Focus at or past the separator → start the 2-s dismiss timer once.
@@ -2835,6 +2835,56 @@ class ConversationsPanel(wx.Panel):
             focused = max(0, sep_idx - 1)
         if 0 <= focused < self.messages_list.GetItemCount():
             self.messages_list.Focus(focused)
+
+    def _load_older_messages(self):
+        """Load older messages from the local database, or fall back to the server if none remain locally."""
+        if not self.conversation or not self._all_sorted_messages:
+            return
+
+        self._is_loading_more = True
+        try:
+            remote_jid = self.conversation.get("remoteJid", "")
+            limit = int(
+                self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
+            )
+            # Count separator objects to get the actual database message count currently in memory.
+            loaded_db_count = sum(1 for m in self._all_sorted_messages if not self._is_separator(m))
+            
+            # Fetch from local DB
+            local_msgs = self.main_window.db.get_messages(remote_jid, limit=limit, offset=loaded_db_count)
+            
+            if local_msgs:
+                # We found older messages in the local DB!
+                # Reverse them so they are in ascending chronological order (older first)
+                local_msgs.reverse()
+                displayable = [m for m in local_msgs if self._is_displayable_message(m)]
+                if displayable:
+                    n_new = len(displayable)
+                    self.messages_list.Freeze()
+                    try:
+                        self._all_sorted_messages = displayable + self._all_sorted_messages
+                        self._sorted_messages     = displayable + self._sorted_messages
+                        self._messages_offset     = 0
+                        if self._unread_sep_idx >= 0:
+                            self._unread_sep_idx += n_new
+                            
+                        self.messages_list.DeleteAllItems()
+                        for msg in self._sorted_messages:
+                            self.messages_list.Append((self._render_message_line(msg),))
+                            
+                        self.messages_list.Focus(n_new)
+                        self.messages_list.Select(n_new, True)
+                        self.messages_list.EnsureVisible(n_new)
+                    finally:
+                        self.messages_list.Thaw()
+                    self._is_loading_more = False
+                    return
+            
+            # No older messages in local DB, fetch from server
+            self._load_older_messages_from_server()
+        except Exception as e:
+            print(f"[_load_older_messages] error: {e}")
+            self._is_loading_more = False
 
     def _load_older_messages_from_server(self):
         """Fetch older messages from server when the beginning of local history is reached."""
