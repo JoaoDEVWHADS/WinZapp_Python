@@ -5872,11 +5872,14 @@ class MainWindow(wx.Frame):
         audio_b64 = base64.b64encode(ogg_bytes).decode("utf-8")
 
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-voice-base64"
-        quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid) if quoted else None
+        phone_net = remote_jid
+        if phone_net.endswith("@s.whatsapp.net"):
+            phone_net = phone_net.replace("@s.whatsapp.net", "@c.us")
+        quoted_id = self._serialize_quoted_id(quoted, fallback_jid=phone_net) if quoted else None
         payload = {
-            "phone": [remote_jid],
+            "phone": [phone_net],
             "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
-            "isGroup": remote_jid.endswith("@g.us"),
+            "isGroup": phone_net.endswith("@g.us"),
         }
         if quoted_id:
             payload["quotedMessageId"] = quoted_id
@@ -7934,7 +7937,9 @@ class MainWindow(wx.Frame):
         # Authorization only — Content-Type is set automatically by requests
         # when using files= (multipart/form-data with correct boundary).
         headers = {"Authorization": f"Bearer {self.token}"}
-        phone_val = remote_jid.rsplit("@", 1)[0] if remote_jid.endswith("@g.us") else remote_jid
+        phone_val = remote_jid
+        if phone_val.endswith("@s.whatsapp.net"):
+            phone_val = phone_val.replace("@s.whatsapp.net", "@c.us")
         # Force WPPConnect to send the chosen WhatsApp message type instead of
         # its mimetype-based "auto-detect", which otherwise sends e.g. an .mp3
         # picked from the "Document" menu as a playable audio message, or a
@@ -7947,7 +7952,7 @@ class MainWindow(wx.Frame):
             "phone":    [phone_val],
             "filename": filename,
             "caption":  caption,
-            "isGroup":  remote_jid.endswith("@g.us"),
+            "isGroup":  phone_val.endswith("@g.us"),
             "type":     _wpp_type,
         }
         if quoted:
