@@ -1618,20 +1618,10 @@ class ConversationsPanel(wx.Panel):
         enc_key = mw.key
 
         def _write_and_enqueue():
-            from core.ogg_opus import encode_pcm_to_ogg_opus
-
             # 1. Join raw PCM frames.
             audio_data = b"".join(frames)
 
-            # 2. Encode OGG Opus from PCM directly (no WAV read-back).
-            ogg_bytes = None
-            try:
-                ogg_bytes = encode_pcm_to_ogg_opus(audio_data, actual_rate, actual_ch)
-            except Exception as exc:
-                logging.warning("[_send_voice_message] OGG pre-encode failed, "
-                                "queue will encode on send: %s", exc)
-
-            # 3. Write WAV temp file (for .msv backup and retry fallback).
+            # 2. Write WAV temp file (used for ffmpeg conversion, backup, and retry fallback).
             try:
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 tmp.close()
@@ -1644,6 +1634,20 @@ class ConversationsPanel(wx.Panel):
             except Exception as exc:
                 logging.error("[_send_voice_message] failed to write WAV: %s", exc)
                 return
+
+            # 3. Encode OGG Opus via ffmpeg conversion.
+            ogg_bytes = None
+            try:
+                ogg_path = mw._convert_wav_to_ogg(wav_path)
+                if ogg_path and os.path.isfile(ogg_path):
+                    with open(ogg_path, "rb") as f_in:
+                        ogg_bytes = f_in.read()
+                    try:
+                        os.unlink(ogg_path)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logging.warning("[_send_voice_message] OGG pre-encode failed: %s", exc)
 
             # 4. Encrypt OGG (or raw PCM fallback) and save as .msv for offline playback.
             try:
