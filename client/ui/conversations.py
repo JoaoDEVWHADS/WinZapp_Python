@@ -12,8 +12,8 @@ import wx.adv
 import pyperclip
 import pyaudio
 import wave
-import sound_lib.stream as sl_stream
-from sound_lib.effects import Tempo
+import core.sound_system as sl_stream
+from core.sound_system import Tempo
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
