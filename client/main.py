@@ -5510,6 +5510,39 @@ class MainWindow(wx.Frame):
             deduped.append(m)
         all_messages = deduped
 
+        # Sort by timestamp so the conversation always shows the most recent
+        # messages at the bottom. The user scrolls up to see older history.
+        all_messages.sort(
+            key=lambda m: int(
+                m.get("messageTimestamp") or m.get("timestamp") or m.get("t") or 0
+            )
+        )
+
+        # ── Late-arriving race-condition fix ─────────────────────────────────
+        # on_historical_message() and on_new_message() run on the wx main thread
+        # and may have inserted messages into self.chats[remote_jid] AFTER we
+        # took the local_records snapshot above but BEFORE we write back below.
+        # Do a second merge against the live chat to ensure none of those
+        # messages are silently discarded by our final self.chats assignment.
+        live_chat    = self.chats.get(remote_jid, {})
+        live_records = (live_chat.get("messages", {})
+                        .get("messages", {})
+                        .get("records", []))
+        if live_records:
+            current_ids = {r.get("key", {}).get("id") for r in all_messages}
+            late_extra  = [r for r in live_records
+                           if r.get("key", {}).get("id") and
+                              r.get("key", {}).get("id") not in current_ids
+                              and not self._is_cleared_message(remote_jid, r)]
+            if late_extra:
+                all_messages = all_messages + late_extra
+                # Re-sort to keep chronological order
+                all_messages.sort(
+                    key=lambda m: int(
+                        m.get("messageTimestamp") or m.get("timestamp") or m.get("t") or 0
+                    )
+                )
+
         # Update records: accept API data only when it actually returned some
         # messages, or fall back to preserving whatever we have in memory.
         # An empty API response (200 OK with no messages) must NOT wipe the
