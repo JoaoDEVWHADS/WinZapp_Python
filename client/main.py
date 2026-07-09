@@ -5974,7 +5974,7 @@ class MainWindow(wx.Frame):
                 [ffmpeg, "-y", "-i", wav_path,
                  "-ac", "1",
                  "-c:a", "libopus", "-b:a", "64k",
-                 "-vbr", "on", "-compression_level", "10",
+                 "-vbr", "on", "-compression_level", "5",
                  ogg_path],
                 capture_output=True,
                 timeout=60,
@@ -6001,10 +6001,16 @@ class MainWindow(wx.Frame):
                    On retry (ogg_bytes=None) falls back to reading wav_path.
         """
         # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        import time as _time
+        _tsend0 = _time.perf_counter()
         remote_jid = self._resolve_jid_for_send(remote_jid)
+        logging.info("[VOICE_TIMING] send_audio_message started for %s (ogg_bytes=%s) — jid resolved in %.3fs",
+                     remote_jid, "yes" if ogg_bytes else "NO", _time.perf_counter() - _tsend0)
 
         if ogg_bytes is None:
             # Fallback path: convert WAV to OGG using ffmpeg and read the bytes
+            _t_fallback = _time.perf_counter()
+            logging.info("[VOICE_TIMING] ogg_bytes is None — running ffmpeg AGAIN as fallback (this should NOT happen!)")
             ogg_path = self._convert_wav_to_ogg(wav_path)
             if ogg_path and os.path.isfile(ogg_path):
                 try:
@@ -6027,6 +6033,8 @@ class MainWindow(wx.Frame):
                 except Exception as exc:
                     logging.error("[send_audio_message] cannot read WAV %s: %s", wav_path, exc)
                     return {"ok": False, "error": str(exc)[:200], "retry": False}
+            logging.info("[VOICE_TIMING] fallback encode+read done in %.3fs",
+                         _time.perf_counter() - _t_fallback)
 
         audio_b64 = base64.b64encode(ogg_bytes).decode("utf-8")
 
@@ -6046,8 +6054,13 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+        _t_post = _time.perf_counter()
+        logging.info("[VOICE_TIMING] POSTing to send-voice-base64 (payload size ~%d bytes b64)",
+                     len(audio_b64))
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
+            logging.info("[VOICE_TIMING] POST returned HTTP %s in %.3fs",
+                         response.status_code, _time.perf_counter() - _t_post)
             if response.status_code not in (200, 201):
                 err = f"HTTP {response.status_code}: {response.text[:300]}"
                 logging.error("[send_audio_message] %s for %s", err, remote_jid)
@@ -6192,6 +6205,9 @@ class MainWindow(wx.Frame):
         real_id is the WhatsApp message ID returned by the API; it replaces the
         local UUID in the virtual message so playback can find the message in the DB.
         """
+        import time as _time
+        logging.info("[VOICE_TIMING] _on_message_sent — message LEFT pending state. local_id=%s real_id=%s",
+                     local_id, real_id)
         if real_id and remote_jid:
             def _bg_update_db():
                 try:
