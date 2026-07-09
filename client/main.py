@@ -3111,12 +3111,51 @@ class MainWindow(wx.Frame):
 
         # Initialise DatabaseBridge (async→sync bridge)
         self.db = DatabaseBridge(data_path("messages.db"), self.key)
-        # Load persistent metadata from database
-        self._presence_pushname_map = dict(self.db.get_metadata_json("presence_pushname_map", {}))
-        self._deleted_chats = set(self.db.get_metadata_json("deleted_chats", []))
-        self._archived_chats = set(self.db.get_metadata_json("archived_chats", []))
-        self._pinned_chats = set(self.db.get_metadata_json("pinned_chats", []))
-        self._muted_chats = dict(self.db.get_metadata_json("muted_chats", {}))
+        # Load persistent metadata from database with fallback/bootstrap from settings.json
+        settings_dirty = False
+        
+        # 1. presence_pushname_map
+        if self.db.get_metadata("presence_pushname_map") is None and "presence_pushname_map" in self.settings:
+            self._presence_pushname_map = dict(self.settings.pop("presence_pushname_map", {}))
+            self.db.set_metadata_json("presence_pushname_map", self._presence_pushname_map)
+            settings_dirty = True
+        else:
+            self._presence_pushname_map = dict(self.db.get_metadata_json("presence_pushname_map", {}))
+            
+        # 2. deleted_chats
+        if self.db.get_metadata("deleted_chats") is None and "deleted_chats" in self.settings:
+            self._deleted_chats = set(self.settings.pop("deleted_chats", []))
+            self.db.set_metadata_json("deleted_chats", list(self._deleted_chats))
+            settings_dirty = True
+        else:
+            self._deleted_chats = set(self.db.get_metadata_json("deleted_chats", []))
+            
+        # 3. archived_chats
+        if self.db.get_metadata("archived_chats") is None and "archived_chats" in self.settings:
+            self._archived_chats = set(self.settings.pop("archived_chats", []))
+            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+            settings_dirty = True
+        else:
+            self._archived_chats = set(self.db.get_metadata_json("archived_chats", []))
+            
+        # 4. pinned_chats
+        if self.db.get_metadata("pinned_chats") is None and "pinned_chats" in self.settings:
+            self._pinned_chats = set(self.settings.pop("pinned_chats", []))
+            self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
+            settings_dirty = True
+        else:
+            self._pinned_chats = set(self.db.get_metadata_json("pinned_chats", []))
+            
+        # 5. muted_chats
+        if self.db.get_metadata("muted_chats") is None and "muted_chats" in self.settings:
+            self._muted_chats = dict(self.settings.pop("muted_chats", {}))
+            self.db.set_metadata_json("muted_chats", self._muted_chats)
+            settings_dirty = True
+        else:
+            self._muted_chats = dict(self.db.get_metadata_json("muted_chats", {}))
+            
+        if settings_dirty:
+            self.save_settings()
         # Run migration from messages.dat → SQLite if needed
         try:
             if self.db.run_migration():
