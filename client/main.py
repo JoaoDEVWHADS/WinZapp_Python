@@ -5974,7 +5974,7 @@ class MainWindow(wx.Frame):
                 [ffmpeg, "-y", "-i", wav_path,
                  "-ac", "1",
                  "-c:a", "libopus", "-b:a", "64k",
-                 "-vbr", "on", "-compression_level", "5",
+                 "-vbr", "on", "-compression_level", "10",
                  ogg_path],
                 capture_output=True,
                 timeout=60,
