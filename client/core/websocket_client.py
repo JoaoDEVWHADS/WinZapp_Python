@@ -167,7 +167,7 @@ class WebSocketClient:
         old_token = pi.pop("WA_token", "")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
-        mw.settings.setdefault("status", {})["messages_set_completed"] = False
+        mw.messages_set_completed = False
         mw.token = ""
         mw.save_settings()
         
@@ -244,8 +244,7 @@ class WebSocketClient:
         wx.CallAfter(_update_ui)
 
     def on_messages_set(self, info):
-        self.main_window.settings.setdefault("status", {})["messages_set_completed"] = True
-        self.main_window.save_settings()
+        self.main_window.messages_set_completed = True
         # Guard 1: don't start a second sync while one is already running.
         existing = getattr(self.main_window, "sync_thread", None)
         if existing and existing.is_alive():

@@ -251,3 +251,18 @@ class DatabaseBridge:
         return self._call(
             self._db.upsert_status_update(participant, msg)
         )
+
+    # ── Metadata ──────────────────────────────────────────────────────────────
+
+    def get_metadata(self, key: str, default: str | None = None) -> str | None:
+        return self._call(self._db.get_metadata(key, default))
+
+    def set_metadata(self, key: str, value: str) -> None:
+        return self._call(self._db.set_metadata(key, value))
+
+    def get_metadata_json(self, key: str, default: Any = None) -> Any:
+        return self._call(self._db.get_metadata_json(key, default))
+
+    def set_metadata_json(self, key: str, value: Any) -> None:
+        return self._call(self._db.set_metadata_json(key, value))
+

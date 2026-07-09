@@ -89,6 +89,11 @@ CREATE TABLE IF NOT EXISTS status_updates (
     timestamp       INTEGER NOT NULL,
     PRIMARY KEY (participant_jid, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS system_metadata (
+    key             TEXT PRIMARY KEY,
+    value           TEXT
+);
 """
 
 # How many messages to include inside each chat's ``messages.messages.records``
@@ -269,6 +274,42 @@ class DatabaseManager:
             await self.connect()
         assert self._conn is not None
         return self._conn
+
+    async def get_metadata(self, key: str, default: str | None = None) -> str | None:
+        """Retrieve a string value from system_metadata table."""
+        conn = await self._ensure_conn()
+        async with self._write_lock:
+            cursor = await conn.execute(
+                "SELECT value FROM system_metadata WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row["value"]
+            return default
+
+    async def set_metadata(self, key: str, value: str) -> None:
+        """Insert or replace a string value in system_metadata table."""
+        conn = await self._ensure_conn()
+        async with self._write_lock:
+            await conn.execute(
+                "INSERT OR REPLACE INTO system_metadata (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            await conn.commit()
+
+    async def get_metadata_json(self, key: str, default: Any = None) -> Any:
+        """Retrieve a JSON-decoded value from system_metadata table."""
+        val = await self.get_metadata(key)
+        if val is None:
+            return default
+        try:
+            return json.loads(val)
+        except Exception:
+            return default
+
+    async def set_metadata_json(self, key: str, value: Any) -> None:
+        """Insert or replace a JSON-serializable value in system_metadata table."""
+        await self.set_metadata(key, json.dumps(value))
 
     # ── Chats ───────────────────────────────────────────────────────────────
 

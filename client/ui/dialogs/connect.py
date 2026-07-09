@@ -515,8 +515,7 @@ class Connect:
                 self.main_window.token = existing_token
             else:
                 # New pairing: reset sync flag so we wait for messages.set
-                self.main_window.settings["status"]["messages_set_completed"] = False
-                self.main_window.save_settings()
+                self.main_window.messages_set_completed = False
                 self.main_window.clear_local_data()
                 raw_token = self.generate_random_token()
                 # Raise on failure so the outer except shows a meaningful message
@@ -662,7 +661,7 @@ class Connect:
                 _instance_exists = bool(stored_raw == self.phone_number and existing_token)
                 if not _instance_exists:
                     # New pairing: reset sync flag so we wait for messages.set
-                    self.main_window.settings["status"]["messages_set_completed"] = False
+                    self.main_window.messages_set_completed = False
                     self.main_window.clear_local_data()
 
                 if _instance_exists:

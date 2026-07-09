@@ -434,8 +434,10 @@ class MainWindow(wx.Frame):
         # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
         self._presence_timers = {}
         # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
-        # from presence.update events. Loaded from settings and saved whenever updated.
-        self._presence_pushname_map = dict(self.settings.get("presence_pushname_map", {}))
+        # from presence.update events. Loaded from DB on prepare_sync() and saved whenever updated.
+        self._presence_pushname_map = {}
+        # List of deleted chats, loaded from DB on prepare_sync()
+        self._deleted_chats = set()
         # Set by init_UI() when all wx widgets are ready.  start_sync() waits
         # on this before making any wx.CallAfter calls so it never touches
         # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
@@ -817,7 +819,7 @@ class MainWindow(wx.Frame):
         old_token = pi.pop("WA_token", "")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
-        self.settings.setdefault("status", {})["messages_set_completed"] = False
+        self.messages_set_completed = False
         self.token = ""
         self.save_settings()
         self.clear_local_data()
@@ -2997,6 +2999,19 @@ class MainWindow(wx.Frame):
         if changed:
             self.save_settings()
 
+    @property
+    def messages_set_completed(self) -> bool:
+        """Get the messages synchronization status from SQLite metadata."""
+        if not hasattr(self, "db") or self.db is None:
+            return False
+        return self.db.get_metadata_json("messages_set_completed", False)
+
+    @messages_set_completed.setter
+    def messages_set_completed(self, val: bool):
+        """Set the messages synchronization status in SQLite metadata."""
+        if hasattr(self, "db") and self.db is not None:
+            self.db.set_metadata_json("messages_set_completed", val)
+
     def save_settings(self):
         try:
             with open(data_path("settings.json"), "w") as f:
@@ -3092,6 +3107,9 @@ class MainWindow(wx.Frame):
 
         # Initialise DatabaseBridge (async→sync bridge)
         self.db = DatabaseBridge(data_path("messages.db"), self.key)
+        # Load persistent metadata from database
+        self._presence_pushname_map = dict(self.db.get_metadata_json("presence_pushname_map", {}))
+        self._deleted_chats = set(self.db.get_metadata_json("deleted_chats", []))
         # Run migration from messages.dat → SQLite if needed
         try:
             if self.db.run_migration():
@@ -3129,8 +3147,7 @@ class MainWindow(wx.Frame):
         # Reset so the 60-s fallback and on_messages_set() can fire.
         # The flag persisted as True across restarts, blocking re-sync on
         # reconnection when the WPPConnect doesn't re-send messages.set.
-        self.settings.setdefault("status", {})["messages_set_completed"] = False
-        self.save_settings()
+        self.messages_set_completed = False
         self.wait_messages_set()
 
     def check_wa_connection_http(self):
@@ -3379,7 +3396,7 @@ class MainWindow(wx.Frame):
         # unconditionally so the program never stays stuck on "preparing to sync".
         def _fallback():
             def _already_syncing() -> bool:
-                if self.settings.get("status", {}).get("messages_set_completed"):
+                if self.messages_set_completed:
                     return True
                 existing = getattr(self, "sync_thread", None)
                 if existing and existing.is_alive():
@@ -3406,8 +3423,7 @@ class MainWindow(wx.Frame):
                     }
                     r = requests.post(url, headers=headers, timeout=5)
                     if r.ok and isinstance(r.json(), list):
-                        self.settings.setdefault("status", {})["messages_set_completed"] = True
-                        self.save_settings()
+                        self.messages_set_completed = True
                         self.sync_thread = threading.Thread(
                             target=self.start_sync, daemon=True
                         )
@@ -3430,8 +3446,7 @@ class MainWindow(wx.Frame):
             # 60 s elapsed and sync still hasn't started — start it unconditionally
             # so the program never stays stuck on "preparando para sincronizar".
             if not _already_syncing():
-                self.settings.setdefault("status", {})["messages_set_completed"] = True
-                self.save_settings()
+                self.messages_set_completed = True
                 self.sync_thread = threading.Thread(
                     target=self.start_sync, daemon=True
                 )
@@ -6470,10 +6485,9 @@ class MainWindow(wx.Frame):
                             except Exception:
                                 pass
 
-        # Persist the updated pushName map to settings (debounced via _schedule_save).
-        if _ppm_updated:
-            self.settings["presence_pushname_map"] = dict(self._presence_pushname_map)
-            self._schedule_save_settings()
+        # Persist the updated pushName map to database metadata.
+        if _ppm_updated and hasattr(self, "db") and self.db is not None:
+            self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
@@ -7661,21 +7675,21 @@ class MainWindow(wx.Frame):
     # ── Delete / Clear ────────────────────────────────────────────────────────
 
     def is_chat_deleted(self, jid: str) -> bool:
-        return jid in self.settings.get("deleted_chats", [])
+        return jid in self._deleted_chats
 
     def delete_chat_local(self, jid: str):
-        lst = self.settings.setdefault("deleted_chats", [])
-        if jid not in lst:
-            lst.append(jid)
+        if jid not in self._deleted_chats:
+            self._deleted_chats.add(jid)
         if jid.endswith("@s.whatsapp.net"):
             lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
-            if lid_jid and lid_jid not in lst:
-                lst.append(lid_jid)
+            if lid_jid and lid_jid not in self._deleted_chats:
+                self._deleted_chats.add(lid_jid)
         elif jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
-            if phone_jid and phone_jid not in lst:
-                lst.append(phone_jid)
-        self.save_settings()
+            if phone_jid and phone_jid not in self._deleted_chats:
+                self._deleted_chats.add(phone_jid)
+        if hasattr(self, "db") and self.db is not None:
+            self.db.set_metadata_json("deleted_chats", list(self._deleted_chats))
         self.chats.pop(jid, None)
         self._schedule_save()
         self._schedule_set_chats()
