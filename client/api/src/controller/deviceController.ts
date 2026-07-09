@@ -1857,19 +1857,17 @@ export async function setTyping(req: Request, res: Response) {
      }
    */
   const { phone, value = true, isGroup = false } = req.body;
-  try {
-    let response;
-    for (const contato of contactToArray(phone, isGroup)) {
-      if (value) response = await req.client.startTyping(contato);
-      else response = await req.client.stopTyping(contato);
-    }
-
-    res.status(200).json({ status: 'success', response: response });
-  } catch (error) {
-    req.logger.error(error);
-    res
-      .status(500)
-      .json({ status: 'error', message: 'Error on set typing', error: error });
+  // Fire-and-forget: respond immediately — the client never uses this response.
+  // Errors like 'Chat not found' are expected when the chat JID is @c.us but
+  // WhatsApp Web opened it via @lid; suppress those silently to avoid polluting
+  // the event loop and logs with giant stack traces on every keystroke.
+  res.status(200).json({ status: 'success' });
+  for (const contato of contactToArray(phone, isGroup)) {
+    const p = value ? req.client.startTyping(contato) : req.client.stopTyping(contato);
+    p.catch((err: any) => {
+      const msg: string = err?.message ?? String(err);
+      if (!msg.includes('Chat not found')) req.logger.warn('[setTyping] ' + msg);
+    });
   }
 }
 
@@ -1912,20 +1910,17 @@ export async function setRecording(req: Request, res: Response) {
      }
    */
   const { phone, value = true, duration, isGroup = false } = req.body;
-  try {
-    let response;
-    for (const contato of contactToArray(phone, isGroup)) {
-      if (value) response = await req.client.startRecording(contato, duration);
-      else response = await req.client.stopRecording(contato);
-    }
-
-    res.status(200).json({ status: 'success', response: response });
-  } catch (error) {
-    req.logger.error(error);
-    res.status(500).json({
-      status: 'error',
-      message: 'Error on set recording',
-      error: error,
+  // Fire-and-forget: respond immediately — the client never uses this response.
+  // Errors like 'Chat not found' are expected when the chat JID is @c.us but
+  // WhatsApp Web opened it via @lid; suppress those silently.
+  res.status(200).json({ status: 'success' });
+  for (const contato of contactToArray(phone, isGroup)) {
+    const p = value
+      ? req.client.startRecording(contato, duration)
+      : req.client.stopRecording(contato);
+    p.catch((err: any) => {
+      const msg: string = err?.message ?? String(err);
+      if (!msg.includes('Chat not found')) req.logger.warn('[setRecording] ' + msg);
     });
   }
 }
