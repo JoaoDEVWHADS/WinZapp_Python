@@ -5,7 +5,7 @@ import tempfile
 import threading
 import wx
 import requests
-import sound_lib.stream as sl_stream
+import core.sound_system as sl_stream
 from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext
 from core.utils import format_number
 
