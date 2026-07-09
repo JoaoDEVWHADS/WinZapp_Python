@@ -4697,29 +4697,34 @@ class MainWindow(wx.Frame):
         # Pinned chats float to the top; within each group sort by most-recent
         # message timestamp descending (newest first), then alphabetically.
         def _chat_last_ts(c):
-            ts = int(c.get("t", 0) or 0)
-            if ts > 1_000_000_000_000:
-                ts //= 1000
             lm = c.get("lastMessage")
+            has_messages = False
+            ts = 0
+            
             if isinstance(lm, dict):
                 lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
                 if lm_ts > 1_000_000_000_000:
                     lm_ts //= 1000
-                if lm_ts > ts:
-                    ts = lm_ts
-            # Copy the records list to prevent RuntimeError during concurrent modifications
+                ts = lm_ts
+                has_messages = True
+                
             records_wrapper = c.get("messages") or {}
             if isinstance(records_wrapper, dict):
                 inner_wrapper = records_wrapper.get("messages") or {}
                 if isinstance(inner_wrapper, dict):
                     records_copy = list(inner_wrapper.get("records") or [])
-                    for m in records_copy:
-                        if isinstance(m, dict):
-                            t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
-                            if t > 1_000_000_000_000:
-                                t //= 1000
-                            if t > ts:
-                                ts = t
+                    if records_copy:
+                        has_messages = True
+                        for m in records_copy:
+                            if isinstance(m, dict):
+                                t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
+                                if t > 1_000_000_000_000:
+                                    t //= 1000
+                                if t > ts:
+                                    ts = t
+                                    
+            if not has_messages:
+                return 1
             return ts if ts else 1
 
         def _sort_key(pair):
