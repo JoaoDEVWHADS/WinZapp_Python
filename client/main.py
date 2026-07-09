@@ -436,8 +436,8 @@ class MainWindow(wx.Frame):
         # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
         # from presence.update events. Loaded from DB on prepare_sync() and saved whenever updated.
         self._presence_pushname_map = {}
-        # List of deleted chats, loaded from DB on prepare_sync()
-        self._deleted_chats = set()
+        # List of deleted chats, loaded from settings.json
+        self._deleted_chats = set(self.settings.get("deleted_chats", []))
         # List of archived, pinned, and muted chats, loaded from DB on prepare_sync()
         self._archived_chats = set()
         self._pinned_chats = set()
@@ -3122,13 +3122,13 @@ class MainWindow(wx.Frame):
         else:
             self._presence_pushname_map = dict(self.db.get_metadata_json("presence_pushname_map", {}))
             
-        # 2. deleted_chats
-        if self.db.get_metadata("deleted_chats") is None and "deleted_chats" in self.settings:
-            self._deleted_chats = set(self.settings.pop("deleted_chats", []))
-            self.db.set_metadata_json("deleted_chats", list(self._deleted_chats))
-            settings_dirty = True
-        else:
-            self._deleted_chats = set(self.db.get_metadata_json("deleted_chats", []))
+        # Recovery migration: if DB metadata has deleted_chats but settings.json is missing them, copy back to settings.json
+        if "deleted_chats" not in self.settings:
+            db_deleted = self.db.get_metadata_json("deleted_chats")
+            if db_deleted is not None:
+                self.settings["deleted_chats"] = db_deleted
+                self._deleted_chats = set(db_deleted)
+                settings_dirty = True
             
         # 3. archived_chats
         if self.db.get_metadata("archived_chats") is None and "archived_chats" in self.settings:
@@ -7729,8 +7729,8 @@ class MainWindow(wx.Frame):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
             if phone_jid and phone_jid not in self._deleted_chats:
                 self._deleted_chats.add(phone_jid)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("deleted_chats", list(self._deleted_chats))
+        self.settings["deleted_chats"] = list(self._deleted_chats)
+        self.save_settings()
         self.chats.pop(jid, None)
         self._schedule_save()
         self._schedule_set_chats()
