@@ -355,12 +355,23 @@ export async function sendVoice64(req: Request, res: Response) {
     const results: any = [];
     for (const contato of phone) {
       results.push(
-        await req.client.sendPttFromBase64(
-          contato,
-          base64Ptt,
-          'Voice Audio',
-          '',
-          quotedMessageId
+        // Use evaluateAndReturn directly so we can set waitForAck: false.
+        // sendPttFromBase64 has waitForAck hardcoded to true, which blocks
+        // the HTTP response until WhatsApp Web receives the upload ACK —
+        // causing 1–10 s of "pending" delay visible to the user.
+        await (req.client as any).page.evaluate(
+          async ({ to, base64, quotedMsg }: { to: string; base64: string; quotedMsg: string | undefined }) => {
+            const result = await (window as any).WPP.chat.sendFileMessage(to, base64, {
+              type: 'audio',
+              isPtt: true,
+              filename: 'Voice Audio',
+              caption: '',
+              quotedMsg,
+              waitForAck: false,
+            });
+            return { id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 };
+          },
+          { to: contato, base64: base64Ptt, quotedMsg: quotedMessageId }
         )
       );
     }
