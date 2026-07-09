@@ -5946,19 +5946,20 @@ class MainWindow(wx.Frame):
         (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
         needs `<fromMe>_<chatId>_<id>` and, for group messages, a trailing
         `_<participant>` — including for our own group messages (`fromMe=True`).
-
-        @lid JIDs must be resolved to @c.us because WPPConnect indexes messages
-        by the phone-number form of the JID, not the device-linked LID.
         """
-        # Always resolve remote_jid to the active chat JID (LID if available)
-        remote_jid = self._resolve_jid_for_send(remote_jid)
-
-        def _resolve_jid(jid: str) -> str:
-            """Keep @lid JIDs as-is, normalise @s.whatsapp.net → @c.us."""
+        def _resolve_to_lid_if_available(jid: str) -> str:
+            """Resolve JID to cached @lid if available, keeping @g.us / @broadcast, and formatting to @c.us otherwise."""
             if not jid:
                 return jid
-            jid = jid.replace("@s.whatsapp.net", "@c.us")
-            return jid
+            if jid.endswith(("@g.us", "@broadcast")):
+                return jid
+            if jid.endswith("@lid"):
+                return jid
+            clean = jid.replace("@c.us", "@s.whatsapp.net")
+            lid = getattr(self, "_phone_to_lid", {}).get(clean, "")
+            if lid:
+                return lid
+            return jid.replace("@s.whatsapp.net", "@c.us")
 
         msg_id = msg_key.get("id", "")
         if not msg_id:
@@ -5968,7 +5969,7 @@ class MainWindow(wx.Frame):
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
-        chat = _resolve_jid(remote_jid or "")
+        chat = _resolve_to_lid_if_available(remote_jid or "")
         # Group messages always carry the sender's JID in the serialized id,
         # even for our own messages (fromMe=True). 1-on-1 keys have no
         # participant — gate on chat type, since a 1:1 @lid message's key
@@ -5988,9 +5989,7 @@ class MainWindow(wx.Frame):
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
-            # Resolve group participant JID to LID JID if available
-            resolved_raw = self._resolve_jid_for_send(raw)
-            participant = _resolve_jid(resolved_raw)
+            participant = _resolve_to_lid_if_available(raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
