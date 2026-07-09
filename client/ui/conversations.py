@@ -1537,6 +1537,10 @@ class ConversationsPanel(wx.Panel):
         if not self._is_recording:
             return
 
+        import time as _time
+        _t0 = _time.perf_counter()
+        logging.info("[VOICE_TIMING] T+0.000s — user clicked send, stopping recording stream")
+
         # Stop the recording stream in background FIRST so the audio device is fully released
         # without blocking the UI thread before BASS plays the send sound.
         threading.Thread(target=self._stop_recording_stream, daemon=True).start()
@@ -1618,8 +1622,15 @@ class ConversationsPanel(wx.Panel):
         enc_key = mw.key
 
         def _write_and_enqueue():
+            import time as _time
+            _tw0 = _time.perf_counter()
+            logging.info("[VOICE_TIMING] T+%.3fs — _write_and_enqueue thread started",
+                         _tw0 - _t0)
+
             # 1. Join raw PCM frames.
             audio_data = b"".join(frames)
+            logging.info("[VOICE_TIMING] T+%.3fs — PCM frames joined (%d bytes, %d frames)",
+                         _time.perf_counter() - _t0, len(audio_data), len(frames))
 
             # 2. Write WAV temp file (used for ffmpeg conversion, backup, and retry fallback).
             try:
@@ -1631,12 +1642,15 @@ class ConversationsPanel(wx.Panel):
                     wf.setframerate(actual_rate)
                     wf.writeframes(audio_data)
                 wav_path = tmp.name
+                logging.info("[VOICE_TIMING] T+%.3fs — WAV written to %s",
+                             _time.perf_counter() - _t0, wav_path)
             except Exception as exc:
                 logging.error("[_send_voice_message] failed to write WAV: %s", exc)
                 return
 
             # 3. Encode OGG Opus via ffmpeg conversion.
             ogg_bytes = None
+            _t_enc = _time.perf_counter()
             try:
                 ogg_path = mw._convert_wav_to_ogg(wav_path)
                 if ogg_path and os.path.isfile(ogg_path):
@@ -1648,18 +1662,29 @@ class ConversationsPanel(wx.Panel):
                         pass
             except Exception as exc:
                 logging.warning("[_send_voice_message] OGG pre-encode failed: %s", exc)
+            logging.info("[VOICE_TIMING] T+%.3fs — OGG encode done in %.3fs (%s bytes)",
+                         _time.perf_counter() - _t0,
+                         _time.perf_counter() - _t_enc,
+                         len(ogg_bytes) if ogg_bytes else 0)
 
             # 4. Encrypt OGG (or raw PCM fallback) and save as .msv for offline playback.
+            _t_msv = _time.perf_counter()
             try:
                 voice_messages_dir = data_path("voice_messages")
                 os.makedirs(voice_messages_dir, exist_ok=True)
                 local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
                 with open(local_audio_path, "wb") as f_out:
                     f_out.write(encrypt(ogg_bytes or audio_data, enc_key))
+                logging.info("[VOICE_TIMING] T+%.3fs — .msv saved in %.3fs",
+                             _time.perf_counter() - _t0,
+                             _time.perf_counter() - _t_msv)
             except Exception as exc:
                 logging.warning("[_send_voice_message] failed to save local audio copy: %s", exc)
 
             # 5. Enqueue — ogg_bytes pre-encoded so worker skips encoding, just POSTs.
+            logging.info("[VOICE_TIMING] T+%.3fs — calling enqueue (ogg_bytes=%s)",
+                         _time.perf_counter() - _t0,
+                         "yes" if ogg_bytes else "NO — will fallback to WAV")
             pm = PendingMessage(local_id, remote_jid, audio_path=wav_path,
                                 ogg_bytes=ogg_bytes, quoted=quoted_msg)
             mw.message_queue.enqueue(pm)
