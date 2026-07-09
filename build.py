@@ -382,6 +382,27 @@ def assemble_staging():
     if not _bassopus_copied:
         print("  [WARN] bassopus.dll not found in client/lib — OGG Opus audio playback will fail")
 
+    # Copy ffmpeg binary to staging/lib/ to support audio conversion on remote API setups
+    import glob as _glob
+    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
+    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
+    if not hits:
+        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+    
+    ffmpeg_src = None
+    if hits:
+        ffmpeg_src = hits[0]
+    else:
+        ffmpeg_src = shutil.which("ffmpeg")
+
+    if ffmpeg_src and os.path.isfile(ffmpeg_src):
+        ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
+        ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
+        shutil.copy2(ffmpeg_src, ffmpeg_dst)
+        print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
+    else:
+        print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
+
     print(f"  -> lib/  ({dll_count} DLLs total)")
 
 
