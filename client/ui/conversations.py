@@ -1645,13 +1645,13 @@ class ConversationsPanel(wx.Panel):
                 logging.error("[_send_voice_message] failed to write WAV: %s", exc)
                 return
 
-            # 4. Encrypt raw PCM and save as .msv for offline playback.
+            # 4. Encrypt OGG (or raw PCM fallback) and save as .msv for offline playback.
             try:
                 voice_messages_dir = data_path("voice_messages")
                 os.makedirs(voice_messages_dir, exist_ok=True)
                 local_audio_path = os.path.join(voice_messages_dir, f"{local_id}.msv")
                 with open(local_audio_path, "wb") as f_out:
-                    f_out.write(encrypt(audio_data, enc_key))
+                    f_out.write(encrypt(ogg_bytes or audio_data, enc_key))
             except Exception as exc:
                 logging.warning("[_send_voice_message] failed to save local audio copy: %s", exc)
 
