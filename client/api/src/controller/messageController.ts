@@ -353,28 +353,46 @@ export async function sendVoice64(req: Request, res: Response) {
 
   try {
     const results: any = [];
+    const page = (req.client as any).page;
+
+    // Inject the base64 payload and quotedMsg directly into the page context
+    // as a global variable to avoid serialising ~100 KB through the CDP IPC
+    // channel as a JSON argument on every page.evaluate() call.
+    const tempVar = `__wz_ptt_${Date.now()}`;
+    await page.evaluate(
+      ({ varName, base64, quotedMsg }: { varName: string; base64: string; quotedMsg: string | undefined }) => {
+        (window as any)[varName] = { base64, quotedMsg };
+      },
+      { varName: tempVar, base64: base64Ptt, quotedMsg: quotedMessageId }
+    );
+
     for (const contato of phone) {
       results.push(
         // Use evaluateAndReturn directly so we can set waitForAck: false.
         // sendPttFromBase64 has waitForAck hardcoded to true, which blocks
         // the HTTP response until WhatsApp Web receives the upload ACK —
         // causing 1–10 s of "pending" delay visible to the user.
-        await (req.client as any).page.evaluate(
-          async ({ to, base64, quotedMsg }: { to: string; base64: string; quotedMsg: string | undefined }) => {
-            const result = await (window as any).WPP.chat.sendFileMessage(to, base64, {
+        // The payload is read from a page-side global (set above) so only
+        // a short string (contact JID + var name) crosses the CDP channel here.
+        await page.evaluate(
+          ({ to, varName }: { to: string; varName: string }) => {
+            const { base64, quotedMsg } = (window as any)[varName] as { base64: string; quotedMsg: string | undefined };
+            return (window as any).WPP.chat.sendFileMessage(to, base64, {
               type: 'audio',
               isPtt: true,
               filename: 'Voice Audio',
               caption: '',
               quotedMsg,
               waitForAck: false,
-            });
-            return { id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 };
+            }).then((result: any) => ({ id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 }));
           },
-          { to: contato, base64: base64Ptt, quotedMsg: quotedMessageId }
+          { to: contato, varName: tempVar }
         )
       );
     }
+
+    // Clean up the temporary global so it doesn't linger in the page context.
+    await page.evaluate(({ varName }: { varName: string }) => { delete (window as any)[varName]; }, { varName: tempVar });
 
     if (results.length === 0) res.status(400).json('Error sending message');
     returnSucess(res, results);
