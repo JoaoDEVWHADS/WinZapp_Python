@@ -438,10 +438,10 @@ class MainWindow(wx.Frame):
         self._presence_pushname_map = {}
         # List of deleted chats, loaded from DB on prepare_sync()
         self._deleted_chats = set()
-        # List of archived, pinned, and muted chats, loaded from DB on prepare_sync()
-        self._archived_chats = set()
-        self._pinned_chats = set()
-        self._muted_chats = {}
+        # List of archived, pinned, and muted chats, loaded from settings.json
+        self._archived_chats = set(self.settings.get("archived_chats", []))
+        self._pinned_chats = set(self.settings.get("pinned_chats", []))
+        self._muted_chats = dict(self.settings.get("muted_chats", {}))
         # Set by init_UI() when all wx widgets are ready.  start_sync() waits
         # on this before making any wx.CallAfter calls so it never touches
         # widgets that don't exist yet (e.g. when ShowModal() is blocking init_UI).
@@ -3130,29 +3130,25 @@ class MainWindow(wx.Frame):
         else:
             self._deleted_chats = set(self.db.get_metadata_json("deleted_chats", []))
             
-        # 3. archived_chats
-        if self.db.get_metadata("archived_chats") is None and "archived_chats" in self.settings:
-            self._archived_chats = set(self.settings.pop("archived_chats", []))
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
-            settings_dirty = True
-        else:
-            self._archived_chats = set(self.db.get_metadata_json("archived_chats", []))
-            
-        # 4. pinned_chats
-        if self.db.get_metadata("pinned_chats") is None and "pinned_chats" in self.settings:
-            self._pinned_chats = set(self.settings.pop("pinned_chats", []))
-            self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
-            settings_dirty = True
-        else:
-            self._pinned_chats = set(self.db.get_metadata_json("pinned_chats", []))
-            
-        # 5. muted_chats
-        if self.db.get_metadata("muted_chats") is None and "muted_chats" in self.settings:
-            self._muted_chats = dict(self.settings.pop("muted_chats", {}))
-            self.db.set_metadata_json("muted_chats", self._muted_chats)
-            settings_dirty = True
-        else:
-            self._muted_chats = dict(self.db.get_metadata_json("muted_chats", {}))
+        # Recovery migration: if DB metadata has lists but settings.json is missing them, copy back to settings.json
+        if "pinned_chats" not in self.settings:
+            db_pinned = self.db.get_metadata_json("pinned_chats")
+            if db_pinned is not None:
+                self.settings["pinned_chats"] = db_pinned
+                self._pinned_chats = set(db_pinned)
+                settings_dirty = True
+        if "muted_chats" not in self.settings:
+            db_muted = self.db.get_metadata_json("muted_chats")
+            if db_muted is not None:
+                self.settings["muted_chats"] = db_muted
+                self._muted_chats = dict(db_muted)
+                settings_dirty = True
+        if "archived_chats" not in self.settings:
+            db_archived = self.db.get_metadata_json("archived_chats")
+            if db_archived is not None:
+                self.settings["archived_chats"] = db_archived
+                self._archived_chats = set(db_archived)
+                settings_dirty = True
             
         if settings_dirty:
             self.save_settings()
@@ -3909,9 +3905,10 @@ class MainWindow(wx.Frame):
                         self._pinned_chats.remove(jid)
                         db_changed = True
 
-                if db_changed and hasattr(self, "db") and self.db is not None:
-                    self.db.set_metadata_json("muted_chats", self._muted_chats)
-                    self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
+                if db_changed:
+                    self.settings["muted_chats"] = self._muted_chats
+                    self.settings["pinned_chats"] = list(self._pinned_chats)
+                    self._schedule_save_settings()
 
                 # Retroactively prune 1:1 phantom chats that slipped into the
                 # local cache before this filter existed: no local messages,
@@ -3981,8 +3978,9 @@ class MainWindow(wx.Frame):
                     self._archived_chats.add(key)
                     db_changed = True
             normalized[key] = chat
-        if db_changed and hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+        if db_changed:
+            self.settings["archived_chats"] = list(self._archived_chats)
+            self.save_settings()
         return normalized
 
     def deduplicate_chats(self, chats: dict) -> dict:
@@ -6586,13 +6584,13 @@ class MainWindow(wx.Frame):
         chat["archived"] = archived
         chat["archive"] = archived
         
-        # Keep local DB synchronized
+        # Keep local settings synchronized
         if archived:
             self._archived_chats.add(normalized)
         else:
             self._archived_chats.discard(normalized)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+        self.settings["archived_chats"] = list(self._archived_chats)
+        self.save_settings()
         self._schedule_set_chats()
 
     def handle_audio_message(self, msg, timeout=60):
@@ -7629,14 +7627,14 @@ class MainWindow(wx.Frame):
             self._muted_chats[jid] = -1
         else:
             self._muted_chats[jid] = int(time.time()) + duration_secs
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("muted_chats", self._muted_chats)
+        self.settings["muted_chats"] = self._muted_chats
+        self.save_settings()
         self._sync_mute_to_server(jid, duration_secs)
 
     def unmute_chat(self, jid: str):
         self._muted_chats.pop(jid, None)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("muted_chats", self._muted_chats)
+        self.settings["muted_chats"] = self._muted_chats
+        self.save_settings()
         self._sync_mute_to_server(jid, 0)
 
     def _sync_mute_to_server(self, jid: str, duration_secs: int):
@@ -7681,16 +7679,16 @@ class MainWindow(wx.Frame):
     def archive_chat(self, jid: str):
         if jid not in self._archived_chats:
             self._archived_chats.add(jid)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+        self.settings["archived_chats"] = list(self._archived_chats)
+        self.save_settings()
         self._schedule_set_chats()
         self._api_archive_chat(jid, archive=True)
 
     def unarchive_chat(self, jid: str):
         if jid in self._archived_chats:
             self._archived_chats.remove(jid)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+        self.settings["archived_chats"] = list(self._archived_chats)
+        self.save_settings()
         self._schedule_set_chats()
         self._api_archive_chat(jid, archive=False)
 
@@ -7858,16 +7856,16 @@ class MainWindow(wx.Frame):
     def pin_chat(self, jid: str):
         if jid not in self._pinned_chats:
             self._pinned_chats.add(jid)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
+        self.settings["pinned_chats"] = list(self._pinned_chats)
+        self.save_settings()
         self._schedule_set_chats()
         self._sync_pin_to_server(jid, pinned=True)
 
     def unpin_chat(self, jid: str):
         if jid in self._pinned_chats:
             self._pinned_chats.remove(jid)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
+        self.settings["pinned_chats"] = list(self._pinned_chats)
+        self.save_settings()
         self._schedule_set_chats()
         self._sync_pin_to_server(jid, pinned=False)
 
