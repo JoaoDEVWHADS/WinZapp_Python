@@ -5931,20 +5931,24 @@ class MainWindow(wx.Frame):
 
     @staticmethod
     def _find_api_ffmpeg() -> str:
-        """Locate ffmpeg binary: bundled npm package first, then system PATH."""
+        """Locate ffmpeg binary: check bundled lib/ first, then node_modules, then system PATH."""
         import glob as _glob
         import shutil
-        # @ffmpeg-installer/ffmpeg places the actual binary inside a platform-
-        # specific sub-package (e.g. @ffmpeg-installer/win32-x64/bin/ffmpeg.exe),
-        # NOT in @ffmpeg-installer/ffmpeg/bin/. Glob the entire scope so we find
-        # it regardless of which platform sub-package npm installed.
+        # 1. Check bundled lib/ directory first (packaged during build for remote API support)
+        bundled_lib = resource_path("lib")
+        for name in ["ffmpeg.exe", "ffmpeg"]:
+            path = os.path.join(bundled_lib, name)
+            if os.path.isfile(path):
+                return path
+
+        # 2. Bundled npm package (local API dev/run mode)
         installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
         hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
         if not hits:
             hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
         if hits:
             return hits[0]
-        # Fallback: ffmpeg on the system PATH (user-installed)
+        # 3. Fallback: ffmpeg on the system PATH (user-installed)
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
             return system_ffmpeg
