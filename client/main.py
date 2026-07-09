@@ -3897,8 +3897,7 @@ class MainWindow(wx.Frame):
                         elif isinstance(pin_val, (int, float)):
                             is_pinned = pin_val > 1000000
                         
-                        if chat.get("pinned") is True and not chat.get("isBusiness") and not chat.get("isEnterprise") and not chat.get("verifiedName"):
-                            is_pinned = True
+
 
                     if is_pinned:
                         if jid not in self._pinned_chats:
@@ -7756,7 +7755,7 @@ class MainWindow(wx.Frame):
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
                 r = requests.post(
-                    url, json={"phone": phone, "isGroup": phone.endswith("@g.us")},
+                    url, json={"phone": [phone], "isGroup": phone.endswith("@g.us")},
                     headers=headers, timeout=10,
                 )
                 if not r.ok:
@@ -7774,7 +7773,7 @@ class MainWindow(wx.Frame):
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
                 r = requests.post(
-                    url, json={"phone": phone, "isGroup": phone.endswith("@g.us")},
+                    url, json={"phone": [phone], "isGroup": phone.endswith("@g.us")},
                     headers=headers, timeout=10,
                 )
                 if not r.ok:
