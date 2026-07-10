@@ -827,6 +827,25 @@ class ConversationsPanel(wx.Panel):
             self._search_open_btn.Show()
             self._search_field.SetValue("")
         self.conversation = conversation
+        
+        # Load up to 200 messages from local DB when opening conversation to support fast startup
+        try:
+            _conv_jid = conversation.get("remoteJid", "")
+            if _conv_jid:
+                limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
+                db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)
+                db_msgs.reverse()
+                if "messages" not in conversation:
+                    conversation["messages"] = {}
+                conversation["messages"]["messages"] = {
+                    "total": self.main_window.db.get_message_count(_conv_jid),
+                    "pages": 1,
+                    "currentPage": 1,
+                    "records": db_msgs
+                }
+        except Exception as e:
+            logging.error(f"[navigate_to_conversation] Failed to load messages from DB: {e}")
+
         _conv_jid = conversation.get("remoteJid", "")
         self._last_open_jid = _conv_jid
         self.conversation_name = (

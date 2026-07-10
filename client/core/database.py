@@ -313,7 +313,7 @@ class DatabaseManager:
 
     # ── Chats ───────────────────────────────────────────────────────────────
 
-    async def get_chats(self) -> dict[str, dict]:
+    async def get_chats(self, limit: int = 5) -> dict[str, dict]:
         """Return all chats as ``{jid: chat_dict}``, compatible with main.py.
 
         Each chat dict includes a ``messages`` wrapper with the first
@@ -330,7 +330,7 @@ class DatabaseManager:
         for row in rows:
             jid = row["jid"]
             last_msg = self._decrypt_json(row["last_message_json"])
-            msgs = await self._build_message_wrapper(jid)
+            msgs = await self._build_message_wrapper(jid, limit=limit)
             t = 0
             try:
                 t = int(row["t"] or 0)
@@ -357,15 +357,15 @@ class DatabaseManager:
             }
         return result
 
-    async def _build_message_wrapper(self, jid: str) -> dict:
+    async def _build_message_wrapper(self, jid: str, limit: int = 200) -> dict:
         """Build the ``{messages: {{records: [...], total: N, ...}}}`` wrapper."""
         total = await self.get_message_count(jid)
-        records = await self.get_messages(jid, limit=_CHAT_PAGE_SIZE, offset=0)
+        records = await self.get_messages(jid, limit=limit, offset=0)
         return {
             "messages": {
                 "records": records,
                 "total": total,
-                "pages": max(1, (total + _CHAT_PAGE_SIZE - 1) // _CHAT_PAGE_SIZE),
+                "pages": max(1, (total + limit - 1) // limit),
                 "currentPage": 1,
             }
         }

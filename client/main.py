@@ -3625,9 +3625,9 @@ class MainWindow(wx.Frame):
             return self.chats.get(alt_jid)
         return None
 
-    def get_chats(self):
+    def get_chats(self, limit: int = 5):
         try:
-            return self.db.get_chats()
+            return self.db.get_chats(limit=limit)
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
@@ -5654,6 +5654,8 @@ class MainWindow(wx.Frame):
 
     def sync_if_media(self, msg, timeout=60):
         """Download media for a single message during the background sync phase."""
+        if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
+            return
         message_type = msg.get("messageType", "")
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
         if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
@@ -6813,6 +6815,7 @@ class MainWindow(wx.Frame):
                         "[get_base64_from_media] session not active for %s, retrying in 3s (attempt %d/%d)",
                         msg_id, attempt + 1, max_attempts
                     )
+                    self._wa_connected = False
                     if attempt < max_attempts - 1:
                         time.sleep(3)
                         continue
@@ -6837,6 +6840,7 @@ class MainWindow(wx.Frame):
                                 "[get_base64_from_media] session not active for %s (stream), retrying in 3s (attempt %d/%d)",
                                 msg_id, attempt + 1, max_attempts
                             )
+                            self._wa_connected = False
                             if attempt < max_attempts - 1:
                                 time.sleep(3)
                                 continue

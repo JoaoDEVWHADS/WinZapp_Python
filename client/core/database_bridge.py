@@ -148,8 +148,8 @@ class DatabaseBridge:
 
     # ── Delegated read methods ────────────────────────────────────────────────
 
-    def get_chats(self) -> dict[str, dict]:
-        return self._call(self._db.get_chats())
+    def get_chats(self, limit: int = 5) -> dict[str, dict]:
+        return self._call(self._db.get_chats(limit))
 
     def get_chat_jids(self) -> list[str]:
         return self._call(self._db.get_chat_jids())
