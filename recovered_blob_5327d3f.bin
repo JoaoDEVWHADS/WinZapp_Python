@@ -1,0 +1,9 @@
+[pytest]
+testpaths = tests
+markers =
+    timeout: mark test to fail if it runs longer than specified
+    slow: mark test as slow (deselect with -m "not slow")
+timeout = 30
+timeout_method = thread
+filterwarnings =
+    ignore::DeprecationWarning
