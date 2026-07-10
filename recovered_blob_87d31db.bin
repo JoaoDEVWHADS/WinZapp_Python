@@ -1,0 +1,22 @@
+{
+    "connection": {
+        "evolution_server": "http://127.0.0.1",
+        "evolution_port": 3417,
+        "evolution_ws_server": "ws://127.0.0.1",
+        "evolution_api_key": "wz-local-api-key"
+    },
+    "general": {
+        "language": "",
+        "sounds_enabled": true,
+        "notifications_enabled": true,
+        "updates_enabled": true,
+        "first_run": true,
+        "autostart": false,
+        "show_tray_icon": true,
+        "terms_alert_displayed": false,
+        "quick_tip_shown": false
+    },
+    "status": {
+        "messages_set_completed": false
+    }
+}
