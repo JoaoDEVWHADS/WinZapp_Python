@@ -1504,9 +1504,10 @@ export async function getMessages(req: Request, res: Response) {
 
         // 1. Check if the target anchor message exists in the browser Store
         let anchorExists = false;
+        let matchedMsgObj: any = null;
         if (id) {
-          const msg = await getMsgSafe(id);
-          if (msg) {
+          matchedMsgObj = await getMsgSafe(id);
+          if (matchedMsgObj) {
             anchorExists = true;
           }
         }
@@ -1571,7 +1572,16 @@ export async function getMessages(req: Request, res: Response) {
 
         // 3. Now query the final response
         let queryId = id;
-        if (id && !anchorExists) {
+        if (anchorExists && matchedMsgObj) {
+          const idObj = typeof matchedMsgObj.get === 'function' ? matchedMsgObj.get('id') : matchedMsgObj.id;
+          if (idObj && typeof idObj === 'object' && idObj._serialized) {
+            queryId = idObj._serialized;
+          } else if (typeof idObj === 'string') {
+            queryId = idObj;
+          } else if (matchedMsgObj.__x_id && matchedMsgObj.__x_id._serialized) {
+            queryId = matchedMsgObj.__x_id._serialized;
+          }
+        } else if (id && !anchorExists) {
           if (currentOldestId) {
             queryId = currentOldestId;
           }
