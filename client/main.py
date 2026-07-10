@@ -7929,15 +7929,22 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+        # Prefer `@lid` for API operations if mapped, as WPPConnect expects it
+        api_jid = jid
+        if not api_jid.endswith("@lid"):
+            alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(jid), "")
+            if alt_lid:
+                api_jid = alt_lid
+
         try:
             resp = requests.post(
                 url,
-                json={"phone": jid, "value": archive, "isGroup": jid.endswith("@g.us")},
+                json={"phone": api_jid, "value": archive, "isGroup": jid.endswith("@g.us")},
                 headers=headers,
                 timeout=10,
             )
             if not resp.ok:
-                print(f"[archive_chat] API error {resp.status_code} for {jid}: {resp.text[:200]}")
+                print(f"[archive_chat] API error {resp.status_code} for {jid} (api_jid: {api_jid}): {resp.text[:200]}")
         except Exception as exc:
             print(f"[archive_chat] Request failed for {jid}: {exc}")
 
@@ -8124,7 +8131,13 @@ class MainWindow(wx.Frame):
     def _sync_pin_to_server(self, jid: str, pinned: bool):
         def _do():
             try:
+                # Prefer `@lid` for API operations if mapped, as WPPConnect expects it
                 api_jid = jid
+                if not api_jid.endswith("@lid"):
+                    alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(jid), "")
+                    if alt_lid:
+                        api_jid = alt_lid
+
                 if api_jid.endswith("@s.whatsapp.net"):
                     api_jid = api_jid.rsplit("@", 1)[0] + "@c.us"
                 url = (f"{self.wpp_server}:{self.wpp_port}"
@@ -8140,8 +8153,8 @@ class MainWindow(wx.Frame):
                     timeout=10,
                 )
                 if not resp.ok:
-                    logging.warning("[pin_chat] API error %s for %s: %s",
-                                    resp.status_code, api_jid, resp.text[:200])
+                    logging.warning("[pin_chat] API error %s for %s (api_jid: %s): %s",
+                                    resp.status_code, jid, api_jid, resp.text[:200])
             except Exception:
                 pass
         threading.Thread(target=_do, daemon=True).start()
