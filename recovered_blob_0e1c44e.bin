@@ -1,0 +1,10 @@
+V0.10.0.0
+- Correção de contatos em branco com JID @lid.
+- Ajuste na formatação de JIDs de grupos.
+- Correção de AttributeError (connection_dial) ao desconectar do WebSocket:
+  Traceback (most recent call last):
+    File "C:\Users\JOO~1\AppData\Local\Temp\WINZAP~1\wx\core.py", line 3425, in <lambda>
+    File "C:\Users\JOO~1\AppData\Local\Temp\WINZAP~1\core\websocket_client.py", line 64, in _show_error
+  AttributeError: 'Connect' object has no attribute 'connection_dial'. Did you mean: 'connection_mode'?
+- Otimização do pipeline de compilação.
+- Integração do sistema de atualizações com o repositório GitHub de JoaoDEVWHADS.
