@@ -1,0 +1,9 @@
+HOST = 127.0.0.1
+PORT = 8081
+EVOLUTION_HOST = https://127.0.0.1
+EVOLUTION_PORT = 8080
+APIKEY = MY_API_KEY
+USE_SSL=true
+SSL_CERTFILE=/certs/localhost.pem
+SSL_KEYFILE=/certs/localhost-key.pem
+EVOLUTION_SSL_VERIFY=true
