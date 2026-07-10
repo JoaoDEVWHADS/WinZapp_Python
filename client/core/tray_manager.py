@@ -105,19 +105,19 @@ class TrayIcon(wx.adv.TaskBarIcon):
         # Only return unread info if initial sync has completed
         if getattr(mw, "_sync_completed", False):
             for jid, chat in mw.chats.items():
-            unread = effective_unread_count(chat)
-            if unread > 0:
-                total += unread
-                name = (
-                    mw._resolve_contact_name(chat)
-                    or mw.find_name_through_messages(chat)
-                    or chat.get("name", "")
-                    or chat.get("pushName", "")
-                    or mw.find_jid_through_messages(chat)
-                    or jid.split("@")[0]
-                )
-                if name:
-                    names.append(name)
+                unread = effective_unread_count(chat)
+                if unread > 0:
+                    total += unread
+                    name = (
+                        mw._resolve_contact_name(chat)
+                        or mw.find_name_through_messages(chat)
+                        or chat.get("name", "")
+                        or chat.get("pushName", "")
+                        or mw.find_jid_through_messages(chat)
+                        or jid.split("@")[0]
+                    )
+                    if name:
+                        names.append(name)
         return total, names
 
     def _build_tooltip(self, total, names):
