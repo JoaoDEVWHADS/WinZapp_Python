@@ -3075,6 +3075,15 @@ class ConversationsPanel(wx.Panel):
             self._sorted_messages     = self._deduplicate_messages(displayable + self._sorted_messages)
             self._messages_offset     = 0
             n_new = len(self._sorted_messages) - old_count
+            logging.info(f"[_on_older_messages_loaded] n_new={n_new}, displayable_count={len(displayable)}, total={len(self._sorted_messages)}")
+            
+            if n_new == 0:
+                # All fetched messages are duplicates — we've reached the beginning
+                phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
+                logging.info(f"[_on_older_messages_loaded] No new messages after dedup — marking reached_server_start for {phone_jid_val}")
+                if phone_jid_val:
+                    self._reached_server_start[phone_jid_val] = True
+                return
             
             # Recalculate unread separator index
             self._unread_sep_idx = -1
