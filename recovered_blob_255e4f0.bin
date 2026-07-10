@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /c/WinZapp/build)",
+      "Bash(windres uninstaller.rc -o /c/WinZapp/build/uninstaller_res.o --include-dir .)",
+      "Bash(gcc uninstaller.c /c/WinZapp/build/uninstaller_res.o -o /c/WinZapp/build/uninstall.exe -mwindows -I. -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32)",
+      "PowerShell(@\\(\"C:\\\\mingw64\", \"C:\\\\MinGW\", \"C:\\\\msys64\", \"C:\\\\msys2\", \"C:\\\\ProgramData\\\\mingw64\", \"C:\\\\Program Files\\\\mingw-w64\"\\) | ForEach-Object { if \\(Test-Path \"$_\\\\bin\\\\gcc.exe\"\\) { \"$_ -> FOUND gcc.exe\" } })",
+      "Bash(/c/msys64/ucrt64/bin/windres.exe uninstaller.rc -o /c/WinZapp/build/uninstaller_res.o --include-dir .)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(/c/msys64/ucrt64/bin/windres.exe --verbose uninstaller.rc -o /c/WinZapp/build/uninstaller_res.o --include-dir .)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -E -xc -DRC_INVOKED -I. uninstaller.rc)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -E -xc -DRC_INVOKED \"-I/c/WinZapp/installer\" \"/c/WinZapp/installer/uninstaller.rc\")",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -v -E -xc -DRC_INVOKED \"-I/c/WinZapp/installer\" \"/c/WinZapp/installer/uninstaller.rc\")",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -v -E -xc -DRC_INVOKED \"-I/c/WinZapp/installer\" \"-I/c/msys64/ucrt64/include\" \"/c/WinZapp/installer/uninstaller.rc\")",
+      "Bash(/c/WinZapp/venv/Scripts/python.exe -m nuitka --help)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe /c/WinZapp/installer/installer.c /c/WinZapp/build/installer_res.o -o /c/WinZapp/build/installer_stub.exe -mwindows -I/c/WinZapp/installer -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32 -v)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe /c/WinZapp/installer/installer.c /c/WinZapp/build/installer_res.o -o /c/WinZapp/build/installer_stub.exe -mwindows -I/c/WinZapp/installer -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32 -Wl,--verbose)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -c /c/WinZapp/installer/installer.c -o /c/WinZapp/build/installer.o -I/c/WinZapp/installer -mwindows)",
+      "Bash(echo \"Compile exit: $?\")",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe /c/WinZapp/build/installer.o /c/WinZapp/build/installer_res.o -o /c/WinZapp/build/installer_stub.exe -mwindows -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32)",
+      "Bash(echo \"Link exit: $?\")",
+      "Bash(/c/msys64/ucrt64/bin/ld.exe -m i386pep --subsystem windows /c/WinZapp/build/installer.o /c/WinZapp/build/installer_res.o -o /c/WinZapp/build/installer_stub.exe -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32 -L/c/msys64/ucrt64/lib)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe /c/WinZapp/build/installer.o /c/WinZapp/build/installer_res.o -o /c/WinZapp/build/installer_stub.exe -mwindows -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32 -lkernel32 -luser32)",
+      "PowerShell(cd C:\\\\WinZapp; Add-Type -AssemblyName System.IO.Compression.FileSystem; $z = [System.IO.Compression.ZipFile]::OpenRead\\(\"dist\\\\WinZapp.zip\"\\); $z.Entries | Sort-Object FullName | Select-Object -First 25 | ForEach-Object { $_.FullName }; Write-Host \"--- Total: $\\($z.Entries.Count\\) entries\"; $z.Dispose\\(\\))",
+      "Bash(Get-ChildItem -Path \"C:\\\\WinZapp\" -Recurse -Depth 3 -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Read(//c/msys64/ucrt64/bin/**)",
+      "Read(//c/msys64/mingw64/bin/**)"
+    ]
+  }
+}
