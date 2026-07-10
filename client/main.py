@@ -41,6 +41,9 @@ from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
 import wx
 import wx.adv
+if sys.platform == "win32":
+    from core.tray_manager import TrayIcon
+from core.notification_manager import NotificationManager
 from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
