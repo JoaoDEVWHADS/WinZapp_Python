@@ -1453,6 +1453,9 @@ export async function getMessages(req: Request, res: Response) {
     if (direction === 'before' && id) {
       req.logger.info(`Fetching older messages before ${id} for ${phone} using browser-side sync...`);
       response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
+        if (!(window as any).Store || !(window as any).Store.Chat) {
+          return [];
+        }
         const getMsgSafe = async (msgId: string) => {
           try {
             const exact = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
@@ -1611,6 +1614,9 @@ export async function getMessages(req: Request, res: Response) {
     } else {
       // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package and avoids WAPI issues
       response = await req.client.page.evaluate(({ chatId, params }) => {
+        if (!(window as any).Store || !(window as any).Store.Chat) {
+          return [];
+        }
         return (window as any).WPP.chat.getMessages(chatId, params);
       }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
     }
