@@ -3004,7 +3004,7 @@ class ConversationsPanel(wx.Panel):
         
         def _fetch():
             try:
-                phone_jid = self.conversation.get("remoteJid", "")
+                phone_jid = self.main_window._normalize_jid(self.conversation.get("remoteJid", ""))
                 fetched = self.main_window.fetch_older_messages(phone_jid, oldest_msg)
                 if fetched:
                     wx.CallAfter(self._on_older_messages_loaded, fetched)

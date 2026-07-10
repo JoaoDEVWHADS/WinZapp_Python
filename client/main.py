@@ -5490,7 +5490,9 @@ class MainWindow(wx.Frame):
         api_ok = False
         # Skip API call entirely if session is known disconnected
         if getattr(self, "_wa_connected", False):
-            max_retries = 12
+            # Use only 3 retries with max 5s sleep so a bad JID (e.g. :60@lid suffix
+            # in the local DB) doesn't block the entire sync thread for minutes.
+            max_retries = 3
             for attempt in range(max_retries):
                 if not getattr(self, "_wa_connected", False):
                     logging.info(f"[sync_chat_messages] Connection lost during sync retry loop for {remote_jid}, aborting sync.")
@@ -5543,12 +5545,11 @@ class MainWindow(wx.Frame):
                         # 401 = "Error on open list" (Baileys not ready yet)
                         # 404 = session not active
                         # 500 = transient WPPConnect internal error
-                        # All are retryable — wait briefly and try again.
+                        # Short sleep only — keep sync moving quickly.
                         logging.warning(f"[sync_chat_messages] Retryable error {response.status_code} for {remote_jid} (attempt {attempt+1}/{max_retries}): {response.text[:120]}")
                         if attempt < max_retries - 1:
-                            sleep_time = min(5 * (attempt + 1), 30)
+                            sleep_time = min(5, 5 * (attempt + 1))
                             logging.info(f"[sync_chat_messages] Sleeping {sleep_time} seconds before attempt {attempt+2} for {remote_jid}...")
-                            # Check connection repeatedly while sleeping
                             for _ in range(sleep_time):
                                 if not getattr(self, "_wa_connected", False):
                                     break
@@ -7006,8 +7007,15 @@ class MainWindow(wx.Frame):
         remote_jid = self._normalize_jid(remote_jid)
         
         # Check if history is already marked as exhausted in-memory
-        if remote_jid in getattr(self, "_exhausted_chats", set()):
-            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
+        # Also check the alternate JID (LID <-> phone) in case it was exhausted
+        # under the other form.
+        exhausted = getattr(self, "_exhausted_chats", set())
+        alt_jid = (
+            getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+            or getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        )
+        if remote_jid in exhausted or (alt_jid and alt_jid in exhausted):
+            logging.info(f"[fetch_older_messages] History already marked as exhausted for {remote_jid}, skipping API query.")
             return []
 
         # Use remote_jid resolved to @lid (if available) for the URL parameter.
