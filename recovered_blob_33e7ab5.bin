@@ -1,0 +1,246 @@
+name: Release WinZapp
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão da Release (Deixe em branco para usar a data/hora atual)"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Código-Fonte
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Definir Versão da Release
+        shell: pwsh
+        run: |
+          $ver = "${{ inputs.version }}"
+          if ([string]::IsNullOrEmpty($ver)) {
+              $ver = Get-Date -Format "yyyy.MM.dd.HHmm"
+          }
+          echo "RELEASE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "[INFO] Versão definida para: $ver"
+
+      - name: Atualizar versão no version.py
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_VERSION }}"
+          $filePath = "client/version.py"
+          $content = "__version__ = `"$ver`""
+          $content | Out-File -FilePath $filePath -Encoding utf8 -NoNewline
+          Write-Output "[INFO] Arquivo version.py atualizado para a versão $ver."
+
+      - name: Configurar Git, Commit e Tag
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_VERSION }}"
+          git config --local user.name "github-actions"
+          git config --local user.email "github-actions@github.com"
+          git add client/version.py
+          git commit -m "chore: bump version to $ver [skip ci]"
+          git tag "v$ver"
+          git push origin HEAD:main
+          git push origin "v$ver"
+          Write-Output "[INFO] Alterações enviadas e tag v$ver criada."
+
+      - name: Configurar Arquivos .env
+        shell: pwsh
+        run: |
+          $envContent = @"
+          WPPCONNECT_TAG_VERSION=2.10.0
+          WPPCONNECT_API_MINIMUM_VERSION=2.10.0
+          LICENSING_USER_EMAIL=gabrielhaberkamp@gmail.com
+          "@
+          $envContent | Out-File -FilePath ".env" -Encoding utf8
+          $envContent | Out-File -FilePath "client/.env" -Encoding utf8
+          Write-Output "[INFO] Arquivos .env criados para o build."
+
+      - name: Configurar Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Instalar Dependências do Python
+        run: |
+          python -m venv venv
+          ./venv/Scripts/python -m pip install --upgrade pip
+          ./venv/Scripts/pip install -r requirements.txt
+          ./venv/Scripts/pip install zstandard pyinstaller pycdlib
+
+      - name: Configurar MSYS2 (para gcc, windres e opus)
+        uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-opus
+
+      - name: Adicionar MSYS2 GCC ao Path do Windows
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Copiar DLL do libopus e bassopus para client/lib
+        run: |
+          New-Item -ItemType Directory -Force client\lib | Out-Null
+          Copy-Item "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin\libopus-0.dll" "client\lib\libopus-0.dll"
+          if (Test-Path "client\lib\bass_opus.dll") {
+            Copy-Item "client\lib\bass_opus.dll" "client\lib\bassopus.dll" -Force
+          }
+
+      - name: Cache Base QEMU Disk Image
+        id: cache-qemu-disk
+        uses: actions/cache@v4
+        with:
+          path: client/system/ubuntu-22.04.qcow2
+          key: qemu-ubuntu-base-cloud-v1
+
+      - name: Instalar QEMU Portátil (Se não estiver em cache)
+        id: cache-qemu-bin
+        uses: actions/cache@v4
+        with:
+          path: client/qemu
+          key: qemu-portable-win-v2
+
+      - name: Baixar QEMU Portátil se não houver Cache
+        if: steps.cache-qemu-bin.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install qemu --no-progress -y
+          New-Item -ItemType Directory -Force -Path "client/qemu"
+          Copy-Item "C:\Program Files\qemu\*" "client/qemu" -Recurse -Force
+          Write-Host "[OK] QEMU installed via Chocolatey and copied to client/qemu"
+
+      - name: Construir Imagem Base QEMU Ubuntu se não houver Cache
+        if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "client/system"
+          # Download Canonical's official minimal Ubuntu 22.04 LTS cloud image (QCOW2 format)
+          Invoke-WebRequest -Uri "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img" -OutFile "client/system/ubuntu-22.04.qcow2"
+          
+          # Create cloud-init configuration
+          $userData = @"
+          #cloud-config
+          users:
+            - name: user
+              ssh_pwauth: True
+              plain_text_passwd: 'password'
+              sudo: ['ALL=(ALL) NOPASSWD:ALL']
+              groups: sudo
+              shell: /bin/bash
+          packages:
+            - docker.io
+            - openssh-server
+          runcmd:
+            - systemctl enable docker
+            - systemctl start docker
+            - systemctl enable ssh
+            - systemctl start ssh
+          "@
+          $userData | Out-File -FilePath "user-data" -Encoding utf8
+          
+          $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
+          $metaData | Out-File -FilePath "meta-data" -Encoding utf8
+          
+          # Generate cidata.iso using Python's pycdlib
+          $pythonCode = @"
+          import pycdlib
+          iso = pycdlib.PyCdlib()
+          iso.new(interchange_level=1)
+          iso.add_file('user-data', '/USER_DATA.;1')
+          iso.add_file('meta-data', '/META_DATA.;1')
+          iso.write('cidata.iso')
+          iso.close()
+          "@
+          $pythonCode | Out-File -FilePath "generate_iso.py" -Encoding utf8
+          ./venv/Scripts/python generate_iso.py
+          
+          # Add QEMU to path
+          $qemuDir = "$(Resolve-Path client/qemu)"
+          $env:PATH = "$qemuDir;$env:PATH"
+          
+          # Resize the cloud image to 10GB to have enough room for Docker layers
+          & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
+          
+          # Boot VM in background with the cloud-init configuration CD-ROM to auto-install Docker
+          Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user -nographic" -PassThru
+          
+          # Wait 90 seconds for cloud-init to finish installing Docker/SSH
+          Start-Sleep -Seconds 90
+          
+          # Clean VM shutdown
+          Stop-Process -Id $qemuProcess.Id -Force
+          Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
+          Write-Host "[OK] Base virtual disk image created and cached successfully."
+
+      - name: Preparar contexto Docker da API
+        run: |
+          python setup_api.py
+
+      - name: Setup Docker Buildx & Cache
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image and export to tar
+        uses: docker/build-push-action@v5
+        with:
+          context: client/api
+          tags: wppconnect-api:latest
+          outputs: type=docker,dest=client/api/wppconnect-api.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Injetar Imagem Docker no QCOW2
+        shell: pwsh
+        run: |
+          # Copy QEMU bin folder to PATH
+          $qemuDir = "$(Resolve-Path client/qemu)"
+          $env:PATH = "$qemuDir;$env:PATH"
+          
+          # Start QEMU headless VM in background
+          $qemuProcess = Start-Process -FilePath "$qemuDir/qemu-system-x86_64.exe" -ArgumentList "-m 1024M -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic" -PassThru
+          
+          # Wait 20 seconds for boot
+          Start-Sleep -Seconds 20
+          
+          # Transfer the Docker tar and execute docker load inside the VM
+          $sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222"
+          scp $sshOpts client/api/wppconnect-api.tar user@127.0.0.1:/home/user/wppconnect-api.tar
+          ssh $sshOpts user@127.0.0.1 "docker load -i /home/user/wppconnect-api.tar && docker tag wppconnect-api:latest wppconnect-api:current && rm /home/user/wppconnect-api.tar"
+          
+          # Shutdown VM cleanly
+          ssh $sshOpts user@127.0.0.1 "sudo poweroff"
+          Wait-Process -Id $qemuProcess.Id
+
+      - name: Compilar WinZapp e Gerar Instalador
+        shell: pwsh
+        run: |
+          python build.py
+
+      - name: Criar GitHub Release e Fazer Upload dos Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.RELEASE_VERSION }}
+          name: Versão ${{ env.RELEASE_VERSION }}
+          files: |
+            dist/WinZappInstaller.exe
+            dist/WinZapp.zip
+          generate_release_notes: true
