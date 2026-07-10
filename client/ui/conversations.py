@@ -804,12 +804,25 @@ class ConversationsPanel(wx.Panel):
         self._hide_audio_controls()
         self._hide_all_media_controls()
         self._hide_attachment_panel()
+        self._dismiss_unread_separator()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
         self._first_unread_msg_id = None
         self._first_unread_count = 0
         if self._unread_sep_dismiss_timer.IsRunning():
             self._unread_sep_dismiss_timer.Stop()
+        
+        # Clear exhausted cache for the selected conversation to allow scrolling fresh
+        _conv_jid = conversation.get("remoteJid", "")
+        if _conv_jid and hasattr(self.main_window, "_exhausted_chats"):
+            self.main_window._exhausted_chats.discard(_conv_jid)
+            alt_jid = (
+                getattr(self.main_window, "_lid_to_phone", {}).get(_conv_jid, "")
+                or getattr(self.main_window, "_phone_to_lid", {}).get(_conv_jid, "")
+            )
+            if alt_jid:
+                self.main_window._exhausted_chats.discard(alt_jid)
+
         self._quoted_message = None
         self._reaction_map   = {}
         # Reset mention state for the new conversation
