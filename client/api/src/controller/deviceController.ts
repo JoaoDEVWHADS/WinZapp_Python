@@ -1480,9 +1480,10 @@ export async function getMessages(req: Request, res: Response) {
                   return false;
                 };
 
-                const found = typeof chatModel.msgs.find === 'function' 
-                  ? chatModel.msgs.find(searchFn)
-                  : (Array.isArray(chatModel.msgs) ? chatModel.msgs.find(searchFn) : null);
+                const models = chatModel.msgs.models || (Array.isArray(chatModel.msgs) ? chatModel.msgs : null);
+                const found = models && typeof models.find === 'function'
+                  ? models.find(searchFn)
+                  : (typeof chatModel.msgs.find === 'function' ? chatModel.msgs.find(searchFn) : null);
                 if (found) return found;
               }
             }
