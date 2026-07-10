@@ -1,0 +1,21 @@
+[INFO] Stashed custom file: src/config.ts
+[INFO] Stashed custom file: src/index.ts
+[INFO] Stashed custom file: src/util/createSessionUtil.ts
+[INFO] Stashed custom file: src/util/functions.ts
+[INFO] Stashed custom file: src/middleware/statusConnection.ts
+[INFO] Stashed custom file: src/controller/deviceController.ts
+[INFO] Stashed custom file: src/controller/messageController.ts
+[INFO] Stashed custom file: src/controller/sessionController.ts
+[INFO] Stashed custom file: src/routes/index.ts
+[INFO] Stashed custom file: decrypt.js
+[INFO] Stashed custom file: start.js
+[INFO] Stashed custom file: package.json
+[INFO] Stashed custom file: config.json
+[INFO] WPPConnect Server files are missing, fetching via temp clone...
+  $ git clone https://github.com/wppconnect-team/wppconnect-server.git D:\a\WinZapp_Python\WinZapp_Python\client\api_temp
+Cloning into 'D:\a\WinZapp_Python\WinZapp_Python\client\api_temp'...
+[INFO] Checking out tag: 2.10.0
+  $ git checkout -f 2.10.0
+error: pathspec '2.10.0' did not match any file(s) known to git
+
+[ERROR] Command failed (exit 1).
