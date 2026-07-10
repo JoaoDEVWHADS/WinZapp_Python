@@ -1,0 +1,10 @@
+#define IDC_INSTALL_PATH   1001
+#define IDC_BROWSE         1002
+#define IDC_DESKTOP_SC     1003
+#define IDC_STARTMENU_SC   1004
+#define IDC_PROGRESS       1005
+#define IDC_STATUS         1006
+#define IDC_INSTALL        1007
+#define IDC_CANCEL         1008
+#define IDD_INSTALL        101
+#define IDD_UNINSTALL      102
