@@ -41,6 +41,9 @@ from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
 import wx
 import wx.adv
+if sys.platform == "win32":
+    from core.tray_manager import TrayIcon
+from core.notification_manager import NotificationManager
 from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
@@ -1231,9 +1234,16 @@ class MainWindow(wx.Frame):
 
     @staticmethod
     def _normalize_jid(jid: str) -> str:
-        """Normalize WhatsApp JID: replace the legacy @c.us suffix with @s.whatsapp.net.
+        """Normalize WhatsApp JID: strip device suffix (e.g. :1, :60) and replace legacy @c.us with @s.whatsapp.net.
         @g.us (groups) and @lid (linked-device IDs) are left unchanged."""
-        if jid and jid.endswith("@c.us"):
+        if not jid:
+            return jid
+        # Strip companion device suffix if present (e.g. "5511919177719:60@c.us" -> "5511919177719@c.us")
+        if ":" in jid and "@" in jid:
+            parts = jid.split("@", 1)
+            base = parts[0].split(":", 1)[0]
+            jid = f"{base}@{parts[1]}"
+        if jid.endswith("@c.us"):
             return jid[:-5] + "@s.whatsapp.net"
         return jid
 
@@ -6994,13 +7004,10 @@ class MainWindow(wx.Frame):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
         
-        # Check if history is already marked as exhausted in the DB
-        try:
-            if self.db.get_metadata(f"exhausted_{remote_jid}") == "1":
-                logging.info(f"[fetch_older_messages] History already marked as exhausted for {remote_jid}, skipping API query.")
-                return []
-        except Exception as e:
-            logging.error(f"[fetch_older_messages] Failed to check exhausted state: {e}")
+        # Check if history is already marked as exhausted in-memory
+        if remote_jid in getattr(self, "_exhausted_chats", set()):
+            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
+            return []
 
         # Use remote_jid resolved to @lid (if available) for the URL parameter.
         # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs.
@@ -7083,13 +7090,12 @@ class MainWindow(wx.Frame):
                 if not isinstance(wpp_messages, list):
                     wpp_messages = []
                 
-                # If API returned no messages, mark history as exhausted
+                # If API returned no messages, mark history as exhausted in-memory
                 if not wpp_messages:
-                    try:
-                        self.db.set_metadata(f"exhausted_{remote_jid}", "1")
-                        logging.info(f"[fetch_older_messages] Marked history as exhausted for {remote_jid}")
-                    except Exception as e:
-                        logging.error(f"[fetch_older_messages] Failed to mark exhausted state: {e}")
+                    if not hasattr(self, "_exhausted_chats"):
+                        self._exhausted_chats = set()
+                    self._exhausted_chats.add(remote_jid)
+                    logging.info(f"[fetch_older_messages] Marked history as exhausted in-memory for {remote_jid}")
                 
                 fetched_messages = []
                 for wm in wpp_messages:
