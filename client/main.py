@@ -3194,6 +3194,23 @@ class MainWindow(wx.Frame):
         # reconnection when the WPPConnect doesn't re-send messages.set.
         self.messages_set_completed = False
         self.wait_messages_set()
+        self.start_connection_health_checker()
+
+    def start_connection_health_checker(self):
+        """Periodically verify session health and auto-restart Puppeteer if closed."""
+        def _loop():
+            # Wait a bit after startup before starting checks
+            time.sleep(30)
+            while True:
+                try:
+                    if not getattr(self, "_wa_connected", False) and not getattr(self, "offline_mode", False):
+                        logging.info("[health_checker] Connection down. Checking session status on API server...")
+                        self.check_wa_connection_http()
+                except Exception as e:
+                    logging.warning(f"[health_checker] Error checking connection in background: {e}")
+                time.sleep(30)
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
