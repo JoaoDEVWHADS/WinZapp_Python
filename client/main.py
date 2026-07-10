@@ -3860,7 +3860,15 @@ class MainWindow(wx.Frame):
                             # incremented since the server snapshot was taken.
                             # But always accept a server-reported positive value
                             # so that newly-arrived unread chats show up.
-                            # Trust the server unreadCount value directly
+                            if k == "unreadCount":
+                                server_val = int(v or 0)
+                                local_val = int(chats[jid].get("unreadCount") or 0)
+                                # During startup sync (before messages_set_completed is True),
+                                # WPPConnect often returns 0 unreadCount because WhatsApp Web has
+                                # not fully finished syncing chats from the phone yet.
+                                # Keep the local count to prevent startup wipe of unread badges.
+                                if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
+                                    continue
                             chats[jid][k] = v
                         # WPPConnect may return the group name only in "subject".
                         # If the existing entry still has no name, pull it from subject.
