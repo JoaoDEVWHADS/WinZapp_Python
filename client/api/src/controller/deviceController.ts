@@ -1510,34 +1510,23 @@ export async function getMessages(req: Request, res: Response) {
           return `${fromMe}_${remote}_${msgId}`;
         };
 
-        // Ensure the chat is loaded in the browser store
+        // 1. Open the chat in the browser to force it to load messages into memory
         try {
-          if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
-            await (window as any).WPP.chat.find(chatId);
+          if ((window as any).WPP.chat.openChatBottom) {
+            await (window as any).WPP.chat.openChatBottom(chatId);
+          } else if ((window as any).WPP.chat.openChat) {
+            await (window as any).WPP.chat.openChat(chatId);
           }
+          // Wait for the chat to load
+          await new Promise((r) => setTimeout(r, 1500));
         } catch (e) {
-          // Ignore
+          // Ignore errors opening chat
         }
 
-        // 1. Check if the target anchor message exists in the browser Store
-        let anchorExists = false;
-        let matchedMsgObj: any = null;
-        if (id) {
-          matchedMsgObj = await getMsgSafe(id);
-          if (matchedMsgObj) {
-            anchorExists = true;
-          }
-        }
-
-        // 2. If the anchor doesn't exist, load history from the server page-by-page (progressing backward)
-        let attempts = 0;
-        const maxAttempts = 10;
-        let currentOldestId: string | null = null;
-        let previousOldestId: string | null = null;
-
-        // Initialize currentOldestId with the oldest message currently in the store
+        // 2. Get the oldest message currently loaded in the browser store
+        let oldestInStoreId: string | null = null;
         try {
-          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+          const currentMsgs: any[] = await (window as any).WPP.chat.getMessages(chatId, { count: 50 });
           if (currentMsgs && currentMsgs.length > 0) {
             let oldestMsg = currentMsgs[0];
             for (const m of currentMsgs) {
@@ -1545,63 +1534,67 @@ export async function getMessages(req: Request, res: Response) {
                 oldestMsg = m;
               }
             }
-            currentOldestId = oldestMsg.id._serialized || oldestMsg.id;
+            oldestInStoreId = (oldestMsg.id && oldestMsg.id._serialized) ? oldestMsg.id._serialized : String(oldestMsg.id);
           }
         } catch (err) {
           // Ignore
         }
-        
-        while (id && !anchorExists && attempts < maxAttempts) {
-          try {
-            if (!currentOldestId || currentOldestId === previousOldestId) {
-              break;
-            }
-            previousOldestId = currentOldestId;
-            
-            const loaded: any[] = await (window as any).WPP.chat.getMessages(chatId, {
-              count: 100,
-              direction: 'before',
-              id: currentOldestId
+
+        // 3. If we have an oldest stored message, paginate backward from it
+        //    Keep going until we find the anchor message or exhaust history
+        let queryId = oldestInStoreId;
+        const anchorMsgId = id ? id.split('_')[2] : null; // Extract just the hex message ID
+        let anchorFound = false;
+
+        if (anchorMsgId && oldestInStoreId) {
+          let attempts = 0;
+          const maxAttempts = 15;
+          let prevId: string | null = null;
+
+          while (attempts < maxAttempts && queryId && queryId !== prevId) {
+            prevId = queryId;
+            let loaded: any[] = [];
+            try {
+              loaded = await (window as any).WPP.chat.getMessages(chatId, {
+                count: 50,
+                direction: 'before',
+                id: queryId
+              });
+            } catch (e) { break; }
+
+            if (!loaded || loaded.length === 0) break;
+
+            // Check if the anchor message is among the loaded batch
+            const found = loaded.find((m: any) => {
+              const mid = m.id && typeof m.id === 'object' ? m.id.id : null;
+              return mid === anchorMsgId;
             });
-            
-            if (!loaded || loaded.length === 0) {
+
+            if (found) {
+              anchorFound = true;
+              // Use the found message's own serialized ID as the query anchor
+              queryId = (found.id && found.id._serialized) ? found.id._serialized : queryId;
               break;
             }
-            
-            let oldestMsg = loaded[0];
+
+            // Move to the oldest of this batch
+            let oldest = loaded[0];
             for (const m of loaded) {
-              if (m.t < oldestMsg.t) {
-                oldestMsg = m;
-              }
+              if (m.t < oldest.t) oldest = m;
             }
-            currentOldestId = oldestMsg.id._serialized || oldestMsg.id;
-            
-            const checkMsg = await getMsgSafe(id);
-            if (checkMsg) {
-              anchorExists = true;
-              break;
-            }
-          } catch (err) {
-            break;
-          }
-          attempts++;
-        }
-
-        // 3. Now query the final response
-        let queryId = id;
-        if (anchorExists && matchedMsgObj) {
-          const idObj = typeof matchedMsgObj.get === 'function' ? matchedMsgObj.get('id') : matchedMsgObj.id;
-          const serialized = getSerializedId(idObj) || getSerializedId(matchedMsgObj.__x_id);
-          if (serialized) {
-            queryId = serialized;
-          }
-        } else if (id && !anchorExists) {
-          if (currentOldestId) {
-            queryId = currentOldestId;
+            const newId = (oldest.id && oldest.id._serialized) ? oldest.id._serialized : String(oldest.id);
+            if (newId === queryId) break; // No progress
+            queryId = newId;
+            attempts++;
           }
         }
 
+        // 4. Fetch the final page of messages before the anchor (or oldest available)
         try {
+          if (!queryId) {
+            // No anchor at all, just return the latest
+            return await (window as any).WPP.chat.getMessages(chatId, { count: targetCount });
+          }
           return await (window as any).WPP.chat.getMessages(chatId, {
             count: targetCount,
             direction: 'before',
@@ -1611,6 +1604,7 @@ export async function getMessages(req: Request, res: Response) {
           return [];
         }
       }, { chatId: phone, targetCount, id: id as string });
+
     } else {
       // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package and avoids WAPI issues
       response = await req.client.page.evaluate(({ chatId, params }) => {
