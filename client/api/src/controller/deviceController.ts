@@ -1453,10 +1453,14 @@ export async function getMessages(req: Request, res: Response) {
     if (direction === 'before' && id) {
       req.logger.info(`Fetching older messages before ${id} for ${phone} using browser-side sync...`);
       response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
+        console.log(`[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`);
         const getMsgSafe = async (msgId: string) => {
           try {
-            return (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            const m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            console.log(`[browser-evaluate] getMsgSafe for ${msgId}: ${m ? 'Found' : 'Not Found'}`);
+            return m;
           } catch (e) {
+            console.log(`[browser-evaluate] getMsgSafe error for ${msgId}: ${e}`);
             return null;
           }
         };
@@ -1477,7 +1481,9 @@ export async function getMessages(req: Request, res: Response) {
 
         // Get initial oldest message currently loaded
         if (id && !anchorExists) {
+          console.log(`[browser-evaluate] Anchor not found in store. Fetching current messages to find oldest...`);
           const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+          console.log(`[browser-evaluate] Current messages in store count: ${currentMsgs ? currentMsgs.length : 0}`);
           if (currentMsgs && currentMsgs.length > 0) {
             let oldestMsg = currentMsgs[0];
             for (const m of currentMsgs) {
@@ -1486,16 +1492,19 @@ export async function getMessages(req: Request, res: Response) {
               }
             }
             oldestId = oldestMsg.id._serialized || oldestMsg.id;
+            console.log(`[browser-evaluate] Oldest loaded message JID/ID: ${oldestId}`);
           }
         }
 
         while (id && !anchorExists && oldestId && attempts < maxAttempts) {
+          console.log(`[browser-evaluate] Walkback attempt ${attempts + 1}/${maxAttempts} from oldestId=${oldestId}...`);
           const loaded = await (window as any).WPP.chat.getMessages(chatId, {
             count: 100,
             direction: 'before',
             id: oldestId
           });
           
+          console.log(`[browser-evaluate] Walkback returned ${loaded ? loaded.length : 0} messages`);
           if (!loaded || loaded.length === 0) {
             break;
           }
@@ -1512,6 +1521,7 @@ export async function getMessages(req: Request, res: Response) {
           const checkMsg = await getMsgSafe(id);
           if (checkMsg) {
             anchorExists = true;
+            console.log(`[browser-evaluate] Anchor found during walkback!`);
             break;
           }
           
@@ -1523,7 +1533,9 @@ export async function getMessages(req: Request, res: Response) {
         if (id && !anchorExists) {
           if (oldestId) {
             queryId = oldestId;
+            console.log(`[browser-evaluate] Anchor not found after walkback. Falling back to oldestId: ${queryId}`);
           } else {
+            console.log(`[browser-evaluate] Anchor not found, and no oldestId resolved. Fetching default messages...`);
             const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
             if (currentMsgs && currentMsgs.length > 0) {
               let oldestMsg = currentMsgs[0];
@@ -1537,6 +1549,7 @@ export async function getMessages(req: Request, res: Response) {
           }
         }
 
+        console.log(`[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`);
         return (window as any).WAPI.getMessages(chatId, {
           count: targetCount,
           direction: 'before',
