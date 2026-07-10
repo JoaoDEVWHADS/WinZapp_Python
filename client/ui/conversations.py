@@ -814,6 +814,7 @@ class ConversationsPanel(wx.Panel):
             self._unread_sep_dismiss_timer.Stop()
         self._quoted_message = None
         self._reaction_map   = {}
+        self._is_loading_more = False
         # Reset mention state for the new conversation
         self._pending_mentions.clear()
         self._pending_mention_display_names.clear()
@@ -2946,9 +2947,11 @@ class ConversationsPanel(wx.Panel):
                 if displayable:
                     self.messages_list.Freeze()
                     try:
+                        old_count = len(self._sorted_messages)
                         self._all_sorted_messages = self._deduplicate_messages(displayable + self._all_sorted_messages)
                         self._sorted_messages     = self._deduplicate_messages(displayable + self._sorted_messages)
                         self._messages_offset     = 0
+                        n_new = len(self._sorted_messages) - old_count
                         
                         # Recalculate unread separator index
                         self._unread_sep_idx = -1
@@ -2961,7 +2964,6 @@ class ConversationsPanel(wx.Panel):
                         for msg in self._sorted_messages:
                             self.messages_list.Append((self._render_message_line(msg),))
                             
-                        n_new = len(displayable)
                         self.messages_list.Focus(n_new)
                         self.messages_list.Select(n_new, True)
                         self.messages_list.EnsureVisible(n_new)
@@ -2979,10 +2981,12 @@ class ConversationsPanel(wx.Panel):
     def _load_older_messages_from_server(self):
         """Fetch older messages from server when the beginning of local history is reached."""
         if not self.conversation or not self._all_sorted_messages:
+            self._is_loading_more = False
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
         if phone_jid and phone_jid in getattr(self, "_reached_server_start", {}):
+            self._is_loading_more = False
             return
         
         # Get oldest non-separator and non-pending message ID
@@ -3043,13 +3047,13 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             pass
             
-        n_new = len(displayable)
-        
         self.messages_list.Freeze()
         try:
+            old_count = len(self._sorted_messages)
             self._all_sorted_messages = self._deduplicate_messages(displayable + self._all_sorted_messages)
             self._sorted_messages     = self._deduplicate_messages(displayable + self._sorted_messages)
             self._messages_offset     = 0
+            n_new = len(self._sorted_messages) - old_count
             
             # Recalculate unread separator index
             self._unread_sep_idx = -1
