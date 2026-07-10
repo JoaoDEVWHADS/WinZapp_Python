@@ -3015,11 +3015,14 @@ class ConversationsPanel(wx.Panel):
             try:
                 phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
-                if fetched:
-                    wx.CallAfter(self._on_older_messages_loaded, fetched)
+                if fetched is not None:
+                    if fetched:
+                        wx.CallAfter(self._on_older_messages_loaded, fetched)
+                    else:
+                        if phone_jid_val:
+                            self._reached_server_start[phone_jid_val] = True
+                        self._is_loading_more = False
                 else:
-                    if phone_jid_val:
-                        self._reached_server_start[phone_jid_val] = True
                     self._is_loading_more = False
             except Exception as e:
                 print(f"[_load_older_messages_from_server] error: {e}")
