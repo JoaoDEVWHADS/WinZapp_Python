@@ -1,0 +1,7 @@
+[pytest]
+testpaths = tests
+pythonpath = client
+asyncio_mode = auto
+markers =
+    slow: tests that run migration on large datasets
+    integration: tests that require a real wx.App
