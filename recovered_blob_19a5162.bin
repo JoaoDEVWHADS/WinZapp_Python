@@ -1,0 +1,16 @@
+{
+    "language": "pt",
+    "connection": {
+        "authentication_server": "127.0.0.1",
+        "authentication_port": 8081,
+        "evolution_server": "127.0.0.1",
+        "evolution_port": 8080
+    },
+    "status": {
+        "terms_alert_displayed": false
+    },
+    "privateinfo": {
+        "WA_phone_number": "",
+        "WA_token": ""
+    }
+}
