@@ -1479,34 +1479,30 @@ export async function getMessages(req: Request, res: Response) {
           }
         }
 
-        // 2. If the anchor doesn't exist, load history from the server page-by-page
+        // 2. If the anchor doesn't exist, load history from the server page-by-page (progressing backward)
         let attempts = 0;
-        const maxAttempts = 3;
+        const maxAttempts = 5;
+        let currentOldestId: string | null = null;
         
         while (id && !anchorExists && attempts < maxAttempts) {
           try {
-            const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
-            if (!currentMsgs || currentMsgs.length === 0) {
-              break;
-            }
-            
-            let oldestMsg = currentMsgs[0];
-            for (const m of currentMsgs) {
-              if (m.t < oldestMsg.t) {
-                oldestMsg = m;
-              }
-            }
-            
-            const oldestId = oldestMsg.id._serialized || oldestMsg.id;
-            const loaded = await (window as any).WPP.chat.getMessages(chatId, {
+            const loaded: any[] = await (window as any).WPP.chat.getMessages(chatId, {
               count: 100,
               direction: 'before',
-              id: oldestId
+              id: currentOldestId || undefined
             });
             
             if (!loaded || loaded.length === 0) {
               break;
             }
+            
+            let oldestMsg = loaded[0];
+            for (const m of loaded) {
+              if (m.t < oldestMsg.t) {
+                oldestMsg = m;
+              }
+            }
+            currentOldestId = oldestMsg.id._serialized || oldestMsg.id;
             
             const checkMsg = await getMsgSafe(id);
             if (checkMsg) {
@@ -1522,19 +1518,23 @@ export async function getMessages(req: Request, res: Response) {
         // 3. Now query the final response
         let queryId = id;
         if (id && !anchorExists) {
-          try {
-            const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
-            if (currentMsgs && currentMsgs.length > 0) {
-              let oldestMsg = currentMsgs[0];
-              for (const m of currentMsgs) {
-                if (m.t < oldestMsg.t) {
-                  oldestMsg = m;
+          if (currentOldestId) {
+            queryId = currentOldestId;
+          } else {
+            try {
+              const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+              if (currentMsgs && currentMsgs.length > 0) {
+                let oldestMsg = currentMsgs[0];
+                for (const m of currentMsgs) {
+                  if (m.t < oldestMsg.t) {
+                    oldestMsg = m;
+                  }
                 }
+                queryId = oldestMsg.id._serialized || oldestMsg.id;
               }
-              queryId = oldestMsg.id._serialized || oldestMsg.id;
+            } catch (err) {
+              // Ignore
             }
-          } catch (err) {
-            // Ignore
           }
         }
 
