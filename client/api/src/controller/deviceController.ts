@@ -1552,11 +1552,13 @@ export async function getMessages(req: Request, res: Response) {
         }
 
         console.log(`[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`);
-        return (window as any).WAPI.getMessages(chatId, {
+        const result = await (window as any).WAPI.getMessages(chatId, {
           count: targetCount,
           direction: 'before',
           id: queryId
         });
+        console.log(`[browser-evaluate] WAPI.getMessages returned ${result ? result.length : 0} messages`);
+        return result;
       }, { chatId: phone, targetCount, id: id as string });
     } else {
       if (phone && phone.endsWith('@lid')) {
