@@ -1588,7 +1588,7 @@ export async function getMessages(req: Request, res: Response) {
         }
 
         try {
-          return await (window as any).WAPI.getMessages(chatId, {
+          return await (window as any).WPP.chat.getMessages(chatId, {
             count: targetCount,
             direction: 'before',
             id: queryId
@@ -1601,7 +1601,7 @@ export async function getMessages(req: Request, res: Response) {
       if (phone && phone.endsWith('@lid')) {
         // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
         response = await req.client.page.evaluate(({ chatId, params }) => {
-          return (window as any).WAPI.getMessages(chatId, params);
+          return (window as any).WPP.chat.getMessages(chatId, params);
         }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
       } else {
         response = await req.client.getMessages(`${phone}`, {
