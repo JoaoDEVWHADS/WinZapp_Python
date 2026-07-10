@@ -572,7 +572,41 @@ export async function getMediaByMessage(req: Request, res: Response) {
         .status(200)
         .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
     } catch (decryptErr) {
-      req.logger.error(`decryptFile failed, trying client.downloadMedia as fallback: ${decryptErr}`);
+      req.logger.error(`decryptFile failed, trying browser-side recovery: ${decryptErr}`);
+      
+      // Attempt browser-side recovery: fetch the message fresh from WhatsApp Web to get updated CDN URLs
+      let freshMessage: any = null;
+      try {
+        freshMessage = await client.getMessageById(messageId);
+      } catch (err) {}
+
+      if (!freshMessage && messageId) {
+        const parts = messageId.split('_');
+        if (parts.length >= 2) {
+          const chatId = parts[1];
+          if (chatId && typeof client.loadEarlierMessages === 'function') {
+            try {
+              await client.loadEarlierMessages(chatId);
+              freshMessage = await client.getMessageById(messageId);
+            } catch (err) {}
+          }
+        }
+      }
+
+      if (freshMessage) {
+        try {
+          req.logger.info(`Found fresh message in browser for ${messageId}, attempting decryption...`);
+          const buffer = await client.decryptFile(freshMessage);
+          return res.status(200).json({
+            base64: buffer.toString('base64'),
+            mimetype: freshMessage.mimetype || 'audio/ogg'
+          });
+        } catch (freshDecryptErr) {
+          req.logger.error(`Decryption of fresh browser message failed: ${freshDecryptErr}`);
+        }
+      }
+
+      // Final fallback to WPPConnect's downloadMedia
       if (typeof (client as any).downloadMedia === 'function') {
         try {
           let timer: any;
@@ -584,7 +618,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
           let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
-            let mimetype = message.mimetype || 'audio/ogg';
+            let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
               const matches = base64.match(/^data:(.*?);base64,(.*)$/);
               if (matches) {

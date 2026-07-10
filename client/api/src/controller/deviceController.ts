@@ -1465,6 +1465,15 @@ export async function getMessages(req: Request, res: Response) {
           }
         };
 
+        // Ensure the chat is loaded in the browser store
+        try {
+          if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
+            await (window as any).WPP.chat.find(chatId);
+          }
+        } catch (e) {
+          // Ignore
+        }
+
         // 1. Check if the target anchor message exists in the browser Store
         let anchorExists = false;
         if (id) {

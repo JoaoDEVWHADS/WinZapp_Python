@@ -149,8 +149,7 @@ export default class CreateSessionUtil {
                   statusFind
                 );
                 if (
-                  statusFind === StatusFind.autocloseCalled ||
-                  statusFind === StatusFind.disconnectedMobile
+                  statusFind === StatusFind.autocloseCalled
                 ) {
                   client.status = 'CLOSED';
                   client.qrcode = null;

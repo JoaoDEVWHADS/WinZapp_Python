@@ -462,5 +462,6 @@
     "channel_read_only": "Este canal es de solo lectura",
     "interactive_reply": "respuesta interactiva",
     "list_reply": "selección de lista",
-    "interactive_message": "mensaje interactivo"
+    "interactive_message": "mensaje interactivo",
+    "resync_failed_offline": "No se pueden resincronizar las conversaciones mientras esté desconectado de WhatsApp. Por favor, verifique la conexión de su teléfono e inténtelo de nuevo."
 }

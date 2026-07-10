@@ -142,10 +142,15 @@ class NewGroupDialog(wx.Dialog):
         if idx < 0 or idx >= len(self._current_jids):
             return
         jid = self._current_jids[idx]
-        if self._contacts_listbox.IsChecked(idx):
+        checked = self._contacts_listbox.IsChecked(idx)
+        if checked:
             self._checked_jids.add(jid)
         else:
             self._checked_jids.discard(jid)
+        # Accessibility announcement for screen readers
+        label = self._contacts_listbox.GetString(idx)
+        state_str = "selecionado" if checked else "não selecionado"
+        self._mw.output(f"{label}: {state_str}")
 
     def _on_search_contacts(self, event):
         """Re-populate the checklist to only show contacts matching the query."""
@@ -210,26 +215,25 @@ class NewGroupDialog(wx.Dialog):
                     else:
                         self._checked_jids.discard(jid)
 
-        numbers: list = []
+        participants: list = []
         for jid in self._checked_jids:
-            digits = re.sub(r"\D", "", jid.split("@")[0])
-            if digits:
-                numbers.append(digits)
+            if jid:
+                participants.append(jid)
 
         # Gather extra number field
         extra_raw = self._extra_number_field.GetValue()
         for part in re.split(r"[,\n]", extra_raw):
             digits = re.sub(r"\D", "", part.strip())
             if len(digits) >= 7:
-                numbers.append(digits)
+                participants.append(digits)
 
         # Deduplicate while preserving order
         seen: set = set()
         unique_numbers = []
-        for n in numbers:
-            if n not in seen:
-                seen.add(n)
-                unique_numbers.append(n)
+        for p in participants:
+            if p not in seen:
+                seen.add(p)
+                unique_numbers.append(p)
 
         if not unique_numbers:
             wx.MessageBox(

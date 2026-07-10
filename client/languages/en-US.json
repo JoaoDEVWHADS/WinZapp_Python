@@ -462,5 +462,6 @@
     "channel_read_only": "This channel is read-only",
     "interactive_reply": "interactive reply",
     "list_reply": "list selection",
-    "interactive_message": "interactive message"
+    "interactive_message": "interactive message",
+    "resync_failed_offline": "Cannot resync conversations while disconnected from WhatsApp. Please check your phone connection and try again."
 }

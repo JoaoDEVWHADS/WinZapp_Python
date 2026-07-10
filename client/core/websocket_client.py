@@ -368,6 +368,22 @@ class WebSocketClient:
                 archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
                 if archive is not None:
                     wx.CallAfter(self.main_window.on_chat_archive_update, jid, bool(archive))
+
+                # Handle pin/unpin updates in real-time
+                pin = chat_update.get("pin")
+                if pin is not None:
+                    if isinstance(pin, str):
+                        if pin.lower() == "true": pin = True
+                        elif pin.lower() == "false": pin = False
+                        else:
+                            try: pin = float(pin)
+                            except ValueError: pin = None
+                    is_pinned = False
+                    if isinstance(pin, bool):
+                        is_pinned = pin
+                    elif isinstance(pin, (int, float)):
+                        is_pinned = pin > 0
+                    wx.CallAfter(self.main_window.on_chat_pin_update, jid, is_pinned)
         except Exception as e:
             print(f"[WebSocketClient] on_chats_update error: {e}")
 
@@ -860,7 +876,7 @@ class WebSocketClient:
             ts //= 1000
 
         msg_type = wpp_msg.get("type", "chat")
-        conversation = wpp_msg.get("body", "")
+        conversation = wpp_msg.get("body", "") or wpp_msg.get("text", "")
 
         def _safe_media_key(val):
             if not val:
@@ -877,6 +893,12 @@ class WebSocketClient:
         message_content = {}
         if msg_type == "chat":
             message_content = {"conversation": conversation}
+        elif msg_type == "extendedText":
+            message_content = {
+                "extendedTextMessage": {
+                    "text": conversation
+                }
+            }
         elif msg_type in ("audio", "ptt"):
             dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
             if not dur and isinstance(wpp_msg.get("mediaData"), dict):
@@ -995,7 +1017,8 @@ class WebSocketClient:
             "buttons": "buttonsMessage",
             "list": "listMessage",
             "template": "templateMessage",
-            "revoked": "protocolMessage"
+            "revoked": "protocolMessage",
+            "extendedText": "extendedTextMessage"
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
 
