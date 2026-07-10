@@ -1,0 +1,6 @@
+V0.10.0.0
+- Correção de contatos em branco com JID @lid.
+- Ajuste na formatação de JIDs de grupos.
+- Correção de AttributeError (connection_dial) ao desconectar do WebSocket.
+- Otimização do pipeline de compilação.
+- Integração do sistema de atualizações com o repositório GitHub de JoaoDEVWHADS.
