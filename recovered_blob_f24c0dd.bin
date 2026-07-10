@@ -1,0 +1,26 @@
+{
+    "connection": {
+        "evolution_server": "http://127.0.0.1",
+        "evolution_port": 3417,
+        "evolution_ws_server": "ws://127.0.0.1",
+        "evolution_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037"
+    },
+    "general": {
+        "language": "",
+        "sounds_enabled": true,
+        "notifications_enabled": true,
+        "updates_enabled": true,
+        "first_run": true,
+        "autostart": false,
+        "show_tray_icon": true,
+        "terms_alert_displayed": false,
+        "quick_tip_shown": false
+    },
+    "status": {
+        "messages_set_completed": false
+    },
+    "ui": {
+        "messages_page_size": 50,
+        "focus_on_open": "message_field"
+    }
+}
