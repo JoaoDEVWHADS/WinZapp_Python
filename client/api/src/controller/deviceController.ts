@@ -1481,7 +1481,7 @@ export async function getMessages(req: Request, res: Response) {
 
         // 2. If the anchor doesn't exist, load history from the server page-by-page
         let attempts = 0;
-        const maxAttempts = 30;
+        const maxAttempts = 3;
         
         while (id && !anchorExists && attempts < maxAttempts) {
           try {
