@@ -1462,10 +1462,27 @@ export async function getMessages(req: Request, res: Response) {
               const msgIdBase = parts[2];
               const chatModel = (window as any).WPP.chat.get(chatId);
               if (chatModel && chatModel.msgs) {
-                // If it is a Backbone Collection, try to find the message by base ID
+                // If it is a Backbone Collection or Array, search robustly
+                const searchFn = (m: any) => {
+                  if (!m) return false;
+                  // 1. If it has a .get('id') method (Backbone Model)
+                  const idObj = typeof m.get === 'function' ? m.get('id') : m.id;
+                  if (idObj && typeof idObj === 'object') {
+                    if (idObj.id === msgIdBase) return true;
+                  }
+                  // 2. If m.id is a serialized string ID
+                  const serialized = m.id && typeof m.id === 'string' 
+                    ? m.id 
+                    : (idObj && typeof idObj === 'object' ? idObj._serialized : '');
+                  if (serialized && serialized.includes(msgIdBase)) return true;
+                  // 3. Check internal __x_id
+                  if (m.__x_id && m.__x_id.id === msgIdBase) return true;
+                  return false;
+                };
+
                 const found = typeof chatModel.msgs.find === 'function' 
-                  ? chatModel.msgs.find((m: any) => (m.id?.id || (m.id && typeof m.id === 'object' ? m.id.id : '')) === msgIdBase)
-                  : (Array.isArray(chatModel.msgs) ? chatModel.msgs.find((m: any) => (m.id?.id || (m.id && typeof m.id === 'object' ? m.id.id : '')) === msgIdBase) : null);
+                  ? chatModel.msgs.find(searchFn)
+                  : (Array.isArray(chatModel.msgs) ? chatModel.msgs.find(searchFn) : null);
                 if (found) return found;
               }
             }
