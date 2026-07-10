@@ -3110,12 +3110,12 @@ class ConversationsPanel(wx.Panel):
         """Make Space fire the same activation as Enter / double-click.
         Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
         key = event.GetKeyCode()
+        idx = self.messages_list.GetFocusedItem()
+        logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
         if key == wx.WXK_SPACE:
-            idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
         elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_HOME):
-            idx = self.messages_list.GetFocusedItem()
             if idx == 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
                     self._load_more_messages()
