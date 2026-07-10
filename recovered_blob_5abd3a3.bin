@@ -1,0 +1,30 @@
+{
+  "secretKey": "wz-local-api-key",
+  "host": "http://localhost",
+  "port": "6300",
+  "deviceName": "WinZapp",
+  "poweredBy": "WinZapp-API",
+  "startAllSession": false,
+  "tokenStoreType": "file",
+  "maxListeners": 15,
+  "customUserDataDir": "./userDataDir/",
+  "webhook": {
+    "url": null,
+    "autoDownload": true,
+    "uploadS3": false,
+    "readMessage": true,
+    "allUnreadOnStart": false,
+    "listenAcks": true,
+    "onPresenceChanged": false,
+    "onParticipantsChanged": false,
+    "onReactionMessage": false,
+    "onPollResponse": false,
+    "onRevokedMessage": false,
+    "onLabelUpdated": false,
+    "onSelfMessage": false
+  },
+  "log": {
+    "level": "info",
+    "logger": ["console", "file"]
+  }
+}
