@@ -1609,18 +1609,10 @@ export async function getMessages(req: Request, res: Response) {
         }
       }, { chatId: phone, targetCount, id: id as string });
     } else {
-      if (phone && phone.endsWith('@lid')) {
-        // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
-        response = await req.client.page.evaluate(({ chatId, params }) => {
-          return (window as any).WPP.chat.getMessages(chatId, params);
-        }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
-      } else {
-        response = await req.client.getMessages(`${phone}`, {
-          count: targetCount,
-          direction: direction.toString() as any,
-          id: id as string,
-        });
-      }
+      // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package and avoids WAPI issues
+      response = await req.client.page.evaluate(({ chatId, params }) => {
+        return (window as any).WPP.chat.getMessages(chatId, params);
+      }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
     }
     res.status(200).json({ status: 'success', response: response });
   } catch (e) {
