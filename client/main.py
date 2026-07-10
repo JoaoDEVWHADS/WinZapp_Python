@@ -8168,9 +8168,19 @@ class MainWindow(wx.Frame):
     def create_group(self, name: str, participants: list) -> tuple:
         """
         Create a WhatsApp group with the given name and participant numbers.
-        participants: list of phone number strings (e.g. ["5511999999999"])
+        participants: list of phone number or JID strings (e.g. ["5511999999999@s.whatsapp.net", "63977983840477@lid"])
         Returns (True, group_jid) on success, (False, error_message) on failure.
         """
+        # Normalize participant JIDs for WPPConnect
+        normalized_participants = []
+        for p in participants:
+            if "@" in p:
+                p_norm = p.replace("@s.whatsapp.net", "@c.us")
+                normalized_participants.append(p_norm)
+            else:
+                # Default to c.us for raw typed digits (phone numbers)
+                normalized_participants.append(f"{p}@c.us")
+
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/create-group"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -8178,7 +8188,7 @@ class MainWindow(wx.Frame):
         }
         payload = {
             "name":         name,
-            "participants": [f"{p}@c.us" for p in participants],
+            "participants": normalized_participants,
         }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=30)
