@@ -6974,9 +6974,10 @@ class MainWindow(wx.Frame):
                 logging.warning(
                     f"[fetch_older_messages] API returned status {response.status_code} for {remote_jid}: {response.text[:300]}"
                 )
+                return None
         except Exception as e:
             logging.error(f"[fetch_older_messages] failed to get older messages for {remote_jid}: {e}")
-        return []
+            return None
 
     def save_audio_locally(self, msg, audio_content):
         voice_messages_dir = data_path("voice_messages")
