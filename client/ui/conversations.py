@@ -3142,11 +3142,21 @@ class ConversationsPanel(wx.Panel):
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
     def _on_messages_list_key_down(self, event):
-        """Make Space fire the same activation as Enter / double-click."""
-        if event.GetKeyCode() == wx.WXK_SPACE:
+        """Make Space fire the same activation as Enter / double-click.
+        Also trigger loading older messages if they press UP key at the very top."""
+        key = event.GetKeyCode()
+        if key == wx.WXK_SPACE:
             idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
+        elif key == wx.WXK_UP:
+            idx = self.messages_list.GetFocusedItem()
+            if idx == 0 and not self._is_loading_more:
+                if self._messages_offset > 0:
+                    self._load_more_messages()
+                else:
+                    self._load_older_messages()
+            event.Skip()
         else:
             event.Skip()
 
