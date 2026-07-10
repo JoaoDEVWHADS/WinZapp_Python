@@ -4945,9 +4945,9 @@ class MainWindow(wx.Frame):
         key = msg.get("key")
         if not isinstance(key, dict):
             return
-        remote = key.get("remoteJid", "")
-        alt = key.get("remoteJidAlt", "")
-        participant = key.get("participant", "")
+        remote = self._normalize_jid(key.get("remoteJid", ""))
+        alt = self._normalize_jid(key.get("remoteJidAlt", ""))
+        participant = self._normalize_jid(key.get("participant", ""))
 
         # Invalidate the negative cache since a new message is added to this chat
         if remote and hasattr(self, "_chats_without_alt_jid"):
@@ -5847,6 +5847,7 @@ class MainWindow(wx.Frame):
         """
         if not jid:
             return jid
+        jid = self._normalize_jid(jid)
         if jid.endswith(("@g.us", "@broadcast")):
             return jid
         if jid.endswith("@lid"):
