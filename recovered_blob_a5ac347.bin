@@ -1,0 +1,29 @@
+Histórico de Alterações (Fork WinZapp)
+
+V2026.06.17.2228
+- Resolução do crash de inicialização de conexão (TypeError: Cannot read properties of undefined (reading 'state')) ao aplicar patch defensivo contra authState indefinido na Evolution API.
+- Configuração de persistência local por padrão no inicializador da API (start.js) para salvar instâncias e histórico de dados no PostgreSQL (DATABASE_SAVE_DATA_INSTANCE=true).
+- Implementação de sistema de logs persistentes em logs/log.log no cliente para armazenar erros operacionais, tracebacks e diagnósticos de falha do atualizador.
+- Correção de falhas silenciosas na verificação de atualizações forçadas (Ajuda > Forçar Atualização), exibindo um diálogo com o erro de rede ou limite de requisições do GitHub.
+- Execução automatizada de todos os scripts de patch (quoted context, pairing time, mark read, auth state) diretamente no workflow de release do GitHub Actions.
+
+V2026.06.17.2208
+- Remoção completa da tela de novidades (WhatsNewDialog) e do botão de changelog na interface do atualizador.
+- Implementação de Action CI/CD completa para compilar e publicar releases automaticamente a cada push na branch main.
+- Adicionado suporte a versionamento automático por data/hora UTC para evitar loop infinito de atualizações.
+- Configuração de caches estruturados no GitHub Actions para acelerar o build (Pip, Node, node_modules e MSYS2).
+
+V0.11.0.1
+- Reformulação do sistema de atualizações para se integrar diretamente com a API de Releases do GitHub (sem necessidade de version.json e changelog.txt adicionais).
+- Correção do bug de "Acesso Negado" no atualizador: inserção de rotinas no script .bat para identificar e encerrar processos que estiverem escutando nas portas 3417 (Evolution API) e 5433 (PostgreSQL) liberando as travas dos arquivos.
+- Resolução definitiva do erro HTTP 401 (Unauthorized): alteração na inicialização da API local (start.js) para preservar a variável AUTHENTICATION_API_KEY passada pelo ambiente.
+- Migração completa do sistema de compilação de Nuitka para PyInstaller (build.py).
+- Correção no empacotamento de arquivos binários e DLLs nativas de áudio (BASS) e leitor de tela (accessible-output2) que causavam crashes.
+- Otimização do instalador em C (installer.c) para realizar a extração e registro de desinstalação corretos no Windows.
+- Correção em setup_api.py para preservar temporariamente o diretório node_modules e manter o cache do NPM intacto durante o clone.
+
+V0.10.0.0
+- Correção do AttributeError na tela de conexão (connection_dial) ao desconectar repentinamente do WebSocket.
+- Correção de contatos em branco com JID de dispositivos vinculados (@lid).
+- Ajuste na formatação de JIDs de grupos para evitar que sejam tratados como números normais.
+- Redirecionamento e configuração das URLs do atualizador para apontarem para o repositório JoaoDEVWHADS/WinZapp_Python.
