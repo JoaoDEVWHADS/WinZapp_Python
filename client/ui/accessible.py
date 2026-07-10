@@ -228,7 +228,7 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
         self._key_down_handler = handler
 
     def _on_char_hook(self, event):
-        if wx.Window.FindFocus() is self:
+        if self.HasFocus():
             if event.GetKeyCode() == wx.WXK_RETURN:
                 row = self.GetSelection()
                 if row != wx.NOT_FOUND and self._activated_handler is not None:
