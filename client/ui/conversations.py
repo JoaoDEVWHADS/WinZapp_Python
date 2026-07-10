@@ -2904,6 +2904,23 @@ class ConversationsPanel(wx.Panel):
         if 0 <= focused < self.messages_list.GetItemCount():
             self.messages_list.Focus(focused)
 
+    def _deduplicate_messages(self, messages_list: list) -> list:
+        seen = set()
+        result = []
+        for m in reversed(messages_list):
+            if not isinstance(m, dict):
+                result.append(m)
+                continue
+            mid = m.get("key", {}).get("id", "")
+            if not mid:
+                result.append(m)
+                continue
+            if mid not in seen:
+                seen.add(mid)
+                result.append(m)
+        result.reverse()
+        return result
+
     def _load_older_messages(self):
         """Load older messages from the local database, or fall back to the server if none remain locally."""
         if not self.conversation or not self._all_sorted_messages:
@@ -2927,19 +2944,24 @@ class ConversationsPanel(wx.Panel):
                 local_msgs.reverse()
                 displayable = [m for m in local_msgs if self._is_displayable_message(m)]
                 if displayable:
-                    n_new = len(displayable)
                     self.messages_list.Freeze()
                     try:
-                        self._all_sorted_messages = displayable + self._all_sorted_messages
-                        self._sorted_messages     = displayable + self._sorted_messages
+                        self._all_sorted_messages = self._deduplicate_messages(displayable + self._all_sorted_messages)
+                        self._sorted_messages     = self._deduplicate_messages(displayable + self._sorted_messages)
                         self._messages_offset     = 0
-                        if self._unread_sep_idx >= 0:
-                            self._unread_sep_idx += n_new
+                        
+                        # Recalculate unread separator index
+                        self._unread_sep_idx = -1
+                        for idx, msg in enumerate(self._sorted_messages):
+                            if self._is_separator(msg):
+                                self._unread_sep_idx = idx
+                                break
                             
                         self.messages_list.DeleteAllItems()
                         for msg in self._sorted_messages:
                             self.messages_list.Append((self._render_message_line(msg),))
                             
+                        n_new = len(displayable)
                         self.messages_list.Focus(n_new)
                         self.messages_list.Select(n_new, True)
                         self.messages_list.EnsureVisible(n_new)
@@ -3025,11 +3047,16 @@ class ConversationsPanel(wx.Panel):
         
         self.messages_list.Freeze()
         try:
-            self._all_sorted_messages = displayable + self._all_sorted_messages
-            self._sorted_messages     = displayable + self._sorted_messages
+            self._all_sorted_messages = self._deduplicate_messages(displayable + self._all_sorted_messages)
+            self._sorted_messages     = self._deduplicate_messages(displayable + self._sorted_messages)
             self._messages_offset     = 0
-            if self._unread_sep_idx >= 0:
-                self._unread_sep_idx += n_new
+            
+            # Recalculate unread separator index
+            self._unread_sep_idx = -1
+            for idx, msg in enumerate(self._sorted_messages):
+                if self._is_separator(msg):
+                    self._unread_sep_idx = idx
+                    break
                 
             self.messages_list.DeleteAllItems()
             for msg in self._sorted_messages:
