@@ -1478,6 +1478,7 @@ export async function getMessages(req: Request, res: Response) {
         let attempts = 0;
         const maxAttempts = 2;
         let oldestId = null;
+        let originalOldestId = null;
 
         // Get initial oldest message currently loaded
         if (id && !anchorExists) {
@@ -1492,6 +1493,7 @@ export async function getMessages(req: Request, res: Response) {
               }
             }
             oldestId = oldestMsg.id._serialized || oldestMsg.id;
+            originalOldestId = oldestId;
             console.log(`[browser-evaluate] Oldest loaded message JID/ID: ${oldestId}`);
           }
         }
@@ -1531,11 +1533,11 @@ export async function getMessages(req: Request, res: Response) {
         // 3. Now query the final response
         let queryId = id;
         if (id && !anchorExists) {
-          if (oldestId) {
-            queryId = oldestId;
-            console.log(`[browser-evaluate] Anchor not found after walkback. Falling back to oldestId: ${queryId}`);
+          if (originalOldestId) {
+            queryId = originalOldestId;
+            console.log(`[browser-evaluate] Anchor not found after walkback. Falling back to originalOldestId: ${queryId}`);
           } else {
-            console.log(`[browser-evaluate] Anchor not found, and no oldestId resolved. Fetching default messages...`);
+            console.log(`[browser-evaluate] Anchor not found, and no originalOldestId resolved. Fetching default messages...`);
             const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
             if (currentMsgs && currentMsgs.length > 0) {
               let oldestMsg = currentMsgs[0];
