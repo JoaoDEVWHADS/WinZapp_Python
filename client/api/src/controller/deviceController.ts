@@ -1493,6 +1493,20 @@ export async function getMessages(req: Request, res: Response) {
           }
         };
 
+        const getSerializedId = (obj: any) => {
+          if (!obj) return '';
+          if (typeof obj === 'string') return obj;
+          if (obj._serialized) return obj._serialized;
+          const fromMe = obj.fromMe ? 'true' : 'false';
+          const remote = obj.remote?._serialized || obj.remote || '';
+          const msgId = obj.id || '';
+          const participant = obj.participant?._serialized || obj.participant || '';
+          if (participant) {
+            return `${fromMe}_${remote}_${msgId}_${participant}`;
+          }
+          return `${fromMe}_${remote}_${msgId}`;
+        };
+
         // Ensure the chat is loaded in the browser store
         try {
           if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
@@ -1574,12 +1588,9 @@ export async function getMessages(req: Request, res: Response) {
         let queryId = id;
         if (anchorExists && matchedMsgObj) {
           const idObj = typeof matchedMsgObj.get === 'function' ? matchedMsgObj.get('id') : matchedMsgObj.id;
-          if (idObj && typeof idObj === 'object' && idObj._serialized) {
-            queryId = idObj._serialized;
-          } else if (typeof idObj === 'string') {
-            queryId = idObj;
-          } else if (matchedMsgObj.__x_id && matchedMsgObj.__x_id._serialized) {
-            queryId = matchedMsgObj.__x_id._serialized;
+          const serialized = getSerializedId(idObj) || getSerializedId(matchedMsgObj.__x_id);
+          if (serialized) {
+            queryId = serialized;
           }
         } else if (id && !anchorExists) {
           if (currentOldestId) {
