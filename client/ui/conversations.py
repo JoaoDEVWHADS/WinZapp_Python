@@ -3051,6 +3051,9 @@ class ConversationsPanel(wx.Panel):
         if not fetched_messages:
             return
             
+        # Reverse to oldest-first order (ascending chronological) to match client storage
+        fetched_messages.reverse()
+            
         displayable = [
             m for m in fetched_messages if self._is_displayable_message(m)
         ]

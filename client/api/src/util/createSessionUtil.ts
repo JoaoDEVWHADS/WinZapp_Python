@@ -194,6 +194,14 @@ export default class CreateSessionUtil {
       clearInterval(shouldClosePoller);
 
       client = clientsArray[session] = Object.assign(wppClient, client);
+      if (client.page) {
+        client.page.on('console', (msg: any) => {
+          const text = msg.text();
+          if (text.includes('[browser-evaluate]')) {
+            req.logger.info(text);
+          }
+        });
+      }
       await this.start(req, client);
 
       if (req.serverOptions.webhook.onParticipantsChanged) {
