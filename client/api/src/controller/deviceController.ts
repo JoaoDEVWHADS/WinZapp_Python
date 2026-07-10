@@ -1481,8 +1481,9 @@ export async function getMessages(req: Request, res: Response) {
 
         // 2. If the anchor doesn't exist, load history from the server page-by-page (progressing backward)
         let attempts = 0;
-        const maxAttempts = 30;
+        const maxAttempts = 10;
         let currentOldestId: string | null = null;
+        let previousOldestId: string | null = null;
 
         // Initialize currentOldestId with the oldest message currently in the store
         try {
@@ -1502,9 +1503,11 @@ export async function getMessages(req: Request, res: Response) {
         
         while (id && !anchorExists && attempts < maxAttempts) {
           try {
-            if (!currentOldestId) {
+            if (!currentOldestId || currentOldestId === previousOldestId) {
               break;
             }
+            previousOldestId = currentOldestId;
+            
             const loaded: any[] = await (window as any).WPP.chat.getMessages(chatId, {
               count: 100,
               direction: 'before',
