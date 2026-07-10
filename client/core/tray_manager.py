@@ -102,7 +102,9 @@ class TrayIcon(wx.adv.TaskBarIcon):
         total = 0
         names = []
         mw = self.main_window
-        for jid, chat in mw.chats.items():
+        # Only return unread info if initial sync has completed
+        if getattr(mw, "_sync_completed", False):
+            for jid, chat in mw.chats.items():
             unread = effective_unread_count(chat)
             if unread > 0:
                 total += unread
