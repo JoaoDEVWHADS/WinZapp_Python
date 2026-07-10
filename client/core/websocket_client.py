@@ -368,6 +368,22 @@ class WebSocketClient:
                 archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
                 if archive is not None:
                     wx.CallAfter(self.main_window.on_chat_archive_update, jid, bool(archive))
+
+                # Handle pin/unpin updates in real-time
+                pin = chat_update.get("pin")
+                if pin is not None:
+                    if isinstance(pin, str):
+                        if pin.lower() == "true": pin = True
+                        elif pin.lower() == "false": pin = False
+                        else:
+                            try: pin = float(pin)
+                            except ValueError: pin = None
+                    is_pinned = False
+                    if isinstance(pin, bool):
+                        is_pinned = pin
+                    elif isinstance(pin, (int, float)):
+                        is_pinned = pin > 0
+                    wx.CallAfter(self.main_window.on_chat_pin_update, jid, is_pinned)
         except Exception as e:
             print(f"[WebSocketClient] on_chats_update error: {e}")
 

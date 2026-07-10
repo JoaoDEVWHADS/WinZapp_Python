@@ -3838,12 +3838,7 @@ class MainWindow(wx.Frame):
                             # incremented since the server snapshot was taken.
                             # But always accept a server-reported positive value
                             # so that newly-arrived unread chats show up.
-                            if k == "unreadCount":
-                                server_val = int(v or 0)
-                                local_val  = int(chats[jid].get("unreadCount") or 0)
-                                if server_val == 0 and local_val > 0:
-                                    continue  # keep the higher local count
-                                # otherwise, trust the server (e.g. 0→N or N→M)
+                            # Trust the server unreadCount value directly
                             chats[jid][k] = v
                         # WPPConnect may return the group name only in "subject".
                         # If the existing entry still has no name, pull it from subject.
@@ -3903,9 +3898,37 @@ class MainWindow(wx.Frame):
                         if jid not in self._pinned_chats:
                             self._pinned_chats.add(jid)
                             db_changed = True
+                        # Also pin the alternate JID if present
+                        if jid.endswith("@lid"):
+                            alt = getattr(self, "_lid_to_phone", {}).get(jid, "")
+                            if alt:
+                                alt_norm = self._normalize_jid(alt)
+                                if alt_norm not in self._pinned_chats:
+                                    self._pinned_chats.add(alt_norm)
+                                    db_changed = True
+                        else:
+                            alt = getattr(self, "_phone_to_lid", {}).get(jid, "")
+                            if alt:
+                                if alt not in self._pinned_chats:
+                                    self._pinned_chats.add(alt)
+                                    db_changed = True
                     elif jid in self._pinned_chats:
                         self._pinned_chats.remove(jid)
                         db_changed = True
+                        # Also remove pin from the alternate JID if present
+                        if jid.endswith("@lid"):
+                            alt = getattr(self, "_lid_to_phone", {}).get(jid, "")
+                            if alt:
+                                alt_norm = self._normalize_jid(alt)
+                                if alt_norm in self._pinned_chats:
+                                    self._pinned_chats.remove(alt_norm)
+                                    db_changed = True
+                        else:
+                            alt = getattr(self, "_phone_to_lid", {}).get(jid, "")
+                            if alt:
+                                if alt in self._pinned_chats:
+                                    self._pinned_chats.remove(alt)
+                                    db_changed = True
 
                 if db_changed and hasattr(self, "db") and self.db is not None:
                     self.db.set_metadata_json("muted_chats", self._muted_chats)
@@ -6718,8 +6741,8 @@ class MainWindow(wx.Frame):
         # Never resurrect unread count for a conversation the user already read
         # locally (mark_conversation_as_read set it to 0). The server may still
         # carry a stale unread count from before the read-ack arrived.
-        if old_count == 0 and unread_count > 0:
-            return
+        if normalized == getattr(self, "_last_open_jid", ""):
+            unread_count = 0
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
@@ -6740,6 +6763,46 @@ class MainWindow(wx.Frame):
             self._archived_chats.discard(normalized)
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+        self._schedule_set_chats()
+
+    def on_chat_pin_update(self, jid: str, is_pinned: bool):
+        """Handle pin/unpin status change from chats.update."""
+        normalized = self._normalize_jid(jid)
+        chat = self.chats.get(normalized)
+        if chat is None:
+            if normalized.endswith("@lid"):
+                alt = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+                if alt: chat = self.chats.get(self._normalize_jid(alt))
+            else:
+                alt = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+                if alt: chat = self.chats.get(alt)
+
+        if is_pinned:
+            self._pinned_chats.add(normalized)
+            if normalized.endswith("@lid"):
+                alt_phone = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+                if alt_phone:
+                    self._pinned_chats.add(self._normalize_jid(alt_phone))
+            else:
+                alt_lid = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+                if alt_lid:
+                    self._pinned_chats.add(alt_lid)
+        else:
+            self._pinned_chats.discard(normalized)
+            if normalized.endswith("@lid"):
+                alt_phone = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+                if alt_phone:
+                    self._pinned_chats.discard(self._normalize_jid(alt_phone))
+            else:
+                alt_lid = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+                if alt_lid:
+                    self._pinned_chats.discard(alt_lid)
+
+        if chat is not None:
+            chat["pin"] = is_pinned
+
+        if hasattr(self, "db") and self.db is not None:
+            self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
         self._schedule_set_chats()
 
     def handle_audio_message(self, msg, timeout=60):
@@ -8021,16 +8084,38 @@ class MainWindow(wx.Frame):
         return jid in self._pinned_chats
 
     def pin_chat(self, jid: str):
-        if jid not in self._pinned_chats:
-            self._pinned_chats.add(jid)
+        normalized = self._normalize_jid(jid)
+        if normalized not in self._pinned_chats:
+            self._pinned_chats.add(normalized)
+        # Also pin the alternate JID if present
+        if normalized.endswith("@lid"):
+            alt = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+            if alt:
+                self._pinned_chats.add(self._normalize_jid(alt))
+        else:
+            alt = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+            if alt:
+                self._pinned_chats.add(alt)
+
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
         self._schedule_set_chats()
         self._sync_pin_to_server(jid, pinned=True)
 
     def unpin_chat(self, jid: str):
-        if jid in self._pinned_chats:
-            self._pinned_chats.remove(jid)
+        normalized = self._normalize_jid(jid)
+        if normalized in self._pinned_chats:
+            self._pinned_chats.remove(normalized)
+        # Also unpin the alternate JID if present
+        if normalized.endswith("@lid"):
+            alt = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+            if alt:
+                self._pinned_chats.discard(self._normalize_jid(alt))
+        else:
+            alt = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+            if alt:
+                self._pinned_chats.discard(alt)
+
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
         self._schedule_set_chats()
