@@ -2822,7 +2822,7 @@ class ConversationsPanel(wx.Panel):
         idx = event.GetIndex()
         import time
         last_act = getattr(self.main_window, "_last_activation_time", 0)
-        if time.time() - last_act < 1.0:
+        if time.time() - last_act < 5.0:
             return
         if (
             idx == 0

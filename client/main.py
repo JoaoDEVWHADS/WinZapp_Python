@@ -1690,12 +1690,16 @@ class MainWindow(wx.Frame):
                 self.message_current_sound.play()
                 sender = format_foreground_sender(msg, self, self.i18n)
                 self.output(f"{sender}: {body}")
-                # Mark the active conversation as read immediately
-                threading.Thread(
-                    target=self.mark_conversation_as_read,
-                    args=(remote_jid, True),
-                    daemon=True,
-                ).start()
+                # Mark the active conversation as read immediately, but only if the
+                # window has been focused for at least 5 seconds (to prevent marking
+                # startup/offline messages as read automatically).
+                last_act = getattr(self, "_last_activation_time", 0)
+                if time.time() - last_act >= 5.0:
+                    threading.Thread(
+                        target=self.mark_conversation_as_read,
+                        args=(remote_jid, True),
+                        daemon=True,
+                    ).start()
             else:
                 # Scenario 2: message in a DIFFERENT conversation (window active)
                 # Play foreground sound, speak "Nova mensagem de X: body" via AO2
