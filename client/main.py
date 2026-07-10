@@ -6861,6 +6861,14 @@ class MainWindow(wx.Frame):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
         
+        # Check if history is already marked as exhausted in the DB
+        try:
+            if self.db.get_metadata(f"exhausted_{remote_jid}") == "1":
+                logging.info(f"[fetch_older_messages] History already marked as exhausted for {remote_jid}, skipping API query.")
+                return []
+        except Exception as e:
+            logging.error(f"[fetch_older_messages] Failed to check exhausted state: {e}")
+
         # Use remote_jid resolved to @lid (if available) for the URL parameter.
         # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs.
         phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
@@ -6941,6 +6949,14 @@ class MainWindow(wx.Frame):
                 wpp_messages = body.get("response", []) if isinstance(body, dict) else []
                 if not isinstance(wpp_messages, list):
                     wpp_messages = []
+                
+                # If API returned no messages, mark history as exhausted
+                if not wpp_messages:
+                    try:
+                        self.db.set_metadata(f"exhausted_{remote_jid}", "1")
+                        logging.info(f"[fetch_older_messages] Marked history as exhausted for {remote_jid}")
+                    except Exception as e:
+                        logging.error(f"[fetch_older_messages] Failed to mark exhausted state: {e}")
                 
                 fetched_messages = []
                 for wm in wpp_messages:

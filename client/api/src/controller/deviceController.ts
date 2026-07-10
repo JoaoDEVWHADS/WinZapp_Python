@@ -1461,6 +1461,15 @@ export async function getMessages(req: Request, res: Response) {
           }
         };
 
+        // Ensure the chat is loaded in the browser store
+        try {
+          if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
+            await (window as any).WPP.chat.find(chatId);
+          }
+        } catch (e) {
+          // Ignore
+        }
+
         // 1. Check if the target anchor message exists in the browser Store
         let anchorExists = false;
         if (id) {
@@ -1472,61 +1481,72 @@ export async function getMessages(req: Request, res: Response) {
 
         // 2. If the anchor doesn't exist, load history from the server page-by-page
         let attempts = 0;
-        const maxAttempts = 5;
+        const maxAttempts = 30;
         
         while (id && !anchorExists && attempts < maxAttempts) {
-          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
-          if (!currentMsgs || currentMsgs.length === 0) {
-            break;
-          }
-          
-          let oldestMsg = currentMsgs[0];
-          for (const m of currentMsgs) {
-            if (m.t < oldestMsg.t) {
-              oldestMsg = m;
+          try {
+            const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+            if (!currentMsgs || currentMsgs.length === 0) {
+              break;
             }
-          }
-          
-          const oldestId = oldestMsg.id._serialized || oldestMsg.id;
-          const loaded = await (window as any).WPP.chat.getMessages(chatId, {
-            count: 50,
-            direction: 'before',
-            id: oldestId
-          });
-          
-          if (!loaded || loaded.length === 0) {
-            break;
-          }
-          
-          const checkMsg = await getMsgSafe(id);
-          if (checkMsg) {
-            anchorExists = true;
-            break;
-          }
-          
-          attempts++;
-        }
-
-        // 3. Now query the final response
-        let queryId = id;
-        if (id && !anchorExists) {
-          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
-          if (currentMsgs && currentMsgs.length > 0) {
+            
             let oldestMsg = currentMsgs[0];
             for (const m of currentMsgs) {
               if (m.t < oldestMsg.t) {
                 oldestMsg = m;
               }
             }
-            queryId = oldestMsg.id._serialized || oldestMsg.id;
+            
+            const oldestId = oldestMsg.id._serialized || oldestMsg.id;
+            const loaded = await (window as any).WPP.chat.getMessages(chatId, {
+              count: 100,
+              direction: 'before',
+              id: oldestId
+            });
+            
+            if (!loaded || loaded.length === 0) {
+              break;
+            }
+            
+            const checkMsg = await getMsgSafe(id);
+            if (checkMsg) {
+              anchorExists = true;
+              break;
+            }
+          } catch (err) {
+            break;
+          }
+          attempts++;
+        }
+
+        // 3. Now query the final response
+        let queryId = id;
+        if (id && !anchorExists) {
+          try {
+            const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+            if (currentMsgs && currentMsgs.length > 0) {
+              let oldestMsg = currentMsgs[0];
+              for (const m of currentMsgs) {
+                if (m.t < oldestMsg.t) {
+                  oldestMsg = m;
+                }
+              }
+              queryId = oldestMsg.id._serialized || oldestMsg.id;
+            }
+          } catch (err) {
+            // Ignore
           }
         }
 
-        return (window as any).WAPI.getMessages(chatId, {
-          count: targetCount,
-          direction: 'before',
-          id: queryId
-        });
+        try {
+          return await (window as any).WAPI.getMessages(chatId, {
+            count: targetCount,
+            direction: 'before',
+            id: queryId
+          });
+        } catch (err) {
+          return [];
+        }
       }, { chatId: phone, targetCount, id: id as string });
     } else {
       if (phone && phone.endsWith('@lid')) {
