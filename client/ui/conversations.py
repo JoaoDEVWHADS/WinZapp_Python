@@ -2919,6 +2919,7 @@ class ConversationsPanel(wx.Panel):
     def _load_older_messages(self):
         """Load older messages from the local database, or fall back to the server if none remain locally."""
         if not self.conversation or not self._all_sorted_messages:
+            logging.info(f"[_load_older_messages] Aborting: conversation={self.conversation is not None}, all_sorted={len(self._all_sorted_messages) if self._all_sorted_messages else 0}")
             return
 
         self._is_loading_more = True
@@ -2929,15 +2930,18 @@ class ConversationsPanel(wx.Panel):
             )
             # Count separator objects to get the actual database message count currently in memory.
             loaded_db_count = sum(1 for m in self._all_sorted_messages if not self._is_separator(m))
+            logging.info(f"[_load_older_messages] Querying local DB for {remote_jid} with count={loaded_db_count}")
             
             # Fetch from local DB
             local_msgs = self.main_window.db.get_messages(remote_jid, limit=limit, offset=loaded_db_count)
+            logging.info(f"[_load_older_messages] Local DB returned {len(local_msgs) if local_msgs else 0} messages")
             
             if local_msgs:
                 # We found older messages in the local DB!
                 # Reverse them so they are in ascending chronological order (older first)
                 local_msgs.reverse()
                 displayable = [m for m in local_msgs if self._is_displayable_message(m)]
+                logging.info(f"[_load_older_messages] Displayable local messages count: {len(displayable)}")
                 if displayable:
                     self.messages_list.Freeze()
                     try:
@@ -2946,6 +2950,7 @@ class ConversationsPanel(wx.Panel):
                         self._sorted_messages     = self._deduplicate_messages(displayable + self._sorted_messages)
                         self._messages_offset     = 0
                         n_new = len(self._sorted_messages) - old_count
+                        logging.info(f"[_load_older_messages] Prepend finished. Added {n_new} new unique messages. Rebuilding UI list.")
                         
                         # Recalculate unread separator index
                         self._unread_sep_idx = -1
@@ -2969,17 +2974,20 @@ class ConversationsPanel(wx.Panel):
             # No older messages in local DB, fetch from server
             self._load_older_messages_from_server()
         except Exception as e:
-            print(f"[_load_older_messages] error: {e}")
+            logging.exception(f"[_load_older_messages] error: {e}")
             self._is_loading_more = False
 
     def _load_older_messages_from_server(self):
         """Fetch older messages from server when the beginning of local history is reached."""
         if not self.conversation or not self._all_sorted_messages:
+            logging.info(f"[_load_older_messages_from_server] Aborting: conversation={self.conversation is not None}, all_sorted={len(self._all_sorted_messages) if self._all_sorted_messages else 0}")
             self._is_loading_more = False
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
-        if phone_jid and phone_jid in getattr(self, "_reached_server_start", {}):
+        reached_start = phone_jid in getattr(self, "_reached_server_start", {})
+        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
+        if phone_jid and reached_start:
             self._is_loading_more = False
             return
         
@@ -3000,7 +3008,9 @@ class ConversationsPanel(wx.Panel):
             oldest_msg = self._all_sorted_messages[0]
 
         oldest_id = oldest_msg.get("key", {}).get("id", "")
+        logging.info(f"[_load_older_messages_from_server] oldest_id={oldest_id}")
         if not oldest_id:
+            self._is_loading_more = False
             return
 
         self._is_loading_more = True
@@ -3008,7 +3018,9 @@ class ConversationsPanel(wx.Panel):
         def _fetch():
             try:
                 phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
+                logging.info(f"[_load_older_messages_from_server thread] Launching fetch_older_messages for {phone_jid_val}")
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
+                logging.info(f"[_load_older_messages_from_server thread] fetch_older_messages returned {len(fetched) if fetched is not None else 'None'}")
                 if fetched is not None:
                     if fetched:
                         wx.CallAfter(self._on_older_messages_loaded, fetched)
@@ -3019,7 +3031,7 @@ class ConversationsPanel(wx.Panel):
                 else:
                     self._is_loading_more = False
             except Exception as e:
-                print(f"[_load_older_messages_from_server] error: {e}")
+                logging.exception(f"[_load_older_messages_from_server] thread error: {e}")
                 self._is_loading_more = False
 
         threading.Thread(target=_fetch, daemon=True).start()
