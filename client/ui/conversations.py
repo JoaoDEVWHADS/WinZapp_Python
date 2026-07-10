@@ -349,6 +349,8 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
+        if isinstance(self.messages_list, CompatListBoxMessagesCtrl):
+            self.messages_list.set_key_down_handler(self._on_messages_list_key_down)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── "Ler mais" button (classic ListCtrl only) ─────────────────────────

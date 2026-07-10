@@ -212,6 +212,7 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
     def __init__(self, parent, style=0):
         super().__init__(parent, style=wx.LB_SINGLE)
         self._activated_handler = None
+        self._key_down_handler = None
         # wx.ListBox has no built-in "activate" notification for Enter (only
         # EVT_LISTBOX_DCLICK, which is mouse-double-click only). A plain
         # EVT_KEY_DOWN binding is not reliable for Enter specifically:
@@ -223,12 +224,20 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
         # unconditionally instead of trying to fold Enter into EVT_KEY_DOWN.
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
+    def set_key_down_handler(self, handler):
+        self._key_down_handler = handler
+
     def _on_char_hook(self, event):
-        if event.GetKeyCode() == wx.WXK_RETURN and wx.Window.FindFocus() is self:
-            row = self.GetSelection()
-            if row != wx.NOT_FOUND and self._activated_handler is not None:
-                self._activated_handler(MockListEvent(row))
-                return
+        if wx.Window.FindFocus() is self:
+            if event.GetKeyCode() == wx.WXK_RETURN:
+                row = self.GetSelection()
+                if row != wx.NOT_FOUND and self._activated_handler is not None:
+                    self._activated_handler(MockListEvent(row))
+                    return
+            elif self._key_down_handler is not None:
+                self._key_down_handler(event)
+                if not event.GetSkipped():
+                    return
         event.Skip()
 
     def InsertColumn(self, col, heading, format=0, width=-1):
