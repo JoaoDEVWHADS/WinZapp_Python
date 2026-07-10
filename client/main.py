@@ -5424,6 +5424,30 @@ class MainWindow(wx.Frame):
                     logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid} (attempt {attempt+1}/{max_retries})")
                     response = requests.get(url, headers=headers, timeout=30)
                     logging.info(f"[sync_chat_messages] URL: {url} returned status: {response.status_code}")
+                    
+                    # Alternate JID query fallback (resolves 401/TypeError or Chat not found errors)
+                    if response.status_code not in (200, 201):
+                        alternate_jid = ""
+                        if remote_jid.endswith("@lid"):
+                            resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
+                            if resolved:
+                                alternate_jid = resolved.replace("@s.whatsapp.net", "@c.us")
+                        else:
+                            alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+                            if alt_lid:
+                                alternate_jid = alt_lid
+
+                        if alternate_jid and alternate_jid != phone:
+                            alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}"
+                            logging.info(f"[sync_chat_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
+                            try:
+                                alt_response = requests.get(alt_url, headers=headers, timeout=30)
+                                if alt_response.status_code in (200, 201):
+                                    response = alt_response
+                                    logging.info("[sync_chat_messages] Fallback alternate JID query succeeded!")
+                            except Exception as alt_e:
+                                logging.warning(f"[sync_chat_messages] Fallback alternate JID query failed: {alt_e}")
+
                     if response.status_code in (200, 201):
                         body = response.json()
                         wpp_messages = body.get("response", []) if isinstance(body, dict) else []

@@ -860,7 +860,7 @@ class WebSocketClient:
             ts //= 1000
 
         msg_type = wpp_msg.get("type", "chat")
-        conversation = wpp_msg.get("body", "")
+        conversation = wpp_msg.get("body", "") or wpp_msg.get("text", "")
 
         def _safe_media_key(val):
             if not val:
@@ -877,6 +877,12 @@ class WebSocketClient:
         message_content = {}
         if msg_type == "chat":
             message_content = {"conversation": conversation}
+        elif msg_type == "extendedText":
+            message_content = {
+                "extendedTextMessage": {
+                    "text": conversation
+                }
+            }
         elif msg_type in ("audio", "ptt"):
             dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
             if not dur and isinstance(wpp_msg.get("mediaData"), dict):
@@ -995,7 +1001,8 @@ class WebSocketClient:
             "buttons": "buttonsMessage",
             "list": "listMessage",
             "template": "templateMessage",
-            "revoked": "protocolMessage"
+            "revoked": "protocolMessage",
+            "extendedText": "extendedTextMessage"
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
 
