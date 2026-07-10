@@ -2804,14 +2804,6 @@ class ConversationsPanel(wx.Panel):
 
     def _on_message_focused(self, event):
         idx = event.GetIndex()
-        if (
-            idx == 0
-            and not self._is_loading_more
-        ):
-            if self._messages_offset > 0:
-                self._load_more_messages()
-            else:
-                self._load_older_messages()
 
         # Unread-separator dismiss logic:
         # - Focus at or past the separator → start the 2-s dismiss timer once.
@@ -3113,11 +3105,22 @@ class ConversationsPanel(wx.Panel):
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
     def _on_messages_list_key_down(self, event):
-        """Make Space fire the same activation as Enter / double-click."""
-        if event.GetKeyCode() == wx.WXK_SPACE:
+        """Make Space fire the same activation as Enter / double-click.
+        Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
+        key = event.GetKeyCode()
+        if key == wx.WXK_SPACE:
             idx = self.messages_list.GetFocusedItem()
             if idx >= 0:
                 self._do_activate_message(idx)
+        elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
+            idx = self.messages_list.GetFocusedItem()
+            if idx == 0 and not self._is_loading_more:
+                if self._messages_offset > 0:
+                    self._load_more_messages()
+                else:
+                    self._load_older_messages()
+            else:
+                event.Skip()
         else:
             event.Skip()
 
