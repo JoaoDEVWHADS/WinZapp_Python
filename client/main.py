@@ -952,6 +952,18 @@ class MainWindow(wx.Frame):
             # Avoid corrupting state with two syncs writing to self.chats/db
             # at the same time.
             return
+        # Ensure we are connected before wiping local data
+        self.check_wa_connection_http()
+        if not getattr(self, "_wa_connected", False):
+            self.error_sound.play()
+            wx.MessageBox(
+                self.i18n.t("resync_failed_offline"),
+                self.i18n.t("app_name"),
+                wx.OK | wx.ICON_WARNING,
+                self
+            )
+            return
+
         self.output(self.i18n.t("resyncing_all_announcement"), interrupt=True)
         threading.Thread(target=self._resync_all_worker, daemon=True).start()
 
