@@ -2957,9 +2957,8 @@ class ConversationsPanel(wx.Panel):
                         if self._unread_sep_idx >= 0:
                             self._unread_sep_idx += n_new
                             
-                        self.messages_list.DeleteAllItems()
-                        for msg in self._sorted_messages:
-                            self.messages_list.Append((self._render_message_line(msg),))
+                        for msg in reversed(displayable):
+                            self.messages_list.InsertItem(0, self._render_message_line(msg))
                             
                         self.messages_list.Focus(n_new)
                         self.messages_list.Select(n_new, True)
@@ -3046,9 +3045,8 @@ class ConversationsPanel(wx.Panel):
             if self._unread_sep_idx >= 0:
                 self._unread_sep_idx += n_new
                 
-            self.messages_list.DeleteAllItems()
-            for msg in self._sorted_messages:
-                self.messages_list.Append((self._render_message_line(msg),))
+            for msg in reversed(displayable):
+                self.messages_list.InsertItem(0, self._render_message_line(msg))
                 
             self.messages_list.Focus(n_new)
             self.messages_list.Select(n_new, True)
