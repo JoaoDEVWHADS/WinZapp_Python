@@ -150,6 +150,8 @@ class ConversationsPanel(wx.Panel):
         # ── Reaction tracking ───────────────────────────────────────────────
         # Maps original_msg_id → {emoji: count}
         self._reaction_map: dict = {}
+        # Keep track of chats where we reached the start of history on the server
+        self._reached_server_start: dict = {}
 
         # ── Reply / quoted message state ────────────────────────────────────
         # When not None, the next sent message will be a quoted reply
@@ -2957,6 +2959,10 @@ class ConversationsPanel(wx.Panel):
         if not self.conversation or not self._all_sorted_messages:
             return
         
+        phone_jid = self.conversation.get("remoteJid", "")
+        if phone_jid and phone_jid in getattr(self, "_reached_server_start", {}):
+            return
+        
         # Get oldest non-separator and non-pending message ID
         oldest_msg = None
         for m in self._all_sorted_messages:
@@ -2981,11 +2987,13 @@ class ConversationsPanel(wx.Panel):
         
         def _fetch():
             try:
-                phone_jid = self.conversation.get("remoteJid", "")
-                fetched = self.main_window.fetch_older_messages(phone_jid, oldest_msg)
+                phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
+                fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
                 if fetched:
                     wx.CallAfter(self._on_older_messages_loaded, fetched)
                 else:
+                    if phone_jid_val:
+                        self._reached_server_start[phone_jid_val] = True
                     self._is_loading_more = False
             except Exception as e:
                 print(f"[_load_older_messages_from_server] error: {e}")
@@ -3037,6 +3045,7 @@ class ConversationsPanel(wx.Panel):
     def _load_more_messages(self):
         """Prepend the previous page of messages to the list."""
         self._is_loading_more = True
+        self.messages_list.Freeze()
         try:
             limit = int(
                 self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
@@ -3064,6 +3073,7 @@ class ConversationsPanel(wx.Panel):
             self.messages_list.Select(n_new, True)
             self.messages_list.EnsureVisible(n_new)
         finally:
+            self.messages_list.Thaw()
             self._is_loading_more = False
 
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
