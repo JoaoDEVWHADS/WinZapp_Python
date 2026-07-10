@@ -1481,7 +1481,7 @@ export async function getMessages(req: Request, res: Response) {
 
         // 2. If the anchor doesn't exist, load history from the server page-by-page (progressing backward)
         let attempts = 0;
-        const maxAttempts = 5;
+        const maxAttempts = 30;
         let currentOldestId: string | null = null;
 
         // Initialize currentOldestId with the oldest message currently in the store
