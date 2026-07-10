@@ -2943,6 +2943,12 @@ class ConversationsPanel(wx.Panel):
                 displayable = [m for m in local_msgs if self._is_displayable_message(m)]
                 logging.info(f"[_load_older_messages] Displayable local messages count: {len(displayable)}")
                 if displayable:
+                    oldest_in_mem = self._all_sorted_messages[0] if self._all_sorted_messages else None
+                    oldest_in_mem_id = oldest_in_mem.get("key", {}).get("id") if oldest_in_mem else "None"
+                    oldest_in_mem_ts = oldest_in_mem.get("timestamp") if oldest_in_mem else "None"
+                    logging.info(f"[_load_older_messages] Oldest in memory: id={oldest_in_mem_id}, ts={oldest_in_mem_ts}")
+                    logging.info(f"[_load_older_messages] Returned oldest from DB: id={displayable[0].get('key', {}).get('id')}, ts={displayable[0].get('timestamp')}")
+                    logging.info(f"[_load_older_messages] Returned newest from DB: id={displayable[-1].get('key', {}).get('id')}, ts={displayable[-1].get('timestamp')}")
                     self.messages_list.Freeze()
                     try:
                         old_count = len(self._sorted_messages)
