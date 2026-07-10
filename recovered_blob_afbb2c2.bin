@@ -1,0 +1,107 @@
+name: Release Build
+
+on:
+  release:
+    types: [created]
+
+env:
+  NODE_VERSION: "24.15.0"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  build:
+    name: Build Windows installer and portable ZIP
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # GCC and windres are required by build.py to compile the C installer/uninstaller.
+      # UCRT64 binaries land in C:\msys64\ucrt64\bin which we add to PATH below.
+      - name: Set up MSYS2 (GCC + windres)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+
+      - name: Add MSYS2 UCRT64 bin to PATH
+        run: echo "C:/msys64/ucrt64/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # build.py expects client/node/node.exe — download the same portable ZIP
+      # version that developers use and place it at the right path.
+      - name: Download portable Node.js v${{ env.NODE_VERSION }}
+        run: |
+          $version = "${{ env.NODE_VERSION }}"
+          $zip = "node-v${version}-win-x64.zip"
+          Invoke-WebRequest "https://nodejs.org/dist/v${version}/${zip}" -OutFile $zip -UseBasicParsing
+          Expand-Archive $zip -DestinationPath . -Force
+          Move-Item "node-v${version}-win-x64" "client\node"
+
+      - name: Create Python venv and install dependencies
+        run: |
+          python -m venv venv
+          venv\Scripts\pip install --upgrade pip --quiet
+          venv\Scripts\pip install -r requirements-dev.txt --quiet
+          venv\Scripts\pip install -r requirements.txt --quiet
+          venv\Scripts\pip install pyinstaller --quiet
+
+      # Cache node_modules to avoid re-downloading hundreds of packages on every run.
+      # setup_api.py preserves node_modules across clones (moves/restores the folder),
+      # so this cache survives the WPPConnect Server re-clone in the next step.
+      - name: Cache API node_modules
+        uses: actions/cache@v4
+        with:
+          path: client/api/node_modules
+          key: ${{ runner.os }}-npm-${{ hashFiles('client/api/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      # Clones the WPPConnect Server repo into client/api/ and restores
+      # WinZapp's custom files (start.js, package.json, config.json, src patches).
+      - name: Set up WPPConnect Server
+        run: venv\Scripts\python.exe setup_api.py
+
+      # Install JS dependencies and compile TypeScript → dist/server.js.
+      # PUPPETEER_SKIP_DOWNLOAD skips the ~680 MB Chrome download — the app
+      # downloads Chrome on the user's machine during first-run setup instead.
+      - name: Install API dependencies and build
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
+        run: |
+          $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
+          $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
+
+          Set-Location "$env:GITHUB_WORKSPACE\client\api"
+
+          & $node $npm install --no-audit --no-fund --legacy-peer-deps
+
+          # Run Prisma generate only if the package defines the script
+          $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
+          if ($null -ne $scripts.'db:generate') {
+            & $node $npm run db:generate
+          }
+
+          & $node $npm run build
+
+      # Runs all 8 build steps: PyInstaller → staging → C installer/uninstaller → ZIP.
+      - name: Build WinZapp
+        run: venv\Scripts\python.exe build.py
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/WinZappInstaller.exe
+            dist/WinZapp.zip
