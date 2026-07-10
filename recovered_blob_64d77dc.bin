@@ -1,0 +1,199 @@
+# ── WinZapp: project-specific ignores ────────────────────────────────────────
+
+# User data / secrets (generated at runtime, never committed)
+client/data/messages.dat
+client/data/settings.json
+client/data/settings_default.json
+client/data/secret.key
+client/data/token.tk
+client/data/token.tk2
+client/data/media/
+client/data/voice_messages/
+client/logs/
+
+# Bundled Node.js runtime (binary distribution, ~50 MB)
+/client/node/
+/client/node-v24.15.0-win-x64.zip
+
+# Evolution API directory.
+# The entire directory is excluded because it contains the cloned upstream
+# repo (~hundreds of MB) plus runtime state (pgdata, instances, store, logs).
+# EXCEPTIONS: start.js, .env and package.json are WinZapp-specific files that
+# belong in version control.  package.json lists the minimal runtime deps
+# (embedded-postgres, prisma) needed before setup_api.py clones the full API.
+/client/api/*
+!/client/api/start.js
+!/client/api/.env
+!/client/api/package.json
+
+# Evolution API runtime state (redundant with /api/* but explicit for clarity)
+/client/api/pgdata/
+/client/api/instances/
+/client/api/store/
+/client/api/evolution.log
+/client/api2/
+
+# Build intermediates and distribution artefacts
+/build/
+/dist/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre / pytype
+.pyre/
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Ruff
+.ruff_cache/
+
+# pdm / pixi
+.pdm-python
+.pdm-build/
+.pixi
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# PyPI config
+.pypirc
+
+# ── Windows / C build ────────────────────────────────────────────────────────
+
+# PyInstaller / Windows manifests
+# *.manifest is kept generic to ignore Nuitka/PyInstaller output, but the
+# hand-written installer manifest must stay tracked.
+*.manifest
+!installer/installer.manifest
+
+# Compiled object files and binaries produced by build.py
+*.o
+*.exe
+*.pdb
+
+# ── Editors / IDEs ───────────────────────────────────────────────────────────
+
+# VS Code local settings (share .vscode/extensions.json if desired)
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Cursor
+.cursorignore
+.cursorindexingignore
+
+# JetBrains / PyCharm
+.idea/
+
+# VS Code / Cursor local history
+.history/
+
+# Abstra
+.abstra/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+
+# Logs (general)
+*.log
+
+# SQLite
+db.sqlite3
+db.sqlite3-journal
+
+# Jupyter
+.ipynb_checkpoints
+
+# ── WinZapp: negations (must come last to override earlier rules) ─────────────
+
+# Re-admit the Evolution API config files that .env and /api/* would block.
+# Also track api/.gitignore itself so its WinZapp-specific !start.js / !.env
+# exceptions are available to anyone who clones this repo.
+!/api/.gitignore
+!/api/start.js
+!/api/.env
+!/client/api/src/util/functions.ts
+!/client/api/src/middleware/statusConnection.ts
+!/client/api/src/controller/deviceController.ts
