@@ -1048,6 +1048,7 @@ class MainWindow(wx.Frame):
             event.Skip()
             return
         if event.GetActive():
+            self._last_activation_time = time.time()
             threading.Thread(
                 target=self._send_presence, args=("available",), daemon=True
             ).start()
@@ -7136,13 +7137,13 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
-        # Resolve @lid to phone JID if necessary for WPPConnect compatibility
+        # Prefer @lid JID for WPPConnect if mapped
         target_phone = remote_jid
-        if remote_jid.endswith("@lid"):
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-            if phone_jid:
-                target_phone = phone_jid
-        
+        if not target_phone.endswith("@lid"):
+            alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(remote_jid), "")
+            if alt_lid:
+                target_phone = alt_lid
+
         if target_phone.endswith("@s.whatsapp.net"):
             target_phone = target_phone.rsplit("@", 1)[0] + "@c.us"
         
@@ -7162,63 +7163,24 @@ class MainWindow(wx.Frame):
                 if not resp.ok:
                     logging.warning("[mark_as_read] API response %s for %s: %s",
                                      resp.status_code, target_phone, resp.text[:200])
-                    # WPPConnect's live session sometimes only has this contact's
-                    # chat loaded under its @lid identity (not @c.us) — "Chat not
-                    # found" in that case leaves the read-receipt never sent to
-                    # WhatsApp, so the server (correctly) keeps reporting it
-                    # unread on every future sync/restart. Retry once with the
-                    # @lid form when we have one and it's a distinct JID.
-                    if "not found" in resp.text.lower() or "não existe" in resp.text.lower():
-                        lid_jid = ""
-                        if not target_phone.endswith("@lid"):
-                            # Try cache first
-                            lid_jid = getattr(self, "_phone_to_lid", {}).get(
-                                self._normalize_jid(remote_jid), ""
-                            )
-                            # If not in cache, resolve it dynamically
-                            if not lid_jid:
-                                try:
-                                    pn_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{target_phone}"
-                                    headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-                                    pn_resp = requests.get(pn_url, headers=headers, timeout=5)
-                                    if pn_resp.ok:
-                                        pn_data = pn_resp.json()
-                                        lid_obj = pn_data.get("lid") or {}
-                                        lid_jid = lid_obj.get("_serialized") or lid_obj.get("id") or ""
-                                        if lid_jid:
-                                            self.register_jid_mapping(lid_jid, self._normalize_jid(remote_jid))
-                                except Exception as e:
-                                    logging.warning("[mark_as_read] Failed to resolve JID mapping dynamically: %s", e)
+                    # If it failed, try the alternate format (LID <-> phone) as fallback
+                    fallback_phone = remote_jid
+                    if fallback_phone.endswith("@lid"):
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(fallback_phone, "")
+                        if phone_jid: fallback_phone = phone_jid
+                    else:
+                        alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(fallback_phone), "")
+                        if alt_lid: fallback_phone = alt_lid
 
-                            if lid_jid and lid_jid != target_phone:
-                                resp2 = _send_seen(lid_jid, True)
-                                if not resp2.ok:
-                                    logging.warning("[mark_as_read] Retry via @lid also failed %s for %s: %s",
-                                                     resp2.status_code, lid_jid, resp2.text[:200])
-                        else:
-                            # Target phone is a @lid that wasn't found - try to resolve its phone number
-                            phone_jid = getattr(self, "_lid_to_phone", {}).get(target_phone, "")
-                            if not phone_jid:
-                                try:
-                                    pn_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{target_phone}"
-                                    headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-                                    pn_resp = requests.get(pn_url, headers=headers, timeout=5)
-                                    if pn_resp.ok:
-                                        pn_data = pn_resp.json()
-                                        phone_obj = pn_data.get("phoneNumber") or {}
-                                        phone_val = phone_obj.get("_serialized") or phone_obj.get("id") or ""
-                                        if phone_val:
-                                            phone_jid = self._normalize_jid(phone_val)
-                                            self.register_jid_mapping(target_phone, phone_jid)
-                                except Exception as e:
-                                    logging.warning("[mark_as_read] Failed to resolve JID mapping from LID: %s", e)
+                    if fallback_phone.endswith("@s.whatsapp.net"):
+                        fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
 
-                            if phone_jid:
-                                phone_c_us = phone_jid.rsplit("@", 1)[0] + "@c.us"
-                                resp2 = _send_seen(phone_c_us, False)
-                                if not resp2.ok:
-                                    logging.warning("[mark_as_read] Retry via resolved phone also failed %s for %s: %s",
-                                                     resp2.status_code, phone_c_us, resp2.text[:200])
+                    if fallback_phone != target_phone:
+                        logging.info("[mark_as_read] Retrying /send-seen using fallback JID: %s", fallback_phone)
+                        resp2 = _send_seen(fallback_phone, fallback_phone.endswith("@lid"))
+                        if not resp2.ok:
+                            logging.warning("[mark_as_read] Fallback /send-seen also failed %s for %s: %s",
+                                             resp2.status_code, fallback_phone, resp2.text[:200])
             except Exception as exc:
                 logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
         threading.Thread(target=_do_api, daemon=True).start()
