@@ -6970,6 +6970,8 @@ class MainWindow(wx.Frame):
                                 logging.error(f"[fetch_older_messages] Incremental save failed: {e}")
                                 self.save_data(self.chats, self.contacts)
                     return fetched_messages
+                else:
+                    return []
             else:
                 logging.warning(
                     f"[fetch_older_messages] API returned status {response.status_code} for {remote_jid}: {response.text[:300]}"
