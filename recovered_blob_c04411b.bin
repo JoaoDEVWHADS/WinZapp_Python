@@ -1,0 +1,351 @@
+name: Release WinZapp
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão da Release (Deixe em branco para usar a data/hora atual)"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Código-Fonte
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Definir Versão da Release
+        shell: pwsh
+        run: |
+          $ver = "${{ inputs.version }}"
+          if ([string]::IsNullOrEmpty($ver)) {
+              $ver = Get-Date -Format "yyyy.MM.dd.HHmm"
+          }
+          echo "RELEASE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "[INFO] Versão definida para: $ver"
+
+      - name: Atualizar versão no version.py
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_VERSION }}"
+          $filePath = "client/version.py"
+          $content = "__version__ = `"$ver`""
+          $content | Out-File -FilePath $filePath -Encoding utf8 -NoNewline
+          Write-Output "[INFO] Arquivo version.py atualizado para a versão $ver."
+
+      - name: Configurar Git, Commit e Tag
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_VERSION }}"
+          git config --local user.name "github-actions"
+          git config --local user.email "github-actions@github.com"
+          git add client/version.py
+          git commit -m "chore: bump version to $ver [skip ci]"
+          git tag "v$ver"
+          git push origin HEAD:main
+          git push origin "v$ver"
+          Write-Output "[INFO] Alterações enviadas e tag v$ver criada."
+
+      - name: Configurar Arquivos .env
+        shell: pwsh
+        run: |
+          $envContent = @"
+          WPPCONNECT_TAG_VERSION=v2.10.0
+          WPPCONNECT_API_MINIMUM_VERSION=2.10.0
+          LICENSING_USER_EMAIL=gabrielhaberkamp@gmail.com
+          "@
+          $envContent | Out-File -FilePath ".env" -Encoding utf8
+          $envContent | Out-File -FilePath "client/.env" -Encoding utf8
+          Write-Output "[INFO] Arquivos .env criados para o build."
+
+      - name: Configurar Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Instalar Dependências do Python
+        run: |
+          python -m venv venv
+          ./venv/Scripts/python -m pip install --upgrade pip
+          ./venv/Scripts/pip install -r requirements.txt
+          ./venv/Scripts/pip install zstandard pyinstaller pycdlib
+
+      - name: Configurar MSYS2 (para gcc, windres e opus)
+        uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-opus
+
+      - name: Adicionar MSYS2 GCC ao Path do Windows
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Copiar DLL do libopus e bassopus para client/lib
+        run: |
+          New-Item -ItemType Directory -Force client\lib | Out-Null
+          Copy-Item "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin\libopus-0.dll" "client\lib\libopus-0.dll"
+          if (Test-Path "client\lib\bass_opus.dll") {
+            Copy-Item "client\lib\bass_opus.dll" "client\lib\bassopus.dll" -Force
+          }
+
+      - name: Cache Base QEMU Disk Image
+        id: cache-qemu-disk
+        uses: actions/cache@v4
+        with:
+          path: client/system/ubuntu-22.04.qcow2
+          key: qemu-ubuntu-base-cloud-v11
+
+      - name: Instalar QEMU Portátil (Se não estiver em cache)
+        id: cache-qemu-bin
+        uses: actions/cache@v4
+        with:
+          path: client/qemu
+          key: qemu-portable-win-v2
+
+      - name: Baixar QEMU Portátil se não houver Cache
+        if: steps.cache-qemu-bin.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install qemu --no-progress -y
+          New-Item -ItemType Directory -Force -Path "client/qemu"
+          Copy-Item "C:\Program Files\qemu\*" "client/qemu" -Recurse -Force
+          Write-Host "[OK] QEMU installed via Chocolatey and copied to client/qemu"
+
+      - name: Construir Imagem Base QEMU Ubuntu se não houver Cache
+        if: steps.cache-qemu-disk.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "client/system"
+          # Download Canonical's official minimal Ubuntu 22.04 LTS cloud image (QCOW2 format)
+          Invoke-WebRequest -Uri "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img" -OutFile "client/system/ubuntu-22.04.qcow2"
+          
+          # Generate SSH key pair for passwordless authentication
+          New-Item -ItemType Directory -Force -Path "$HOME/.ssh" | Out-Null
+          if (Test-Path "$HOME/.ssh/id_rsa") { Remove-Item -Force "$HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa.pub" }
+          ssh-keygen -t rsa -b 2048 -N "" -f "$HOME/.ssh/id_rsa"
+          $pubKey = (Get-Content "$HOME/.ssh/id_rsa.pub").Trim()
+
+          # Create cloud-init configuration using string array to avoid column-1 indentation breaking YAML
+          $userDataLines = @(
+              "#cloud-config",
+              "users:",
+              "  - name: user",
+              "    ssh_authorized_keys:",
+              "      - $pubKey",
+              "    sudo: ['ALL=(ALL) NOPASSWD:ALL']",
+              "    groups: sudo",
+              "    shell: /bin/bash",
+              "packages:",
+              "  - docker.io",
+              "  - openssh-server",
+              "runcmd:",
+              "  - systemctl enable docker",
+              "  - systemctl start docker",
+              "  - systemctl enable ssh",
+              "  - systemctl start ssh"
+          )
+          $userData = $userDataLines -join "`n"
+          $userData | Out-File -FilePath "user-data" -Encoding utf8
+          
+          $metaData = "instance-id: winzapp-vm`nlocal-hostname: winzapp-vm"
+          $metaData | Out-File -FilePath "meta-data" -Encoding utf8
+          
+          # Generate cidata.iso using Python's pycdlib with exception logging
+          $pythonCode = @"
+          import sys
+          import traceback
+          try:
+              import pycdlib
+              iso = pycdlib.PyCdlib()
+              iso.new(joliet=3, vol_ident='cidata')
+              iso.add_file('user-data', '/USER_DAT.;1', joliet_path='/user-data')
+              iso.add_file('meta-data', '/META_DAT.;1', joliet_path='/meta-data')
+              iso.write('cidata.iso')
+              iso.close()
+              print('[OK] cidata.iso created successfully')
+          except Exception as e:
+              print('[ERROR] pycdlib failed:', e)
+              traceback.print_exc()
+              sys.exit(1)
+          "@
+          $pythonCode | Out-File -FilePath "generate_iso.py" -Encoding utf8
+          ./venv/Scripts/python generate_iso.py
+          
+          # Add QEMU to path
+          $qemuDir = "$(Resolve-Path client/qemu)"
+          $env:PATH = "$qemuDir;$env:PATH"
+          
+          # Resize the cloud image to 10GB to have enough room for Docker layers
+          & "$qemuDir/qemu-img.exe" resize client/system/ubuntu-22.04.qcow2 +8G
+          
+          # Boot VM in background with the cloud-init configuration CD-ROM, forwarding port 2222 for SSH, redirecting stdout/stderr for troubleshooting
+          Write-Host "[INFO] Booting Ubuntu Cloud Image for cloud-init installation..."
+          cmd /c "start /b `"$qemuDir/qemu-system-x86_64.exe`" -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -drive file=cidata.iso,format=raw,readonly=on -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_boot.log 2>&1"
+          
+          # Wait for VM to boot and SSH to become fully responsive (Docker/SSH installs take some time)
+          Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
+          $sshTimeout = 450
+          $elapsed = 0
+          $sshReady = $false
+          while ($elapsed -lt $sshTimeout) {
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+              if ($qemuProcess -eq $null) {
+                  Write-Error "[ERROR] QEMU VM process exited unexpectedly!"
+                  if (Test-Path qemu_boot.log) { Get-Content qemu_boot.log }
+                  exit 1
+              }
+              try {
+                  $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 2222)
+                  if ($socket.Connected) {
+                      $socket.Close()
+                      # Run SSH test in a background job with a strict 5-second timeout to prevent hangs
+                      $sshJob = Start-Job -ScriptBlock {
+                          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 -o ConnectTimeout=2 user@127.0.0.1 "echo OK"
+                      }
+                      $waitResult = Wait-Job $sshJob -Timeout 5
+                      if ($waitResult -ne $null) {
+                          $testSsh = Receive-Job $sshJob
+                          if ($testSsh -eq "OK") {
+                              $sshReady = $true
+                              Remove-Job $sshJob -Force
+                              break
+                          }
+                      }
+                      Remove-Job $sshJob -Force
+                  }
+              } catch {}
+              Start-Sleep -Seconds 2
+              $elapsed += 2
+          }
+          if ($sshReady -eq $false) {
+              Write-Error "[ERROR] VM SSH did not become ready during cloud-init in time."
+              if (Test-Path qemu_boot.log) { Get-Content qemu_boot.log }
+              exit 1
+          }
+          Write-Host "[OK] VM SSH is fully ready. Initiating clean poweroff shutdown..."
+          
+          # Shutdown VM cleanly in the background to prevent SSH client from hanging when guest interface drops
+          Start-Job -ScriptBlock { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff" } | Out-Null
+          
+          # Wait up to 30 seconds for process exit, fallback to kill if needed
+          $waited = 0
+          $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+          while ($qemuProcess -ne $null -and $waited -lt 30) {
+              Start-Sleep -Seconds 1
+              $waited++
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+          }
+          if ($qemuProcess -ne $null) {
+              Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item -Force "user-data", "meta-data", "generate_iso.py", "cidata.iso"
+          Write-Host "[OK] Base virtual disk image created cleanly and cached successfully."
+
+      - name: Preparar contexto Docker da API
+        run: |
+          python -u setup_api.py
+
+      - name: Injetar Imagem Docker no QCOW2
+        shell: pwsh
+        run: |
+          # Copy QEMU bin folder to PATH
+          $qemuDir = "$(Resolve-Path client/qemu)"
+          $env:PATH = "$qemuDir;$env:PATH"
+          
+          # Start QEMU headless VM            cmd /c "start /b `"$qemuDir/qemu-system-x86_64.exe`" -m 1024 -drive file=client/system/ubuntu-22.04.qcow2,format=qcow2 -net nic -net user,hostfwd=tcp::2222-:22 -nographic > qemu_run.log 2>&1"
+          
+          # Wait for VM to boot and SSH to become fully responsive
+          Write-Host "[INFO] Waiting for VM SSH port to become responsive..."
+          $sshTimeout = 90
+          $elapsed = 0
+          $sshReady = $false
+          while ($elapsed -lt $sshTimeout) {
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+              if ($qemuProcess -eq $null) {
+                  Write-Error "[ERROR] QEMU VM process exited unexpectedly!"
+                  if (Test-Path qemu_run.log) { Get-Content qemu_run.log }
+                  exit 1
+              }
+              try {
+                  $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 2222)
+                  if ($socket.Connected) {
+                      $socket.Close()
+                      # Run SSH test in a background job with a strict 5-second timeout to prevent hangs
+                      $sshJob = Start-Job -ScriptBlock {
+                          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 -o ConnectTimeout=2 user@127.0.0.1 "echo OK"
+                      }
+                      $waitResult = Wait-Job $sshJob -Timeout 5
+                      if ($waitResult -ne $null) {
+                          $testSsh = Receive-Job $sshJob
+                          if ($testSsh -eq "OK") {
+                              $sshReady = $true
+                              Remove-Job $sshJob -Force
+                              break
+                          }
+                      }
+                      Remove-Job $sshJob -Force
+                  }
+              } catch {}
+              Start-Sleep -Seconds 2
+              $elapsed += 2
+          }
+          if ($sshReady -eq $false) {
+              Write-Error "[ERROR] VM SSH did not become ready in time."
+              if (Test-Path qemu_run.log) { Get-Content qemu_run.log }
+              exit 1
+          }
+          Write-Host "[OK] VM SSH is fully ready."
+          
+          # Create and transfer WPPConnect context archive to the VM
+          tar -czf client/api.tar.gz -C client/api .
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -P 2222 client/api.tar.gz user@127.0.0.1:/home/user/api.tar.gz
+          
+          # Build Docker image natively inside the Ubuntu VM
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "mkdir -p /home/user/api && tar -xzf /home/user/api.tar.gz -C /home/user/api && cd /home/user/api && sudo docker build -t wppconnect-api:latest -t wppconnect-api:current . && cd /home/user && rm -rf /home/user/api /home/user/api.tar.gz"
+          
+          # Shutdown VM cleanly in the background to prevent SSH client from hanging
+          Start-Job -ScriptBlock { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 2222 user@127.0.0.1 "sudo poweroff" } | Out-Null
+          
+          # Wait up to 30 seconds for process exit, fallback to kill if needed
+          $waited = 0
+          $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+          while ($qemuProcess -ne $null -and $waited -lt 30) {
+              Start-Sleep -Seconds 1
+              $waited++
+              $qemuProcess = Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue
+          }
+          if ($qemuProcess -ne $null) {
+              Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Compilar WinZapp e Gerar Instalador
+        shell: pwsh
+        run: |
+          python build.py
+
+      - name: Criar GitHub Release e Fazer Upload dos Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.RELEASE_VERSION }}
+          name: Versão ${{ env.RELEASE_VERSION }}
+          files: |
+            dist/WinZappInstaller.exe
+            dist/WinZapp.zip
+          generate_release_notes: true
