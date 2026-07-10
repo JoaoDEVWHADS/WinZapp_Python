@@ -1,0 +1,379 @@
+import os
+import sys
+import wx
+import wx.dataview
+
+
+class AccessibleSearchInConversation(wx.Accessible):
+    """Reports Ctrl+Shift+F as the keyboard shortcut for the search-in-conversation button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+F")
+
+
+class AccessibleSearchNextResult(wx.Accessible):
+    """Reports Enter as the keyboard shortcut for the next-result button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Enter")
+
+
+class AccessibleSearchPrevResult(wx.Accessible):
+    """Reports Shift+Enter as the keyboard shortcut for the previous-result button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Shift+Enter")
+
+
+class AccessibleStatusPrev(wx.Accessible):
+    """Reports Ctrl+Left as the keyboard shortcut for the previous-status button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Left")
+
+
+class AccessibleStatusNext(wx.Accessible):
+    """Reports Ctrl+Right as the keyboard shortcut for the next-status button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Right")
+
+
+class AccessibleSearchConversations(wx.Accessible):
+    def __init__(self, shortcut):
+        super().__init__()
+        self.shortcut = shortcut
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, self.shortcut)
+
+
+class AccessibleRecordVoiceMessage(wx.Accessible):
+    def __init__(self, shortcut):
+        super().__init__()
+        self.shortcut = shortcut
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, self.shortcut)
+
+
+class AccessibleSaveAs(wx.Accessible):
+    """Reports Ctrl+Shift+S as the keyboard shortcut for the Save-As button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+S")
+
+
+class AccessibleReadMoreButton(wx.Accessible):
+    """Reports Alt+L as the keyboard shortcut for the Read-more button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Alt+L")
+
+
+class AccessibleConversationDataButton(wx.Accessible):
+    """Reports Ctrl+Shift+D as the keyboard shortcut for the conversation-data button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+D")
+
+
+class AccessibleAddAttachmentButton(wx.Accessible):
+    """Reports Ctrl+Shift+A as the keyboard shortcut for the Add Attachment button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+A")
+
+
+class AccessibleDiscardVoiceMessage(wx.Accessible):
+    """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+D")
+
+
+class AccessiblePauseResumeRecording(wx.Accessible):
+    """Reports Ctrl+Shift+P as the keyboard shortcut for the Pause/Resume button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+P")
+
+
+class AccessibleSendVoiceMessage(wx.Accessible):
+    """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+R")
+
+
+class AccessibleNewConversationButton(wx.Accessible):
+    """Reports Ctrl+N as the keyboard shortcut for the New Conversation button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+N")
+
+
+class AccessibleMessagesList(wx.Accessible):
+    """
+    Custom accessible for the conversation messages ListCtrl.
+
+    The native Win32 ListView control truncates each item's text to ~259
+    characters, both visually and in the MSAA name exposed to screen readers.
+    Long messages (e.g. a paragraph ending in a URL) therefore got cut off and
+    could only be read in full through the Alt+C popup.  This accessible returns
+    the complete, untruncated rendered text for each row so the screen reader
+    always announces the whole message.
+    """
+
+    def __init__(self, conversations_panel):
+        super().__init__()
+        self._panel = conversations_panel
+
+    def GetName(self, childId):
+        # childId 0 is the control itself; rows are 1-based.
+        # We return an empty string for items (childId > 0) to prevent the native OS
+        # MSAA list proxy from announcing the truncated text.
+        # This completely avoids speech duplication and double entries in NVDA history,
+        # allowing our debounced self.main_window.output() to cleanly announce the full message.
+        if childId == 0:
+            return (wx.ACC_NOT_IMPLEMENTED, "")
+        return (wx.ACC_OK, "")
+
+
+class AccessibleMessagesListControl(wx.Accessible):
+    """
+    Reports a simple, fixed name (e.g. "Mensagens") for the conversation
+    messages list control itself (childId 0) when it receives focus via
+    Tab/Shift+Tab.
+
+    Without this, NVDA falls back to a generic, redundant description built
+    from the native control's window class and item count — e.g. "DataViewCtrl
+    200 itens" for CompatDataViewListCtrl, or "wx dataviewctrlmainwindow" for
+    its internal child window — instead of announcing just the field label.
+    Applies to both the classic wx.ListCtrl and CompatDataViewListCtrl so the
+    announcement is identical regardless of which one is configured.
+
+    Per-row announcements (childId > 0) are left untouched (ACC_NOT_IMPLEMENTED)
+    so the screen reader keeps reading each message's content normally.
+    """
+
+    def __init__(self, label):
+        super().__init__()
+        self._label = label
+
+    def GetName(self, childId):
+        if childId == 0:
+            return (wx.ACC_OK, self._label)
+        return (wx.ACC_NOT_IMPLEMENTED, "")
+
+
+class AccessibleAudioSlider(wx.Accessible):
+    def __init__(self, conversations_panel):
+        super().__init__()
+        self._panel = conversations_panel
+
+    def GetName(self, childId):
+        panel = self._panel
+        i18n = panel.main_window.i18n
+        if panel._audio_stream is not None and panel._audio_stream_duration > 0:
+            try:
+                pos = panel._audio_stream.get_position()
+                total = panel._audio_stream.get_length()
+                current_secs = int(pos / total * panel._audio_stream_duration) if total > 0 else 0
+            except Exception:
+                current_secs = 0
+            current_str = panel._format_duration(current_secs)
+            total_str = panel._format_duration(panel._audio_stream_duration)
+            return (wx.ACC_OK, f"{current_str} {i18n.t('of')} {total_str}")
+        return (wx.ACC_OK, "")
+
+
+class MockListEvent:
+    def __init__(self, index):
+        self._index = index
+    def GetIndex(self):
+        return self._index
+    def Skip(self):
+        pass
+
+
+class CompatDataViewListCtrl(wx.dataview.DataViewListCtrl):
+    """
+    Subclass of wx.dataview.DataViewListCtrl that mimics the wx.ListCtrl API.
+    Used to bypass the native Windows SysListView32 512-character screen reader limitation
+    by utilizing the generic wxWindowNR backend, exactly like Easygram does.
+    """
+    def __init__(self, parent, style=0):
+        super().__init__(parent, style=wx.dataview.DV_ROW_LINES | wx.dataview.DV_SINGLE)
+        self.Bind(wx.dataview.EVT_DATAVIEW_COLUMN_HEADER_CLICK, self._on_header_click)
+
+    def _on_header_click(self, event):
+        event.Veto()
+
+    def _get_main_window(self):
+        """Return the internal child window that actually receives OS focus.
+
+        wx.dataview.DataViewListCtrl (generic/wxWindowNR backend) is a
+        compound control: the window the user tabs into and that Windows
+        reports focus events for is an internal child ("wxDataViewCtrlMainWindow"),
+        not `self`. Calling SetAccessible()/SetName() only on `self` therefore
+        never reaches NVDA, which reads the child's native window class name
+        instead ("wx dataviewctrlmainwindow"). Returns None if no such child
+        is found (e.g. on non-Windows backends where this isn't an issue).
+        """
+        children = self.GetChildren()
+        return children[0] if children else None
+
+    def SetAccessible(self, accessible):
+        super().SetAccessible(accessible)
+        main_win = self._get_main_window()
+        if main_win is not None and main_win is not self:
+            # wx.Accessible instances are single-owner in wxPython (SetAccessible
+            # takes ownership), so a second one must be created for the child.
+            label = getattr(accessible, "_label", None)
+            if label is not None:
+                main_win.SetAccessible(type(accessible)(label))
+                main_win.SetName(label)
+            else:
+                main_win.SetAccessible(accessible)
+
+    def SetName(self, name):
+        super().SetName(name)
+        main_win = self._get_main_window()
+        if main_win is not None and main_win is not self:
+            main_win.SetName(name)
+
+    def InsertColumn(self, col, heading, format=0, width=-1):
+        self.AppendTextColumn(heading, width=width)
+
+    def GetItemCount(self):
+        return super().GetItemCount()
+
+    def Focus(self, row):
+        item = self.RowToItem(row)
+        if item.IsOk():
+            self.SelectRow(row)
+            # SelectRow() alone only changes which row is highlighted — it does
+            # not move the DataViewCtrl's internal "current item" that arrow-key
+            # navigation continues from. Without also setting it here, the very
+            # first Up/Down press after programmatic Focus()/Select() has no
+            # valid position to move relative to, so navigation appears dead.
+            self.SetCurrentItem(item)
+
+    def Select(self, row, select=True):
+        item = self.RowToItem(row)
+        if select:
+            self.SelectRow(row)
+            if item.IsOk():
+                self.SetCurrentItem(item)
+        else:
+            self.UnselectRow(row)
+
+    def EnsureVisible(self, row):
+        item = self.RowToItem(row)
+        if item.IsOk():
+            super().EnsureVisible(item)
+
+    def SetItemText(self, row, col_or_text, text=None):
+        if text is None:
+            self.SetValue(col_or_text, row, 0)
+        else:
+            self.SetValue(text, row, col_or_text)
+
+    def GetItemText(self, row, col=0):
+        return self.GetValue(row, col)
+
+    def Append(self, entry_tuple):
+        self.AppendItem([entry_tuple[0]])
+
+    def InsertItem(self, pos, text):
+        """DataViewListCtrl only supports append, so we rebuild the list to insert at pos.
+        Saves and restores the selected row and OS-level focus to prevent cursor jumping and
+        focus loss when a new message arrives while the user is navigating with arrow keys."""
+        count = self.GetItemCount()
+        selected = self.GetSelectedRow()
+        had_focus = self.HasFocus()
+        values = [self.GetValue(i, 0) for i in range(count)]
+        values.insert(pos, text)
+        self.DeleteAllItems()
+        for v in values:
+            self.AppendItem([v])
+        # Restore selection: shift down if the insertion was at or before it
+        if selected != wx.NOT_FOUND:
+            restored = selected + 1 if pos <= selected else selected
+            self.SelectRow(restored)
+            item = self.RowToItem(restored)
+            if item.IsOk():
+                super().EnsureVisible(item)
+        if had_focus:
+            self.SetFocus()
+        return pos
+
+    def DeleteItem(self, row):
+        """DataViewListCtrl has no native delete-by-row, so we rebuild the list.
+        Saves and restores the selected row and OS-level focus to prevent cursor jumping and
+        focus loss when the unread separator is dismissed."""
+        count = self.GetItemCount()
+        if row < 0 or row >= count:
+            return
+        selected = self.GetSelectedRow()
+        had_focus = self.HasFocus()
+        values = [self.GetValue(i, 0) for i in range(count) if i != row]
+        self.DeleteAllItems()
+        for v in values:
+            self.AppendItem([v])
+        # Restore selection: shift up if deleted row was before it; clamp if same row deleted
+        if selected != wx.NOT_FOUND and len(values) > 0:
+            if selected > row:
+                restored = selected - 1
+            elif selected == row:
+                restored = max(0, row - 1)
+            else:
+                restored = selected
+            self.SelectRow(restored)
+            item = self.RowToItem(restored)
+            if item.IsOk():
+                super().EnsureVisible(item)
+        if had_focus:
+            self.SetFocus()
+
+    def GetFocusedItem(self):
+        return self.GetSelectedRow()
+
+    def GetFirstSelected(self):
+        return self.GetSelectedRow()
+
+    def SetColumn(self, col, listItem):
+        column = self.GetColumn(col)
+        if column:
+            column.SetTitle(listItem.GetText())
+
+    def Bind(self, event_type, handler, *args, **kwargs):
+        if event_type == wx.EVT_LIST_ITEM_ACTIVATED:
+            def _on_activated(evt):
+                row = self.ItemToRow(evt.GetItem())
+                if row != wx.NOT_FOUND:
+                    handler(MockListEvent(row))
+            super().Bind(wx.dataview.EVT_DATAVIEW_ITEM_ACTIVATED, _on_activated, *args, **kwargs)
+
+        elif event_type in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_LIST_ITEM_FOCUSED):
+            def _on_selected(evt):
+                row = self.ItemToRow(evt.GetItem())
+                if row != wx.NOT_FOUND:
+                    handler(MockListEvent(row))
+            super().Bind(wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, _on_selected, *args, **kwargs)
+
+        elif event_type == wx.EVT_KEY_DOWN:
+            # Raw key events are delivered to whichever window actually has OS
+            # focus. For this compound control that's the internal child
+            # ("wxDataViewCtrlMainWindow"), not self — binding on self here
+            # would silently never fire (breaking e.g. Space-to-activate),
+            # unlike EVT_LIST_ITEM_ACTIVATED/SELECTED above, which are
+            # explicitly re-emitted from DataView events rather than relying
+            # on OS event delivery.
+            main_win = self._get_main_window()
+            target = main_win if main_win is not None else self
+            target.Bind(event_type, handler, *args, **kwargs)
+
+        else:
+            super().Bind(event_type, handler, *args, **kwargs)
