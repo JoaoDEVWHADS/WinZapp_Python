@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /c/WinZapp/build)",
+      "Bash(windres uninstaller.rc -o /c/WinZapp/build/uninstaller_res.o --include-dir .)",
+      "Bash(gcc uninstaller.c /c/WinZapp/build/uninstaller_res.o -o /c/WinZapp/build/uninstall.exe -mwindows -I. -lole32 -lshell32 -lcomctl32 -lshlwapi -ladvapi32)",
+      "PowerShell(@\\(\"C:\\\\mingw64\", \"C:\\\\MinGW\", \"C:\\\\msys64\", \"C:\\\\msys2\", \"C:\\\\ProgramData\\\\mingw64\", \"C:\\\\Program Files\\\\mingw-w64\"\\) | ForEach-Object { if \\(Test-Path \"$_\\\\bin\\\\gcc.exe\"\\) { \"$_ -> FOUND gcc.exe\" } })",
+      "Bash(/c/msys64/ucrt64/bin/windres.exe uninstaller.rc -o /c/WinZapp/build/uninstaller_res.o --include-dir .)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(/c/msys64/ucrt64/bin/windres.exe --verbose uninstaller.rc -o /c/WinZapp/build/uninstaller_res.o --include-dir .)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -E -xc -DRC_INVOKED -I. uninstaller.rc)",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -E -xc -DRC_INVOKED \"-I/c/WinZapp/installer\" \"/c/WinZapp/installer/uninstaller.rc\")",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -v -E -xc -DRC_INVOKED \"-I/c/WinZapp/installer\" \"/c/WinZapp/installer/uninstaller.rc\")",
+      "Bash(/c/msys64/ucrt64/bin/gcc.exe -v -E -xc -DRC_INVOKED \"-I/c/WinZapp/installer\" \"-I/c/msys64/ucrt64/include\" \"/c/WinZapp/installer/uninstaller.rc\")"
+    ]
+  }
+}
