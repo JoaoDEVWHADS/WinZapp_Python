@@ -1483,13 +1483,32 @@ export async function getMessages(req: Request, res: Response) {
         let attempts = 0;
         const maxAttempts = 5;
         let currentOldestId: string | null = null;
+
+        // Initialize currentOldestId with the oldest message currently in the store
+        try {
+          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+          if (currentMsgs && currentMsgs.length > 0) {
+            let oldestMsg = currentMsgs[0];
+            for (const m of currentMsgs) {
+              if (m.t < oldestMsg.t) {
+                oldestMsg = m;
+              }
+            }
+            currentOldestId = oldestMsg.id._serialized || oldestMsg.id;
+          }
+        } catch (err) {
+          // Ignore
+        }
         
         while (id && !anchorExists && attempts < maxAttempts) {
           try {
+            if (!currentOldestId) {
+              break;
+            }
             const loaded: any[] = await (window as any).WPP.chat.getMessages(chatId, {
               count: 100,
               direction: 'before',
-              id: currentOldestId || undefined
+              id: currentOldestId
             });
             
             if (!loaded || loaded.length === 0) {
@@ -1520,21 +1539,6 @@ export async function getMessages(req: Request, res: Response) {
         if (id && !anchorExists) {
           if (currentOldestId) {
             queryId = currentOldestId;
-          } else {
-            try {
-              const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
-              if (currentMsgs && currentMsgs.length > 0) {
-                let oldestMsg = currentMsgs[0];
-                for (const m of currentMsgs) {
-                  if (m.t < oldestMsg.t) {
-                    oldestMsg = m;
-                  }
-                }
-                queryId = oldestMsg.id._serialized || oldestMsg.id;
-              }
-            } catch (err) {
-              // Ignore
-            }
           }
         }
 
