@@ -2958,24 +2958,27 @@ class ConversationsPanel(wx.Panel):
                         n_new = len(self._sorted_messages) - old_count
                         logging.info(f"[_load_older_messages] Prepend finished. Added {n_new} new unique messages. Rebuilding UI list.")
                         
-                        # Recalculate unread separator index
-                        self._unread_sep_idx = -1
-                        for idx, msg in enumerate(self._sorted_messages):
-                            if self._is_separator(msg):
-                                self._unread_sep_idx = idx
-                                break
-                            
-                        self.messages_list.DeleteAllItems()
-                        for msg in self._sorted_messages:
-                            self.messages_list.Append((self._render_message_line(msg),))
-                            
-                        self.messages_list.Focus(n_new)
-                        self.messages_list.Select(n_new, True)
-                        self.messages_list.EnsureVisible(n_new)
+                        if n_new > 0:
+                            # Recalculate unread separator index
+                            self._unread_sep_idx = -1
+                            for idx, msg in enumerate(self._sorted_messages):
+                                if self._is_separator(msg):
+                                    self._unread_sep_idx = idx
+                                    break
+                                
+                            self.messages_list.DeleteAllItems()
+                            for msg in self._sorted_messages:
+                                self.messages_list.Append((self._render_message_line(msg),))
+                                
+                            self.messages_list.Focus(n_new)
+                            self.messages_list.Select(n_new, True)
+                            self.messages_list.EnsureVisible(n_new)
+                            self._is_loading_more = False
+                            return
+                        else:
+                            logging.info("[_load_older_messages] No new unique messages found in local DB chunk. Falling through to server fetch.")
                     finally:
                         self.messages_list.Thaw()
-                    self._is_loading_more = False
-                    return
             
             # No older messages in local DB, fetch from server
             self._load_older_messages_from_server()
