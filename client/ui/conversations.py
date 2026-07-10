@@ -2948,27 +2948,46 @@ class ConversationsPanel(wx.Panel):
                 local_msgs.reverse()
                 displayable = [m for m in local_msgs if self._is_displayable_message(m)]
                 if displayable:
-                    n_new = len(displayable)
-                    self.messages_list.Freeze()
-                    try:
-                        self._all_sorted_messages = displayable + self._all_sorted_messages
-                        self._sorted_messages     = displayable + self._sorted_messages
-                        self._messages_offset     = 0
-                        if self._unread_sep_idx >= 0:
-                            self._unread_sep_idx += n_new
-                            
-                        for msg in reversed(displayable):
-                            self.messages_list.InsertItem(0, self._render_message_line(msg))
-                            
-                        self.messages_list.Focus(n_new)
-                        self.messages_list.Select(n_new, True)
-                        self.messages_list.EnsureVisible(n_new)
-                    finally:
-                        self.messages_list.Thaw()
-                    self._is_loading_more = False
-                    return
+                    combined = displayable + self._all_sorted_messages
+                    # Deduplicate combined messages, keeping the latest version
+                    _seen_ids = {}
+                    for i, m in enumerate(combined):
+                        if not isinstance(m, dict):
+                            continue
+                        mid = m.get("key", {}).get("id", "")
+                        if mid:
+                            _seen_ids[mid] = i
+                    _kept = set(_seen_ids.values())
+                    combined_dedup = [
+                        m for i, m in enumerate(combined)
+                        if isinstance(m, dict) and (
+                            not m.get("key", {}).get("id", "") or i in _kept
+                        )
+                    ]
+
+                    n_new = len(combined_dedup) - len(self._all_sorted_messages)
+                    if n_new > 0:
+                        self.messages_list.Freeze()
+                        try:
+                            self._all_sorted_messages = combined_dedup
+                            self._sorted_messages     = combined_dedup
+                            self._messages_offset     = 0
+                            if self._unread_sep_idx >= 0:
+                                self._unread_sep_idx += n_new
+                                
+                            self.messages_list.DeleteAllItems()
+                            for msg in self._sorted_messages:
+                                self.messages_list.Append((self._render_message_line(msg),))
+                                
+                            self.messages_list.Focus(n_new)
+                            self.messages_list.Select(n_new, True)
+                            self.messages_list.EnsureVisible(n_new)
+                        finally:
+                            self.messages_list.Thaw()
+                        self._is_loading_more = False
+                        return
             
-            # No older messages in local DB, fetch from server
+            # No older/new messages in local DB, fetch from server
             self._load_older_messages_from_server()
         except Exception as e:
             print(f"[_load_older_messages] error: {e}")
@@ -3035,18 +3054,38 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             pass
             
-        n_new = len(displayable)
+        combined = displayable + self._all_sorted_messages
+        # Deduplicate combined messages, keeping the latest version
+        _seen_ids = {}
+        for i, m in enumerate(combined):
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("key", {}).get("id", "")
+            if mid:
+                _seen_ids[mid] = i
+        _kept = set(_seen_ids.values())
+        combined_dedup = [
+            m for i, m in enumerate(combined)
+            if isinstance(m, dict) and (
+                not m.get("key", {}).get("id", "") or i in _kept
+            )
+        ]
+
+        n_new = len(combined_dedup) - len(self._all_sorted_messages)
+        if n_new <= 0:
+            return
         
         self.messages_list.Freeze()
         try:
-            self._all_sorted_messages = displayable + self._all_sorted_messages
-            self._sorted_messages     = displayable + self._sorted_messages
+            self._all_sorted_messages = combined_dedup
+            self._sorted_messages     = combined_dedup
             self._messages_offset     = 0
             if self._unread_sep_idx >= 0:
                 self._unread_sep_idx += n_new
                 
-            for msg in reversed(displayable):
-                self.messages_list.InsertItem(0, self._render_message_line(msg))
+            self.messages_list.DeleteAllItems()
+            for msg in self._sorted_messages:
+                self.messages_list.Append((self._render_message_line(msg),))
                 
             self.messages_list.Focus(n_new)
             self.messages_list.Select(n_new, True)
