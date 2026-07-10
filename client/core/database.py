@@ -857,6 +857,7 @@ class DatabaseManager:
                     for tbl in (
                         "chats", "messages", "contacts",
                         "lid_mappings", "unresolvable_lids", "status_updates",
+                        "system_metadata",
                     ):
                         await conn.execute(f"DELETE FROM {tbl}")
 
@@ -1007,6 +1008,7 @@ class DatabaseManager:
                 for table in (
                     "chats", "messages", "contacts",
                     "lid_mappings", "unresolvable_lids", "status_updates",
+                    "system_metadata",
                 ):
                     await conn.execute(f"DELETE FROM {table}")
                 await conn.commit()
