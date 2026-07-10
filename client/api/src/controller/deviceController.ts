@@ -1455,7 +1455,21 @@ export async function getMessages(req: Request, res: Response) {
       response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
         const getMsgSafe = async (msgId: string) => {
           try {
-            return (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            const exact = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            if (exact) return exact;
+            const parts = msgId.split('_');
+            if (parts.length >= 3) {
+              const msgIdBase = parts[2];
+              const chatModel = (window as any).WPP.chat.get(chatId);
+              if (chatModel && chatModel.msgs) {
+                // If it is a Backbone Collection, try to find the message by base ID
+                const found = typeof chatModel.msgs.find === 'function' 
+                  ? chatModel.msgs.find((m: any) => (m.id?.id || (m.id && typeof m.id === 'object' ? m.id.id : '')) === msgIdBase)
+                  : (Array.isArray(chatModel.msgs) ? chatModel.msgs.find((m: any) => (m.id?.id || (m.id && typeof m.id === 'object' ? m.id.id : '')) === msgIdBase) : null);
+                if (found) return found;
+              }
+            }
+            return null;
           } catch (e) {
             return null;
           }
