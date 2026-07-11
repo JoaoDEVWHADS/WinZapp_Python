@@ -3365,6 +3365,12 @@ class MainWindow(wx.Frame):
         if not getattr(self, "_wa_connected", False):
             logging.warning("[start_sync] Sync starting without active WhatsApp connection (timeout).")
 
+        # Play sound and announce synchronization start immediately to give instant user feedback
+        self.synchronizing_sound.play()
+        wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
+        if not self.background_mode:
+            self.output(self.i18n.t("synchronization_started"), interrupt=True)
+
         # After first pairing the API may need a few seconds to populate chats.
         # Retry only when starting cold (no local cache); if we already have
         # local chats just refresh once and move on — the API is ready.
@@ -3391,11 +3397,6 @@ class MainWindow(wx.Frame):
         # with messages.  We'll do a second, definitive fetch after messages are
         # synced (by then the API has received all contacts from WhatsApp).
         self.get_remote_contacts()
-
-        self.synchronizing_sound.play()
-        wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
-        if not self.background_mode:
-            self.output(self.i18n.t("synchronization_started"), interrupt=True)
 
         # ── Start background resolving of unknown LIDs ──────────────────
         self.start_background_lid_resolution()
