@@ -7148,8 +7148,17 @@ class MainWindow(wx.Frame):
                 else:
                     return []
             else:
+                err_msg = response.text[:300]
+                try:
+                    body = response.json()
+                    if isinstance(body, dict) and "error" in body:
+                        err_obj = body["error"]
+                        if isinstance(err_obj, dict) and "message" in err_obj:
+                            err_msg = f"{err_obj.get('message')} - {err_obj.get('stack', '')[:200]}"
+                except Exception:
+                    pass
                 logging.warning(
-                    f"[fetch_older_messages] API returned status {response.status_code} for {remote_jid}: {response.text[:300]}"
+                    f"[fetch_older_messages] API returned status {response.status_code} for {remote_jid}: {err_msg}"
                 )
                 return None
         except Exception as e:

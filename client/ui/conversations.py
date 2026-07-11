@@ -3044,28 +3044,42 @@ class ConversationsPanel(wx.Panel):
         self._is_loading_more = True
         
         def _fetch():
+            phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
             try:
-                phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
                 logging.info(f"[_load_older_messages_from_server thread] Launching fetch_older_messages for {phone_jid_val}")
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
                 logging.info(f"[_load_older_messages_from_server thread] fetch_older_messages returned {len(fetched) if fetched is not None else 'None'}")
                 if fetched is not None:
                     if fetched:
-                        wx.CallAfter(self._on_older_messages_loaded, fetched)
+                        wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
                     else:
-                        if phone_jid_val:
-                            self._reached_server_start[phone_jid_val] = True
-                        self._is_loading_more = False
+                        wx.CallAfter(self._set_reached_start, phone_jid_val)
                 else:
-                    self._is_loading_more = False
+                    wx.CallAfter(self._clear_loading_more, phone_jid_val)
             except Exception as e:
                 logging.exception(f"[_load_older_messages_from_server] thread error: {e}")
-                self._is_loading_more = False
+                wx.CallAfter(self._clear_loading_more, phone_jid_val)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _on_older_messages_loaded(self, fetched_messages):
+    def _set_reached_start(self, requested_jid):
+        if not self.conversation or self.conversation.get("remoteJid") != requested_jid:
+            logging.info(f"[_set_reached_start] Ignoring call for {requested_jid} (current active: {self.conversation.get('remoteJid') if self.conversation else 'None'})")
+            return
+        self._reached_server_start[requested_jid] = True
+        self._is_loading_more = False
+
+    def _clear_loading_more(self, requested_jid):
+        if not self.conversation or self.conversation.get("remoteJid") != requested_jid:
+            logging.info(f"[_clear_loading_more] Ignoring call for {requested_jid} (current active: {self.conversation.get('remoteJid') if self.conversation else 'None'})")
+            return
+        self._is_loading_more = False
+
+    def _on_older_messages_loaded(self, fetched_messages, requested_jid):
         """Prepend fetched history to UI message list."""
+        if not self.conversation or self.conversation.get("remoteJid") != requested_jid:
+            logging.info(f"[_on_older_messages_loaded] Ignoring fetched messages for {requested_jid} (current active: {self.conversation.get('remoteJid') if self.conversation else 'None'})")
+            return
         self._is_loading_more = False
         if not fetched_messages:
             return

@@ -1584,11 +1584,18 @@ export async function getMessages(req: Request, res: Response) {
       }
     }
     res.status(200).json({ status: 'success', response: response });
-  } catch (e) {
-    req.logger.error(e);
+  } catch (e: any) {
+    req.logger.error(`Error in getMessages: ${e?.message || e}\nStack: ${e?.stack || ''}`);
     res
       .status(401)
-      .json({ status: 'error', response: 'Error on open list', error: e });
+      .json({
+        status: 'error',
+        response: 'Error on open list',
+        error: {
+          message: e?.message || String(e),
+          stack: e?.stack || ''
+        }
+      });
   }
 }
 
