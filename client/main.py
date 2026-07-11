@@ -7737,21 +7737,28 @@ class MainWindow(wx.Frame):
         if not jid or jid.endswith("@newsletter"):
             return
         
-        # Translate phone JID to LID JID if available to prevent "Chat not found" errors
-        # on modern WhatsApp Web clients.
+        jids_to_subscribe = [jid]
         phone_to_lid = getattr(self, "_phone_to_lid", {})
-        target_jid = phone_to_lid.get(jid, jid)
+        lid_to_phone = getattr(self, "_lid_to_phone", {})
         
+        if jid in phone_to_lid:
+            jids_to_subscribe.append(phone_to_lid[jid])
+        elif jid in lid_to_phone:
+            jids_to_subscribe.append(lid_to_phone[jid])
+            
         def _api():
-            is_group = target_jid.endswith("@g.us")
-            is_lid = target_jid.endswith("@lid")
-            phone = target_jid.replace("@s.whatsapp.net", "@c.us")
-            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-            try:
-                requests.post(url, json={"phone": phone, "isGroup": is_group, "isLid": is_lid}, headers=headers, timeout=10)
-            except Exception:
-                pass
+            for target_jid in set(jids_to_subscribe):
+                is_group = target_jid.endswith("@g.us")
+                is_lid = target_jid.endswith("@lid")
+                phone = target_jid.replace("@s.whatsapp.net", "@c.us")
+                url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/subscribe-presence"
+                logging.info("[subscribe_presence] Subscribing to: %s (isGroup=%s, isLid=%s)", phone, is_group, is_lid)
+                try:
+                    resp = requests.post(url, json={"phone": phone, "isGroup": is_group, "isLid": is_lid}, headers=headers, timeout=10)
+                    logging.info("[subscribe_presence] Response for %s: %s (body: %s)", phone, resp.status_code, resp.text[:200])
+                except Exception as e:
+                    logging.error("[subscribe_presence] Error subscribing to %s: %s", phone, e)
         threading.Thread(target=_api, daemon=True).start()
 
     def start_background_lid_resolution(self):
