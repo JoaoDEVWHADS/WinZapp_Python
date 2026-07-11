@@ -6632,15 +6632,6 @@ class MainWindow(wx.Frame):
                 break
 
     def on_presence_update(self, jid: str, presences: dict):
-        """
-        Handle a presence.update WebSocket event (main thread).
-
-        Stores the latest presence data for the JID in _presence_cache, updates
-        the composing-chats index for the typing indicator in the chat list, speaks
-        via AO2 when the active conversation has a new composing event, and refreshes
-        the data-button note for the open conversation.
-
-    def on_presence_update(self, jid: str, presences: dict):
         """Update the presence cache and composing indicators. Speaks changes
         via AO2 when the active conversation has a new composing event, and refreshes
         the data-button note for the open conversation.
