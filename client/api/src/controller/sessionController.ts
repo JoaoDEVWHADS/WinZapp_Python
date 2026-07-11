@@ -820,7 +820,37 @@ export async function subscribePresence(req: Request, res: Response) {
      }
    */
   try {
-    const { phone, isGroup = false, all = false } = req.body;
+    const { phone, isGroup = false, all = false, isLid = false } = req.body;
+
+    const subscribeOne = async (contato: string) => {
+      // Prefer the modern WPP.contact.subscribePresence which works with
+      // current WhatsApp Web. The legacy req.client.subscribePresence uses
+      // the internal WAPI that calls Store.Presence.find() — broken in newer
+      // WA versions and returns 500. We fall back to the legacy path if the
+      // WPP API is not available.
+      const page = (req.client as any).page;
+      if (page) {
+        try {
+          await page.evaluate((id: string) => {
+            const wpp = (window as any).WPP;
+            if (wpp && wpp.contact && typeof wpp.contact.subscribePresence === 'function') {
+              return wpp.contact.subscribePresence(id);
+            }
+            // Fallback to WPP.whatsapp.PresenceUtils if available
+            if (wpp && wpp.whatsapp && wpp.whatsapp.PresenceUtils) {
+              return wpp.whatsapp.PresenceUtils.subscribeToPresence(id);
+            }
+            throw new Error('WPP.contact.subscribePresence not available');
+          }, contato);
+          req.logger.info(`[subscribePresence] WPP subscribed: ${contato}`);
+          return;
+        } catch (wppErr) {
+          req.logger.warn(`[subscribePresence] WPP fallback for ${contato}: ${wppErr}`);
+        }
+      }
+      // Legacy fallback
+      await req.client.subscribePresence(contato);
+    };
 
     if (all) {
       let contacts;
@@ -831,11 +861,14 @@ export async function subscribePresence(req: Request, res: Response) {
         const chats = await req.client.getAllContacts();
         contacts = chats.map((c: any) => c.id._serialized);
       }
-      await req.client.subscribePresence(contacts);
-    } else
-      for (const contato of contactToArray(phone, isGroup)) {
-        await req.client.subscribePresence(contato);
+      for (const contato of contacts) {
+        await subscribeOne(contato);
       }
+    } else {
+      for (const contato of contactToArray(phone, isGroup, false, isLid)) {
+        await subscribeOne(contato);
+      }
+    }
 
     res.status(200).json({
       status: 'success',
