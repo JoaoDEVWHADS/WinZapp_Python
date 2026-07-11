@@ -54,6 +54,20 @@ from traceback import format_exc, format_exception
 import pyperclip
 import logging
 
+# Enable global HTTP connection pooling (Keep-Alive) to optimize remote API request latency
+_http_session = requests.Session()
+_orig_get = requests.get
+_orig_post = requests.post
+
+def _patched_get(*args, **kwargs):
+    return _http_session.get(*args, **kwargs)
+
+def _patched_post(*args, **kwargs):
+    return _http_session.post(*args, **kwargs)
+
+requests.get = _patched_get
+requests.post = _patched_post
+
 # Tell Windows to use "WinZapp" as the App User Model ID so notifications
 # show the correct name instead of the executable filename.
 try:
@@ -550,33 +564,41 @@ class MainWindow(wx.Frame):
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
-        # Ensure session is active on WPPConnect Server before connecting WebSocket
-        self.check_wa_connection_http()
-        try:
-            logging.info("MainWindow: Connecting WebSocket...")
-            self.connect_websocket()
-        except Exception as e:
-            logging.exception("MainWindow: Exception during websocket connection")
-            self.error_sound.play()
-            error_str = str(e)
-            # If the instance does not exist on the server (e.g. database recreated/wiped),
-            # it returns "Invalid namespace". We should fallback to the connection dialog silently.
-            if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
-                wx.MessageBox(
-                    self.i18n.t("device_logged_out"),
-                    self.i18n.t("error").format(app_name=self.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                )
-                self._on_disconnect()
-            else:
-                wx.MessageBox(
-                    self.i18n.t("websocket_failed_reconnect"),
-                    self.i18n.t("connection_error"),
-                    wx.OK | wx.ICON_WARNING,
-                )
-                self.connect.show_connection_dial()
-            self._just_paired = True
+        # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
+        def _connect_bg():
+            # Ensure session is active on WPPConnect Server before connecting WebSocket
+            self.check_wa_connection_http()
+            try:
+                logging.info("MainWindow: Connecting WebSocket...")
+                self.connect_websocket()
+            except Exception as e:
+                logging.exception("MainWindow: Exception during websocket connection")
+                self.error_sound.play()
+                error_str = str(e)
+                # If the instance does not exist on the server (e.g. database recreated/wiped),
+                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
+                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
+                    def _gui_logout():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(self.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                        self._on_disconnect()
+                    wx.CallAfter(_gui_logout)
+                else:
+                    def _gui_failed():
+                        wx.MessageBox(
+                            self.i18n.t("websocket_failed_reconnect"),
+                            self.i18n.t("connection_error"),
+                            wx.OK | wx.ICON_WARNING,
+                        )
+                        self.connect.show_connection_dial()
+                    wx.CallAfter(_gui_failed)
+                self._just_paired = True
+
+        threading.Thread(target=_connect_bg, daemon=True).start()
         
         logging.info("MainWindow: Initializing User Interface...")
         self.init_UI()
