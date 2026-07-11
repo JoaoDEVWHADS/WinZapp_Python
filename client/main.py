@@ -6665,6 +6665,22 @@ class MainWindow(wx.Frame):
 
         presence_changed = False
 
+        # Check if this presence event belongs to the currently active conversation
+        def is_active_chat(cjid, open_jid):
+            if not open_jid:
+                return False
+            if cjid == open_jid:
+                return True
+            p1 = self._lid_to_phone.get(cjid, cjid)
+            p2 = self._lid_to_phone.get(open_jid, open_jid)
+            if p1 == p2:
+                return True
+            l1 = self._phone_to_lid.get(cjid, cjid)
+            l2 = self._phone_to_lid.get(open_jid, open_jid)
+            if l1 == l2:
+                return True
+            return False
+
         _ppm_updated = False
         for participant_jid, data in presences.items():
             if not isinstance(data, dict):
@@ -6740,7 +6756,7 @@ class MainWindow(wx.Frame):
                     speech.get("announce_typing", True) if new_lkp == "composing"
                     else speech.get("announce_recording", True)
                 )
-                if announce_enabled and chat_jid_norm == conv_jid:
+                if announce_enabled and is_active_chat(chat_jid_norm, conv_jid):
                     if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
                         name = self._resolve_jid_name(canonical)
                         if name:
