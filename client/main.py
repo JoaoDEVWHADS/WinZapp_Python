@@ -4747,6 +4747,12 @@ class MainWindow(wx.Frame):
                     msg_push = self.find_name_through_messages(chat)
                     name = msg_push or get_valid_name(chat.get("name", ""))
             
+            # Treat placeholders as empty to trigger phone number fallback
+            if name:
+                name_lower = name.lower().strip()
+                if "sem nome" in name_lower or "unnamed" in name_lower or name_lower in ("no name", "unknown", "desconhecido") or name == self.i18n.t("unknown_contact"):
+                    name = ""
+
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
                     name = self.i18n.t("unknown_group")
