@@ -4527,9 +4527,14 @@ class MainWindow(wx.Frame):
                     contact["remoteJid"] = jid_str.replace("@c.us", "@s.whatsapp.net")
                 contact["type"] = "contact"
             logging.info(f"[get_remote_contacts] Downloaded {len(response_data)} contacts from WPPConnect API.")
+            active_jids = set(self.chats.keys())
             filtered_contacts = [
                 c for c in response_data 
-                if isinstance(c, dict) and c.get("type", "") == "contact" and (c.get("isMyContact") is True or c.get("isMe") is True)
+                if isinstance(c, dict) and c.get("type", "") == "contact" and (
+                    c.get("isMyContact") is True 
+                    or c.get("isMe") is True 
+                    or self._normalize_jid(c.get("remoteJid") or c.get("id", "")) in active_jids
+                )
             ]
             names_with_values = [c.get("name") or c.get("pushName") for c in filtered_contacts if c.get("name") or c.get("pushName")]
             logging.info(f"[get_remote_contacts] Total filtered contacts (phonebook): {len(filtered_contacts)} (with valid names: {len(names_with_values)})")
@@ -4890,7 +4895,13 @@ class MainWindow(wx.Frame):
         # too expensive to run on the wx main thread. The cache is built once
         # at startup (in init_chats) and then maintained incrementally by
         # _extract_lid_mapping() on each new message.
-        self._apply_chat_lists(*self._compute_chat_lists())
+        def _bg():
+            try:
+                result = self._compute_chat_lists()
+                wx.CallAfter(self._apply_chat_lists, *result)
+            except Exception:
+                logging.exception("[set_chats] Unhandled error during bg set_chats")
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
