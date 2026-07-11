@@ -1910,12 +1910,12 @@ export async function setTyping(req: Request, res: Response) {
         const contact = (window as any).WPP?.contact?.get(jid);
         if (contact) {
           if (jid.endsWith('@c.us') && contact.lid) {
-            const lidStr = contact.lid.toString();
-            if ((window as any).WPP?.chat?.get(lidStr)) return lidStr;
+            const lidStr = typeof contact.lid === 'string' ? contact.lid : (contact.lid?._serialized || contact.lid?.toString() || '');
+            if (lidStr && (window as any).WPP?.chat?.get(lidStr)) return lidStr;
           }
           if (jid.endsWith('@lid') && contact.id) {
-            const idStr = contact.id.toString();
-            if ((window as any).WPP?.chat?.get(idStr)) return idStr;
+            const idStr = typeof contact.id === 'string' ? contact.id : (contact.id?._serialized || contact.id?.toString() || '');
+            if (idStr && (window as any).WPP?.chat?.get(idStr)) return idStr;
           }
         }
         return jid;
@@ -1928,11 +1928,12 @@ export async function setTyping(req: Request, res: Response) {
   for (const contato of contactToArray(phone, isGroup)) {
     (async () => {
       const resolvedContato = await getActiveJid(contato);
+      req.logger.warn(`[setTyping] contato: ${contato}, resolvedContato: ${resolvedContato}, value: ${value}`);
       const p = value ? req.client.startTyping(resolvedContato) : req.client.stopTyping(resolvedContato);
       await p;
     })().catch((err: any) => {
       const msg: string = err?.message ?? String(err);
-      if (!msg.includes('Chat not found')) req.logger.warn('[setTyping] ' + msg);
+      req.logger.warn('[setTyping] Error: ' + msg);
     });
   }
 }
@@ -1988,12 +1989,12 @@ export async function setRecording(req: Request, res: Response) {
         const contact = (window as any).WPP?.contact?.get(jid);
         if (contact) {
           if (jid.endsWith('@c.us') && contact.lid) {
-            const lidStr = contact.lid.toString();
-            if ((window as any).WPP?.chat?.get(lidStr)) return lidStr;
+            const lidStr = typeof contact.lid === 'string' ? contact.lid : (contact.lid?._serialized || contact.lid?.toString() || '');
+            if (lidStr && (window as any).WPP?.chat?.get(lidStr)) return lidStr;
           }
           if (jid.endsWith('@lid') && contact.id) {
-            const idStr = contact.id.toString();
-            if ((window as any).WPP?.chat?.get(idStr)) return idStr;
+            const idStr = typeof contact.id === 'string' ? contact.id : (contact.id?._serialized || contact.id?.toString() || '');
+            if (idStr && (window as any).WPP?.chat?.get(idStr)) return idStr;
           }
         }
         return jid;
@@ -2006,13 +2007,14 @@ export async function setRecording(req: Request, res: Response) {
   for (const contato of contactToArray(phone, isGroup)) {
     (async () => {
       const resolvedContato = await getActiveJid(contato);
+      req.logger.warn(`[setRecording] contato: ${contato}, resolvedContato: ${resolvedContato}, value: ${value}`);
       const p = value
         ? req.client.startRecording(resolvedContato, duration)
         : req.client.stopRecording(resolvedContato);
       await p;
     })().catch((err: any) => {
       const msg: string = err?.message ?? String(err);
-      if (!msg.includes('Chat not found')) req.logger.warn('[setRecording] ' + msg);
+      req.logger.warn('[setRecording] Error: ' + msg);
     });
   }
 }

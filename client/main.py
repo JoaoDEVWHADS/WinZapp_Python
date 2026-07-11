@@ -8005,14 +8005,16 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/typing"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                requests.post(
+                r = requests.post(
                     url,
                     json={"phone": phone, "value": value, "isGroup": is_group},
                     headers=headers,
                     timeout=10,
                 )
-            except Exception:
-                pass
+                if not r.ok:
+                    logging.warning("[send_typing_status] API error %s: %s", r.status_code, r.text)
+            except Exception as exc:
+                logging.warning("[send_typing_status] Request failed: %s", exc)
         threading.Thread(target=_api, daemon=True).start()
 
     def send_recording_status(self, jid: str, value: bool, is_group: bool = False):
@@ -8022,14 +8024,16 @@ class MainWindow(wx.Frame):
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/recording"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                requests.post(
+                r = requests.post(
                     url,
                     json={"phone": phone, "duration": 0, "value": value, "isGroup": is_group},
                     headers=headers,
                     timeout=10,
                 )
-            except Exception:
-                pass
+                if not r.ok:
+                    logging.warning("[send_recording_status] API error %s: %s", r.status_code, r.text)
+            except Exception as exc:
+                logging.warning("[send_recording_status] Request failed: %s", exc)
         threading.Thread(target=_api, daemon=True).start()
 
     def _is_cleared_message(self, jid: str, msg: dict) -> bool:
