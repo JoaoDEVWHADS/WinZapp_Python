@@ -7986,16 +7986,20 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_api, daemon=True).start()
 
     def _resolve_jid_for_chat_state(self, jid: str) -> str:
-        """Resolve to @c.us format without doing LID mapping to avoid inconsistency and potential crashes."""
+        """Resolve to the active JID for chat state, preferring @lid if mapped."""
         if not jid:
             return jid
         if jid.endswith(("@g.us", "@broadcast")):
             return jid.replace("@s.whatsapp.net", "@c.us")
+        
+        normalized = jid.replace("@c.us", "@s.whatsapp.net")
+        lid = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+        if lid:
+            return lid.replace("@s.whatsapp.net", "@lid")
+            
         if jid.endswith("@lid"):
-            phone_net = getattr(self, "_lid_to_phone", {}).get(jid, jid)
-            if phone_net:
-                return phone_net.replace("@s.whatsapp.net", "@c.us")
             return jid
+            
         return jid.replace("@s.whatsapp.net", "@c.us")
 
     def send_typing_status(self, jid: str, value: bool, is_group: bool = False):
