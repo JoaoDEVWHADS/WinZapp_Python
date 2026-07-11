@@ -6640,8 +6640,16 @@ class MainWindow(wx.Frame):
         via AO2 when the active conversation has a new composing event, and refreshes
         the data-button note for the open conversation.
 
+    def on_presence_update(self, jid: str, presences: dict):
+        """Update the presence cache and composing indicators. Speaks changes
+        via AO2 when the active conversation has a new composing event, and refreshes
+        the data-button note for the open conversation.
+
         presences: {jid_str: {"lastKnownPresence": str, "lastSeen": int|None}, ...}
         """
+        import logging
+        logging.info("[on_presence_update] jid=%s, presences=%s", jid, presences)
+
         if not jid or not isinstance(presences, dict):
             return
 
@@ -6756,16 +6764,21 @@ class MainWindow(wx.Frame):
                     speech.get("announce_typing", True) if new_lkp == "composing"
                     else speech.get("announce_recording", True)
                 )
-                if announce_enabled and is_active_chat(chat_jid_norm, conv_jid):
+                active_match = is_active_chat(chat_jid_norm, conv_jid)
+                logging.info("[on_presence_update] announce_enabled=%s, is_active_chat=%s (chat_jid_norm=%s, conv_jid=%s)", 
+                             announce_enabled, active_match, chat_jid_norm, conv_jid)
+                if announce_enabled and active_match:
                     if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
                         name = self._resolve_jid_name(canonical)
+                        logging.info("[on_presence_update] resolved name=%s for canonical=%s", name, canonical)
                         if name:
                             try:
                                 i18n_key = "typing_text" if new_lkp == "composing" else "recording_text"
                                 msg_text = self.i18n.t(i18n_key).format(name=name)
+                                logging.info("[on_presence_update] speaking: %s", msg_text)
                                 self.speak_output.output(msg_text)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logging.error("[on_presence_update] speak error: %s", e)
 
         # Persist the updated pushName map to database metadata.
         if _ppm_updated and hasattr(self, "db") and self.db is not None:
