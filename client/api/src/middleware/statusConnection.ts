@@ -36,7 +36,15 @@ export default async function statusConnection(
       );
       let index = 0;
       for (const contact of localArr) {
-        if (req.body.isGroup || req.body.isNewsletter || req.body.isLid || (typeof contact === 'string' && contact.endsWith('@lid'))) {
+        if (
+          req.body.isGroup ||
+          req.body.isNewsletter ||
+          req.body.isLid ||
+          (typeof contact === 'string' && contact.endsWith('@lid')) ||
+          req.path.endsWith('/typing') ||
+          req.path.endsWith('/recording') ||
+          req.path.endsWith('/send-seen')
+        ) {
           // checkNumberStatus() below expects a phone-number JID it can look
           // up in WhatsApp's contact directory — it doesn't understand @lid
           // identifiers. When the caller explicitly says this is a @lid
