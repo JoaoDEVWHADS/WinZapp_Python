@@ -842,6 +842,7 @@ export async function subscribePresence(req: Request, res: Response) {
       response: { message: 'Subscribe presence executed' },
     });
   } catch (error) {
+    req.logger.error(error);
     res.status(500).json({
       status: 'error',
       message: 'Error on subscribe presence',
