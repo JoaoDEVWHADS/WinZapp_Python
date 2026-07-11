@@ -3230,8 +3230,7 @@ class MainWindow(wx.Frame):
             time.sleep(30)
             while True:
                 try:
-                    if not getattr(self, "_wa_connected", False) and not getattr(self, "offline_mode", False):
-                        logging.info("[health_checker] Connection down. Checking session status on API server...")
+                    if not getattr(self, "offline_mode", False):
                         self.check_wa_connection_http()
                 except Exception as e:
                     logging.warning(f"[health_checker] Error checking connection in background: {e}")
@@ -3319,6 +3318,10 @@ class MainWindow(wx.Frame):
                         "[check_wa_connection_http] Session is in active state '%s' — skipping /start-session to avoid browser conflict.",
                         status,
                     )
+                    if status in ("notLogged", "QRCODE"):
+                        logging.warning("[check_wa_connection_http] Detected unlinked/logged out state: %s. Triggering disconnect.", status)
+                        self._wa_connected = False
+                        wx.CallAfter(self._on_disconnect)
         except Exception as e:
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
 
