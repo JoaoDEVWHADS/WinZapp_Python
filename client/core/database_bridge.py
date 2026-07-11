@@ -220,6 +220,10 @@ class DatabaseBridge:
     def delete_chat(self, jid: str) -> None:
         return self._call(self._db.delete_chat(jid))
 
+    def merge_or_rename_chat(self, old_jid: str, new_jid: str) -> None:
+        return self._call(self._db.merge_or_rename_chat(old_jid, new_jid))
+
+
     def has_message(self, remote_jid: str, message_id: str) -> bool:
         return self._call(self._db.has_message(remote_jid, message_id))
 

@@ -4182,6 +4182,12 @@ class MainWindow(wx.Frame):
             cus_chat   = chats.pop(cus_jid)
             cus_chat["remoteJid"] = normalized
 
+            if hasattr(self, "db") and self.db is not None:
+                try:
+                    self.db.merge_or_rename_chat(cus_jid, normalized)
+                except Exception as db_err:
+                    logging.error(f"[deduplicate_chats] Failed to merge/rename {cus_jid} to {normalized} in DB: {db_err}")
+
             if normalized in chats:
                 # Both exist — merge messages into the @s.whatsapp.net entry
                 dst_records = (
@@ -4227,6 +4233,12 @@ class MainWindow(wx.Frame):
                 alt_jid = getattr(self, "_lid_to_phone", {}).get(lid_jid, "")
             if not alt_jid:
                 continue  # no phone-number JID found anywhere — keep @lid as-is
+
+            if hasattr(self, "db") and self.db is not None:
+                try:
+                    self.db.merge_or_rename_chat(lid_jid, alt_jid)
+                except Exception as db_err:
+                    logging.error(f"[deduplicate_chats] Failed to merge/rename {lid_jid} to {alt_jid} in DB: {db_err}")
 
             src_records = (
                 lid_chat.get("messages", {})
@@ -7081,10 +7093,8 @@ class MainWindow(wx.Frame):
             if response.status_code not in (200, 201):
                 alternate_jid = ""
                 if remote_jid.endswith("@lid"):
-                    # Fallback to resolved phone JID if LID query failed
-                    resolved = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-                    if resolved:
-                        alternate_jid = resolved.replace("@s.whatsapp.net", "@c.us")
+                    # Primary query used resolved phone JID, so fallback to original LID JID
+                    alternate_jid = remote_jid
                 else:
                     alt_lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
                     if alt_lid:
