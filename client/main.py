@@ -1955,6 +1955,7 @@ class MainWindow(wx.Frame):
                     socketio_path="socket.io",
                     headers={"apikey": self.token},
                     namespaces=["/"],
+                    transports=["websocket"],
                 )
                 logging.info("connect_websocket: Connected successfully on attempt %d.", attempt)
                 return
