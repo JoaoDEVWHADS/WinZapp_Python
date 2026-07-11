@@ -4527,9 +4527,12 @@ class MainWindow(wx.Frame):
                     contact["remoteJid"] = jid_str.replace("@c.us", "@s.whatsapp.net")
                 contact["type"] = "contact"
             logging.info(f"[get_remote_contacts] Downloaded {len(response_data)} contacts from WPPConnect API.")
-            filtered_contacts = [c for c in response_data if isinstance(c, dict) and c.get("type", "") == "contact"]
+            filtered_contacts = [
+                c for c in response_data 
+                if isinstance(c, dict) and c.get("type", "") == "contact" and (c.get("isMyContact") is True or c.get("isMe") is True)
+            ]
             names_with_values = [c.get("name") or c.get("pushName") for c in filtered_contacts if c.get("name") or c.get("pushName")]
-            logging.info(f"[get_remote_contacts] Total filtered contacts (type='contact'): {len(filtered_contacts)} (with valid names: {len(names_with_values)})")
+            logging.info(f"[get_remote_contacts] Total filtered contacts (phonebook): {len(filtered_contacts)} (with valid names: {len(names_with_values)})")
             if filtered_contacts:
                 logging.info(f"[get_remote_contacts] First contact raw keys: {list(filtered_contacts[0].keys())}")
                 logging.info(f"[get_remote_contacts] First contact raw data: {filtered_contacts[0]}")
