@@ -50,7 +50,8 @@ if __name__ == "__main__":
     folders_to_clean = [
         os.path.join(base_dir, "client", "api", "userDataDir"),
         os.path.join(base_dir, "client", "api", "tokens"),
-        os.path.join(base_dir, "client", "api", "wppconnect_tokens")
+        os.path.join(base_dir, "client", "api", "wppconnect_tokens"),
+        os.path.join(base_dir, "client", "data")
     ]
     
     for folder in folders_to_clean:

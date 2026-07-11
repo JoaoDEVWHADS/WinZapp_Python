@@ -467,6 +467,36 @@ class DatabaseManager:
             await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
             await conn.commit()
 
+    async def merge_or_rename_chat(self, old_jid: str, new_jid: str) -> None:
+        """Merge or rename a chat and its messages in the database."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            # 1. Merge messages (ignoring duplicates and then deleting the old JID entries)
+            await conn.execute(
+                "UPDATE OR IGNORE messages SET remote_jid=? WHERE remote_jid=?",
+                (new_jid, old_jid)
+            )
+            await conn.execute(
+                "DELETE FROM messages WHERE remote_jid=?",
+                (old_jid,)
+            )
+
+            # 2. Merge/rename chats table
+            cursor = await conn.execute("SELECT 1 FROM chats WHERE jid=? LIMIT 1", (new_jid,))
+            exists = await cursor.fetchone()
+
+            if exists:
+                # If new_jid exists, delete the old_jid row to prevent constraint failures
+                await conn.execute("DELETE FROM chats WHERE jid=?", (old_jid,))
+            else:
+                # If new_jid does not exist, rename it
+                await conn.execute(
+                    "UPDATE chats SET jid=?, remote_jid=? WHERE jid=?",
+                    (new_jid, new_jid, old_jid)
+                )
+            await conn.commit()
+
+
     async def has_message(self, remote_jid: str, message_id: str) -> bool:
         """Return True if the message exists in the database."""
         conn = await self._ensure_conn()
