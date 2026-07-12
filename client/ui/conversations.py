@@ -470,7 +470,6 @@ class ConversationsPanel(wx.Panel):
         self._mention_list.Bind(wx.EVT_KEY_DOWN, self._on_mention_list_key_down)
         self._mention_list.Bind(wx.EVT_CHAR,     self._on_mention_list_char)
         self._mention_list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_mention_list_selected_mouse)
-        self._mention_list.Bind(wx.EVT_LISTBOX, self._on_mention_list_selected_mouse)
         _mention_sizer.Add(self._mention_list, 0, wx.EXPAND | wx.ALL, 3)
         self._mention_panel.SetSizer(_mention_sizer)
         self._mention_panel.Hide()
