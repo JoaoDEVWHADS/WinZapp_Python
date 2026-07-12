@@ -4800,7 +4800,7 @@ class MainWindow(wx.Frame):
             
             # Detailed logging for name resolution debugging
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
-                logging.debug(
+                logging.info(
                     f"[Name Resolution] jid={jid} phone_jid={phone_jid} "
                     f"resolved_name={resolved_name} "
                     f"msg_name={msg_push} "
