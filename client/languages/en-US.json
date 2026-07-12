@@ -209,6 +209,7 @@
     "edit_message": "Edit",
     "cancel_edit": "Cancel editing",
     "sounds_label": "Enable &program sounds",
+    "noise_reduction_label": "Enable microphone &noise reduction",
     "notifications_label": "Enable &notifications for new messages",
     "tray_show_icon": "Show icon and unread message count in the system tray",
     "tray_open": "Open",

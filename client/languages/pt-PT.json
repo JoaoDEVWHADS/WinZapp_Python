@@ -209,6 +209,7 @@
     "edit_message": "Editar",
     "cancel_edit": "Cancelar edição",
     "sounds_label": "Ativar os &sons do programa",
+    "noise_reduction_label": "Ativar a &redução de ruído do microfone",
     "notifications_label": "Ativar as &notificações para novas mensagens",
     "tray_show_icon": "Mostrar o ícone e o número de mensagens não lidas no tabuleiro do sistema",
     "tray_open": "Abrir",

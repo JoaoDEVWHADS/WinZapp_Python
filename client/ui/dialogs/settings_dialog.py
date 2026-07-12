@@ -160,6 +160,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._sounds_check, 0, wx.ALL, 8)
 
+        self._noise_reduction_check = wx.CheckBox(
+            self._general_page, label=i18n.t("noise_reduction_label")
+        )
+        gen_sizer.Add(self._noise_reduction_check, 0, wx.ALL, 8)
+
         self._notifications_check = wx.CheckBox(
             self._general_page, label=i18n.t("notifications_label")
         )
@@ -406,6 +411,9 @@ class SettingsDialog(wx.Dialog):
 
         sounds = self.main_window.settings.get("general", {}).get("sounds_enabled", True)
         self._sounds_check.SetValue(sounds)
+
+        noise_red = self.main_window.settings.get("general", {}).get("noise_reduction_enabled", False)
+        self._noise_reduction_check.SetValue(noise_red)
 
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
@@ -675,6 +683,10 @@ class SettingsDialog(wx.Dialog):
             self._sounds_check.GetValue()
         )
 
+        self.main_window.settings.setdefault("general", {})["noise_reduction_enabled"] = (
+            self._noise_reduction_check.GetValue()
+        )
+
         # Notifications
         self.main_window.settings.setdefault("general", {})["notifications_enabled"] = (
             self._notifications_check.GetValue()
@@ -784,6 +796,7 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(3, i18n.t("tab_connection"))
         self._notebook.SetPageText(4, i18n.t("tab_audio_playback"))
         self._sounds_check.SetLabel(i18n.t("sounds_label"))
+        self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))

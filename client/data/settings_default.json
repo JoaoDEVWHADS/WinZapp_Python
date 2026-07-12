@@ -11,6 +11,7 @@
         "sounds_enabled": true,
         "notifications_enabled": true,
         "updates_enabled": true,
+        "noise_reduction_enabled": false,
         "first_run": true,
         "autostart": false,
         "show_tray_icon": true,

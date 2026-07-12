@@ -1657,6 +1657,16 @@ class ConversationsPanel(wx.Panel):
             logging.info("[VOICE_TIMING] T+%.3fs — PCM frames joined (%d bytes, %d frames)",
                          _time.perf_counter() - _t0, len(audio_data), len(frames))
 
+            # Apply microphone noise reduction if enabled in settings
+            if mw.settings.get("general", {}).get("noise_reduction_enabled", False):
+                try:
+                    logging.info("[VOICE_TIMING] Applying microphone noise reduction...")
+                    from core.audio_processing import apply_noise_gate
+                    audio_data = apply_noise_gate(audio_data, actual_rate, actual_ch)
+                    logging.info("[VOICE_TIMING] Noise reduction applied successfully")
+                except Exception as ex:
+                    logging.error("[VOICE_TIMING] Failed to apply noise reduction: %s", ex)
+
             # 2. Write WAV temp file (used for ffmpeg conversion, backup, and retry fallback).
             try:
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
