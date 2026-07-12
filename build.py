@@ -269,6 +269,7 @@ def pyinstaller_compile():
         "winrt",
         "pyaudio",
         "aiosqlite",
+        "numpy",
     ]
 
     cmd = [
