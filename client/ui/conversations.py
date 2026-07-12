@@ -2544,6 +2544,9 @@ class ConversationsPanel(wx.Panel):
             if not q or q in name.lower() or q in norm_jid:
                 matches.append((name, jid))
 
+        import logging
+        logging.info(f"[mention] _update_mention_suggestions: query='{query}', cache_size={len(self._group_participants_cache)}, matches_size={len(matches)}")
+
         # Sort: names that start with the query come first, then those that
         # contain it but don't start with it — both groups sorted alphabetically.
         if q:
