@@ -18,24 +18,37 @@ def apply_noise_gate(audio_bytes: bytes, rate: int, channels: int, threshold_db:
             
         num_samples = len(samples)
         
-        # Calculate amplitude threshold from decibel value (16-bit limit: 32768)
-        # db = 20 * log10(amplitude / 32768) -> amplitude = 32768 * 10^(db / 20)
-        threshold = 32768.0 * (10.0 ** (threshold_db / 20.0))
+        # Compute RMS for all blocks first to estimate noise floor
+        rms_values = []
+        for i in range(0, num_samples, block_size):
+            block = samples[i:i+block_size]
+            if len(block) == 0:
+                continue
+            rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
+            rms_values.append(rms)
+
+        if not rms_values:
+            return audio_bytes
+
+        # Use the 15th percentile of RMS to find the background noise floor (pauses)
+        noise_floor = float(np.percentile(rms_values, 15))
         
-        # Envelope parameters for gain smoothing
-        # attack determines how quickly the gate opens when speech is detected.
-        # release determines how quickly the gate closes when speech stops.
+        # Threshold is 2.5x the noise floor, bounded between -45dB (180) and -22dB (2600)
+        threshold = max(180.0, min(2600.0, noise_floor * 2.5))
+        
+        logging.info("[audio_processing] Dynamic noise gate: estimated noise floor RMS = %.2f, threshold set to %.2f", noise_floor, threshold)
+        
+        # Envelope parameters for gain smoothing (faster attack/release response)
         gain = 1.0
-        attack = 0.25
-        release = 0.05
+        attack = 0.35
+        release = 0.15
         
         for i in range(0, num_samples, block_size):
             block = samples[i:i+block_size]
             if len(block) == 0:
                 continue
             
-            # Compute Root Mean Square (RMS) amplitude of block
-            rms = np.sqrt(np.mean(block.astype(np.float32) ** 2))
+            rms = rms_values[i // block_size] if (i // block_size) < len(rms_values) else np.sqrt(np.mean(block.astype(np.float32) ** 2))
             
             # Determine target gain factor
             target_gain = 1.0 if rms >= threshold else attenuation
