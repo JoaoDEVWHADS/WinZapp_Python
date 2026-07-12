@@ -30,11 +30,11 @@ def start_api():
     try:
         if sys.platform == "win32":
             # On Windows, start in a new console window so it runs in background
-            process = subprocess.Popen(["node", "start.js"], cwd=api_dir, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            process = subprocess.Popen(["node", "--max-old-space-size=4096", "start.js"], cwd=api_dir, creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             # On Linux, run as background process redirecting output using shell redirection
             # This prevents the process from dying when Python closes the file descriptor
-            cmd = f"node start.js >> {stdout_log} 2>&1"
+            cmd = f"node --max-old-space-size=4096 start.js >> {stdout_log} 2>&1"
             process = subprocess.Popen(cmd, shell=True, cwd=api_dir, preexec_fn=os.setsid)
             
         # Aguarda 2 segundos para validar se o processo não morreu imediatamente

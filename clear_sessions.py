@@ -43,7 +43,7 @@ if __name__ == "__main__":
     kill_port(6300)
     kill_process_by_name("chrome")
     kill_process_by_name("chromium")
-    kill_process_by_name("node start.js")
+    kill_process_by_name("start.js")
     
     # 2. Remover as pastas de sessões salvas e tokens
     base_dir = os.path.dirname(os.path.abspath(__file__))

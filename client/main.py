@@ -2424,7 +2424,7 @@ class MainWindow(wx.Frame):
                 creation_flags = subprocess.CREATE_NO_WINDOW
 
             self.wpp_process = subprocess.Popen(
-                [node_exe, start_js],
+                [node_exe, "--max-old-space-size=4096", start_js],
                 cwd=cwd,
                 creationflags=creation_flags,
                 stdout=log_fh,
