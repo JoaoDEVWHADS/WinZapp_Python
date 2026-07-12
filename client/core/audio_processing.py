@@ -3,10 +3,40 @@ import numpy as np
 
 def apply_noise_gate(audio_bytes: bytes, rate: int, channels: int, threshold_db: float = -40.0, attenuation: float = 0.1) -> bytes:
     """
-    Applies a simple, soft-knee noise gate filter to raw 16-bit PCM audio bytes.
-    This attenuates silent or low-volume background noise (computer fans, room hum)
-    when the user is not actively speaking, without distorting the voice.
+    Applies noise reduction/suppression to raw 16-bit PCM audio bytes.
+    First tries to use WebRTC Noise Suppression and Auto Gain Control (webrtc-noise-gain).
+    If unavailable or unsupported, falls back to the NumPy-based dynamic noise gate.
     """
+    # 1. Try WebRTC Noise Suppression + Automatic Gain Control (which compresses/boosts voice)
+    try:
+        from webrtc_noise_gain import AudioProcessor
+        # WebRTC AudioProcessor only supports 8000, 16000, 32000, 48000 Hz and mono (1 channel)
+        if rate in (8000, 16000, 32000, 48000) and channels == 1:
+            logging.info("[audio_processing] Applying WebRTC Noise Suppression + AGC (rate=%d)", rate)
+            # noise_suppression_level: 0 to 4 (4 is maximum suppression)
+            # auto_gain_dbfs: 0 to 31 (target level below full scale, e.g., 3dBFS)
+            processor = AudioProcessor(auto_gain_dbfs=3, noise_suppression_level=3)
+            
+            # WebRTC processes audio in strict 10ms blocks
+            frame_samples = int(rate * 0.01)
+            frame_bytes_len = frame_samples * 2  # 16-bit PCM = 2 bytes/sample
+            
+            processed_chunks = []
+            for i in range(0, len(audio_bytes), frame_bytes_len):
+                chunk = audio_bytes[i:i+frame_bytes_len]
+                # Pad the last chunk with silence if it's too small
+                if len(chunk) < frame_bytes_len:
+                    chunk = chunk.ljust(frame_bytes_len, b'\x00')
+                
+                res = processor.Process10ms(chunk)
+                processed_chunks.append(res.audio)
+                
+            logging.info("[audio_processing] WebRTC NS + AGC applied successfully")
+            return b"".join(processed_chunks)
+    except Exception as e:
+        logging.warning("[audio_processing] WebRTC NS failed or not installed, falling back to dynamic noise gate: %s", e)
+
+    # 2. Fallback: Dynamic Noise Gate (using NumPy)
     try:
         # Load raw bytes as 16-bit signed PCM samples
         samples = np.frombuffer(audio_bytes, dtype=np.int16).copy()
