@@ -3456,6 +3456,16 @@ class MainWindow(wx.Frame):
         # issue where names were missing because the initial fetch was too early.
         self.get_remote_contacts()
 
+        # Resolve all unresolved @lid JIDs in our chat list via WPPConnect API
+        unresolved_lids = [
+            jid for jid in self.chats.keys() 
+            if jid.endswith("@lid") and jid not in getattr(self, "_lid_to_phone", {})
+        ]
+        if unresolved_lids:
+            logging.info(f"[Sync] Resolving {len(unresolved_lids)} unresolved @lid chats via API...")
+            self.resolve_lid_jids_via_api(unresolved_lids)
+            self.chats = self.deduplicate_chats(self.chats)
+
         # Conversations are fully sorted as soon as messages are synced.
         # Sort, display, play sync-complete sound, and announce to the user
         # NOW — before the slower media-download phase begins.
