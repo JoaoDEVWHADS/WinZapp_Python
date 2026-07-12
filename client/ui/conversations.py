@@ -469,6 +469,8 @@ class ConversationsPanel(wx.Panel):
         self._mention_list = wx.ListBox(self._mention_panel, style=wx.LB_SINGLE)
         self._mention_list.Bind(wx.EVT_KEY_DOWN, self._on_mention_list_key_down)
         self._mention_list.Bind(wx.EVT_CHAR,     self._on_mention_list_char)
+        self._mention_list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_mention_list_selected_mouse)
+        self._mention_list.Bind(wx.EVT_LISTBOX, self._on_mention_list_selected_mouse)
         _mention_sizer.Add(self._mention_list, 0, wx.EXPAND | wx.ALL, 3)
         self._mention_panel.SetSizer(_mention_sizer)
         self._mention_panel.Hide()
@@ -2430,10 +2432,16 @@ class ConversationsPanel(wx.Panel):
     def _on_mention_open(self, jid: str):
         """Navigate to the conversation for the mentioned contact."""
         mw = self.main_window
-        chat = mw.chats.get(jid)
+        target_jid = jid
+        # Resolve @lid <=> @s.whatsapp.net alternative JID if it was deduplicated
+        alt_jid = getattr(mw, "_lid_to_phone", {}).get(jid) or getattr(mw, "_phone_to_lid", {}).get(jid)
+        if alt_jid and alt_jid in mw.chats:
+            target_jid = alt_jid
+        
+        chat = mw.chats.get(target_jid)
         if chat is None:
-            name = self._get_participant_name(jid)
-            chat = {"remoteJid": jid, "pushName": name}
+            name = self._get_participant_name(target_jid)
+            chat = {"remoteJid": target_jid, "pushName": name}
         self.navigate_to_conversation(chat)
 
     def _on_mention_hyperlink(self, event, jid: str):
@@ -2810,6 +2818,13 @@ class ConversationsPanel(wx.Panel):
         if self._mention_suggestions:
             self._mention_list.SetFocus()
             self._mention_list.SetSelection(0)
+
+    def _on_mention_list_selected_mouse(self, event):
+        """Mouse click or double click on mention list item inserts it."""
+        idx = self._mention_list.GetSelection()
+        if 0 <= idx < len(self._mention_suggestions):
+            name, jid = self._mention_suggestions[idx]
+            self._insert_mention(name, jid)
 
     # ── Lazy-loading: load older messages when the user focuses item 0 ─────────
 
