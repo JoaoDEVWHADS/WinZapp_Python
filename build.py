@@ -270,6 +270,7 @@ def pyinstaller_compile():
         "pyaudio",
         "aiosqlite",
         "numpy",
+        "webrtc_noise_gain",
     ]
 
     cmd = [
