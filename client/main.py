@@ -4535,20 +4535,35 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        try:
-            response = requests.get(url, headers=headers, timeout=90)
-            if response.status_code not in (200, 201):
-                logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
-                response_data = []
-            else:
-                try:
-                    body = response.json()
-                except Exception as json_err:
-                    logging.error(f"[get_remote_contacts] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
-                    body = {}
-                response_data = body.get("response", []) if isinstance(body, dict) else []
-            if not isinstance(response_data, list):
-                response_data = []
+        
+        response_data = []
+        for attempt in range(5):
+            try:
+                response = requests.get(url, headers=headers, timeout=90)
+                if response.status_code not in (200, 201):
+                    logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
+                    response_data = []
+                else:
+                    try:
+                        body = response.json()
+                    except Exception as json_err:
+                        logging.error(f"[get_remote_contacts] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
+                        body = {}
+                    response_data = body.get("response", []) if isinstance(body, dict) else []
+                
+                if isinstance(response_data, list) and len(response_data) > 0:
+                    break
+                else:
+                    logging.info(f"[get_remote_contacts] Got 0 contacts from API, waiting for WPPConnect initialization... (attempt {attempt+1}/5)")
+                    import time
+                    time.sleep(4)
+            except Exception as e:
+                logging.error(f"[get_remote_contacts] Request failed: {e}")
+                import time
+                time.sleep(4)
+
+        if not isinstance(response_data, list):
+            response_data = []
 
             # Traduzir id._serialized para remoteJid e definir type = contact
             for contact in response_data:
@@ -5585,7 +5600,7 @@ class MainWindow(wx.Frame):
         api_ok = False
         # Skip API call entirely if session is known disconnected
         if getattr(self, "_wa_connected", False):
-            max_retries = 12
+            max_retries = 3
             for attempt in range(max_retries):
                 if not getattr(self, "_wa_connected", False):
                     logging.info(f"[sync_chat_messages] Connection lost during sync retry loop for {remote_jid}, aborting sync.")
