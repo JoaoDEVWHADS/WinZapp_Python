@@ -3387,6 +3387,11 @@ class MainWindow(wx.Frame):
             waited += 1
         if not getattr(self, "_wa_connected", False):
             logging.warning("[start_sync] Sync starting without active WhatsApp connection (timeout).")
+        else:
+            # Give WPPConnect/WA-JS internal stores a few seconds to fully initialize
+            # before querying chats and contacts. This prevents HTTP 500/TypeError crashes.
+            logging.info("[start_sync] WhatsApp connected. Waiting 5s for stores to initialize...")
+            time.sleep(5)
 
         # Play sound and announce synchronization start immediately to give instant user feedback
         self.synchronizing_sound.play()
