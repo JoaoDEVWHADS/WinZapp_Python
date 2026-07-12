@@ -466,7 +466,7 @@ class ConversationsPanel(wx.Panel):
             self._mention_panel, label=i18n.t("mention_suggestions_label")
         )
         _mention_sizer.Add(self._mention_list_label, 0, wx.LEFT | wx.TOP, 3)
-        self._mention_list = wx.ListBox(self._mention_panel, style=wx.LB_SINGLE)
+        self._mention_list = wx.ListBox(self._mention_panel, style=wx.LB_SINGLE, size=(-1, 120))
         self._mention_list.Bind(wx.EVT_KEY_DOWN, self._on_mention_list_key_down)
         self._mention_list.Bind(wx.EVT_CHAR,     self._on_mention_list_char)
         self._mention_list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_mention_list_selected_mouse)
