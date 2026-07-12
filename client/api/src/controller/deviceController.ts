@@ -2100,7 +2100,20 @@ export async function getAllContacts(req: Request, res: Response) {
      }
    */
   try {
-    const response = await req.client.getAllContacts();
+    let response = await req.client.getAllContacts();
+
+    if (Array.isArray(response)) {
+      const chats = await req.client.getAllChats().catch(() => []);
+      const activeChatIds = new Set(
+        chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
+      );
+      
+      response = response.filter((c: any) => {
+        if (!c) return false;
+        const jid = c.id?._serialized || c.id;
+        return c.isMyContact === true || c.isMe === true || activeChatIds.has(jid);
+      });
+    }
 
     res.status(200).json({ status: 'success', response: response });
   } catch (error) {
