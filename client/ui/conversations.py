@@ -2709,18 +2709,6 @@ class ConversationsPanel(wx.Panel):
                 logging.info(f"[mention] get_group_info({jid}) attempt {attempt+1}/{max_retries} → {len(participants)} participants")
                 if participants:
                     my_jid = getattr(self.main_window, "my_jid", "") or ""
-                    mw_ref = self.main_window
-                    
-                    # Collect unresolved LIDs to fetch in background
-                    lid_jids_to_resolve = []
-                    lid_to_phone = getattr(mw_ref, "_lid_to_phone", {})
-                    for p in participants:
-                        if not isinstance(p, dict):
-                            continue
-                        p_jid = p.get("id", "")
-                        if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
-                            lid_jids_to_resolve.append(p_jid)
-
                     # Build initial cache first so UI is populated instantly
                     cache = []
                     for p in participants:
@@ -2734,31 +2722,8 @@ class ConversationsPanel(wx.Panel):
                         name = self._get_participant_name(p_jid, p)
                         cache.append((name, p_jid))
                     cache.sort(key=lambda x: x[0].lower())
-                    logging.info(f"[mention] initial cache built: {[n for n,_ in cache]}")
+                    logging.info(f"[mention] cache built: {[n for n,_ in cache]}")
                     wx.CallAfter(self._set_group_participants_cache, cache)
-
-                    # Now resolve LIDs in background without blocking the UI thread
-                    import threading
-                    if lid_jids_to_resolve:
-                        def resolve_bg():
-                            mw_ref.resolve_lid_jids_via_api(lid_jids_to_resolve)
-                            # After resolution, rebuild cache with new resolved names/phones
-                            new_cache = []
-                            for p in participants:
-                                if not isinstance(p, dict):
-                                    continue
-                                p_jid = p.get("id", "")
-                                if not p_jid:
-                                    continue
-                                if my_jid and p_jid.split("@")[0] == my_jid.split("@")[0]:
-                                    continue
-                                name = self._get_participant_name(p_jid, p)
-                                new_cache.append((name, p_jid))
-                            new_cache.sort(key=lambda x: x[0].lower())
-                            logging.info(f"[mention] background cache updated: {[n for n,_ in new_cache]}")
-                            wx.CallAfter(self._set_group_participants_cache, new_cache)
-                        
-                        threading.Thread(target=resolve_bg, daemon=True).start()
                     return
             except Exception as e:
                 logging.error(f"[mention] _fetch_group_participants error on attempt {attempt+1}: {e}", exc_info=True)
