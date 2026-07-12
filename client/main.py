@@ -4798,15 +4798,21 @@ class MainWindow(wx.Frame):
                             name = msg_jid_num
                         elif self._format_jid_for_display(jid):
                             name = self._format_jid_for_display(jid)
-                        elif jid.endswith("@lid"):
-                            # Unresolved @lid: show placeholder, never format as phone
-                            name = self.i18n.t("unknown_contact")
                         else:
-                            numeric = jid.split("@")[0].split(":")[0]
-                            if numeric.isdigit():
-                                name = format_number(numeric)
-                            else:
+                            # Let's check contact cache and chat metadata for a fallback (like masked number +55∙∙∙∙∙∙∙∙12)
+                            c_obj = self.contacts.get(jid) or {}
+                            fallback = c_obj.get("formattedName") or c_obj.get("pushName") or chat.get("formattedName") or chat.get("pushName") or ""
+                            fallback_clean = fallback.strip()
+                            if fallback_clean and "sem nome" not in fallback_clean.lower() and fallback_clean != self.i18n.t("unknown_contact"):
+                                name = fallback_clean
+                            elif jid.endswith("@lid"):
                                 name = self.i18n.t("unknown_contact")
+                            else:
+                                numeric = jid.split("@")[0].split(":")[0]
+                                if numeric.isdigit():
+                                    name = format_number(numeric)
+                                else:
+                                    name = self.i18n.t("unknown_contact")
             
             # Detailed logging for name resolution debugging
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
@@ -7618,6 +7624,13 @@ class MainWindow(wx.Frame):
                                     logging.warning("[LID Resolution] set_lid_mapping (profile) failed: %s", exc)
                                 if not canonical_jid:
                                     canonical_jid = profile_canonical
+                        formatted_name = res_data.get("formattedName")
+                        if formatted_name:
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {}
+                            self.contacts[lid_jid]["formattedName"] = formatted_name
+                            updated_contacts[lid_jid] = self.contacts[lid_jid]
+
                         name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
                         if name and name != "Contato sem nome" and not is_phone_like(name):
                             if lid_jid not in self.contacts:
