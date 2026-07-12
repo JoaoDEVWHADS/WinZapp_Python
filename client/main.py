@@ -5495,11 +5495,25 @@ class MainWindow(wx.Frame):
         chats = list(self.chats.values())
         if not chats:
             return
+            
+        # Filter out invalid JIDs (like '0' or empty entries) to prevent API errors
+        valid_chats = []
+        for c in chats:
+            jid = c.get("remoteJid", "")
+            user_part = jid.split("@")[0] if "@" in jid else jid
+            if user_part and user_part != "0" and len(user_part) >= 5:
+                valid_chats.append(c)
+            else:
+                logging.warning(f"[sync_remote_chats] Skipping invalid JID from sync: {jid}")
+                
+        if not valid_chats:
+            return
+            
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 15 workers to avoid overloading it.
-        max_workers = min(15, len(chats))
+        max_workers = min(15, len(valid_chats))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in chats}
+            futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in valid_chats}
             for fut in as_completed(futs):
                 try:
                     fut.result()
@@ -5542,6 +5556,12 @@ class MainWindow(wx.Frame):
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
+        
+        user_part = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
+        if not user_part or user_part == "0" or len(user_part) < 5:
+            logging.warning(f"[sync_chat_messages] Aborting sync for invalid JID: {remote_jid}")
+            return
+            
         # Formata o JID corretamente para o WPPConnect
         # Se houver mapeamento phone -> LID, usamos o LID.
         lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
