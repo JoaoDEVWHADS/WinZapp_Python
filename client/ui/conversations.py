@@ -2596,6 +2596,18 @@ class ConversationsPanel(wx.Panel):
                 self._hide_mention_suggestions()
                 self._mention_active = False
             return
+
+        # Fail-safe: if cache is empty, fetch participants now in background
+        if not getattr(self, "_group_participants_cache", None):
+            import threading
+            import logging
+            logging.info(f"[mention] Cache empty on mention check. Triggering lazy fetch for group {jid}...")
+            threading.Thread(
+                target=self._fetch_group_participants,
+                args=(jid,),
+                daemon=True,
+            ).start()
+
         self._mention_active = True
         self._mention_start_pos = start
         self._mention_query = query
