@@ -1561,11 +1561,14 @@ export async function getMessages(req: Request, res: Response) {
         }
 
         console.log(`[browser-evaluate] Final query using WPP.chat.getMessages with anchor: ${queryId}`);
-        const result = await (window as any).WPP.chat.getMessages(chatId, {
+        const options: any = {
           count: targetCount,
-          direction: 'before',
-          id: queryId
-        });
+          direction: 'before'
+        };
+        if (queryId && queryId !== 'null' && queryId !== 'undefined') {
+          options.id = queryId;
+        }
+        const result = await (window as any).WPP.chat.getMessages(chatId, options);
         console.log(`[browser-evaluate] WPP.chat.getMessages returned ${result ? result.length : 0} messages`);
         return result;
       }, { chatId: phone, targetCount, id: id as string });
@@ -1573,7 +1576,14 @@ export async function getMessages(req: Request, res: Response) {
       if (phone && phone.endsWith('@lid')) {
         // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
         response = await req.client.page.evaluate(({ chatId, params }) => {
-          return (window as any).WPP.chat.getMessages(chatId, params);
+          const options: any = { count: params.count };
+          if (params.direction) {
+            options.direction = params.direction;
+          }
+          if (params.id && params.id !== 'null' && params.id !== 'undefined') {
+            options.id = params.id;
+          }
+          return (window as any).WPP.chat.getMessages(chatId, options);
         }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
       } else {
         response = await req.client.getMessages(`${phone}`, {
