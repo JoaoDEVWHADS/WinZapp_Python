@@ -1465,10 +1465,13 @@ export async function getMessages(req: Request, res: Response) {
           }
         };
 
-        // Ensure the chat is loaded in the browser store
+        // Ensure the chat is loaded in the browser store and resolve JID
         try {
           if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
-            await (window as any).WPP.chat.find(chatId);
+            const resolvedChat = await (window as any).WPP.chat.find(chatId);
+            if (resolvedChat && resolvedChat.id) {
+              chatId = resolvedChat.id._serialized || resolvedChat.id;
+            }
           }
         } catch (e) {
           // Ignore
@@ -1575,7 +1578,17 @@ export async function getMessages(req: Request, res: Response) {
     } else {
       if (phone && phone.endsWith('@lid')) {
         // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
-        response = await req.client.page.evaluate(({ chatId, params }) => {
+        response = await req.client.page.evaluate(async ({ chatId, params }) => {
+          try {
+            if ((window as any).WPP && (window as any).WPP.chat && (window as any).WPP.chat.find) {
+              const resolvedChat = await (window as any).WPP.chat.find(chatId);
+              if (resolvedChat && resolvedChat.id) {
+                chatId = resolvedChat.id._serialized || resolvedChat.id;
+              }
+            }
+          } catch (e) {
+            // Ignore
+          }
           const options: any = { count: params.count };
           if (params.direction) {
             options.direction = params.direction;
