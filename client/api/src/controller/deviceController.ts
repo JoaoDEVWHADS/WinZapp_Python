@@ -1674,12 +1674,12 @@ export async function getMessages(req: Request, res: Response) {
             options.id = params.id;
           }
           return (window as any).WPP.chat.getMessages(chatId, options);
-        }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
+        }, { chatId: phone, params: { count: targetCount, direction: directionVal ? directionVal.toString() as any : undefined, id: idVal ? idVal.toString() as any : undefined } });
       } else {
         response = await req.client.getMessages(`${phone}`, {
           count: targetCount,
-          direction: direction.toString() as any,
-          id: id as string,
+          direction: directionVal ? directionVal.toString() as any : undefined,
+          id: idVal ? idVal.toString() as any : undefined,
         });
       }
     }
