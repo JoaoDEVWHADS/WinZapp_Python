@@ -4867,8 +4867,27 @@ class MainWindow(wx.Frame):
                 chat_ts //= 1000
             ts = chat_ts
             
+            supported_types = {
+                "conversation", "extendedTextMessage", "imageMessage", "videoMessage",
+                "audioMessage", "documentMessage", "stickerMessage", "contactMessage",
+                "locationMessage", "liveLocationMessage", "pollCreationMessage",
+                "buttonsMessage", "listMessage", "templateMessage", "interactiveMessage",
+                "buttonsResponseMessage", "listResponseMessage", "protocolMessage",
+                "reactionMessage", "chat", "extended_text", "image", "video", "audio",
+                "ptt", "document", "sticker", "location", "vcard", "multi_vcard",
+                "poll", "revoked", "reaction"
+            }
+            
+            def is_valid_msg(m):
+                if not isinstance(m, dict):
+                    return False
+                m_type = m.get("messageType") or m.get("type", "")
+                if m_type not in supported_types:
+                    return False
+                return True
+
             lm = c.get("lastMessage")
-            if isinstance(lm, dict):
+            if isinstance(lm, dict) and is_valid_msg(lm):
                 lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
                 if lm_ts > 1_000_000_000_000:
                     lm_ts //= 1000
@@ -4882,7 +4901,7 @@ class MainWindow(wx.Frame):
                     records_copy = list(inner_wrapper.get("records") or [])
                     if records_copy:
                         for m in records_copy:
-                            if isinstance(m, dict):
+                            if isinstance(m, dict) and is_valid_msg(m):
                                 t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
                                 if t > 1_000_000_000_000:
                                     t //= 1000
