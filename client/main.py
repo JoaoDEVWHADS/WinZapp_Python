@@ -3483,20 +3483,6 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             self.output(self.i18n.t("sync_complete"))
 
-        # ── Phase 2: download media (silent) ──────────────────────────────
-        wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-        self._media_sync_running = True
-        try:
-            self.sync_media_for_all_chats()
-        finally:
-            self._media_sync_running = False
-        wx.CallAfter(self._set_status, "")
-        # Final refresh so any media-resolved previews appear in the list.
-        wx.CallAfter(self.set_chats)
-
-        # Start periodic background contacts sync (every 5 minutes)
-        self.start_periodic_contacts_sync()
-
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
@@ -3517,6 +3503,20 @@ class MainWindow(wx.Frame):
                     self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
                     self.sync_thread.start()
             threading.Thread(target=_retry_sync, daemon=True).start()
+
+        # ── Phase 2: download media (silent) ──────────────────────────────
+        wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+        self._media_sync_running = True
+        try:
+            self.sync_media_for_all_chats()
+        finally:
+            self._media_sync_running = False
+        wx.CallAfter(self._set_status, "")
+        # Final refresh so any media-resolved previews appear in the list.
+        wx.CallAfter(self.set_chats)
+
+        # Start periodic background contacts sync (every 5 minutes)
+        self.start_periodic_contacts_sync()
         # _initial_sync_running is reset by start_sync()'s finally block.
 
     def wait_messages_set(self):
@@ -4862,16 +4862,19 @@ class MainWindow(wx.Frame):
         # Pinned chats float to the top; within each group sort by most-recent
         # message timestamp descending (newest first), then alphabetically.
         def _chat_last_ts(c):
-            lm = c.get("lastMessage")
-            has_messages = False
-            ts = 0
+            # Fallback to chat's own last activity timestamp (t)
+            chat_ts = int(c.get("t", 0) or 0)
+            if chat_ts > 1_000_000_000_000:
+                chat_ts //= 1000
+            ts = chat_ts
             
+            lm = c.get("lastMessage")
             if isinstance(lm, dict):
                 lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
                 if lm_ts > 1_000_000_000_000:
                     lm_ts //= 1000
-                ts = lm_ts
-                has_messages = True
+                if lm_ts > ts:
+                    ts = lm_ts
                 
             records_wrapper = c.get("messages") or {}
             if isinstance(records_wrapper, dict):
@@ -4879,7 +4882,6 @@ class MainWindow(wx.Frame):
                 if isinstance(inner_wrapper, dict):
                     records_copy = list(inner_wrapper.get("records") or [])
                     if records_copy:
-                        has_messages = True
                         for m in records_copy:
                             if isinstance(m, dict):
                                 t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
@@ -4888,8 +4890,6 @@ class MainWindow(wx.Frame):
                                 if t > ts:
                                     ts = t
                                     
-            if not has_messages:
-                return 1
             return ts if ts else 1
 
         def _sort_key(pair):
@@ -5804,7 +5804,7 @@ class MainWindow(wx.Frame):
     # loop for every expired URL, which starves the API thread pool and eventually
     # breaks sends.  Never request media older than this threshold.
     _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
-    _MEDIA_SYNC_WORKERS    = 2               # parallel workers during bulk sync — kept
+    _MEDIA_SYNC_WORKERS    = 1               # parallel workers during bulk sync — kept
                                               # low because WPPConnect proxies every
                                               # request through a single Puppeteer/Chrome
                                               # automation session; too many concurrent
