@@ -5531,8 +5531,8 @@ class MainWindow(wx.Frame):
             return
             
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
-        # concurrent requests fine; cap at 15 workers to avoid overloading it.
-        max_workers = min(15, len(valid_chats))
+        # concurrent requests fine; cap at 6 workers to avoid overloading it.
+        max_workers = min(6, len(valid_chats))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in valid_chats}
             for fut in as_completed(futs):
