@@ -3148,6 +3148,12 @@ class MainWindow(wx.Frame):
                     self.save_settings()
             except Exception:
                 pass
+        if token and ":" in token:
+            parts = token.split(":")
+            if len(parts) > 1 and "." in parts[1]:
+                import logging
+                logging.info("[retrieve_token] Legacy token contains a dot. Forcing regeneration...")
+                token = parts[0]
         if token and ":" not in token:
             try:
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/{self.wpp_api_key}/generate-token"
