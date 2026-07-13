@@ -3977,10 +3977,17 @@ class MainWindow(wx.Frame):
                             del self._muted_chats[jid]
                             db_changed = True
 
-                    # Check if the JID starts with "0@" (official WhatsApp/system account)
-                    is_system = jid.startswith("0@")
+                # Rebuild pinned chats set entirely from server response to prevent "ghost" pinned chats
+                server_pinned = set()
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    raw_jid = chat.get("remoteJid", "")
+                    if not raw_jid:
+                        continue
+                    jid = self._normalize_jid(raw_jid)
                     
-                    # Parse and clean pin values to prevent bool() truthiness bug on non-standard fields
+                    is_system = jid.startswith("0@")
                     pin_val = chat.get("pin")
                     if isinstance(pin_val, str):
                         if pin_val.lower() == "true":
@@ -3999,44 +4006,22 @@ class MainWindow(wx.Frame):
                             is_pinned = pin_val
                         elif isinstance(pin_val, (int, float)):
                             is_pinned = pin_val > 1000000
-                        
-
 
                     if is_pinned:
-                        if jid not in self._pinned_chats:
-                            self._pinned_chats.add(jid)
-                            db_changed = True
+                        server_pinned.add(jid)
                         # Also pin the alternate JID if present
                         if jid.endswith("@lid"):
                             alt = getattr(self, "_lid_to_phone", {}).get(jid, "")
                             if alt:
-                                alt_norm = self._normalize_jid(alt)
-                                if alt_norm not in self._pinned_chats:
-                                    self._pinned_chats.add(alt_norm)
-                                    db_changed = True
+                                server_pinned.add(self._normalize_jid(alt))
                         else:
                             alt = getattr(self, "_phone_to_lid", {}).get(jid, "")
                             if alt:
-                                if alt not in self._pinned_chats:
-                                    self._pinned_chats.add(alt)
-                                    db_changed = True
-                    elif jid in self._pinned_chats:
-                        self._pinned_chats.remove(jid)
-                        db_changed = True
-                        # Also remove pin from the alternate JID if present
-                        if jid.endswith("@lid"):
-                            alt = getattr(self, "_lid_to_phone", {}).get(jid, "")
-                            if alt:
-                                alt_norm = self._normalize_jid(alt)
-                                if alt_norm in self._pinned_chats:
-                                    self._pinned_chats.remove(alt_norm)
-                                    db_changed = True
-                        else:
-                            alt = getattr(self, "_phone_to_lid", {}).get(jid, "")
-                            if alt:
-                                if alt in self._pinned_chats:
-                                    self._pinned_chats.remove(alt)
-                                    db_changed = True
+                                server_pinned.add(alt)
+
+                if server_pinned != self._pinned_chats:
+                    self._pinned_chats = server_pinned
+                    db_changed = True
 
                 if db_changed and hasattr(self, "db") and self.db is not None:
                     self.db.set_metadata_json("muted_chats", self._muted_chats)
@@ -4917,8 +4902,13 @@ class MainWindow(wx.Frame):
         main_names = [n for _, n in pairs]
 
         arch_pairs = sorted(zip(arch_chats, arch_names), key=_sort_key)
-        arch_chats = [c for c, _ in arch_pairs]
-        arch_names = [n for _, n in arch_pairs]
+        # Debug top 15 sorted chats
+        logging.info("[Sort Debug] Top 15 sorted chats in main_chats:")
+        for idx, (c, n) in enumerate(pairs[:15]):
+            jid = c.get("remoteJid", "")
+            is_pin = jid in pinned
+            last_ts = _chat_last_ts(c)
+            logging.info(f"  #{idx+1}: name='{n}' jid='{jid}' is_pinned_in_db={is_pin} last_ts={last_ts} raw_t={c.get('t')} pin_attr={c.get('pin')}")
 
         return main_chats, main_names, arch_chats, arch_names
 
