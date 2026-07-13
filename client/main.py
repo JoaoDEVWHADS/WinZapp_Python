@@ -3272,13 +3272,15 @@ class MainWindow(wx.Frame):
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code in (401, 403):
                 logging.warning("[check_wa_connection_http] Token is unauthorized (HTTP %s). Triggering logout.", response.status_code)
-                self.error_sound.play()
-                wx.MessageBox(
-                    self.i18n.t("device_logged_out"),
-                    self.i18n.t("error").format(app_name=self.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                )
-                self._on_disconnect()
+                def _logout_with_warning_401():
+                    self.error_sound.play()
+                    wx.MessageBox(
+                        self.i18n.t("device_logged_out"),
+                        self.i18n.t("error").format(app_name=self.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
+                    self._on_disconnect()
+                wx.CallAfter(_logout_with_warning_401)
                 return
 
             if response.status_code in (200, 201):
@@ -3344,7 +3346,19 @@ class MainWindow(wx.Frame):
                     if status in ("notLogged", "QRCODE"):
                         logging.warning("[check_wa_connection_http] Detected unlinked/logged out state: %s. Triggering disconnect.", status)
                         self._wa_connected = False
-                        wx.CallAfter(self._on_disconnect)
+                        def _logout_with_warning():
+                            self.error_sound.play()
+                            wx.MessageBox(
+                                self.i18n.t("device_logged_out"),
+                                self.i18n.t("error").format(app_name=self.app_name),
+                                wx.OK | wx.ICON_ERROR,
+                            )
+                            self._on_disconnect()
+                            
+                        if self.settings.get("privateinfo", {}).get("paired"):
+                            wx.CallAfter(_logout_with_warning)
+                        else:
+                            wx.CallAfter(self._on_disconnect)
         except Exception as e:
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
 
