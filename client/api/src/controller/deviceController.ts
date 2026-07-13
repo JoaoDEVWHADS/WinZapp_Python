@@ -1456,9 +1456,80 @@ export async function getMessages(req: Request, res: Response) {
         console.log(`[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`);
         const getMsgSafe = async (msgId: string) => {
           try {
-            const m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
-            console.log(`[browser-evaluate] getMsgSafe for ${msgId}: ${m ? 'Found' : 'Not Found'}`);
-            return m;
+            let m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            if (m) {
+              console.log(`[browser-evaluate] getMsgSafe for ${msgId}: Found directly`);
+              return m;
+            }
+            
+            // Try fallback by swapping @lid / @c.us in the message ID
+            const parts = msgId.split('_');
+            if (parts.length >= 3) {
+              const prefix = parts[0];
+              let chatSegment = parts[1];
+              const msgSeq = parts[2];
+              let participantSegment = parts[3] || '';
+              
+              // Get alternative chat JID if possible
+              let altChatSegment = chatSegment;
+              try {
+                const cObj = await (window as any).WPP.chat.find(chatSegment);
+                if (cObj) {
+                  const resolvedId = cObj.id._serialized || cObj.id;
+                  if (resolvedId && resolvedId !== chatSegment) {
+                    altChatSegment = resolvedId;
+                  } else {
+                    const contactObj = cObj.contact || {};
+                    const lidObj = contactObj.lid || {};
+                    const phoneObj = contactObj.phoneNumber || {};
+                    if (chatSegment.endsWith('@lid') && phoneObj._serialized) {
+                      altChatSegment = phoneObj._serialized;
+                    } else if (chatSegment.endsWith('@c.us') && lidObj._serialized) {
+                      altChatSegment = lidObj._serialized;
+                    }
+                  }
+                }
+              } catch (e) {}
+
+              // Get alternative participant JID if possible
+              let altParticipantSegment = participantSegment;
+              if (participantSegment) {
+                try {
+                  const pObj = await (window as any).WPP.contact.get(participantSegment);
+                  if (pObj) {
+                    const lidObj = pObj.lid || {};
+                    const phoneObj = pObj.phoneNumber || {};
+                    if (participantSegment.endsWith('@lid') && phoneObj._serialized) {
+                      altParticipantSegment = phoneObj._serialized;
+                    } else if (participantSegment.endsWith('@c.us') && lidObj._serialized) {
+                      altParticipantSegment = lidObj._serialized;
+                    }
+                  }
+                } catch (e) {}
+              }
+
+              // Try all combinations of chatSegment and participantSegment swaps
+              const combinations = [
+                { c: altChatSegment, p: participantSegment },
+                { c: chatSegment, p: altParticipantSegment },
+                { c: altChatSegment, p: altParticipantSegment }
+              ];
+
+              for (const combo of combinations) {
+                if (combo.c === chatSegment && combo.p === participantSegment) continue;
+                const altId = combo.p ? `${prefix}_${combo.c}_${msgSeq}_${combo.p}` : `${prefix}_${combo.c}_${msgSeq}`;
+                try {
+                  m = await (window as any).WPP.chat.getMessageById(altId);
+                  if (m) {
+                    console.log(`[browser-evaluate] getMsgSafe found message using alternate ID: ${altId}`);
+                    return m;
+                  }
+                } catch (e) {}
+              }
+            }
+            
+            console.log(`[browser-evaluate] getMsgSafe for ${msgId}: Not Found`);
+            return null;
           } catch (e) {
             console.log(`[browser-evaluate] getMsgSafe error for ${msgId}: ${e}`);
             return null;

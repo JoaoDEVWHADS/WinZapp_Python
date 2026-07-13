@@ -518,6 +518,63 @@ export async function getMediaByMessage(req: Request, res: Response) {
         req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
       }
 
+      if (!message && messageId) {
+        // Try JID swapping fallback (swapping @lid and @c.us in the message ID)
+        const parts = messageId.split('_');
+        if (parts.length >= 3) {
+          const prefix = parts[0];
+          const chatSegment = parts[1];
+          const msgSeq = parts[2];
+          const participantSegment = parts[3] || '';
+          
+          let altChatSegment = chatSegment;
+          try {
+            const chatInfo: any = await client.getContact(chatSegment);
+            if (chatInfo) {
+              if (chatSegment.endsWith('@lid') && chatInfo.phoneNumber) {
+                altChatSegment = chatInfo.phoneNumber.includes('@') ? chatInfo.phoneNumber : `${chatInfo.phoneNumber}@c.us`;
+              } else if (chatSegment.endsWith('@c.us') && chatInfo.lid) {
+                altChatSegment = chatInfo.lid.includes('@') ? chatInfo.lid : `${chatInfo.lid}@lid`;
+              }
+            }
+          } catch (e) {}
+
+          let altParticipantSegment = participantSegment;
+          if (participantSegment) {
+            try {
+              const partInfo: any = await client.getContact(participantSegment);
+              if (partInfo) {
+                if (participantSegment.endsWith('@lid') && partInfo.phoneNumber) {
+                  altParticipantSegment = partInfo.phoneNumber.includes('@') ? partInfo.phoneNumber : `${partInfo.phoneNumber}@c.us`;
+                } else if (participantSegment.endsWith('@c.us') && partInfo.lid) {
+                  altParticipantSegment = partInfo.lid.includes('@') ? partInfo.lid : `${partInfo.lid}@lid`;
+                }
+              }
+            } catch (e) {}
+          }
+
+          const combinations = [
+            { c: altChatSegment, p: participantSegment },
+            { c: chatSegment, p: altParticipantSegment },
+            { c: altChatSegment, p: altParticipantSegment }
+          ];
+
+          for (const combo of combinations) {
+            if (combo.c === chatSegment && combo.p === participantSegment) continue;
+            const altId = combo.p ? `${prefix}_${combo.c}_${msgSeq}_${combo.p}` : `${prefix}_${combo.c}_${msgSeq}`;
+            try {
+              req.logger.info(`Trying alternate message ID: ${altId}`);
+              const altMsg = await client.getMessageById(altId);
+              if (altMsg) {
+                message = altMsg;
+                req.logger.info(`Found message using alternate ID: ${altId}`);
+                break;
+              }
+            } catch (e) {}
+          }
+        }
+      }
+
       // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
       // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
       // and load earlier messages to force sync it.
