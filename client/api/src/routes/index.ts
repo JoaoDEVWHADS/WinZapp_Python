@@ -471,6 +471,12 @@ routes.get(
   statusConnection,
   DeviceController.getMessages
 );
+routes.post(
+  '/api/:session/get-messages/:phone',
+  verifyToken,
+  statusConnection,
+  DeviceController.getMessages
+);
 
 routes.post(
   '/api/:session/archive-chat',

@@ -1446,13 +1446,17 @@ export async function getMessages(req: Request, res: Response) {
      }
    */
   const { phone } = req.params;
-  const { count = 20, direction = 'before', id = null } = req.query;
+  const countVal = req.body?.count || req.query?.count || 20;
+  const directionVal = req.body?.direction || req.query?.direction || 'before';
+  const idVal = req.body?.id || req.query?.id || null;
+  const jidMap = req.body?.jidMap || {};
+
   try {
     let response: any;
-    const targetCount = parseInt(count as string);
-    if (direction === 'before' && id) {
-      req.logger.info(`Fetching older messages before ${id} for ${phone} using browser-side sync...`);
-      response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
+    const targetCount = parseInt(countVal as string);
+    if (directionVal === 'before' && idVal) {
+      req.logger.info(`Fetching older messages before ${idVal} for ${phone} using browser-side sync...`);
+      response = await req.client.page.evaluate(async ({ chatId, targetCount, id, jidMap }) => {
         console.log(`[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`);
         const getMsgSafe = async (msgId: string) => {
           try {
@@ -1470,30 +1474,32 @@ export async function getMessages(req: Request, res: Response) {
               const msgSeq = parts[2];
               let participantSegment = parts[3] || '';
               
-              // Get alternative chat JID if possible
-              let altChatSegment = chatSegment;
-              try {
-                const cObj = await (window as any).WPP.chat.find(chatSegment);
-                if (cObj) {
-                  const resolvedId = cObj.id._serialized || cObj.id;
-                  if (resolvedId && resolvedId !== chatSegment) {
-                    altChatSegment = resolvedId;
-                  } else {
-                    const contactObj = cObj.contact || {};
-                    const lidObj = contactObj.lid || {};
-                    const phoneObj = contactObj.phoneNumber || {};
-                    if (chatSegment.endsWith('@lid') && phoneObj._serialized) {
-                      altChatSegment = phoneObj._serialized;
-                    } else if (chatSegment.endsWith('@c.us') && lidObj._serialized) {
-                      altChatSegment = lidObj._serialized;
+              // Get alternative chat JID if possible (using passed jidMap first)
+              let altChatSegment = jidMap[chatSegment] || chatSegment;
+              if (altChatSegment === chatSegment) {
+                try {
+                  const cObj = await (window as any).WPP.chat.find(chatSegment);
+                  if (cObj) {
+                    const resolvedId = cObj.id._serialized || cObj.id;
+                    if (resolvedId && resolvedId !== chatSegment) {
+                      altChatSegment = resolvedId;
+                    } else {
+                      const contactObj = cObj.contact || {};
+                      const lidObj = contactObj.lid || {};
+                      const phoneObj = contactObj.phoneNumber || {};
+                      if (chatSegment.endsWith('@lid') && phoneObj._serialized) {
+                        altChatSegment = phoneObj._serialized;
+                      } else if (chatSegment.endsWith('@c.us') && lidObj._serialized) {
+                        altChatSegment = lidObj._serialized;
+                      }
                     }
                   }
-                }
-              } catch (e) {}
+                } catch (e) {}
+              }
 
-              // Get alternative participant JID if possible
-              let altParticipantSegment = participantSegment;
-              if (participantSegment) {
+              // Get alternative participant JID if possible (using passed jidMap first)
+              let altParticipantSegment = participantSegment ? (jidMap[participantSegment] || participantSegment) : '';
+              if (participantSegment && altParticipantSegment === participantSegment) {
                 try {
                   const pObj = await (window as any).WPP.contact.get(participantSegment);
                   if (pObj) {
@@ -1645,7 +1651,7 @@ export async function getMessages(req: Request, res: Response) {
         const result = await (window as any).WPP.chat.getMessages(chatId, options);
         console.log(`[browser-evaluate] WPP.chat.getMessages returned ${result ? result.length : 0} messages`);
         return result;
-      }, { chatId: phone, targetCount, id: id as string });
+      }, { chatId: phone, targetCount, id: idVal as string, jidMap });
     } else {
       if (phone && phone.endsWith('@lid')) {
         // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package

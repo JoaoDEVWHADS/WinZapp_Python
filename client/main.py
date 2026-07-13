@@ -7232,15 +7232,30 @@ class MainWindow(wx.Frame):
                 serialized_id = f"{prefix}_{resolved_phone}_{raw_id}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"
+        
+        # Build JID map payload for API resolving
+        jid_map = {}
+        for lid, phone_val in getattr(self, "_lid_to_phone", {}).items():
+            l_jid = lid if lid.endswith("@lid") else f"{lid.split('@')[0]}@lid"
+            p_jid = phone_val.replace("@s.whatsapp.net", "@c.us")
+            jid_map[l_jid] = p_jid
+            jid_map[p_jid] = l_jid
+
+        payload = {
+            "count": limit,
+            "direction": "before",
+            "id": serialized_id,
+            "jidMap": jid_map
+        }
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
 
         try:
-            logging.info(f"[fetch_older_messages] Querying URL: {url}")
-            response = requests.get(url, headers=headers, timeout=30)
+            logging.info(f"[fetch_older_messages] Querying URL (POST): {url}")
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
             
             # Alternate JID query fallback (resolves 401/TypeError or Chat not found errors)
             if response.status_code not in (200, 201):
@@ -7257,10 +7272,16 @@ class MainWindow(wx.Frame):
                     alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}"
                     if participant and alternate_jid.endswith("@g.us"):
                         alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}_{participant}"
-                    alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}&direction=before&id={alt_serialized_id}"
+                    alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}"
                     logging.info(f"[fetch_older_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
                     try:
-                        alt_response = requests.get(alt_url, headers=headers, timeout=30)
+                        alt_payload = {
+                            "count": limit,
+                            "direction": "before",
+                            "id": alt_serialized_id,
+                            "jidMap": jid_map
+                        }
+                        alt_response = requests.post(alt_url, headers=headers, json=alt_payload, timeout=30)
                         if alt_response.status_code in (200, 201):
                             response = alt_response
                             logging.info("[fetch_older_messages] Fallback alternate JID query succeeded!")
