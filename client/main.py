@@ -2045,8 +2045,8 @@ class MainWindow(wx.Frame):
                             pass
                 try:
                     dist_mtime = os.path.getmtime(dist_server)
-                    if max_src_mtime > dist_mtime:
-                        logging.info("[ensure_api_modules_installed] Source files in api/src/ are newer than api/dist/server.js. Forcing rebuild...")
+                    if max_src_mtime >= dist_mtime:
+                        logging.info("[ensure_api_modules_installed] Source files in api/src/ are newer than or equal to api/dist/server.js. Forcing rebuild...")
                         os.remove(dist_server)
                 except Exception as e:
                     logging.warning("[ensure_api_modules_installed] Error checking mtime/removing dist_server: %s", e)
