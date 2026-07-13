@@ -553,15 +553,24 @@ export async function getMediaByMessage(req: Request, res: Response) {
             } catch (e) {}
           }
 
+          const altPrefix = prefix === 'true' ? 'false' : 'true';
           const combinations = [
-            { c: altChatSegment, p: participantSegment },
-            { c: chatSegment, p: altParticipantSegment },
-            { c: altChatSegment, p: altParticipantSegment }
+            { f: prefix, c: altChatSegment, p: participantSegment },
+            { f: prefix, c: chatSegment, p: altParticipantSegment },
+            { f: prefix, c: altChatSegment, p: altParticipantSegment },
+            { f: altPrefix, c: chatSegment, p: participantSegment },
+            { f: altPrefix, c: altChatSegment, p: participantSegment },
+            { f: altPrefix, c: chatSegment, p: altParticipantSegment },
+            { f: altPrefix, c: altChatSegment, p: altParticipantSegment },
+            { f: prefix, c: chatSegment, p: '' },
+            { f: prefix, c: altChatSegment, p: '' },
+            { f: altPrefix, c: chatSegment, p: '' },
+            { f: altPrefix, c: altChatSegment, p: '' },
           ];
 
           for (const combo of combinations) {
-            if (combo.c === chatSegment && combo.p === participantSegment) continue;
-            const altId = combo.p ? `${prefix}_${combo.c}_${msgSeq}_${combo.p}` : `${prefix}_${combo.c}_${msgSeq}`;
+            if (combo.f === prefix && combo.c === chatSegment && combo.p === participantSegment) continue;
+            const altId = combo.p ? `${combo.f}_${combo.c}_${msgSeq}_${combo.p}` : `${combo.f}_${combo.c}_${msgSeq}`;
             try {
               req.logger.info(`Trying alternate message ID: ${altId}`);
               const altMsg = await client.getMessageById(altId);

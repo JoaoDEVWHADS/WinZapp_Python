@@ -265,7 +265,7 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
 
     def EnsureVisible(self, row):
         if 0 <= row < self.GetCount():
-            super().EnsureVisible(row)
+            self.SetFirstItem(row)
 
     def SetItemText(self, row, col_or_text, text=None):
         if text is None:
