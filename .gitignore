@@ -36,11 +36,13 @@ client/logs/
 !/client/api/src/controller/
 /client/api/src/controller/*
 !/client/api/src/controller/deviceController.ts
+!/client/api/src/controller/encryptController.ts
 !/client/api/src/controller/messageController.ts
 !/client/api/src/controller/sessionController.ts
 !/client/api/src/middleware/
 /client/api/src/middleware/*
 !/client/api/src/middleware/statusConnection.ts
+!/client/api/src/middleware/auth.ts
 !/client/api/src/util/
 /client/api/src/util/*
 !/client/api/src/util/createSessionUtil.ts
