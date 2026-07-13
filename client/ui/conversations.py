@@ -349,6 +349,7 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
+        self.messages_list.Bind(wx.EVT_MOUSEWHEEL, self._on_messages_list_mousewheel)
         if isinstance(self.messages_list, CompatListBoxMessagesCtrl):
             self.messages_list.set_key_down_handler(self._on_messages_list_key_down)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
@@ -3217,6 +3218,28 @@ class ConversationsPanel(wx.Panel):
                 event.Skip()
         else:
             event.Skip()
+
+    def _get_top_index(self):
+        if hasattr(self.messages_list, "GetTopItem"):
+            return self.messages_list.GetTopItem()
+        else:
+            try:
+                import ctypes
+                hwnd = self.messages_list.GetHandle()
+                return ctypes.windll.user32.SendMessageW(hwnd, 0x018E, 0, 0)
+            except Exception:
+                pass
+        return -1
+
+    def _on_messages_list_mousewheel(self, event):
+        event.Skip()
+        if event.GetWheelRotation() > 0:  # Scrolling UP
+            top_idx = self._get_top_index()
+            if top_idx == 0 and not self._is_loading_more:
+                if self._messages_offset > 0:
+                    self._load_more_messages()
+                else:
+                    self._load_older_messages()
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).

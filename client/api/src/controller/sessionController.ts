@@ -556,7 +556,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
           const combinations = [
             { c: altChatSegment, p: participantSegment },
             { c: chatSegment, p: altParticipantSegment },
-            { c: altChatSegment, p: altParticipantSegment }
+            { c: altChatSegment, p: altParticipantSegment },
+            { c: chatSegment, p: '' },
+            { c: altChatSegment, p: '' }
           ];
 
           for (const combo of combinations) {
