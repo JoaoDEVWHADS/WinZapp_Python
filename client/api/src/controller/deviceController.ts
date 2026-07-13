@@ -1446,109 +1446,29 @@ export async function getMessages(req: Request, res: Response) {
      }
    */
   const { phone } = req.params;
-  const countVal = req.body?.count || req.query?.count || 20;
-  const directionVal = req.body?.direction || req.query?.direction || 'before';
-  const idVal = req.body?.id || req.query?.id || null;
-  const jidMap = req.body?.jidMap || {};
-
+  const { count = 20, direction = 'before', id = null } = req.query;
   try {
     let response: any;
-    const targetCount = parseInt(countVal as string);
-    if (directionVal === 'before' && idVal) {
-      req.logger.info(`Fetching older messages before ${idVal} for ${phone} using browser-side sync...`);
-      response = await req.client.page.evaluate(async ({ chatId, targetCount, id, jidMap }) => {
+    const targetCount = parseInt(count as string);
+    if (direction === 'before' && id) {
+      req.logger.info(`Fetching older messages before ${id} for ${phone} using browser-side sync...`);
+      response = await req.client.page.evaluate(async ({ chatId, targetCount, id }) => {
         console.log(`[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`);
         const getMsgSafe = async (msgId: string) => {
           try {
-            let m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
-            if (m) {
-              console.log(`[browser-evaluate] getMsgSafe for ${msgId}: Found directly`);
-              return m;
-            }
-            
-            // Try fallback by swapping @lid / @c.us in the message ID
-            const parts = msgId.split('_');
-            if (parts.length >= 3) {
-              const prefix = parts[0];
-              let chatSegment = parts[1];
-              const msgSeq = parts[2];
-              let participantSegment = parts[3] || '';
-              
-              // Get alternative chat JID if possible (using passed jidMap first)
-              let altChatSegment = jidMap[chatSegment] || chatSegment;
-              if (altChatSegment === chatSegment) {
-                try {
-                  const cObj = await (window as any).WPP.chat.find(chatSegment);
-                  if (cObj) {
-                    const resolvedId = cObj.id._serialized || cObj.id;
-                    if (resolvedId && resolvedId !== chatSegment) {
-                      altChatSegment = resolvedId;
-                    } else {
-                      const contactObj = cObj.contact || {};
-                      const lidObj = contactObj.lid || {};
-                      const phoneObj = contactObj.phoneNumber || {};
-                      if (chatSegment.endsWith('@lid') && phoneObj._serialized) {
-                        altChatSegment = phoneObj._serialized;
-                      } else if (chatSegment.endsWith('@c.us') && lidObj._serialized) {
-                        altChatSegment = lidObj._serialized;
-                      }
-                    }
-                  }
-                } catch (e) {}
-              }
-
-              // Get alternative participant JID if possible (using passed jidMap first)
-              let altParticipantSegment = participantSegment ? (jidMap[participantSegment] || participantSegment) : '';
-              if (participantSegment && altParticipantSegment === participantSegment) {
-                try {
-                  const pObj = await (window as any).WPP.contact.get(participantSegment);
-                  if (pObj) {
-                    const lidObj = pObj.lid || {};
-                    const phoneObj = pObj.phoneNumber || {};
-                    if (participantSegment.endsWith('@lid') && phoneObj._serialized) {
-                      altParticipantSegment = phoneObj._serialized;
-                    } else if (participantSegment.endsWith('@c.us') && lidObj._serialized) {
-                      altParticipantSegment = lidObj._serialized;
-                    }
-                  }
-                } catch (e) {}
-              }
-
-              // Try all combinations of chatSegment and participantSegment swaps
-              const combinations = [
-                { c: altChatSegment, p: participantSegment },
-                { c: chatSegment, p: altParticipantSegment },
-                { c: altChatSegment, p: altParticipantSegment }
-              ];
-
-              for (const combo of combinations) {
-                if (combo.c === chatSegment && combo.p === participantSegment) continue;
-                const altId = combo.p ? `${prefix}_${combo.c}_${msgSeq}_${combo.p}` : `${prefix}_${combo.c}_${msgSeq}`;
-                try {
-                  m = await (window as any).WPP.chat.getMessageById(altId);
-                  if (m) {
-                    console.log(`[browser-evaluate] getMsgSafe found message using alternate ID: ${altId}`);
-                    return m;
-                  }
-                } catch (e) {}
-              }
-            }
-            
-            console.log(`[browser-evaluate] getMsgSafe for ${msgId}: Not Found`);
-            return null;
+            const m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            console.log(`[browser-evaluate] getMsgSafe for ${msgId}: ${m ? 'Found' : 'Not Found'}`);
+            return m;
           } catch (e) {
             console.log(`[browser-evaluate] getMsgSafe error for ${msgId}: ${e}`);
             return null;
           }
         };
 
-        // Ensure the chat is loaded in the browser store and resolve JID
+        // Ensure the chat is loaded in the browser store
         try {
           if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
-            const resolvedChat = await (window as any).WPP.chat.find(chatId);
-            if (resolvedChat && resolvedChat.id) {
-              chatId = resolvedChat.id._serialized || resolvedChat.id;
-            }
+            await (window as any).WPP.chat.find(chatId);
           }
         } catch (e) {
           // Ignore
@@ -1640,40 +1560,20 @@ export async function getMessages(req: Request, res: Response) {
           }
         }
 
-        console.log(`[browser-evaluate] Final query using WPP.chat.getMessages with anchor: ${queryId}`);
-        const options: any = {
+        console.log(`[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`);
+        const result = await (window as any).WAPI.getMessages(chatId, {
           count: targetCount,
-          direction: 'before'
-        };
-        if (queryId && queryId !== 'null' && queryId !== 'undefined') {
-          options.id = queryId;
-        }
-        const result = await (window as any).WPP.chat.getMessages(chatId, options);
-        console.log(`[browser-evaluate] WPP.chat.getMessages returned ${result ? result.length : 0} messages`);
+          direction: 'before',
+          id: queryId
+        });
+        console.log(`[browser-evaluate] WAPI.getMessages returned ${result ? result.length : 0} messages`);
         return result;
-      }, { chatId: phone, targetCount, id: idVal as string, jidMap });
+      }, { chatId: phone, targetCount, id: id as string });
     } else {
       if (phone && phone.endsWith('@lid')) {
         // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
-        response = await req.client.page.evaluate(async ({ chatId, params }) => {
-          try {
-            if ((window as any).WPP && (window as any).WPP.chat && (window as any).WPP.chat.find) {
-              const resolvedChat = await (window as any).WPP.chat.find(chatId);
-              if (resolvedChat && resolvedChat.id) {
-                chatId = resolvedChat.id._serialized || resolvedChat.id;
-              }
-            }
-          } catch (e) {
-            // Ignore
-          }
-          const options: any = { count: params.count };
-          if (params.direction) {
-            options.direction = params.direction;
-          }
-          if (params.id && params.id !== 'null' && params.id !== 'undefined') {
-            options.id = params.id;
-          }
-          return (window as any).WPP.chat.getMessages(chatId, options);
+        response = await req.client.page.evaluate(({ chatId, params }) => {
+          return (window as any).WAPI.getMessages(chatId, params);
         }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
       } else {
         response = await req.client.getMessages(`${phone}`, {
