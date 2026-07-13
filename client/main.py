@@ -3257,7 +3257,7 @@ class MainWindow(wx.Frame):
                         self.check_wa_connection_http()
                 except Exception as e:
                     logging.warning(f"[health_checker] Error checking connection in background: {e}")
-                time.sleep(30)
+                time.sleep(10)
 
         threading.Thread(target=_loop, daemon=True).start()
 
