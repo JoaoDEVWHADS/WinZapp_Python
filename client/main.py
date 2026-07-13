@@ -2028,6 +2028,29 @@ class MainWindow(wx.Frame):
         dist_server  = resource_path("api",  "dist", "server.js")
         node_modules = resource_path("api",  "node_modules")
 
+        # Rebuild check: if any TS source files are newer than the built dist/server.js,
+        # delete dist/server.js to force a rebuild.
+        if os.path.isfile(dist_server):
+            src_dir = resource_path("api", "src")
+            if os.path.isdir(src_dir):
+                max_src_mtime = 0
+                for root, dirs, files in os.walk(src_dir):
+                    for file in files:
+                        filepath = os.path.join(root, file)
+                        try:
+                            mtime = os.path.getmtime(filepath)
+                            if mtime > max_src_mtime:
+                                max_src_mtime = mtime
+                        except Exception:
+                            pass
+                try:
+                    dist_mtime = os.path.getmtime(dist_server)
+                    if max_src_mtime > dist_mtime:
+                        logging.info("[ensure_api_modules_installed] Source files in api/src/ are newer than api/dist/server.js. Forcing rebuild...")
+                        os.remove(dist_server)
+                except Exception as e:
+                    logging.warning("[ensure_api_modules_installed] Error checking mtime/removing dist_server: %s", e)
+
         # Node.js is mandatory — auto-download portable version if missing.
         if not os.path.isfile(node_exe):
             if self.background_mode:
