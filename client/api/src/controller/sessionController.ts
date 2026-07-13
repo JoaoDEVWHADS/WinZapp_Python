@@ -98,6 +98,26 @@ export async function download(message: any, client: any, logger: any) {
   }
 }
 
+async function safeLoadEarlierMessages(client: any, chatId: string) {
+  if (client.page && !client.page.isClosed()) {
+    try {
+      await client.page.evaluate(async (chatId) => {
+        if ((window as any).WPP && (window as any).WPP.chat && (window as any).WPP.chat.getMessages) {
+          await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+        } else if ((window as any).WAPI && (window as any).WAPI.loadEarlierMessages) {
+          await (window as any).WAPI.loadEarlierMessages(chatId);
+        }
+      }, chatId);
+    } catch (e) {
+      if (typeof client.loadEarlierMessages === 'function') {
+        await client.loadEarlierMessages(chatId);
+      }
+    }
+  } else if (typeof client.loadEarlierMessages === 'function') {
+    await client.loadEarlierMessages(chatId);
+  }
+}
+
 export async function startAllSessions(
   req: Request,
   res: Response
@@ -505,11 +525,11 @@ export async function getMediaByMessage(req: Request, res: Response) {
         const parts = messageId.split('_');
         if (parts.length >= 2) {
           const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
+          if (chatId) {
             req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
             try {
               // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
-              await client.loadEarlierMessages(chatId);
+              await safeLoadEarlierMessages(client, chatId);
               // Query again
               try {
                 message = await client.getMessageById(messageId);
@@ -584,9 +604,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
         const parts = messageId.split('_');
         if (parts.length >= 2) {
           const chatId = parts[1];
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
+          if (chatId) {
             try {
-              await client.loadEarlierMessages(chatId);
+              await safeLoadEarlierMessages(client, chatId);
               freshMessage = await client.getMessageById(messageId);
             } catch (err) {}
           }
