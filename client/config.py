@@ -31,14 +31,10 @@ def _load_dotenv():
 
 _load_dotenv()
 
-# ── Update URLs ───────────────────────────────────────────────────────────────
+# ── Update source: GitHub Releases ───────────────────────────────────────────
+# Override WINZAPP_GITHUB_REPO in .env to point at a fork.
 
-GITHUB_RELEASE_URL = os.environ.get(
-    "WINZAPP_GITHUB_RELEASE_URL",
-    "https://api.github.com/repos/JoaoDEVWHADS/WinZapp_Python/releases/latest",
-)
-
-UPDATE_ZIP_URL = os.environ.get(
-    "WINZAPP_ZIP_URL",
-    "https://github.com/JoaoDEVWHADS/WinZapp_Python/releases/latest/download/WinZapp.zip",
+GITHUB_REPO = os.environ.get("WINZAPP_GITHUB_REPO", "gabrielhhaber/WinZapp_Python")
+GITHUB_API_LATEST_RELEASE = (
+    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 )
