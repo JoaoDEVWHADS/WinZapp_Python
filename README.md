@@ -1,9 +1,4 @@
-# WinZapp (Fork)
-
-> **This repository is a [fork of the original repository by Gabriel Haberkamp](https://github.com/gabrielhhaber/WinZapp_Python).**  
-> All credits for the initial development and project architecture belong to the original author. This fork focuses on stabilization, build automation, accessibility bug fixes, and restructuring the update system for the WPPConnect Server backend.
-
----
+# WinZapp
 
 WinZapp is a **free, self-hosted, open-source desktop WhatsApp client for Windows**, developed primarily with a focus on **accessibility for blind or low-vision users**.  
 It integrates seamlessly with screen readers (such as NVDA, JAWS, Narrator, and others) through the [accessible-output2](https://github.com/accessibleapps/accessible_output2) ecosystem, offering a fully keyboard-navigable interface using wxPython.
@@ -14,34 +9,32 @@ The application runs in a hybrid manner:
 
 ---
 
-## 🛠️ Improvements in this Fork
+## ✨ Key Features
 
-Since the original fork, a deep restructuring has been performed in the following areas:
+### WPPConnect Server Integration
+* **API Framework:** Uses the WPPConnect Server backend with a compiled distribution. Startup launchers (`start.js`), configuration setup (`setup_api.py`), and Python controllers are all tuned for the WPPConnect stack.
+* **Port Uniformity:** Default API port is `6300` throughout client configurators and launcher scripts for reliable out-of-the-box local connections.
+* **Auto-install:** Node.js modules are downloaded and installed automatically on first run — no manual `npm install` needed by the end user.
 
-### 1. WPPConnect Server Integration
-* **API Framework Switch:** Restructured the startup launchers (`start.js`), configuration setup (`setup_api.py`), and Python controllers to support a compiled, highly responsive WPPConnect Server backend instead of Evolution API.
-* **Port Uniformity:** Shifted default API ports to `6300` throughout client configurators and launcher scripts to guarantee reliable out-of-the-box local connections.
+### Auto-Updater
+* **Direct GitHub Integration:** Queries the GitHub Releases API directly to pull release notes and version info.
+* **Release of File Locks:** Resolves update-time access denied errors by scanning for processes bound to port **6300** (WPPConnect Server) and port **5433** (Postgres) and terminating them before overwriting client files.
 
-### 2. Auto-Updater Redesign (Zero Conflicts)
-* **Direct GitHub Integration:** Removed the reliance on static files in the repository. The updater now queries the GitHub Releases API directly to pull notes and version info.
-* **Release of File Locks:** Resolved update-time access denied errors by adding netstat port scanners in the updater batch script. The updater dynamically terminates processes bound to port **6300** (WPPConnect Server) and port **5433** (Postgres) and kills remaining node processes before overwriting client files.
+### @lid JID Resolution & Cache
+* **Background Profile Resolution:** Background queries via `/contact/fetchProfile` map linked secondary device JIDs (`@lid`) to standard phone numbers and contact names, resolving blank list items.
+* **Encrypted JID Cache:** Local `_lid_to_phone` mappings encrypted and cached in the local database (`messages.dat`).
+* **Real-time Deduplication:** Merges messages and unread counts from `@lid` chats into standard `@s.whatsapp.net` chats on startup and on incoming events.
+* **Brazilian 9-Digit Interchangeability:** Matches and resolves Brazilian phone number JIDs with and without the 9th digit (e.g. 55XX9YYYYYYYY ↔ 55XXYYYYYYYY).
 
-### 3. @lid JID Resolution & Cache Overhaul
-* **Background Profiles Resolution:** Integrated background queries leveraging the `/contact/fetchProfile` endpoint to map linked secondary device JIDs (`@lid`) to standard phone numbers and contact names, resolving blank list items.
-* **Encrypted JID Cache:** Implemented local `_lid_to_phone` mappings that are encrypted and cached directly in the local database (`messages.dat`) on exit.
-* **Real-time Deduplication:** Merges messages and unread counts from `@lid` chats directly into standard `@s.whatsapp.net` chats on startup and on incoming events.
-* **Placeholder Exclusions:** Prevents placeholder names (e.g. "Contato sem nome") from polluting JID resolution.
-* **Brazilian 9-Digit Interchangeability:** Added support for matching and resolving Brazilian phone number JIDs interchangeably with and without the 9th digit (e.g. 55XX9YYYYYYYY vs 55XXYYYYYYYY).
+### Accessibility Safeguards
+* **NVDA/JAWS Guards:** Virtual focus guards (`list_has_focus` and sync status checks) prevent screen readers from stuttering or entering announcement loops when rebuilding chat lists.
+* **Debounced Local Writes:** Thread-safe `_save_lock` with a 150 ms debounce prevents `messages.dat` corruption under bulk message loads.
+* **Silent Reconnection:** Socket.IO reconnection loop with silent status bar indicators for network glitches — no blocking popup dialogs.
+* **PTT Voice Note Controls:** Playback controls for voice notes directly within the conversation UI.
+* **Group Mentions:** `@mention` lists and `mentioned_jids` routing to WPPConnect's `/api/:session/send-mentioned` endpoint.
 
-### 4. Advanced UX & NVDA Accessibility Safeguards
-* **NVDA COMError & Stuttering Fixes:** Added virtual focus guards (`list_has_focus` and sync status checks) to prevent NVDA/JAWS screen readers from stuttering or entering announcement loops when rebuilding chat lists. Also cleared selection states before deletions to prevent COMErrors.
-* **Debounced Local Writes:** Wrapped the disk writer in a thread-safe `_save_lock` and debounced disk access (`150ms` delay) to prevent `messages.dat` file corruption when receiving bulk message logs.
-* **Silent Disconnection Loop:** Adopted upstream's Socket.IO reconnection loop and silent status bar indicators for network glitches to avoid locking the UI with blocking popup dialogs.
-* **PTT Voice Note Audio Controls:** Added the upstream visual playback controls for playing voice notes directly within the conversation UI.
-* **Group Mentions Routing:** Integrated upstream's `@mention` lists and `mentioned_jids` parameters, routing them to WPPConnect's specialized `/api/:session/send-mentioned` endpoint.
-
-### 5. Persistent & High Verbosity Logging
-* **Full Debug Tracing:** Configured persistent client logging under `logs/log.log` at the `DEBUG` level. This captures HTTP headers, Socket.IO websocket payloads, and thread exceptions.
+### Logging
+* **Full Debug Tracing:** Persistent client logging under `logs/log.log` at `DEBUG` level, capturing HTTP headers, Socket.IO payloads, and thread exceptions.
 
 ---
 
@@ -52,40 +45,55 @@ Since the original fork, a deep restructuring has been performed in the followin
 * **Git** for version control.
 * For local installer builds: **GCC** and **windres** (available via MSYS2).
 
-### Steps to Run Locally:
+### Steps to Run Locally
+
 ```powershell
 # 1. Clone the repository
-git clone https://github.com/JoaoDEVWHADS/WinZapp_Python.git
-# Or for WPPConnect server setup:
-python setup_api.py
+git clone https://github.com/gabrielhhaber/WinZapp_Python.git
+cd WinZapp_Python
 
 # 2. Create and activate the virtual environment
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 
-# 3. Install the dependencies
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Start the client in development mode
+# 4. Set up the WPPConnect Server (clones and configures client/api/)
+python setup_api.py
+
+# 5. Start the client in development mode
 cd client
 python main.py
 ```
 
 ---
 
-## 📦 Local Compilation (Build)
+## 📦 Building
 
-To compile and generate the `WinZappInstaller.exe` installer and the portable `WinZapp.zip` version locally on your Windows machine:
+### Automated (recommended)
+
+When a GitHub release is created, the [release workflow](.github/workflows/release.yml) automatically builds `WinZappInstaller.exe` and `WinZapp.zip` on GitHub's servers and attaches them to the release.
+
+To publish a new release (requires [GitHub CLI](https://cli.github.com/)):
 
 ```powershell
-# With the virtual environment active and C tools (GCC/windres) in your PATH:
+gh release create v1.2.3 --title "v1.2.3" --notes "Release notes here"
+```
+
+### Local build (fallback)
+
+Requires MSYS2 with GCC/windres, the portable Node.js placed at `client/node/`, and the WPPConnect Server built at `client/api/dist/server.js`.
+
+```powershell
+# With the virtual environment active and GCC/windres in PATH:
 python build.py
 ```
 
-The final compiled files will be generated in the `dist/` directory at the root of the project.
+The final files are generated in the `dist/` directory.
 
 ---
 
 ## 📄 License and Disclaimer
 
-WinZapp is a project licensed under the GPL. It relies on reverse engineering of the WhatsApp Web protocol. Use of the software is at your own risk. This repository is not affiliated with, maintained, or sponsored by Meta Platforms, Inc.
+WinZapp is licensed under the GPL. It relies on reverse engineering of the WhatsApp Web protocol. Use of the software is at your own risk. This repository is not affiliated with, maintained, or sponsored by Meta Platforms, Inc.

@@ -125,13 +125,13 @@ jobs:
             $entries = $zip.Entries | ForEach-Object { $_.FullName }
             $hasSounds   = ($entries | Where-Object { $_ -like "WinZapp/sounds/*" }).Count -gt 0
             $hasLib      = ($entries | Where-Object { $_ -like "WinZapp/lib/bass.dll" }).Count -gt 0
-            $hasOpus     = ($entries | Where-Object { $_ -like "WinZapp/lib/libopus-0.dll" }).Count -gt 0
+            $hasBassOpus = ($entries | Where-Object { $_ -like "WinZapp/lib/bassopus.dll" }).Count -gt 0
             $hasExe      = ($entries | Where-Object { $_ -eq   "WinZapp/WinZapp.exe" }).Count -gt 0
-            Write-Host "WinZapp.exe : $hasExe"
-            Write-Host "sounds/*    : $hasSounds"
-            Write-Host "lib/bass.dll: $hasLib"
-            Write-Host "lib/libopus : $hasOpus"
-            if (-not ($hasSounds -and $hasLib -and $hasOpus -and $hasExe)) {
+            Write-Host "WinZapp.exe    : $hasExe"
+            Write-Host "sounds/*       : $hasSounds"
+            Write-Host "lib/bass.dll   : $hasLib"
+            Write-Host "lib/bassopus   : $hasBassOpus"
+            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe)) {
               Write-Error "dist/WinZapp.zip is missing required entries — build failed."
               exit 1
             }
