@@ -998,6 +998,22 @@ class WebSocketClient:
                     "type": 3
                 }
             }
+        elif msg_type == "gp2":
+            # Group membership/settings notifications (join, leave, removed,
+            # promoted, subject/description/picture change, …). WPPConnect
+            # carries the specific action in "subtype" and the affected
+            # participants in "recipients".
+            sender_obj = wpp_msg.get("sender")
+            author_raw = wpp_msg.get("author") or (
+                sender_obj.get("id", "") if isinstance(sender_obj, dict) else ""
+            )
+            message_content = {
+                "groupNotification": {
+                    "subtype": wpp_msg.get("subtype", ""),
+                    "recipients": wpp_msg.get("recipients") or [],
+                    "author": self._clean_jid(author_raw) if author_raw else "",
+                }
+            }
 
         # Fallback to plain text if the message type is unsupported/unmapped but contains body text
         if not message_content and conversation:
@@ -1018,7 +1034,8 @@ class WebSocketClient:
             "list": "listMessage",
             "template": "templateMessage",
             "revoked": "protocolMessage",
-            "extendedText": "extendedTextMessage"
+            "extendedText": "extendedTextMessage",
+            "gp2": "groupNotification",
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
 

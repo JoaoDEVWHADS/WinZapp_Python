@@ -1013,7 +1013,16 @@ class ConversationsPanel(wx.Panel):
             event.Skip()
             return
 
-        char = chr(event.GetUnicodeKey())
+        key_code = event.GetUnicodeKey()
+        # EVT_CHAR_HOOK reports the raw (unshifted-case) key code for letters,
+        # so A-Z always arrives uppercase regardless of Shift/Caps Lock — apply
+        # the correct case ourselves instead of trusting the hook's casing.
+        if ord("A") <= key_code <= ord("Z"):
+            caps_on = wx.GetKeyState(wx.WXK_CAPITAL)
+            upper = event.ShiftDown() != caps_on
+            char = chr(key_code) if upper else chr(key_code).lower()
+        else:
+            char = chr(key_code)
         self.message_field.SetFocus()
         self.message_field.WriteText(char)
 
@@ -1024,7 +1033,7 @@ class ConversationsPanel(wx.Panel):
             return False
         if self._is_recording:
             return False
-        if event.ControlDown() or event.AltDown() or event.ShiftDown():
+        if event.ControlDown() or event.AltDown():
             return False
         if hasattr(event, "MetaDown") and event.MetaDown():
             return False
@@ -2113,8 +2122,8 @@ class ConversationsPanel(wx.Panel):
         if self._reaction_map:
             all_emojis: dict = {}
             for msg_reactions in self._reaction_map.values():
-                for em, cnt in msg_reactions.items():
-                    all_emojis[em] = all_emojis.get(em, 0) + cnt
+                for em in msg_reactions.values():
+                    all_emojis[em] = all_emojis.get(em, 0) + 1
             if all_emojis:
                 top_emojis = sorted(all_emojis.items(), key=lambda x: x[1], reverse=True)[:5]
                 most_used_sub = wx.Menu()
@@ -4162,6 +4171,43 @@ class ConversationsPanel(wx.Panel):
             body = (inter.get("body") or {}).get("text", "")
             return body or i18n.t("interactive_message")
 
+        # ── Group participant/settings notifications (join, leave, …) ──────────
+        if msg_type == "groupNotification":
+            notif = msg_obj.get("groupNotification") or {}
+            subtype = (notif.get("subtype") or "").lower()
+            author_jid = notif.get("author") or ""
+            recipient_jids = notif.get("recipients") or []
+
+            def _name(j: str) -> str:
+                return self._sender_label({"key": {"participant": j, "remoteJid": j, "fromMe": False}})
+
+            author_name = _name(author_jid) if author_jid else ""
+            names = ", ".join(_name(j) for j in recipient_jids) if recipient_jids else author_name
+
+            if subtype == "invite":
+                return i18n.t("group_notif_invited").format(names=names)
+            if subtype == "add":
+                if author_jid and recipient_jids and author_jid not in recipient_jids:
+                    return i18n.t("group_notif_added").format(author=author_name, names=names)
+                return i18n.t("group_notif_joined").format(names=names)
+            if subtype == "remove":
+                return i18n.t("group_notif_removed").format(author=author_name, names=names)
+            if subtype == "leave":
+                return i18n.t("group_notif_left").format(names=names)
+            if subtype in ("promote", "promotion"):
+                return i18n.t("group_notif_promoted").format(author=author_name, names=names)
+            if subtype in ("demote", "demotion"):
+                return i18n.t("group_notif_demoted").format(author=author_name, names=names)
+            if subtype == "subject":
+                return i18n.t("group_notif_subject_changed").format(author=author_name)
+            if subtype == "description":
+                return i18n.t("group_notif_description_changed").format(author=author_name)
+            if subtype == "picture":
+                return i18n.t("group_notif_picture_changed").format(author=author_name)
+            if subtype == "create":
+                return i18n.t("group_notif_created").format(author=author_name)
+            return i18n.t("group_notif_generic")
+
         # ── Fallback ─────────────────────────────────────────────────────────
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
@@ -4192,6 +4238,7 @@ class ConversationsPanel(wx.Panel):
             "buttonsResponseMessage",
             "listResponseMessage",
             "protocolMessage",
+            "groupNotification",
         )
 
         if msg_type not in allowed_types:
@@ -4597,7 +4644,7 @@ class ConversationsPanel(wx.Panel):
 
         # Append reactions if any
         msg_id    = msg.get("key", {}).get("id", "")
-        reactions = self._reaction_map.get(msg_id, {})
+        reactions = self._reaction_counts(msg_id)
         if reactions:
             r_parts = []
             for emoji, count in reactions.items():
@@ -5230,60 +5277,24 @@ class ConversationsPanel(wx.Panel):
         if not target_jid:
             return
 
-        # ── Extract forwardable text from the message ─────────────────────────
-        msg_type = msg.get("messageType", "")
-        msg_obj  = msg.get("message") or {}
-        text = ""
-
-        if msg_type == "conversation":
-            text = msg_obj.get("conversation") or ""
-        elif msg_type == "extendedTextMessage":
-            text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
-        else:
-            for sub_key in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
-                sub = msg_obj.get(sub_key) or {}
-                if sub:
-                    text = sub.get("caption", "")
-                    break
-
-        if not text:
+        # ── Forward via the real WPPConnect forward endpoint ────────────────────
+        # Uses WPP.chat.forwardMessagesV2 server-side (main_window.forward_message),
+        # which forwards the actual message as WhatsApp does — media, documents,
+        # audio, captions, etc. all come through, unlike re-extracting the text
+        # and sending it as a brand-new message. The forwarded copy arrives back
+        # through the normal WebSocket echo, same as any other outgoing message.
+        msg_key = msg.get("key", {}) or {}
+        source_jid = msg_key.get("remoteJid") or (self.conversation.get("remoteJid", "") if self.conversation else "")
+        if not source_jid or not msg_key.get("id"):
             return
 
-        # ── Enqueue and add virtual message so the UI reflects the send ───────
-        from core.message_queue import PendingMessage
-        local_id = str(uuid.uuid4())
-        virtual_msg = {
-            "_local_pending":   True,
-            "_local_id":        local_id,
-            "key": {
-                "id":        local_id,
-                "fromMe":    True,
-                "remoteJid": target_jid,
-            },
-            "messageType":      "conversation",
-            "message":          {"conversation": text},
-            "messageTimestamp": int(time.time()),
-            "pushName":         "",
-        }
+        def _do_forward():
+            ok = mw.forward_message(source_jid, msg_key, target_jid)
+            if not ok:
+                wx.CallAfter(mw.error_sound.play)
+                wx.CallAfter(mw.output, i18n.t("forward_failed"))
 
-        mw.message_queue.enqueue(
-            PendingMessage(local_id=local_id, jid=target_jid, text=text)
-        )
-
-        # Register in chat records so _last_msg_preview shows the forwarded text.
-        self._register_virtual_msg(virtual_msg)
-
-        # If the target conversation is currently open, add to the visible list.
-        current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
-        if target_jid == current_jid:
-            self._sorted_messages.append(virtual_msg)
-            self.conversation.setdefault("messages", {}).setdefault("messages", {}).setdefault("records", []).append(virtual_msg)
-            self.messages_list.Append((self._render_message_line(virtual_msg),))
-            last = self.messages_list.GetItemCount() - 1
-            if last >= 0:
-                self.messages_list.EnsureVisible(last)
-
-        mw._schedule_set_chats()
+        threading.Thread(target=_do_forward, daemon=True).start()
 
     def _on_menu_star(self, msg: dict):
         msg["starred"] = not msg.get("starred")
@@ -6001,6 +6012,24 @@ class ConversationsPanel(wx.Panel):
                 daemon=True,
             ).start()
 
+    _SELF_REACTOR_KEY = "_me_"
+
+    def _reactor_key_from_msg(self, msg: dict) -> str:
+        """Identity of whoever sent this reactionMessage — used so each sender
+        only ever holds one active reaction per message in _reaction_map."""
+        key = msg.get("key", {}) or {}
+        if key.get("fromMe"):
+            return self._SELF_REACTOR_KEY
+        return key.get("participant") or key.get("remoteJid") or ""
+
+    def _reaction_counts(self, msg_id: str) -> dict:
+        """Aggregate {sender: emoji} into {emoji: count} for display."""
+        per_msg = self._reaction_map.get(msg_id) or {}
+        counts: dict = {}
+        for emoji in per_msg.values():
+            counts[emoji] = counts.get(emoji, 0) + 1
+        return counts
+
     def _send_reaction(self, msg: dict, emoji: str):
         """Send reaction directly (called from most-used submenu)."""
         msg_key = msg.get("key", {})
@@ -6025,13 +6054,10 @@ class ConversationsPanel(wx.Panel):
         if not orig_id:
             return
 
-        # Update in-memory reaction map
-        if orig_id not in self._reaction_map:
-            self._reaction_map[orig_id] = {}
+        # Update in-memory reaction map — replaces our own previous reaction
+        # on this message rather than adding another count.
         if emoji:
-            self._reaction_map[orig_id][emoji] = (
-                self._reaction_map[orig_id].get(emoji, 0) + 1
-            )
+            self._reaction_map.setdefault(orig_id, {})[self._SELF_REACTOR_KEY] = emoji
 
         # Re-render the original message row if currently visible
         for i, m in enumerate(self._sorted_messages):
@@ -6063,14 +6089,21 @@ class ConversationsPanel(wx.Panel):
                     .setdefault("messages", {})
                     .setdefault("records", [])
             )
-            # Avoid duplicates for the same message+emoji pair
-            rxn_key = f"_rxn_{orig_id}"
-            if not any(r.get("key", {}).get("id") == rxn_key for r in records):
+            # Update our existing reaction record for this message in place
+            # (changing the emoji) instead of silently no-op'ing — previously
+            # a changed reaction only updated the in-memory map, so the old
+            # emoji came back after reopening the conversation.
+            rxn_key  = f"_rxn_{orig_id}"
+            existing = next((r for r in records if r.get("key", {}).get("id") == rxn_key), None)
+            if existing:
+                existing["message"] = reaction_record["message"]
+                existing["messageTimestamp"] = reaction_record["messageTimestamp"]
+            else:
                 records.append(reaction_record)
-                try:
-                    self.main_window.db.insert_message(jid, reaction_record)
-                except Exception:
-                    logging.exception("[conversations] insert reaction failed")
+            try:
+                self.main_window.db.insert_message(jid, reaction_record)
+            except Exception:
+                logging.exception("[conversations] insert reaction failed")
 
         self.main_window._schedule_set_chats()
 
@@ -6424,19 +6457,19 @@ class ConversationsPanel(wx.Panel):
                     top_msg_id = m.get("key", {}).get("id", "")
         # ── Reaction messages: update reaction_map and re-render original ────
         if msg.get("messageType") == "reactionMessage":
-            reaction = (msg.get("message") or {}).get("reactionMessage") or {}
-            emoji    = reaction.get("text", "")
-            orig_id  = (reaction.get("key") or {}).get("id", "")
-            if orig_id:
-                if orig_id not in self._reaction_map:
-                    self._reaction_map[orig_id] = {}
+            reaction   = (msg.get("message") or {}).get("reactionMessage") or {}
+            emoji      = reaction.get("text", "")
+            orig_id    = (reaction.get("key") or {}).get("id", "")
+            sender_key = self._reactor_key_from_msg(msg)
+            if orig_id and sender_key:
+                per_msg = self._reaction_map.setdefault(orig_id, {})
                 if emoji:
-                    self._reaction_map[orig_id][emoji] = (
-                        self._reaction_map[orig_id].get(emoji, 0) + 1
-                    )
-                elif orig_id in self._reaction_map:
-                    # empty emoji = remove reaction (just rebuild, can't easily track sender)
-                    pass
+                    # A new/changed reaction from this sender replaces theirs —
+                    # it never accumulates into a bogus higher count.
+                    per_msg[sender_key] = emoji
+                else:
+                    # Empty emoji = this sender removed their reaction.
+                    per_msg.pop(sender_key, None)
                 # Re-render the original message in the list
                 for i, m in enumerate(self._sorted_messages):
                     if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
@@ -6597,19 +6630,23 @@ class ConversationsPanel(wx.Panel):
             )
         ]
 
-        # Build reaction map from all reaction messages
+        # Build reaction map from all reaction messages. Each sender can only
+        # have ONE active reaction on a message at a time — later records for
+        # the same (message, sender) pair replace the earlier one instead of
+        # accumulating a count, and an empty emoji means that sender removed
+        # their reaction.
         for m in messages_sorted:
             if isinstance(m, dict) and m.get("messageType") == "reactionMessage":
-                reaction = (m.get("message") or {}).get("reactionMessage") or {}
-                emoji    = reaction.get("text", "")
-                orig_id  = (reaction.get("key") or {}).get("id", "")
-                if orig_id:
-                    if orig_id not in self._reaction_map:
-                        self._reaction_map[orig_id] = {}
+                reaction   = (m.get("message") or {}).get("reactionMessage") or {}
+                emoji      = reaction.get("text", "")
+                orig_id    = (reaction.get("key") or {}).get("id", "")
+                sender_key = self._reactor_key_from_msg(m)
+                if orig_id and sender_key:
+                    per_msg = self._reaction_map.setdefault(orig_id, {})
                     if emoji:
-                        self._reaction_map[orig_id][emoji] = (
-                            self._reaction_map[orig_id].get(emoji, 0) + 1
-                        )
+                        per_msg[sender_key] = emoji
+                    else:
+                        per_msg.pop(sender_key, None)
 
         # Exclude reaction messages — they must not affect index mapping
         displayable = [

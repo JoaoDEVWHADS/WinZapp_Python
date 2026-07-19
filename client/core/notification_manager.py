@@ -490,7 +490,14 @@ class NotificationManager:
             reply_hint = self.i18n.t("notif_reply_hint")
 
             toast          = Toast()
-            toast.tag      = self.TOAST_TAG
+            # A unique tag per notification (not the old shared TOAST_TAG) is
+            # required so a new message always pops a fresh banner. Reusing
+            # the same tag makes Windows treat the call as an in-place
+            # *update* of the still-visible toast — which does not reset its
+            # on-screen timer or force it back to the foreground, so a new
+            # message arriving while the previous banner is still showing
+            # played its sound but never appeared until the old one expired.
+            toast.tag      = f"{self.TOAST_TAG}_{uuid.uuid4().hex}"
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
             toast.text_fields = [title, body]

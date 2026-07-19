@@ -876,8 +876,15 @@ class Connect:
             event.Skip()
             return
 
-        # Any Ctrl+key combo (clipboard shortcuts, select-all, …)
-        if event.ControlDown():
+        # Any Ctrl+key or Alt+key combo (clipboard shortcuts, select-all,
+        # Alt+F4, system accelerators, …) always pass through
+        if event.ControlDown() or event.AltDown() or event.CmdDown():
+            event.Skip()
+            return
+
+        # Bare modifier keys and function keys are not typed characters
+        if key in (wx.WXK_ALT, wx.WXK_CONTROL, wx.WXK_SHIFT, wx.WXK_WINDOWS_LEFT,
+                   wx.WXK_WINDOWS_RIGHT, wx.WXK_WINDOWS_MENU) or wx.WXK_F1 <= key <= wx.WXK_F24:
             event.Skip()
             return
 

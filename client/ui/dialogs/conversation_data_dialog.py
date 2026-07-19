@@ -154,6 +154,10 @@ class ConversationDataDialog(wx.Dialog):
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         ov_sizer.Add(self._overview_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+        self._add_members_btn_overview = wx.Button(overview_page, label=self._i18n.t("add_member"))
+        self._add_members_btn_overview.Disable()   # enabled after we confirm user is admin
+        self._add_members_btn_overview.Bind(wx.EVT_BUTTON, self._on_add_members)
+        ov_sizer.Add(self._add_members_btn_overview, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         overview_page.SetSizer(ov_sizer)
         self._notebook.AddPage(overview_page, self._i18n.t("group_overview_tab"))
 
@@ -297,6 +301,8 @@ class ConversationDataDialog(wx.Dialog):
         self._participant_jids = []
         participants = data.get("participants", [])
         my_jid = getattr(self._mw, "my_jid", "") or ""
+        my_lid = getattr(self._mw, "my_lid", "") or ""
+        my_digits = {j.split("@")[0] for j in (my_jid, my_lid) if j}
         user_is_admin = False
         lid_to_phone  = getattr(self._mw, "_lid_to_phone", {})
         for p in participants:
@@ -318,7 +324,7 @@ class ConversationDataDialog(wx.Dialog):
             if not p_name or p_name == p_phone or p_name.isdigit() or p_name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 p_name = p_phone
             is_admin = "admin" if p.get("admin") else ""
-            if is_admin and my_jid and (p_jid == my_jid or p_jid.split("@")[0] == my_jid.split("@")[0]):
+            if is_admin and my_digits and p_jid.split("@")[0] in my_digits:
                 user_is_admin = True
             idx = self._part_list.GetItemCount()
             self._part_list.InsertItem(idx, p_name)
@@ -328,10 +334,11 @@ class ConversationDataDialog(wx.Dialog):
             resolved_jid = lid_to_phone.get(p_jid, p_jid) if p_jid.endswith("@lid") else p_jid
             self._participant_jids.append(resolved_jid)
 
-        # Enable "Add members" button only if current user is a group admin.
-        # If we cannot determine my_jid, enable it anyway (API will reject if not admin).
-        if user_is_admin or not my_jid:
+        # Enable "Add members" buttons only if current user is a group admin.
+        # If we cannot determine my_jid, enable them anyway (API will reject if not admin).
+        if user_is_admin or not my_digits:
             self._add_members_btn.Enable()
+            self._add_members_btn_overview.Enable()
 
         # ── Media ─────────────────────────────────────────────────────────────
         media_dir  = data_path("media")

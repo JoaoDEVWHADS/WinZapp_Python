@@ -3893,8 +3893,23 @@ class MainWindow(wx.Frame):
                         lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
                         if lid_jid and lid_jid in deleted:
                             continue
-                    if jid in cleared:
-                        continue
+                    cleared_cutoff = cleared.get(jid)
+                    if cleared_cutoff:
+                        # A "clear chat" only wipes messages, it must not make the
+                        # conversation disappear from the list (that's delete's job).
+                        # Keep the chat entry but strip any last-message/unread state
+                        # that predates the clear so the conversation shows as empty
+                        # instead of resurrecting the pre-clear preview.
+                        last_msg = chat.get("lastMessage")
+                        if isinstance(last_msg, dict):
+                            try:
+                                lm_ts = int(last_msg.get("messageTimestamp", 0) or 0)
+                            except (ValueError, TypeError):
+                                lm_ts = 0
+                            if not lm_ts or lm_ts < cleared_cutoff:
+                                chat["lastMessage"] = None
+                        if not chat.get("lastMessage"):
+                            chat["unreadCount"] = 0
                     # WPPConnect's list-chats returns every entry in WhatsApp's
                     # internal ChatStore, which includes 1:1 "phantom" chats the
                     # user never actually messaged (e.g. address-book contacts
@@ -4657,6 +4672,13 @@ class MainWindow(wx.Frame):
                 try:
                     if getattr(self, "_wa_connected", False):
                         self.get_remote_contacts()
+                        # WPPConnect Server never relays a "chats-update" socket event
+                        # for chat-level state changes made on other linked devices
+                        # (pin/archive/mute), so pin state can only be picked up by
+                        # periodically re-polling list-chats — do that here too.
+                        result = self.get_remote_chats(dict(self.chats))
+                        if result is not None:
+                            self.chats = result
                         wx.CallAfter(self._schedule_set_chats)
                 except Exception as e:
                     print(f"[periodic_contacts_sync] error: {e}")
@@ -6886,9 +6908,18 @@ class MainWindow(wx.Frame):
                     else speech.get("announce_recording", True)
                 )
                 active_match = is_active_chat(chat_jid_norm, conv_jid)
-                logging.info("[on_presence_update] announce_enabled=%s, is_active_chat=%s (chat_jid_norm=%s, conv_jid=%s)", 
-                             announce_enabled, active_match, chat_jid_norm, conv_jid)
-                if announce_enabled and active_match:
+                # Typing/recording indicators are only meaningful while the user
+                # is actually looking at WinZapp — a conversation left open when
+                # the window was minimized to the tray must not keep announcing.
+                window_active = (
+                    not getattr(self, "_window_hidden", False)
+                    and self.IsShown()
+                    and not self.IsIconized()
+                    and self.IsActive()
+                )
+                logging.info("[on_presence_update] announce_enabled=%s, is_active_chat=%s, window_active=%s (chat_jid_norm=%s, conv_jid=%s)",
+                             announce_enabled, active_match, window_active, chat_jid_norm, conv_jid)
+                if announce_enabled and active_match and window_active:
                     if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
                         name = self._resolve_jid_name(canonical)
                         logging.info("[on_presence_update] resolved name=%s for canonical=%s", name, canonical)
@@ -8602,6 +8633,47 @@ class MainWindow(wx.Frame):
             return False
         except Exception as exc:
             logging.error("[delete_for_everyone] exception for %s: %s", full_id, exc)
+            return False
+
+    def forward_message(self, source_jid: str, msg_key: dict, target_jid: str) -> bool:
+        """Forward a message of any type (text, media, document, …) via
+        POST /api/session/forward-messages, which wraps WPP.chat.forwardMessagesV2
+        — the real WhatsApp forward, so it carries over media/captions/etc.
+        without WinZapp having to re-extract and re-send content itself.
+        """
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(source_jid, "")
+        if lid_jid:
+            source_jid = lid_jid
+        chat_jid = source_jid.replace("@s.whatsapp.net", "@c.us")
+        full_id = self._serialize_msg_id(chat_jid, msg_key)
+
+        target_lid = getattr(self, "_phone_to_lid", {}).get(target_jid, "")
+        if target_lid:
+            target_jid = target_lid
+        target_phone = target_jid.replace("@s.whatsapp.net", "@c.us")
+
+        url = (
+            f"{self.wpp_server}:{self.wpp_port}"
+            f"/api/{self.token}/forward-messages"
+        )
+        payload = {
+            "phone":     [target_phone],
+            "isGroup":   target_phone.endswith("@g.us"),
+            "messageId": [full_id],
+        }
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=20)
+            if r.status_code in (200, 201):
+                return True
+            logging.error("[forward_message] HTTP %s for %s -> %s: %s",
+                          r.status_code, full_id, target_phone, r.text[:300])
+            return False
+        except Exception as exc:
+            logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
             return False
 
     def _preview_sender_from_jid(self, jid: str) -> str:

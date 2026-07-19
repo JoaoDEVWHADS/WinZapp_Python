@@ -18,11 +18,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Bake the just-created release's tag into version.py so the compiled
-      # app reports the right version — this workflow doesn't commit/push
-      # (it's triggered by a release that already exists), it only bundles
-      # the version into the build artifacts.
+      # app reports the right version. This also gets committed back to the
+      # repo's default branch below, so client/version.py in source control
+      # matches what shipped in the release artifacts.
       - name: Set version.py from release tag
         shell: pwsh
         run: |
@@ -138,6 +140,19 @@ jobs:
           } finally {
             $zip.Dispose()
           }
+
+      # Push the version.py bump back to the default branch so the repo
+      # reflects the version that was actually released, not just the build
+      # artifacts. Runs after a successful build/verify so a failed build
+      # never lands a version bump for a release that didn't ship.
+      - name: Commit version.py bump back to the repository
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: bump version to ${{ github.event.release.tag_name }} [skip ci]"
+          file_pattern: client/version.py
+          branch: main
+          commit_user_name: github-actions[bot]
+          commit_user_email: github-actions[bot]@users.noreply.github.com
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
