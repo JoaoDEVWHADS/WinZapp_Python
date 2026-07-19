@@ -168,6 +168,60 @@ class SoundSystem:
 
 
 
+# ── Sound event registry ────────────────────────────────────────────────────
+# Every one-shot UI sound the app plays, as (settings key, default filename in
+# sounds/) pairs — except message_background.ogg, which is configured
+# separately (Alert Tones settings tab / per-conversation override) since it
+# plays through the WinRT toast notification path, not through this list.
+SOUND_EVENTS: list[tuple[str, str]] = [
+    ("startup", "startup.ogg"),
+    ("error", "error.ogg"),
+    ("qrcode_loaded", "qrcode_loaded.ogg"),
+    ("waiting_pairing", "waiting_pairing.ogg"),
+    ("pairing_code_updated", "pairing_code_updated.ogg"),
+    ("connected", "connected.ogg"),
+    ("synchronizing", "synchronizing.ogg"),
+    ("sync_complete", "sync_complete.ogg"),
+    ("offline_mode", "offline_mode.ogg"),
+    ("voicemsg_startrecording", "voicemsg_startrecording.ogg"),
+    ("voicemsg_pauserecording", "voicemsg_pauserecording.ogg"),
+    ("voicemsg_discard", "voicemsg_discard.ogg"),
+    ("voicemsg_send", "voicemsg_send.ogg"),
+    ("message_current", "message_current.ogg"),
+    ("message_foreground", "message_foreground.ogg"),
+    ("message_sent", "message_sent.ogg"),
+]
+
+# ── Alert tone registry (background notification sound choices) ────────────
+# Shared by the Settings > Alert Tones tab (private/group defaults) and the
+# per-conversation notification-sound picker in the conversation data dialog.
+ALERT_TONE_COUNT = 10   # client/sounds/alerts/Alert-01.ogg .. Alert-10.ogg
+
+
+def alert_tone_choice_keys() -> list[str]:
+    """Ordered internal choice keys: 'default', 'alert_1'..'alert_N', 'custom'."""
+    return ["default"] + [f"alert_{i}" for i in range(1, ALERT_TONE_COUNT + 1)] + ["custom"]
+
+
+def resolve_alert_tone_path(sound_dir: str, choice: str, custom_path: str = "") -> str:
+    """Resolve an alert-tone choice key to an absolute .ogg path.
+
+    'default' -> message_background.ogg, 'alert_N' -> sounds/alerts/Alert-0N.ogg,
+    'custom' -> custom_path as given (validation is the caller's job — this
+    just resolves the choice, it doesn't check the file exists).
+    """
+    if choice == "custom":
+        return custom_path or ""
+    if choice and choice.startswith("alert_"):
+        try:
+            n = int(choice.split("_", 1)[1])
+        except (ValueError, IndexError):
+            n = 0
+        if 1 <= n <= ALERT_TONE_COUNT:
+            return os.path.join(sound_dir, "alerts", f"Alert-{n:02d}.ogg")
+    return os.path.join(sound_dir, "message_background.ogg")
+
+
 class NullSound:
     """Returned when a sound file can't be loaded — all methods are no-ops."""
     def play(self): pass
@@ -175,8 +229,9 @@ class NullSound:
 
 
 class Sound(stream.FileStream):
-    def __init__(self, sound_system, file, *args, **kwargs):
+    def __init__(self, sound_system, file, event_key=None, *args, **kwargs):
         self.sound_system = sound_system
+        self.event_key = event_key
         if os.path.isfile(os.path.join(self.sound_system.sound_dir, file)): #sound is a file on disk
             self.file = os.path.join(self.sound_system.sound_dir, file)
         else: #sound is coming from memory
@@ -185,15 +240,21 @@ class Sound(stream.FileStream):
 
     def play(self):
         super().stop()
-        #Check if sounds are enabled
-        if self.sound_system.main_window.settings.get("general", {}).get("sounds_enabled", False):
-            super().play()
+        # Each sound event can be individually enabled/disabled from the
+        # Settings > Sound Events tab. Sounds not tied to an event (e.g. the
+        # background notification tone, resolved dynamically elsewhere) always
+        # play — there's nothing here to gate them on.
+        if self.event_key is not None:
+            events = self.sound_system.main_window.settings.get("sound_events", {})
+            if not events.get(self.event_key, {}).get("enabled", True):
+                return
+        super().play()
 
 
-def load_sound(sound_system, file):
+def load_sound(sound_system, file, event_key=None):
     """Create a Sound, returning NullSound if the file can't be opened."""
     try:
-        return Sound(sound_system, file)
+        return Sound(sound_system, file, event_key=event_key)
     except Exception as e:
         logging.warning("[sound_system] Could not load sound '%s': %s", file, e)
         return NullSound()

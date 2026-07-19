@@ -208,7 +208,6 @@
     "delete_for_everyone_failed": "Não foi possível apagar a mensagem para todos. Ela pode ser muito antiga ou você não tem permissão.",
     "edit_message": "Editar",
     "cancel_edit": "Cancelar edição",
-    "sounds_label": "Ativar &sons do programa",
     "noise_reduction_label": "Ativar &redução de ruído do microfone",
     "notifications_label": "Ativar &notificações de novas mensagens",
     "tray_show_icon": "Mostrar ícone e contagem de mensagens não lidas na bandeja do sistema",
@@ -479,5 +478,42 @@
     "group_notif_picture_changed": "{author} alterou a imagem do grupo",
     "group_notif_created": "{author} criou o grupo",
     "group_notif_generic": "Atualização do grupo",
-    "forward_failed": "Não foi possível encaminhar a mensagem"
+    "forward_failed": "Não foi possível encaminhar a mensagem",
+
+    "tab_sound_events": "Eventos de Som",
+    "tab_alert_tones": "Toques de Alerta",
+
+    "sound_events_list_label": "Eventos de som",
+    "sound_event_path_label": "Caminho do arquivo de som:",
+    "activate_all_sounds": "Ativar todos",
+    "deactivate_all_sounds": "Desativar todos",
+
+    "sound_event_startup": "Inicialização do programa",
+    "sound_event_error": "Erro",
+    "sound_event_qrcode_loaded": "Código QR carregado",
+    "sound_event_waiting_pairing": "Aguardando pareamento",
+    "sound_event_pairing_code_updated": "Código de pareamento atualizado",
+    "sound_event_connected": "Conexão realizada",
+    "sound_event_synchronizing": "Sincronização iniciada",
+    "sound_event_sync_complete": "Sincronização concluída",
+    "sound_event_offline_mode": "Modo offline",
+    "sound_event_voicemsg_startrecording": "Iniciar gravação de áudio",
+    "sound_event_voicemsg_pauserecording": "Pausar gravação de áudio",
+    "sound_event_voicemsg_discard": "Descartar gravação de áudio",
+    "sound_event_voicemsg_send": "Enviar mensagem de áudio",
+    "sound_event_message_current": "Mensagem na conversa atual",
+    "sound_event_message_foreground": "Mensagem em outra conversa (programa em primeiro plano)",
+    "sound_event_message_sent": "Mensagem enviada",
+
+    "alert_tone_private_label": "Som de notificação em segundo plano para conversas privadas:",
+    "alert_tone_group_label": "Som de notificação em segundo plano para grupos:",
+    "alert_tone_default": "Padrão",
+    "alert_tone_item": "Alerta {n}",
+    "alert_tone_custom": "Personalizado",
+    "alert_tone_custom_path_label": "Caminho de arquivo personalizado:",
+
+    "conversation_sound_label": "Som de notificação:",
+    "conversation_sound_custom_path_label": "Caminho do arquivo de som:",
+
+    "invalid_sound_path": "O arquivo de som informado não existe. Escolha outro caminho."
 }

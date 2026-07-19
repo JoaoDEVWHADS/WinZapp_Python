@@ -208,7 +208,6 @@
     "delete_for_everyone_failed": "No se pudo eliminar el mensaje para todos. Puede ser demasiado antiguo o no tienes permiso.",
     "edit_message": "Editar",
     "cancel_edit": "Cancelar edición",
-    "sounds_label": "Activar &sonidos del programa",
     "noise_reduction_label": "Activar &reducción de ruido del micrófono",
     "notifications_label": "Activar &notificaciones de mensajes nuevos",
     "tray_show_icon": "Mostrar icono y recuento de mensajes no leídos en la bandeja del sistema",
@@ -479,5 +478,42 @@
     "group_notif_picture_changed": "{author} cambió la imagen del grupo",
     "group_notif_created": "{author} creó el grupo",
     "group_notif_generic": "Actualización del grupo",
-    "forward_failed": "No se pudo reenviar el mensaje"
+    "forward_failed": "No se pudo reenviar el mensaje",
+
+    "tab_sound_events": "Eventos de Sonido",
+    "tab_alert_tones": "Tonos de Alerta",
+
+    "sound_events_list_label": "Eventos de sonido",
+    "sound_event_path_label": "Ruta del archivo de sonido:",
+    "activate_all_sounds": "Activar todos",
+    "deactivate_all_sounds": "Desactivar todos",
+
+    "sound_event_startup": "Inicio del programa",
+    "sound_event_error": "Error",
+    "sound_event_qrcode_loaded": "Código QR cargado",
+    "sound_event_waiting_pairing": "Esperando emparejamiento",
+    "sound_event_pairing_code_updated": "Código de emparejamiento actualizado",
+    "sound_event_connected": "Conectado",
+    "sound_event_synchronizing": "Sincronización iniciada",
+    "sound_event_sync_complete": "Sincronización completa",
+    "sound_event_offline_mode": "Modo sin conexión",
+    "sound_event_voicemsg_startrecording": "Iniciar grabación de audio",
+    "sound_event_voicemsg_pauserecording": "Pausar grabación de audio",
+    "sound_event_voicemsg_discard": "Descartar grabación de audio",
+    "sound_event_voicemsg_send": "Enviar mensaje de audio",
+    "sound_event_message_current": "Mensaje en la conversación actual",
+    "sound_event_message_foreground": "Mensaje en otra conversación (app en primer plano)",
+    "sound_event_message_sent": "Mensaje enviado",
+
+    "alert_tone_private_label": "Sonido de notificación en segundo plano para chats privados:",
+    "alert_tone_group_label": "Sonido de notificación en segundo plano para grupos:",
+    "alert_tone_default": "Predeterminado",
+    "alert_tone_item": "Alerta {n}",
+    "alert_tone_custom": "Personalizado",
+    "alert_tone_custom_path_label": "Ruta de archivo personalizado:",
+
+    "conversation_sound_label": "Sonido de notificación:",
+    "conversation_sound_custom_path_label": "Ruta del archivo de sonido:",
+
+    "invalid_sound_path": "El archivo de sonido especificado no existe. Elija otra ruta."
 }

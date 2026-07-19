@@ -32,7 +32,10 @@ import atexit
 import ctypes
 import ctypes.wintypes
 from accessible_output2 import outputs
-from core.sound_system import SoundSystem, Sound, load_sound
+from core.sound_system import (
+    SoundSystem, Sound, load_sound, SOUND_EVENTS,
+    alert_tone_choice_keys, resolve_alert_tone_path,
+)
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count
@@ -564,6 +567,19 @@ class MainWindow(wx.Frame):
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
+        # Bounded pool for per-message background work spawned from
+        # on_new_message (DB inserts, LID resolution, media downloads).
+        # A burst of incoming messages (reconnect catch-up, big history sync)
+        # used to spawn one raw threading.Thread per message per task, all
+        # contending for the single asyncio DB write lock at once — a small
+        # fixed pool serializes that work sanely instead of thread-storming.
+        self._msg_bg_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="msg-bg"
+        )
+        # Cache of resolved background-notification Sound objects, keyed by
+        # absolute file path, so repeated notifications for the same
+        # alert-tone choice don't reopen the file stream every time.
+        self._notification_sound_cache: dict = {}
         # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
         def _connect_bg():
             # Ensure session is active on WPPConnect Server before connecting WebSocket
@@ -1502,7 +1518,7 @@ class MainWindow(wx.Frame):
                                 wx.CallAfter(_main_thread_merge)
                     except Exception as e:
                         logging.warning("[on_new_message] Failed to resolve new LID %s in background: %s", lid_jid, e)
-                threading.Thread(target=_bg_resolve_new_lid, args=(remote_jid, msg), daemon=True).start()
+                self._msg_bg_executor.submit(_bg_resolve_new_lid, remote_jid, msg)
         elif alt_jid.endswith("@lid"):
             # NEW format — merge the @lid side into the phone chat
             self._merge_lid_into_phone(alt_jid, remote_jid)
@@ -1609,7 +1625,7 @@ class MainWindow(wx.Frame):
                         self.db.insert_message(remote_jid, pending_msg)
                     except Exception as e:
                         logging.error(f"[on_new_message] Failed to insert pending message to DB: {e}")
-                threading.Thread(target=_bg_insert_pending, daemon=True).start()
+                self._msg_bg_executor.submit(_bg_insert_pending)
                 
                 with self._own_sent_ids_lock:
                     self._own_sent_ids.add(msg_id)
@@ -1643,7 +1659,7 @@ class MainWindow(wx.Frame):
                 self.db.insert_message(remote_jid, msg)
             except Exception as e:
                 logging.error(f"[on_new_message] Failed to insert message to DB: {e}")
-        threading.Thread(target=_bg_insert_msg, daemon=True).start()
+        self._msg_bg_executor.submit(_bg_insert_msg)
 
         # ── Update unread count (only for messages we received) ───────────────
         if not from_me:
@@ -1677,9 +1693,7 @@ class MainWindow(wx.Frame):
         media_types = {"audioMessage", "imageMessage", "videoMessage",
                        "documentMessage", "stickerMessage"}
         if msg.get("messageType") in media_types:
-            threading.Thread(
-                target=self.sync_if_media, args=(msg,), daemon=True
-            ).start()
+            self._msg_bg_executor.submit(self.sync_if_media, msg)
 
         # ── Send notification ─────────────────────────────────────────────────
         if from_me:
@@ -1845,7 +1859,7 @@ class MainWindow(wx.Frame):
                     self.db.upsert_chat(remote_jid, chat)
                 except Exception as db_err:
                     logging.error(f"[on_historical_message] Failed to upsert chat to DB: {db_err}")
-            threading.Thread(target=_bg_upsert_chat, daemon=True).start()
+            self._msg_bg_executor.submit(_bg_upsert_chat)
 
         # Insert message to DB in background
         def _bg_insert_msg():
@@ -1853,7 +1867,7 @@ class MainWindow(wx.Frame):
                 self.db.insert_message(remote_jid, msg)
             except Exception as e:
                 logging.error(f"[on_historical_message] Failed to insert message to DB: {e}")
-        threading.Thread(target=_bg_insert_msg, daemon=True).start()
+        self._msg_bg_executor.submit(_bg_insert_msg)
 
         # Debounced UI update
         self._schedule_save(dirty_jid=remote_jid)
@@ -3089,27 +3103,65 @@ class MainWindow(wx.Frame):
             t.start()
 
     def load_sounds(self):
-        self.startup_sound = load_sound(self.sound_system, "startup.ogg")
-        self.error_sound = load_sound(self.sound_system, "error.ogg")
-        self.qrcode_loaded_sound = load_sound(self.sound_system, "qrcode_loaded.ogg")
-        self.waiting_pairing_sound = load_sound(self.sound_system, "waiting_pairing.ogg")
-        self.pairing_code_updated_sound = load_sound(self.sound_system, "pairing_code_updated.ogg")
-        self.connected_sound = load_sound(self.sound_system, "connected.ogg")
-        self.synchronizing_sound = load_sound(self.sound_system, "synchronizing.ogg")
-        self.sync_complete_sound = load_sound(self.sound_system, "sync_complete.ogg")
-        self.offline_mode_sound = load_sound(self.sound_system, "offline_mode.ogg")
-        # Voice recording sounds
-        self.voicemsg_startrecording_sound  = load_sound(self.sound_system, "voicemsg_startrecording.ogg")
-        self.voicemsg_pauserecording_sound  = load_sound(self.sound_system, "voicemsg_pauserecording.ogg")
-        self.voicemsg_discard_sound         = load_sound(self.sound_system, "voicemsg_discard.ogg")
-        self.voicemsg_send_sound            = load_sound(self.sound_system, "voicemsg_send.ogg")
-        # Background notification sound
-        self.message_background_sound       = load_sound(self.sound_system, "message_background.ogg")
-        # Foreground notification sounds
-        self.message_current_sound          = load_sound(self.sound_system, "message_current.ogg")
-        self.message_foreground_sound       = load_sound(self.sound_system, "message_foreground.ogg")
-        # Message sent confirmation sound
-        self.message_sent_sound             = load_sound(self.sound_system, "message_sent.ogg")
+        """Load every per-event UI sound from Settings > Sound Events (falling
+        back to the bundled default path/enabled=True for events the user
+        hasn't customized), plus the background notification sound — which is
+        NOT part of that event list, it's resolved dynamically per-message
+        from the Alert Tones settings / per-conversation override instead.
+
+        Safe to call again after Settings > Sound Events changes to pick up
+        new enabled/path values without restarting the app.
+        """
+        events_cfg = self.settings.get("sound_events", {})
+        for key, default_filename in SOUND_EVENTS:
+            cfg = events_cfg.get(key) or {}
+            path = cfg.get("path") or os.path.join(self.sound_system.sound_dir, default_filename)
+            setattr(self, f"{key}_sound", load_sound(self.sound_system, path, event_key=key))
+        # Background notification sound — path resolved dynamically at play
+        # time (see play_background_notification_sound); this default load
+        # just keeps the attribute available before that resolution runs.
+        self.message_background_sound = load_sound(self.sound_system, "message_background.ogg")
+
+    def _resolve_background_sound_path(self, remote_jid: str) -> str:
+        """Pick the .ogg file for a background/toast notification for `remote_jid`.
+
+        Priority: per-conversation override (Settings > conversation data
+        dialog) > the private/group default from Settings > Alert Tones >
+        the bundled message_background.ogg. Falls through to the next tier
+        whenever a chosen path doesn't resolve to an existing file, so a
+        removed/typo'd custom path never silently kills notification sound.
+        """
+        sound_dir = self.sound_system.sound_dir
+        conv_cfg = self.settings.get("conversation_sounds", {}).get(remote_jid) or {}
+        choice = conv_cfg.get("choice", "default")
+        if choice and choice != "default":
+            path = resolve_alert_tone_path(sound_dir, choice, conv_cfg.get("custom_path", ""))
+            if path and os.path.isfile(path):
+                return path
+
+        is_group = remote_jid.endswith("@g.us")
+        tones = self.settings.get("alert_tones", {})
+        type_key = "group" if is_group else "private"
+        type_choice = tones.get(type_key, "default")
+        type_custom = tones.get(f"{type_key}_custom_path", "")
+        path = resolve_alert_tone_path(sound_dir, type_choice, type_custom)
+        if path and os.path.isfile(path):
+            return path
+
+        return os.path.join(sound_dir, "message_background.ogg")
+
+    def play_background_notification_sound(self, remote_jid: str):
+        """Play the resolved background/toast notification sound for `remote_jid`."""
+        path = self._resolve_background_sound_path(remote_jid)
+        cache = self._notification_sound_cache
+        snd = cache.get(path)
+        if snd is None:
+            try:
+                snd = Sound(self.sound_system, path)
+            except Exception:
+                snd = self.message_background_sound
+            cache[path] = snd
+        snd.play()
 
     def retrieve_token(self):
         token = self.settings.get("privateinfo", {}).get("WA_token", "").strip()
@@ -3446,8 +3498,11 @@ class MainWindow(wx.Frame):
         # Show the contact list immediately from get_remote_chats() metadata
         # (name, pushName, unreadCount) so the user is not staring at a blank
         # screen while the per-chat message sync runs below.
-        # Build the LID cache first (background is fine here — sync thread).
-        self._build_lid_to_phone_cache()
+        # No need to rebuild the LID cache here: prepare_sync() already built
+        # it from the local cache before this point, and nothing since then
+        # (get_remote_chats() only touches chat-list metadata, not per-message
+        # data) could have added anything new for it to find — a full rescan
+        # of every message in every chat would just reproduce the same cache.
         wx.CallAfter(self.set_chats)
 
         # ── Phase 1: sync all messages ────────────────────────────────────
@@ -3733,7 +3788,17 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             return {}
 
-    def get_remote_chats(self, chats):
+    def get_remote_chats(self, chats, persist_full: bool = True):
+        """Fetch/merge the remote chat list into `chats`.
+
+        `persist_full` controls whether the result is written via the
+        expensive full clear-and-reimport `save_data()` path (appropriate
+        right after a real sync) or left to the existing lightweight
+        debounced per-chat save (appropriate for the periodic background
+        refresh, which otherwise re-clears and re-encrypts the *entire*
+        chats+contacts DB every few minutes just to notice a pin/mute
+        change on one chat).
+        """
         # Use the modern `list-chats` endpoint (WPP.chat.list) instead of the
         # deprecated `all-chats` (legacy WAPI.getAllChats). The legacy call omits
         # some chats — notably muted or pinned groups — so those never got
@@ -4060,33 +4125,39 @@ class MainWindow(wx.Frame):
                 # Retroactively prune 1:1 phantom chats that slipped into the
                 # local cache before this filter existed: no local messages,
                 # no server-reported activity, and not deliberately pinned or
-                # muted by the user.
-                response_jids = {
-                    self._normalize_jid(c.get("remoteJid", ""))
-                    for c in response_data if isinstance(c, dict)
-                }
-                for stale_jid in list(chats.keys()):
-                    if stale_jid.endswith("@g.us"):
-                        continue
-                    if stale_jid not in response_jids:
-                        continue
-                    if stale_jid in self._pinned_chats or stale_jid in self._muted_chats:
-                        continue
-                    stale_chat = chats[stale_jid]
-                    has_messages = bool(
-                        stale_chat.get("messages", {}).get("messages", {}).get("records")
-                    )
-                    if has_messages:
-                        continue
-                    has_activity = (
-                        bool(stale_chat.get("t"))
-                        or bool(stale_chat.get("lastMessage"))
-                        or bool(stale_chat.get("unreadCount"))
-                    )
-                    if not has_activity:
-                        del chats[stale_jid]
+                # muted by the user. Only worth the full-dict scan right after
+                # a real sync (persist_full=True) — the periodic background
+                # refresh just wants pin/mute state, so skip it there.
+                if persist_full:
+                    response_jids = {
+                        self._normalize_jid(c.get("remoteJid", ""))
+                        for c in response_data if isinstance(c, dict)
+                    }
+                    for stale_jid in list(chats.keys()):
+                        if stale_jid.endswith("@g.us"):
+                            continue
+                        if stale_jid not in response_jids:
+                            continue
+                        if stale_jid in self._pinned_chats or stale_jid in self._muted_chats:
+                            continue
+                        stale_chat = chats[stale_jid]
+                        has_messages = bool(
+                            stale_chat.get("messages", {}).get("messages", {}).get("records")
+                        )
+                        if has_messages:
+                            continue
+                        has_activity = (
+                            bool(stale_chat.get("t"))
+                            or bool(stale_chat.get("lastMessage"))
+                            or bool(stale_chat.get("unreadCount"))
+                        )
+                        if not has_activity:
+                            del chats[stale_jid]
 
-                self.save_data(chats, self.contacts)
+                if persist_full:
+                    self.save_data(chats, self.contacts)
+                else:
+                    self._schedule_save()
                 return chats
             except Exception as e:
                 last_error = e
@@ -4676,7 +4747,7 @@ class MainWindow(wx.Frame):
                         # for chat-level state changes made on other linked devices
                         # (pin/archive/mute), so pin state can only be picked up by
                         # periodically re-polling list-chats — do that here too.
-                        result = self.get_remote_chats(dict(self.chats))
+                        result = self.get_remote_chats(dict(self.chats), persist_full=False)
                         if result is not None:
                             self.chats = result
                         wx.CallAfter(self._schedule_set_chats)

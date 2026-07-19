@@ -526,7 +526,7 @@ class NotificationManager:
             self._toaster.show_toast(toast)
 
             # Play custom OGG sound after the toast is sent
-            wx.CallAfter(self._play_sound)
+            wx.CallAfter(self._play_sound, remote_jid)
 
         except Exception as e:
             print(f"[NotificationManager] send_worker error: {e}")
@@ -539,8 +539,10 @@ class NotificationManager:
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
-    def _play_sound(self):
-        if hasattr(self.main_window, "message_background_sound"):
+    def _play_sound(self, remote_jid: str = ""):
+        if hasattr(self.main_window, "play_background_notification_sound"):
+            self.main_window.play_background_notification_sound(remote_jid)
+        elif hasattr(self.main_window, "message_background_sound"):
             self.main_window.message_background_sound.play()
 
     def _do_reply(self, jid: str, text: str):

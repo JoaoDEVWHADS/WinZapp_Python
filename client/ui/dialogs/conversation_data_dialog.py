@@ -22,6 +22,7 @@ import wx
 import wx.adv
 from core.utils import format_number
 from app_paths import data_path
+from core.sound_system import ALERT_TONE_COUNT, alert_tone_choice_keys
 
 
 def _fmt_ts(ts, i18n):
@@ -141,6 +142,77 @@ class ConversationDataDialog(wx.Dialog):
         add_to_group_btn.Bind(wx.EVT_BUTTON, self._on_add_to_group)
         outer.Add(add_to_group_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        self._build_sound_picker(panel, outer)
+
+    def _build_sound_picker(self, panel, sizer):
+        """Per-conversation notification sound override: a combobox (Default
+        + Alert 1..N + Custom) plus a custom-path field shown only when
+        "Custom" is selected. "Default" here means "use the private/group
+        default from Settings > Alert Tones", unlike the same word on that
+        settings tab (which means the bundled message_background.ogg).
+        """
+        i18n = self._i18n
+        self._sound_label = wx.StaticText(panel, label=i18n.t("conversation_sound_label"))
+        sizer.Add(self._sound_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        self._sound_choice_keys = alert_tone_choice_keys()
+        sound_choice_labels = [i18n.t("alert_tone_default")] + [
+            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
+        ] + [i18n.t("alert_tone_custom")]
+        self._sound_combo = wx.ComboBox(
+            panel, style=wx.CB_READONLY, choices=sound_choice_labels
+        )
+        sizer.Add(self._sound_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._sound_custom_label = wx.StaticText(
+            panel, label=i18n.t("conversation_sound_custom_path_label")
+        )
+        sizer.Add(self._sound_custom_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._sound_custom_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
+        sizer.Add(self._sound_custom_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        conv_cfg = self._mw.settings.get("conversation_sounds", {}).get(self._jid) or {}
+        try:
+            idx = self._sound_choice_keys.index(conv_cfg.get("choice", "default"))
+        except ValueError:
+            idx = 0
+        self._sound_combo.SetSelection(idx)
+        self._sound_custom_field.SetValue(conv_cfg.get("custom_path", ""))
+        self._update_sound_custom_field_state()
+
+        self._sound_combo.Bind(wx.EVT_COMBOBOX, self._on_conv_sound_changed)
+        self._sound_custom_field.Bind(wx.EVT_TEXT, self._on_conv_sound_custom_path_changed)
+
+    def _update_sound_custom_field_state(self):
+        is_custom = self._sound_combo.GetSelection() == len(self._sound_choice_keys) - 1
+        self._sound_custom_label.Show(is_custom)
+        self._sound_custom_field.Show(is_custom)
+        self._sound_custom_label.GetParent().Layout()
+
+    def _save_conv_sound(self):
+        """Persist the per-conversation sound override immediately.
+
+        Unlike the Settings dialog, this never blocks or validates the
+        custom path — an invalid path just falls back to the type default
+        at playback time (see MainWindow._resolve_background_sound_path).
+        """
+        choice = self._sound_choice_keys[self._sound_combo.GetSelection()]
+        custom_path = self._sound_custom_field.GetValue().strip()
+        self._mw.settings.setdefault("conversation_sounds", {})[self._jid] = {
+            "choice": choice,
+            "custom_path": custom_path,
+        }
+        self._mw._notification_sound_cache.clear()
+
+    def _on_conv_sound_changed(self, event):
+        self._update_sound_custom_field_state()
+        self._save_conv_sound()
+        self._mw._schedule_save_settings()
+
+    def _on_conv_sound_custom_path_changed(self, event):
+        self._save_conv_sound()
+        self._mw._schedule_save_settings()
+
     def _build_group_ui(self, panel, outer):
         """wx.Notebook with three accessible tabs."""
         self._notebook = wx.Notebook(panel)
@@ -158,6 +230,7 @@ class ConversationDataDialog(wx.Dialog):
         self._add_members_btn_overview.Disable()   # enabled after we confirm user is admin
         self._add_members_btn_overview.Bind(wx.EVT_BUTTON, self._on_add_members)
         ov_sizer.Add(self._add_members_btn_overview, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._build_sound_picker(overview_page, ov_sizer)
         overview_page.SetSizer(ov_sizer)
         self._notebook.AddPage(overview_page, self._i18n.t("group_overview_tab"))
 

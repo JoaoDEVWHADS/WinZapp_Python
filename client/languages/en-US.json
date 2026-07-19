@@ -208,7 +208,6 @@
     "delete_for_everyone_failed": "The message could not be deleted for everyone. It may be too old or you may not have permission.",
     "edit_message": "Edit",
     "cancel_edit": "Cancel editing",
-    "sounds_label": "Enable &program sounds",
     "noise_reduction_label": "Enable microphone &noise reduction",
     "notifications_label": "Enable &notifications for new messages",
     "tray_show_icon": "Show icon and unread message count in the system tray",
@@ -479,5 +478,42 @@
     "group_notif_picture_changed": "{author} changed the group picture",
     "group_notif_created": "{author} created the group",
     "group_notif_generic": "Group update",
-    "forward_failed": "Could not forward the message"
+    "forward_failed": "Could not forward the message",
+
+    "tab_sound_events": "Sound Events",
+    "tab_alert_tones": "Alert Tones",
+
+    "sound_events_list_label": "Sound events",
+    "sound_event_path_label": "Sound file path:",
+    "activate_all_sounds": "Enable all",
+    "deactivate_all_sounds": "Disable all",
+
+    "sound_event_startup": "Program startup",
+    "sound_event_error": "Error",
+    "sound_event_qrcode_loaded": "QR code loaded",
+    "sound_event_waiting_pairing": "Waiting for pairing",
+    "sound_event_pairing_code_updated": "Pairing code updated",
+    "sound_event_connected": "Connected",
+    "sound_event_synchronizing": "Synchronization started",
+    "sound_event_sync_complete": "Synchronization complete",
+    "sound_event_offline_mode": "Offline mode",
+    "sound_event_voicemsg_startrecording": "Start voice recording",
+    "sound_event_voicemsg_pauserecording": "Pause voice recording",
+    "sound_event_voicemsg_discard": "Discard voice recording",
+    "sound_event_voicemsg_send": "Send voice message",
+    "sound_event_message_current": "Message in the current conversation",
+    "sound_event_message_foreground": "Message in another conversation (app in foreground)",
+    "sound_event_message_sent": "Message sent",
+
+    "alert_tone_private_label": "Background notification sound for private chats:",
+    "alert_tone_group_label": "Background notification sound for groups:",
+    "alert_tone_default": "Default",
+    "alert_tone_item": "Alert {n}",
+    "alert_tone_custom": "Custom",
+    "alert_tone_custom_path_label": "Custom file path:",
+
+    "conversation_sound_label": "Notification sound:",
+    "conversation_sound_custom_path_label": "Sound file path:",
+
+    "invalid_sound_path": "The specified sound file does not exist. Please choose another path."
 }
