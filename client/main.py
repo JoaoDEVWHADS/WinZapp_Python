@@ -35,6 +35,7 @@ from accessible_output2 import outputs
 from core.sound_system import (
     SoundSystem, Sound, load_sound, SOUND_EVENTS,
     alert_tone_choice_keys, resolve_alert_tone_path,
+    discover_sound_packs, resolve_sound_event_path, DEFAULT_PACK_ID,
 )
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
@@ -399,6 +400,7 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Initializing sound system...")
         self.sound_system = SoundSystem(self, sound_dir=resource_path("sounds"))
         self.sound_system.start()
+        self.refresh_sound_packs()
         self.load_sounds()
         self.settings = {}
         logging.info("MainWindow: Loading settings...")
@@ -3121,40 +3123,70 @@ class MainWindow(wx.Frame):
             self._settings_save_timer = t
             t.start()
 
+    def refresh_sound_packs(self):
+        """Re-scan client/sounds/*/ for soundpacks (a *.pack.json manifest
+        folder each). Call after importing a new pack so it's immediately
+        selectable without restarting the app.
+        """
+        self._sound_packs = discover_sound_packs(self.sound_system.sound_dir)
+        self._default_sound_pack = self._sound_packs.get(DEFAULT_PACK_ID)
+
+    def get_active_sound_pack(self) -> "dict | None":
+        """The soundpack currently selected in Settings (falls back to the
+        default pack if the stored choice no longer exists — e.g. its folder
+        was deleted outside the app)."""
+        pack_id = self.settings.get("active_sound_pack", DEFAULT_PACK_ID)
+        return self._sound_packs.get(pack_id) or self._default_sound_pack
+
     def load_sounds(self):
-        """Load every per-event UI sound from Settings > Sound Events (falling
-        back to the bundled default path/enabled=True for events the user
-        hasn't customized), plus the background notification sound — which is
-        NOT part of that event list, it's resolved dynamically per-message
-        from the Alert Tones settings / per-conversation override instead.
+        """Load every per-event UI sound from the active soundpack (Settings >
+        Sound Events), falling back to the default pack — and then to
+        enabled=True/no override — for anything the user hasn't customized.
 
         Safe to call again after Settings > Sound Events changes to pick up
-        new enabled/path values without restarting the app.
+        a new active pack / enabled / per-event override without restarting.
         """
-        events_cfg = self.settings.get("sound_events", {})
-        for key, default_filename in SOUND_EVENTS:
+        active_pack = self.get_active_sound_pack()
+        default_pack = self._default_sound_pack
+        pack_id = active_pack.get("id") if active_pack else DEFAULT_PACK_ID
+        events_cfg = self.settings.get("sound_events", {}).get(pack_id, {})
+        for key, _default_filename in SOUND_EVENTS:
             cfg = events_cfg.get(key) or {}
-            path = cfg.get("path") or os.path.join(self.sound_system.sound_dir, default_filename)
-            setattr(self, f"{key}_sound", load_sound(self.sound_system, path, event_key=key))
-        # Background notification sound — path resolved dynamically at play
-        # time (see play_background_notification_sound); this default load
-        # just keeps the attribute available before that resolution runs.
-        self.message_background_sound = load_sound(self.sound_system, "message_background.ogg")
+            override_path = cfg.get("path", "")
+            resolved = resolve_sound_event_path(active_pack, default_pack, key, override_path)
+            if resolved:
+                setattr(self, f"{key}_sound", load_sound(self.sound_system, resolved, event_key=key))
+            else:
+                # Nothing resolves at all (broken install: even the default
+                # pack is missing this file) — a silent no-op beats a crash.
+                from core.sound_system import NullSound
+                setattr(self, f"{key}_sound", NullSound())
+        # Background notification sound — path resolved dynamically per-message
+        # (see play_background_notification_sound); this default load just
+        # keeps the attribute available before that resolution runs.
+        bg_path = resolve_alert_tone_path(active_pack, default_pack, "default")
+        self.message_background_sound = (
+            load_sound(self.sound_system, bg_path) if bg_path
+            else load_sound(self.sound_system, "message_background.ogg")
+        )
 
     def _resolve_background_sound_path(self, remote_jid: str) -> str:
         """Pick the .ogg file for a background/toast notification for `remote_jid`.
 
         Priority: per-conversation override (Settings > conversation data
         dialog) > the private/group default from Settings > Alert Tones >
-        the bundled message_background.ogg. Falls through to the next tier
-        whenever a chosen path doesn't resolve to an existing file, so a
-        removed/typo'd custom path never silently kills notification sound.
+        the active soundpack's message_background > the default pack's.
+        Falls through to the next tier whenever a chosen path doesn't
+        resolve to an existing file, so a removed/typo'd custom path or an
+        active pack missing that file never silently kills notification sound.
         """
-        sound_dir = self.sound_system.sound_dir
+        active_pack = self.get_active_sound_pack()
+        default_pack = self._default_sound_pack
+
         conv_cfg = self.settings.get("conversation_sounds", {}).get(remote_jid) or {}
         choice = conv_cfg.get("choice", "default")
         if choice and choice != "default":
-            path = resolve_alert_tone_path(sound_dir, choice, conv_cfg.get("custom_path", ""))
+            path = resolve_alert_tone_path(active_pack, default_pack, choice, conv_cfg.get("custom_path", ""))
             if path and os.path.isfile(path):
                 return path
 
@@ -3163,11 +3195,11 @@ class MainWindow(wx.Frame):
         type_key = "group" if is_group else "private"
         type_choice = tones.get(type_key, "default")
         type_custom = tones.get(f"{type_key}_custom_path", "")
-        path = resolve_alert_tone_path(sound_dir, type_choice, type_custom)
+        path = resolve_alert_tone_path(active_pack, default_pack, type_choice, type_custom)
         if path and os.path.isfile(path):
             return path
 
-        return os.path.join(sound_dir, "message_background.ogg")
+        return resolve_alert_tone_path(active_pack, default_pack, "default")
 
     def play_background_notification_sound(self, remote_jid: str):
         """Play the resolved background/toast notification sound for `remote_jid`."""

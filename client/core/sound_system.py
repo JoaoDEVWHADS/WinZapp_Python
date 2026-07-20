@@ -1,8 +1,10 @@
 #WinZapp's Sound System Module
 
 import ctypes
+import json
 import logging
 import os
+import shutil
 import sys
 import sound_lib, sound_lib.output
 from sound_lib import stream
@@ -203,23 +205,183 @@ def alert_tone_choice_keys() -> list[str]:
     return ["default"] + [f"alert_{i}" for i in range(1, ALERT_TONE_COUNT + 1)] + ["custom"]
 
 
-def resolve_alert_tone_path(sound_dir: str, choice: str, custom_path: str = "") -> str:
-    """Resolve an alert-tone choice key to an absolute .ogg path.
+# ── Soundpacks ───────────────────────────────────────────────────────────────
+# A soundpack is a subfolder of client/sounds/ containing a *.pack.json
+# manifest ({"name": ..., "events": {event_key: relative_path}, "alerts":
+# {alert_key: relative_path}}) plus the .ogg files it references. Paths in
+# the manifest are always relative to the pack's own folder — never absolute,
+# since an absolute path baked in at manifest-authoring time would point at
+# the wrong install location on a different machine.
+PACK_MANIFEST_SUFFIX = ".pack.json"
+DEFAULT_PACK_ID = "default"
 
-    'default' -> message_background.ogg, 'alert_N' -> sounds/alerts/Alert-0N.ogg,
-    'custom' -> custom_path as given (validation is the caller's job — this
-    just resolves the choice, it doesn't check the file exists).
+
+def _find_pack_manifest(folder: str) -> "str | None":
+    """Return the path to the *.pack.json manifest directly inside `folder`."""
+    try:
+        for name in os.listdir(folder):
+            if name.lower().endswith(PACK_MANIFEST_SUFFIX):
+                candidate = os.path.join(folder, name)
+                if os.path.isfile(candidate):
+                    return candidate
+    except OSError:
+        pass
+    return None
+
+
+def _load_pack(pack_id: str, folder: str) -> "dict | None":
+    manifest = _find_pack_manifest(folder)
+    if not manifest:
+        return None
+    try:
+        with open(manifest, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "id": pack_id,
+        "name": str(data.get("name") or pack_id),
+        "dir": folder,
+        "events": data.get("events") if isinstance(data.get("events"), dict) else {},
+        "alerts": data.get("alerts") if isinstance(data.get("alerts"), dict) else {},
+    }
+
+
+def discover_sound_packs(sounds_root: str) -> dict:
+    """Scan sounds_root for immediate subfolders containing a *.pack.json
+    manifest. Returns {pack_id: pack_dict}, pack_id being the folder name."""
+    packs: dict = {}
+    try:
+        entries = os.listdir(sounds_root)
+    except OSError:
+        return packs
+    for entry in entries:
+        folder = os.path.join(sounds_root, entry)
+        if not os.path.isdir(folder):
+            continue
+        pack = _load_pack(entry, folder)
+        if pack:
+            packs[entry] = pack
+    return packs
+
+
+def _pack_relative_file(pack: dict, rel_path) -> str:
+    """Join a pack-relative path onto the pack's dir. Returns '' if the path
+    is missing or (a corrupted/hand-edited manifest) absolute — a manifest
+    must never carry an absolute path, so one is treated as not resolvable
+    rather than trusted."""
+    if not rel_path or not isinstance(rel_path, str) or os.path.isabs(rel_path):
+        return ""
+    return os.path.join(pack["dir"], rel_path)
+
+
+def resolve_sound_event_path(active_pack, default_pack, event_key: str, override_path: str = "") -> str:
+    """Resolve the file to play for a Sound Events entry, in priority order:
+    1. `override_path` (a per-event custom path the user set), if it exists.
+    2. The active pack's own file for this event.
+    3. The default pack's file for this event — covers packs that don't
+       define every event, or a broken/hand-edited settings.json leaving an
+       empty/stale override path. This is the fallback the previous
+       (non-pack-aware) implementation was missing: an empty or invalid
+       stored path used to silently produce no sound instead of falling
+       back to the bundled default.
+    Returns '' if nothing resolves at all (caller falls back to NullSound).
+    """
+    if override_path and os.path.isfile(override_path):
+        return override_path
+    if active_pack:
+        p = _pack_relative_file(active_pack, active_pack.get("events", {}).get(event_key, ""))
+        if p and os.path.isfile(p):
+            return p
+    if default_pack and default_pack is not active_pack:
+        p = _pack_relative_file(default_pack, default_pack.get("events", {}).get(event_key, ""))
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def resolve_alert_tone_path(active_pack, default_pack, choice: str, custom_path: str = "") -> str:
+    """Resolve an alert-tone choice key ('default' / 'alert_N' / 'custom') to
+    an absolute path, going through the active soundpack with the same
+    fallback-to-default-pack chain as resolve_sound_event_path.
     """
     if choice == "custom":
         return custom_path or ""
-    if choice and choice.startswith("alert_"):
-        try:
-            n = int(choice.split("_", 1)[1])
-        except (ValueError, IndexError):
-            n = 0
-        if 1 <= n <= ALERT_TONE_COUNT:
-            return os.path.join(sound_dir, "alerts", f"Alert-{n:02d}.ogg")
-    return os.path.join(sound_dir, "message_background.ogg")
+    key = "message_background" if choice == "default" else choice
+    for pack in (active_pack, default_pack if default_pack is not active_pack else None):
+        if not pack:
+            continue
+        source = pack.get("events", {}) if key == "message_background" else pack.get("alerts", {})
+        p = _pack_relative_file(pack, source.get(key, ""))
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def validate_soundpack_folder(folder: str):
+    """Check that `folder` is a valid, importable soundpack.
+
+    Returns (ok: bool, error_i18n_key: str, parsed: dict|None). On success
+    error_i18n_key is '' and parsed has 'name'/'events'/'alerts' (paths still
+    relative to `folder`, not yet pointed at the copied destination).
+    """
+    if not folder or not os.path.isdir(folder):
+        return False, "soundpack_import_error_no_folder", None
+
+    manifest = _find_pack_manifest(folder)
+    if not manifest:
+        return False, "soundpack_import_error_no_manifest", None
+
+    try:
+        with open(manifest, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False, "soundpack_import_error_bad_manifest", None
+
+    if not isinstance(data, dict) or not data.get("name") or not isinstance(data.get("events"), dict):
+        return False, "soundpack_import_error_bad_manifest", None
+
+    events = data.get("events") or {}
+    alerts = data.get("alerts") if isinstance(data.get("alerts"), dict) else {}
+    for rel_path in list(events.values()) + list(alerts.values()):
+        if not isinstance(rel_path, str) or not rel_path:
+            continue
+        if os.path.isabs(rel_path):
+            return False, "soundpack_import_error_absolute_path", None
+        if not os.path.isfile(os.path.join(folder, rel_path)):
+            return False, "soundpack_import_error_missing_file", None
+
+    return True, "", {"name": str(data["name"]), "events": events, "alerts": alerts}
+
+
+def import_soundpack(source_folder: str, sounds_root: str):
+    """Validate `source_folder` as a soundpack, then copy it into
+    `sounds_root` as a new subfolder (named after the source folder,
+    de-duplicated if one with that name already exists).
+
+    Returns (ok: bool, error_i18n_key: str, new_pack_id: str|None).
+    """
+    ok, err_key, _data = validate_soundpack_folder(source_folder)
+    if not ok:
+        return False, err_key, None
+
+    base_name = os.path.basename(os.path.normpath(source_folder)) or "soundpack"
+    safe_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")) or "soundpack"
+    dest_id = safe_name
+    suffix = 2
+    while os.path.exists(os.path.join(sounds_root, dest_id)):
+        dest_id = f"{safe_name}_{suffix}"
+        suffix += 1
+
+    dest_folder = os.path.join(sounds_root, dest_id)
+    try:
+        shutil.copytree(source_folder, dest_folder)
+    except OSError:
+        return False, "soundpack_import_error_copy_failed", None
+
+    return True, "", dest_id
 
 
 class NullSound:

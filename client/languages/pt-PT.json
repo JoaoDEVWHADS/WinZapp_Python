@@ -515,5 +515,17 @@
     "conversation_sound_label": "Som de notificação:",
     "conversation_sound_custom_path_label": "Caminho do ficheiro de som:",
 
-    "invalid_sound_path": "O ficheiro de som indicado não existe. Escolha outro caminho."
+    "invalid_sound_path": "O ficheiro de som indicado não existe. Escolha outro caminho.",
+
+    "sound_pack_label": "Pacote de som:",
+    "sound_pack_default_label": "Pacote de som padrão",
+    "import_sound_pack_button": "Importar pacote de sons",
+    "select_folder_dialog_title": "Selecionar pasta",
+    "soundpack_import_success": "Pacote de som importado com sucesso.",
+    "soundpack_import_error_no_folder": "Pasta inválida.",
+    "soundpack_import_error_no_manifest": "A pasta selecionada não contém um ficheiro de pacote de som (.pack.json).",
+    "soundpack_import_error_bad_manifest": "O ficheiro de pacote de som é inválido ou está corrompido.",
+    "soundpack_import_error_absolute_path": "O pacote de som contém caminhos absolutos, o que não é permitido. Peça ao autor do pacote para usar caminhos relativos.",
+    "soundpack_import_error_missing_file": "O pacote de som referencia um ficheiro de som que não foi encontrado na pasta.",
+    "soundpack_import_error_copy_failed": "Não foi possível copiar o pacote de som para a pasta de sons do programa."
 }

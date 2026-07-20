@@ -4,6 +4,7 @@ import wx
 from core.i18n import LANGUAGE_NAMES
 from core.sound_system import (
     SOUND_EVENTS, ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path,
+    DEFAULT_PACK_ID, import_soundpack,
 )
 
 # Win32 modifier constants for RegisterHotKey
@@ -364,6 +365,18 @@ class SettingsDialog(wx.Dialog):
         self._sound_events_page = wx.Panel(self._notebook)
         se_sizer = wx.BoxSizer(wx.VERTICAL)
 
+        self._sound_pack_label = wx.StaticText(
+            self._sound_events_page, label=i18n.t("sound_pack_label")
+        )
+        se_sizer.Add(self._sound_pack_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._sound_pack_combo = wx.ComboBox(self._sound_events_page, style=wx.CB_READONLY)
+        se_sizer.Add(self._sound_pack_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._import_sound_pack_btn = wx.Button(
+            self._sound_events_page, label=i18n.t("import_sound_pack_button")
+        )
+        se_sizer.Add(self._import_sound_pack_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self._sound_events_list_label = wx.StaticText(
             self._sound_events_page, label=i18n.t("sound_events_list_label")
         )
@@ -396,6 +409,8 @@ class SettingsDialog(wx.Dialog):
         self._sound_events_page.SetSizer(se_sizer)
         self._notebook.AddPage(self._sound_events_page, i18n.t("tab_sound_events"))
 
+        self._sound_pack_combo.Bind(wx.EVT_COMBOBOX, self._on_sound_pack_selected)
+        self._import_sound_pack_btn.Bind(wx.EVT_BUTTON, self._on_import_sound_pack)
         self._sound_events_list.Bind(wx.EVT_LISTBOX, self._on_sound_event_selected)
         self._sound_event_path_field.Bind(wx.EVT_TEXT, self._on_sound_event_path_changed)
         self._activate_all_btn.Bind(wx.EVT_BUTTON, lambda e: self._set_all_sound_events(True))
@@ -587,21 +602,10 @@ class SettingsDialog(wx.Dialog):
 
         self._update_fields_state()
 
-        # Sound events
-        events_cfg = self.main_window.settings.get("sound_events", {})
-        self._sound_event_paths = {}
-        for idx, (key, default_filename) in enumerate(SOUND_EVENTS):
-            cfg = events_cfg.get(key) or {}
-            self._sound_events_list.Check(idx, cfg.get("enabled", True))
-            path = cfg.get("path") or os.path.join(
-                self.main_window.sound_system.sound_dir, default_filename
-            )
-            self._sound_event_paths[key] = path
-        if self._sound_events_list.GetCount() > 0:
-            self._sound_events_list.SetSelection(0)
-            self._sound_event_path_field.ChangeValue(
-                self._sound_event_paths[SOUND_EVENTS[0][0]]
-            )
+        # Sound events / packs
+        self.main_window.refresh_sound_packs()
+        self._pack_event_settings = {}
+        self._reload_sound_pack_choices()
 
         # Alert tones
         tones = self.main_window.settings.get("alert_tones", {})
@@ -617,6 +621,134 @@ class SettingsDialog(wx.Dialog):
         except ValueError:
             idx = 0
         combo.SetSelection(idx)
+
+    # ── Soundpacks (Sound Events tab) ────────────────────────────────────────
+
+    def _reload_sound_pack_choices(self, select_pack_id: "str | None" = None):
+        """(Re)populate the pack combobox from main_window._sound_packs and
+        show the given pack's (or the currently-active, or default) settings.
+        Called on initial load and again after a successful pack import.
+        """
+        i18n = self.main_window.i18n
+        packs = self.main_window._sound_packs
+        self._sound_pack_ids = sorted(
+            packs.keys(), key=lambda pid: (pid != DEFAULT_PACK_ID, packs[pid]["name"].lower())
+        )
+        pack_labels = [
+            i18n.t("sound_pack_default_label") if pid == DEFAULT_PACK_ID else packs[pid]["name"]
+            for pid in self._sound_pack_ids
+        ]
+        self._sound_pack_combo.Set(pack_labels)
+
+        if select_pack_id and select_pack_id in self._sound_pack_ids:
+            target = select_pack_id
+        else:
+            target = self.main_window.settings.get("active_sound_pack", DEFAULT_PACK_ID)
+            if target not in self._sound_pack_ids:
+                target = DEFAULT_PACK_ID if DEFAULT_PACK_ID in self._sound_pack_ids else (
+                    self._sound_pack_ids[0] if self._sound_pack_ids else None
+                )
+        if not target:
+            return
+
+        # Seed working (in-memory, editable) settings for any pack not
+        # already tracked this dialog session, from what's actually stored.
+        stored = self.main_window.settings.get("sound_events", {})
+        for pid in self._sound_pack_ids:
+            if pid in self._pack_event_settings:
+                continue
+            pack_stored = stored.get(pid, {})
+            self._pack_event_settings[pid] = {}
+            for key, _default_filename in SOUND_EVENTS:
+                cfg = pack_stored.get(key) or {}
+                self._pack_event_settings[pid][key] = {
+                    "enabled": cfg.get("enabled", True),
+                    "path": cfg.get("path", ""),
+                }
+
+        self._current_pack_id = target
+        self._sound_pack_combo.SetSelection(self._sound_pack_ids.index(target))
+        self._load_sound_events_display(target)
+
+    def _load_sound_events_display(self, pack_id: str):
+        """Populate the checklist's checked state from working settings for
+        `pack_id`, and select/display the first event's resolved path."""
+        settings_for_pack = self._pack_event_settings.get(pack_id, {})
+        for idx, (key, _default_filename) in enumerate(SOUND_EVENTS):
+            cfg = settings_for_pack.get(key) or {}
+            self._sound_events_list.Check(idx, cfg.get("enabled", True))
+        if self._sound_events_list.GetCount() > 0:
+            self._sound_events_list.SetSelection(0)
+        self._update_sound_event_path_display()
+
+    def _update_sound_event_path_display(self):
+        """Show the resolved path for the currently-selected event: the
+        user's own override for the current pack if they set one, else the
+        path that would actually be used at runtime (current pack's file,
+        falling back to the default pack's)."""
+        idx = self._sound_events_list.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(SOUND_EVENTS):
+            self._sound_event_path_field.ChangeValue("")
+            return
+        key = SOUND_EVENTS[idx][0]
+        cfg = self._pack_event_settings.get(self._current_pack_id, {}).get(key) or {}
+        override = cfg.get("path", "")
+        if override:
+            display_path = override
+        else:
+            from core.sound_system import resolve_sound_event_path
+            pack = self.main_window._sound_packs.get(self._current_pack_id)
+            default_pack = self.main_window._default_sound_pack
+            display_path = resolve_sound_event_path(pack, default_pack, key, "") or ""
+        self._sound_event_path_field.ChangeValue(display_path)
+
+    def _flush_current_pack_checks(self):
+        """Copy the checklist's live checked state into working settings for
+        whichever pack is currently displayed — the checkboxes themselves
+        aren't live-synced per click the way the path field is per keystroke."""
+        if not getattr(self, "_current_pack_id", None):
+            return
+        settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
+        for idx, (key, _default_filename) in enumerate(SOUND_EVENTS):
+            entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
+            entry["enabled"] = self._sound_events_list.IsChecked(idx)
+
+    def _on_sound_pack_selected(self, event):
+        self._flush_current_pack_checks()
+        idx = self._sound_pack_combo.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self._sound_pack_ids):
+            return
+        self._current_pack_id = self._sound_pack_ids[idx]
+        self._load_sound_events_display(self._current_pack_id)
+
+    def _on_import_sound_pack(self, event):
+        i18n = self.main_window.i18n
+        with wx.DirDialog(
+            self, message=i18n.t("select_folder_dialog_title"),
+            style=wx.DD_DEFAULT_STYLE,
+        ) as dir_dlg:
+            if dir_dlg.ShowModal() != wx.ID_OK:
+                return
+            source_folder = dir_dlg.GetPath()
+
+        ok, err_key, new_pack_id = import_soundpack(
+            source_folder, self.main_window.sound_system.sound_dir
+        )
+        if not ok:
+            wx.MessageBox(
+                i18n.t(err_key),
+                i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR, self,
+            )
+            return
+
+        self.main_window.refresh_sound_packs()
+        self._reload_sound_pack_choices(select_pack_id=new_pack_id)
+        wx.MessageBox(
+            i18n.t("soundpack_import_success"),
+            i18n.t("settings_title"),
+            wx.OK | wx.ICON_INFORMATION, self,
+        )
 
     def _update_fields_state(self):
         is_custom = self._custom_api_check.GetValue()
@@ -634,18 +766,16 @@ class SettingsDialog(wx.Dialog):
     # ── Sound events tab ─────────────────────────────────────────────────────
 
     def _on_sound_event_selected(self, event):
-        idx = self._sound_events_list.GetSelection()
-        if idx == wx.NOT_FOUND or idx >= len(SOUND_EVENTS):
-            return
-        key = SOUND_EVENTS[idx][0]
-        self._sound_event_path_field.ChangeValue(self._sound_event_paths.get(key, ""))
+        self._update_sound_event_path_display()
 
     def _on_sound_event_path_changed(self, event):
         idx = self._sound_events_list.GetSelection()
         if idx == wx.NOT_FOUND or idx >= len(SOUND_EVENTS):
             return
         key = SOUND_EVENTS[idx][0]
-        self._sound_event_paths[key] = self._sound_event_path_field.GetValue()
+        settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
+        entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
+        entry["path"] = self._sound_event_path_field.GetValue()
 
     def _set_all_sound_events(self, value: bool):
         for i in range(self._sound_events_list.GetCount()):
@@ -731,16 +861,22 @@ class SettingsDialog(wx.Dialog):
                 self._ws_server_field.SetFocus()
                 return False
 
-        # Sound events: every ENABLED event's path must point to a real file.
-        # A disabled event's path is never used, so it's not worth blocking on.
+        # Sound events: an ENABLED event's override path, if the user set one,
+        # must point to a real file. An empty override is always fine — it
+        # just means "use the sound pack's own file for this event" (with a
+        # further fallback to the default pack), never an error. A disabled
+        # event's path is never used, so it's not worth blocking on either.
+        self._flush_current_pack_checks()
+        pack_settings = self._pack_event_settings.get(self._current_pack_id, {})
         for idx, (key, _) in enumerate(SOUND_EVENTS):
-            if not self._sound_events_list.IsChecked(idx):
+            cfg = pack_settings.get(key) or {}
+            if not cfg.get("enabled", True):
                 continue
-            path = self._sound_event_paths.get(key, "")
-            if not path or not os.path.isfile(path):
+            override = (cfg.get("path") or "").strip()
+            if override and not os.path.isfile(override):
                 self._notebook.SetSelection(4)
                 self._sound_events_list.SetSelection(idx)
-                self._sound_event_path_field.ChangeValue(path)
+                self._update_sound_event_path_display()
                 self._sound_event_path_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
@@ -939,14 +1075,10 @@ class SettingsDialog(wx.Dialog):
         # Global hotkey
         self.main_window.set_global_hotkey(self._hotkey_field._vk, self._hotkey_field._mod)
 
-        # Sound events
-        sound_events_cfg = {}
-        for idx, (key, _) in enumerate(SOUND_EVENTS):
-            sound_events_cfg[key] = {
-                "enabled": self._sound_events_list.IsChecked(idx),
-                "path": self._sound_event_paths.get(key, ""),
-            }
-        self.main_window.settings["sound_events"] = sound_events_cfg
+        # Sound events / active pack — _validate() already flushed the
+        # currently-displayed pack's checkbox state into _pack_event_settings.
+        self.main_window.settings["sound_events"] = self._pack_event_settings
+        self.main_window.settings["active_sound_pack"] = self._current_pack_id
 
         # Alert tones
         private_choice = self._alert_choice_keys[self._alert_private_combo.GetSelection()]
@@ -1051,6 +1183,15 @@ class SettingsDialog(wx.Dialog):
         self._api_key_label.SetLabel(i18n.t("connection_api_key_label"))
 
         # Sound events tab
+        self._sound_pack_label.SetLabel(i18n.t("sound_pack_label"))
+        self._import_sound_pack_btn.SetLabel(i18n.t("import_sound_pack_button"))
+        packs = self.main_window._sound_packs
+        pack_sel = self._sound_pack_combo.GetSelection()
+        self._sound_pack_combo.Set([
+            i18n.t("sound_pack_default_label") if pid == DEFAULT_PACK_ID else packs[pid]["name"]
+            for pid in self._sound_pack_ids
+        ])
+        self._sound_pack_combo.SetSelection(pack_sel if pack_sel != wx.NOT_FOUND else 0)
         self._sound_events_list_label.SetLabel(i18n.t("sound_events_list_label"))
         self._sound_event_path_label.SetLabel(i18n.t("sound_event_path_label"))
         self._activate_all_btn.SetLabel(i18n.t("activate_all_sounds"))

@@ -515,5 +515,17 @@
     "conversation_sound_label": "Sonido de notificación:",
     "conversation_sound_custom_path_label": "Ruta del archivo de sonido:",
 
-    "invalid_sound_path": "El archivo de sonido especificado no existe. Elija otra ruta."
+    "invalid_sound_path": "El archivo de sonido especificado no existe. Elija otra ruta.",
+
+    "sound_pack_label": "Paquete de sonido:",
+    "sound_pack_default_label": "Paquete de sonido predeterminado",
+    "import_sound_pack_button": "Importar paquete de sonido",
+    "select_folder_dialog_title": "Seleccionar carpeta",
+    "soundpack_import_success": "Paquete de sonido importado correctamente.",
+    "soundpack_import_error_no_folder": "Carpeta no válida.",
+    "soundpack_import_error_no_manifest": "La carpeta seleccionada no contiene un archivo de paquete de sonido (.pack.json).",
+    "soundpack_import_error_bad_manifest": "El archivo de paquete de sonido no es válido o está dañado.",
+    "soundpack_import_error_absolute_path": "El paquete de sonido contiene rutas absolutas, lo cual no está permitido. Pida al autor del paquete que use rutas relativas.",
+    "soundpack_import_error_missing_file": "El paquete de sonido hace referencia a un archivo de sonido que no se encontró en la carpeta.",
+    "soundpack_import_error_copy_failed": "No se pudo copiar el paquete de sonido a la carpeta de sonidos del programa."
 }

@@ -515,5 +515,17 @@
     "conversation_sound_label": "Notification sound:",
     "conversation_sound_custom_path_label": "Sound file path:",
 
-    "invalid_sound_path": "The specified sound file does not exist. Please choose another path."
+    "invalid_sound_path": "The specified sound file does not exist. Please choose another path.",
+
+    "sound_pack_label": "Sound pack:",
+    "sound_pack_default_label": "Default sound pack",
+    "import_sound_pack_button": "Import sound pack",
+    "select_folder_dialog_title": "Select folder",
+    "soundpack_import_success": "Sound pack imported successfully.",
+    "soundpack_import_error_no_folder": "Invalid folder.",
+    "soundpack_import_error_no_manifest": "The selected folder doesn't contain a sound pack file (.pack.json).",
+    "soundpack_import_error_bad_manifest": "The sound pack file is invalid or corrupted.",
+    "soundpack_import_error_absolute_path": "This sound pack contains absolute paths, which aren't allowed. Ask the pack's author to use relative paths instead.",
+    "soundpack_import_error_missing_file": "This sound pack references a sound file that wasn't found in the folder.",
+    "soundpack_import_error_copy_failed": "Could not copy the sound pack into the program's sounds folder."
 }
