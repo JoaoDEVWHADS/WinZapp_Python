@@ -3573,7 +3573,12 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
 
         # ── Phase 1: sync all messages ────────────────────────────────────
+        _sync_phase1_started = time.time()
         self.sync_remote_chats()
+        logging.info(
+            "[start_sync] sync_remote_chats() finished in %.1fs",
+            time.time() - _sync_phase1_started,
+        )
 
         # After messages are loaded, remoteJidAlt bridge fields are available
         # so @lid ↔ @s.whatsapp.net duplicates (introduced because the API
@@ -5707,14 +5712,20 @@ class MainWindow(wx.Frame):
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
         max_workers = min(6, len(valid_chats))
+        failed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = {pool.submit(self.sync_chat_messages, c.copy()): c for c in valid_chats}
             for fut in as_completed(futs):
                 try:
                     fut.result()
                 except Exception as exc:
+                    failed_count += 1
                     jid = futs[fut].get("remoteJid", "?")
                     logging.warning("[sync_remote_chats] failed for %s: %s", jid, exc)
+        logging.info(
+            "[sync_remote_chats] done: %d chats, %d raised an exception",
+            len(valid_chats), failed_count,
+        )
 
     def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
@@ -5789,8 +5800,9 @@ class MainWindow(wx.Frame):
                     logging.info(f"[sync_chat_messages] Querying URL: {url} for chat: {remote_jid} (attempt {attempt+1}/{max_retries})")
                     response = requests.get(url, headers=headers, timeout=30)
                     logging.info(f"[sync_chat_messages] URL: {url} returned status: {response.status_code}")
-                    
+
                     # Alternate JID query fallback (resolves 401/TypeError or Chat not found errors)
+                    both_jid_forms_failed = False
                     if response.status_code not in (200, 201):
                         alternate_jid = ""
                         if remote_jid.endswith("@lid"):
@@ -5810,8 +5822,11 @@ class MainWindow(wx.Frame):
                                 if alt_response.status_code in (200, 201):
                                     response = alt_response
                                     logging.info("[sync_chat_messages] Fallback alternate JID query succeeded!")
+                                else:
+                                    both_jid_forms_failed = True
                             except Exception as alt_e:
                                 logging.warning(f"[sync_chat_messages] Fallback alternate JID query failed: {alt_e}")
+                                both_jid_forms_failed = True
 
                     if response.status_code in (200, 201):
                         body = response.json()
@@ -5833,10 +5848,24 @@ class MainWindow(wx.Frame):
                         # 401 = "Error on open list" (Baileys not ready yet)
                         # 404 = session not active
                         # 500 = transient WPPConnect internal error
-                        # All are retryable — wait briefly and try again.
+                        # All are retryable — wait briefly and try again. But
+                        # WPPConnect flattens every internal exception (including
+                        # a hard, non-transient one like "Chat not found for
+                        # <jid>@lid" — the live session lost track of that chat
+                        # entirely, no amount of retrying fixes it) into this
+                        # same generic 401, so we can't tell hard failures apart
+                        # from "session still warming up" by status code alone.
+                        # If BOTH the primary and the only known alternate JID
+                        # form have now failed twice, that's a strong enough
+                        # signal to stop early — otherwise a handful of these
+                        # permanently-broken chats can each burn a worker slot
+                        # for over a minute, making the whole sync feel stuck.
                         logging.warning(f"[sync_chat_messages] Retryable error {response.status_code} for {remote_jid} (attempt {attempt+1}/{max_retries}): {response.text[:120]}")
+                        if both_jid_forms_failed and attempt >= 1:
+                            logging.warning(f"[sync_chat_messages] Giving up early for {remote_jid} — both JID forms failed on attempt {attempt+1}.")
+                            break
                         if attempt < max_retries - 1:
-                            sleep_time = min(5 * (attempt + 1), 30)
+                            sleep_time = min(5 * (attempt + 1), 20)
                             logging.info(f"[sync_chat_messages] Sleeping {sleep_time} seconds before attempt {attempt+2} for {remote_jid}...")
                             # Check connection repeatedly while sleeping
                             for _ in range(sleep_time):
