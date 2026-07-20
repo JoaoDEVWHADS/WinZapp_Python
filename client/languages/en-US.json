@@ -498,7 +498,7 @@
     "sound_event_sync_complete": "Synchronization complete",
     "sound_event_offline_mode": "Offline mode",
     "sound_event_voicemsg_startrecording": "Start voice recording",
-    "sound_event_voicemsg_pauserecording": "Pause voice recording",
+    "sound_event_voicemsg_pauserecording": "Pause / resume voice recording",
     "sound_event_voicemsg_discard": "Discard voice recording",
     "sound_event_voicemsg_send": "Send voice message",
     "sound_event_message_current": "Message in the current conversation",

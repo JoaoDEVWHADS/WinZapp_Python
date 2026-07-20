@@ -498,7 +498,7 @@
     "sound_event_sync_complete": "Sincronización completa",
     "sound_event_offline_mode": "Modo sin conexión",
     "sound_event_voicemsg_startrecording": "Iniciar grabación de audio",
-    "sound_event_voicemsg_pauserecording": "Pausar grabación de audio",
+    "sound_event_voicemsg_pauserecording": "Pausar / reanudar grabación de audio",
     "sound_event_voicemsg_discard": "Descartar grabación de audio",
     "sound_event_voicemsg_send": "Enviar mensaje de audio",
     "sound_event_message_current": "Mensaje en la conversación actual",

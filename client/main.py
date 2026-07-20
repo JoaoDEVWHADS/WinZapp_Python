@@ -3162,7 +3162,7 @@ class MainWindow(wx.Frame):
             override_path = cfg.get("path", "")
             resolved = resolve_sound_event_path(active_pack, default_pack, key, override_path)
             if resolved:
-                setattr(self, f"{key}_sound", load_sound(self.sound_system, resolved, event_key=key))
+                setattr(self, f"{key}_sound", load_sound(self.sound_system, resolved, event_key=key, pack_id=pack_id))
             else:
                 # Nothing resolves at all (broken install: even the default
                 # pack is missing this file) — a silent no-op beats a crash.

@@ -395,9 +395,13 @@ class NullSound:
 
 
 class Sound(stream.FileStream):
-    def __init__(self, sound_system, file, event_key=None, *args, **kwargs):
+    def __init__(self, sound_system, file, event_key=None, pack_id=None, *args, **kwargs):
         self.sound_system = sound_system
         self.event_key = event_key
+        # Which soundpack this event's enabled/path settings live under —
+        # settings["sound_events"] is keyed {pack_id: {event_key: {...}}},
+        # not flat, since a pack switch can carry different enabled states.
+        self.pack_id = pack_id
         if os.path.isfile(os.path.join(self.sound_system.sound_dir, file)): #sound is a file on disk
             self.file = os.path.join(self.sound_system.sound_dir, file)
         else: #sound is coming from memory
@@ -410,17 +414,18 @@ class Sound(stream.FileStream):
         # Settings > Sound Events tab. Sounds not tied to an event (e.g. the
         # background notification tone, resolved dynamically elsewhere) always
         # play — there's nothing here to gate them on.
-        if self.event_key is not None:
+        if self.event_key is not None and self.pack_id is not None:
             events = self.sound_system.main_window.settings.get("sound_events", {})
-            if not events.get(self.event_key, {}).get("enabled", True):
+            pack_events = events.get(self.pack_id, {})
+            if not pack_events.get(self.event_key, {}).get("enabled", True):
                 return
         super().play()
 
 
-def load_sound(sound_system, file, event_key=None):
+def load_sound(sound_system, file, event_key=None, pack_id=None):
     """Create a Sound, returning NullSound if the file can't be opened."""
     try:
-        return Sound(sound_system, file, event_key=event_key)
+        return Sound(sound_system, file, event_key=event_key, pack_id=pack_id)
     except Exception as e:
         logging.warning("[sound_system] Could not load sound '%s': %s", file, e)
         return NullSound()
