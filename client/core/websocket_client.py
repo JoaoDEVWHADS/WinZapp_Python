@@ -277,15 +277,29 @@ class WebSocketClient:
 
             # ── Skip history-sync echoes ───────────────────────────────────────
             # WPPConnect/Baileys fires messages.upsert for historical messages
-            # (isMdHistoryMsg=True) during its initial sync phase. These are the
-            # same records already fetched by sync_chat_messages via the REST API
-            # and placed in the correct chronological position. Treating them as
-            # live new messages appends them at the bottom of the conversation
-            # as if they had just been sent. Dispatch them to the historical handler
-            # to be saved silently in the DB and update internal state.
+            # (isMdHistoryMsg=True) during its initial sync phase. These are
+            # normally the same records already fetched by sync_chat_messages via
+            # the REST API and placed in the correct chronological position, so
+            # treating them as live new messages would append them at the bottom
+            # of the conversation as if they had just been sent — dispatch them
+            # to the historical handler to be saved silently instead.
+            #
+            # BUT: this assumption only holds for a chat that hasn't been synced
+            # yet (not present in self.chats). Once a chat is already in the
+            # list, WPPConnect can still tag a genuinely new, real-time message
+            # with isMdHistoryMsg=True (observed in practice) — silently routing
+            # it to on_historical_message would save it without a notification,
+            # sound, or unread-count bump, effectively "losing" it from the
+            # user's point of view. So: only take the silent path for chats not
+            # yet in the list; an already-listed chat always gets full live
+            # treatment regardless of the flag.
             if msg.get("isMdHistoryMsg"):
-                wx.CallAfter(self.main_window.on_historical_message, msg)
-                return
+                key = msg.get("key", {})
+                remote_jid = self.main_window._normalize_jid(key.get("remoteJid", ""))
+                if remote_jid not in self.main_window.chats:
+                    wx.CallAfter(self.main_window.on_historical_message, msg)
+                    return
+                # Chat already known/synced — fall through to live handling below.
 
             # Extract JID mapping from WebSocket message
             self.main_window._extract_lid_mapping(msg)
