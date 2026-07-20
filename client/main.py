@@ -357,6 +357,17 @@ class MediaExpiredError(Exception):
     """CDN URL for this media has expired (HTTP 403 or 410 from WhatsApp)."""
 
 
+# Hard cap on how many messages stay resident in a chat's in-memory records
+# list. Without this, a chat that stays active across a long-running session
+# (this is a tray app — restarts are rare) grows records forever since
+# on_new_message()/on_historical_message() only ever append. The initial
+# sync already bounds itself to messages_page_size (default 200) per chat,
+# so this only kicks in for chats that keep receiving messages well past
+# that after sync — trimming the oldest ones out of RAM (they're still on
+# disk in SQLite, just not resident).
+_MAX_RESIDENT_MESSAGES_PER_CHAT = 1000
+
+
 class MainWindow(wx.Frame):
     def __init__(self):
         import logging
@@ -1653,7 +1664,9 @@ class MainWindow(wx.Frame):
         # Slim any bloated quoted-message payload before persisting.
         prune_message_record(msg)
         records.append(msg)
-        
+        if len(records) > _MAX_RESIDENT_MESSAGES_PER_CHAT:
+            del records[:len(records) - _MAX_RESIDENT_MESSAGES_PER_CHAT]
+
         def _bg_insert_msg():
             try:
                 self.db.insert_message(remote_jid, msg)
@@ -1843,6 +1856,12 @@ class MainWindow(wx.Frame):
             records.sort(key=lambda m: int(m.get("messageTimestamp") or m.get("timestamp") or 0))
         except Exception as sort_err:
             logging.error(f"[on_historical_message] Failed to sort records: {sort_err}")
+
+        # Trim oldest-first now that the list is actually chronological —
+        # doing this before the sort could drop a just-arrived message that
+        # happened to land at the front of the (still unsorted) list.
+        if len(records) > _MAX_RESIDENT_MESSAGES_PER_CHAT:
+            del records[:len(records) - _MAX_RESIDENT_MESSAGES_PER_CHAT]
 
         # Update lastMessage and 't' (timestamp) if this message is newer
         msg_ts = int(msg.get("messageTimestamp") or msg.get("timestamp") or 0)
