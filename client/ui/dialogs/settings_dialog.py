@@ -853,6 +853,12 @@ class SettingsDialog(wx.Dialog):
 
     def _on_alert_choice_changed(self, event):
         self._update_alert_custom_field_state()
+        # Changing the selection invalidates whatever was previewing —
+        # stop it and reset that button back to "play" immediately.
+        if event.GetEventObject() is self._alert_private_combo:
+            self._alert_private_preview.stop()
+        else:
+            self._alert_group_preview.stop()
 
     def _resolve_alert_preview_path(self, kind: str) -> str:
         """Resolve whatever the private/group Alert Tones combo currently

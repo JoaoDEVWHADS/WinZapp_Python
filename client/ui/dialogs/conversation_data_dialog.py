@@ -251,6 +251,8 @@ class ConversationDataDialog(wx.Dialog):
         self._update_sound_custom_field_state()
         self._save_conv_sound()
         self._mw._schedule_save_settings()
+        # Changing the selection invalidates whatever was previewing.
+        self._sound_preview.stop()
 
     def _on_conv_sound_custom_path_changed(self, event):
         self._save_conv_sound()
