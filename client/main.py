@@ -396,15 +396,19 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Initializing screen reader output...")
         self.speak_output = outputs.auto.Auto()
 
+        # Settings must exist before the sound system loads, since
+        # load_sounds()/get_active_sound_pack() read self.settings to resolve
+        # the active soundpack and per-event overrides.
+        self.settings = {}
+        logging.info("MainWindow: Loading settings...")
+        self.load_settings()
+
         #Initialize sound system
         logging.info("MainWindow: Initializing sound system...")
         self.sound_system = SoundSystem(self, sound_dir=resource_path("sounds"))
         self.sound_system.start()
         self.refresh_sound_packs()
         self.load_sounds()
-        self.settings = {}
-        logging.info("MainWindow: Loading settings...")
-        self.load_settings()
 
         # Synchronize registry key with the autostart setting on Windows
         self._sync_autostart_registry()
