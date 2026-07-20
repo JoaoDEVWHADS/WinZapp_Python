@@ -4202,8 +4202,21 @@ class ConversationsPanel(wx.Panel):
         if msg_type == "groupNotification":
             notif = msg_obj.get("groupNotification") or {}
             subtype = (notif.get("subtype") or "").lower()
-            author_jid = notif.get("author") or ""
-            recipient_jids = notif.get("recipients") or []
+
+            def _as_jid_str(j) -> str:
+                # Normally already a plain string by the time it gets here
+                # (see WebSocketClient._normalize_wpp_message's "gp2" branch),
+                # but records saved to disk by an older build before that fix
+                # may still have a raw WPPConnect Wid dict here — guard so a
+                # stale cached message can't crash rendering.
+                if isinstance(j, dict):
+                    return j.get("_serialized") or j.get("id") or ""
+                return j if isinstance(j, str) else ""
+
+            author_jid = _as_jid_str(notif.get("author"))
+            recipient_jids = [
+                rj for rj in (_as_jid_str(r) for r in (notif.get("recipients") or [])) if rj
+            ]
 
             def _name(j: str) -> str:
                 return self._sender_label({"key": {"participant": j, "remoteJid": j, "fromMe": False}})

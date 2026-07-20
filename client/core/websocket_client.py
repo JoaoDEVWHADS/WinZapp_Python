@@ -1007,10 +1007,19 @@ class WebSocketClient:
             author_raw = wpp_msg.get("author") or (
                 sender_obj.get("id", "") if isinstance(sender_obj, dict) else ""
             )
+            # "recipients" entries can be raw JID strings or WPPConnect Wid
+            # objects ({"server":..., "user":..., "_serialized":...}) — always
+            # normalize to plain strings here so downstream UI code (which
+            # expects to call string methods like .endswith() on each one)
+            # never has to guard against a dict slipping through.
+            raw_recipients = wpp_msg.get("recipients") or []
+            clean_recipients = [
+                self._clean_jid(r) for r in raw_recipients if self._clean_jid(r)
+            ]
             message_content = {
                 "groupNotification": {
                     "subtype": wpp_msg.get("subtype", ""),
-                    "recipients": wpp_msg.get("recipients") or [],
+                    "recipients": clean_recipients,
                     "author": self._clean_jid(author_raw) if author_raw else "",
                 }
             }
