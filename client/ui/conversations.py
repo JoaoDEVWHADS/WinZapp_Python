@@ -940,10 +940,37 @@ class ConversationsPanel(wx.Panel):
         # earlier by restore_window on a notification click) from scheduling
         # its own lst.SetFocus and stealing focus away from the conversation.
         focus_setting = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
+        logging.info(
+            "[navigate_to_conversation] scheduling focus: setting=%r jid=%s",
+            focus_setting, jid,
+        )
+
+        def _do_focus_messages_list():
+            try:
+                ok = self.messages_list.SetFocus()
+                logging.info(
+                    "[navigate_to_conversation] messages_list.SetFocus() ran, "
+                    "FindFocus()=%r messages_list=%r",
+                    wx.Window.FindFocus(), self.messages_list,
+                )
+            except Exception:
+                logging.exception("[navigate_to_conversation] messages_list.SetFocus() raised")
+
+        def _do_focus_message_field():
+            try:
+                self.message_field.SetFocus()
+                logging.info(
+                    "[navigate_to_conversation] message_field.SetFocus() ran, "
+                    "FindFocus()=%r message_field=%r",
+                    wx.Window.FindFocus(), self.message_field,
+                )
+            except Exception:
+                logging.exception("[navigate_to_conversation] message_field.SetFocus() raised")
+
         if focus_setting == "unread_or_last":
-            wx.CallAfter(self.messages_list.SetFocus)
+            wx.CallAfter(_do_focus_messages_list)
         else:
-            wx.CallAfter(self.message_field.SetFocus)
+            wx.CallAfter(_do_focus_message_field)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort
@@ -6738,6 +6765,15 @@ class ConversationsPanel(wx.Panel):
                     self.messages_list.EnsureVisible(last)
                     self.messages_list.Focus(last)
                     self.messages_list.Select(last)
+                    logging.info(
+                        "[populate_messages] default-select tail: last=%d "
+                        "GetFocusedItem()=%d GetFirstSelected()=%d ItemCount=%d",
+                        last, self.messages_list.GetFocusedItem(),
+                        self.messages_list.GetFirstSelected(),
+                        self.messages_list.GetItemCount(),
+                    )
+                else:
+                    logging.info("[populate_messages] default-select tail: list is empty (last=-1)")
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────
