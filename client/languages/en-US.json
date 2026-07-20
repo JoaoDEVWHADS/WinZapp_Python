@@ -504,6 +504,9 @@
     "sound_event_message_current": "Message in the current conversation",
     "sound_event_message_foreground": "Message in another conversation (app in foreground)",
     "sound_event_message_sent": "Message sent",
+    "sound_event_message_background": "Message while the program is in the background",
+    "sound_event_state_enabled": "Enabled",
+    "sound_event_state_disabled": "Disabled",
 
     "alert_tone_private_label": "Background notification sound for private chats:",
     "alert_tone_group_label": "Background notification sound for groups:",

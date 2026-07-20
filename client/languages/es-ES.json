@@ -504,6 +504,9 @@
     "sound_event_message_current": "Mensaje en la conversación actual",
     "sound_event_message_foreground": "Mensaje en otra conversación (app en primer plano)",
     "sound_event_message_sent": "Mensaje enviado",
+    "sound_event_message_background": "Mensaje con el programa en segundo plano",
+    "sound_event_state_enabled": "Activado",
+    "sound_event_state_disabled": "Desactivado",
 
     "alert_tone_private_label": "Sonido de notificación en segundo plano para chats privados:",
     "alert_tone_group_label": "Sonido de notificación en segundo plano para grupos:",

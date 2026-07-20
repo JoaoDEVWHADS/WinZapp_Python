@@ -3146,6 +3146,9 @@ class MainWindow(wx.Frame):
         """Load every per-event UI sound from the active soundpack (Settings >
         Sound Events), falling back to the default pack — and then to
         enabled=True/no override — for anything the user hasn't customized.
+        message_background is one of these events too (it's what the Alert
+        Tones "Padrão" choice and the per-conversation "Padrão" override
+        ultimately resolve to — see _resolve_message_background_path()).
 
         Safe to call again after Settings > Sound Events changes to pick up
         a new active pack / enabled / per-event override without restarting.
@@ -3165,24 +3168,30 @@ class MainWindow(wx.Frame):
                 # pack is missing this file) — a silent no-op beats a crash.
                 from core.sound_system import NullSound
                 setattr(self, f"{key}_sound", NullSound())
-        # Background notification sound — path resolved dynamically per-message
-        # (see play_background_notification_sound); this default load just
-        # keeps the attribute available before that resolution runs.
-        bg_path = resolve_alert_tone_path(active_pack, default_pack, "default")
-        self.message_background_sound = (
-            load_sound(self.sound_system, bg_path) if bg_path
-            else load_sound(self.sound_system, "message_background.ogg")
-        )
+
+    def _resolve_message_background_path(self) -> str:
+        """Resolve the message_background Sound Events entry: '' if the user
+        disabled it, else its custom path override or the active/default
+        pack's own file (same fallback chain as any other Sound Events entry).
+        """
+        active_pack = self.get_active_sound_pack()
+        default_pack = self._default_sound_pack
+        pack_id = active_pack.get("id") if active_pack else DEFAULT_PACK_ID
+        cfg = self.settings.get("sound_events", {}).get(pack_id, {}).get("message_background", {})
+        if not cfg.get("enabled", True):
+            return ""
+        return resolve_sound_event_path(active_pack, default_pack, "message_background", cfg.get("path", ""))
 
     def _resolve_background_sound_path(self, remote_jid: str) -> str:
         """Pick the .ogg file for a background/toast notification for `remote_jid`.
 
         Priority: per-conversation override (Settings > conversation data
         dialog) > the private/group default from Settings > Alert Tones >
-        the active soundpack's message_background > the default pack's.
-        Falls through to the next tier whenever a chosen path doesn't
-        resolve to an existing file, so a removed/typo'd custom path or an
-        active pack missing that file never silently kills notification sound.
+        the message_background Sound Events entry (active pack, falling back
+        to the default pack). Falls through to the next tier whenever a
+        chosen path doesn't resolve to an existing file, so a removed/typo'd
+        custom path or an active pack missing that file never silently kills
+        notification sound.
         """
         active_pack = self.get_active_sound_pack()
         default_pack = self._default_sound_pack
@@ -3199,15 +3208,18 @@ class MainWindow(wx.Frame):
         type_key = "group" if is_group else "private"
         type_choice = tones.get(type_key, "default")
         type_custom = tones.get(f"{type_key}_custom_path", "")
-        path = resolve_alert_tone_path(active_pack, default_pack, type_choice, type_custom)
-        if path and os.path.isfile(path):
-            return path
+        if type_choice and type_choice != "default":
+            path = resolve_alert_tone_path(active_pack, default_pack, type_choice, type_custom)
+            if path and os.path.isfile(path):
+                return path
 
-        return resolve_alert_tone_path(active_pack, default_pack, "default")
+        return self._resolve_message_background_path()
 
     def play_background_notification_sound(self, remote_jid: str):
         """Play the resolved background/toast notification sound for `remote_jid`."""
         path = self._resolve_background_sound_path(remote_jid)
+        if not path:
+            return
         cache = self._notification_sound_cache
         snd = cache.get(path)
         if snd is None:

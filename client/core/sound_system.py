@@ -172,9 +172,12 @@ class SoundSystem:
 
 # ── Sound event registry ────────────────────────────────────────────────────
 # Every one-shot UI sound the app plays, as (settings key, default filename in
-# sounds/) pairs — except message_background.ogg, which is configured
-# separately (Alert Tones settings tab / per-conversation override) since it
-# plays through the WinRT toast notification path, not through this list.
+# a pack's folder) pairs, listed (and individually enable/path-customizable)
+# in Settings > Sound Events. message_background is included here too so it
+# gets the same enable + custom-path override as any other event; the Alert
+# Tones tab's "Padrão" choice (and the per-conversation "Padrão" override)
+# ultimately resolve to this same event — see
+# MainWindow._resolve_message_background_path().
 SOUND_EVENTS: list[tuple[str, str]] = [
     ("startup", "startup.ogg"),
     ("error", "error.ogg"),
@@ -192,6 +195,7 @@ SOUND_EVENTS: list[tuple[str, str]] = [
     ("message_current", "message_current.ogg"),
     ("message_foreground", "message_foreground.ogg"),
     ("message_sent", "message_sent.ogg"),
+    ("message_background", "message_background.ogg"),
 ]
 
 # ── Alert tone registry (background notification sound choices) ────────────
