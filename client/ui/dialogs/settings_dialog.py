@@ -130,6 +130,12 @@ class SettingsDialog(wx.Dialog):
         self.Fit()
         self.SetMinSize((360, -1))
         self.Centre()
+        # Enter on the sound events list must toggle the selected event, not
+        # trigger the dialog's default OK button — EVT_CHAR_HOOK fires before
+        # that default-button handling, so it's the only reliable place to
+        # intercept Enter (Space alone is caught fine by the list's own
+        # EVT_KEY_DOWN handler, since Space has no such competing default).
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_dialog_char_hook)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -765,6 +771,13 @@ class SettingsDialog(wx.Dialog):
         self._update_self_reference_field_state()
 
     # ── Sound events tab ─────────────────────────────────────────────────────
+
+    def _on_dialog_char_hook(self, event):
+        if (event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
+                and wx.Window.FindFocus() is getattr(self, "_sound_events_list", None)):
+            self._toggle_current_sound_event()
+            return  # swallow — do NOT Skip, so it doesn't also fire the OK button
+        event.Skip()
 
     def _on_sound_event_selected(self, event):
         self._update_sound_event_path_display()
