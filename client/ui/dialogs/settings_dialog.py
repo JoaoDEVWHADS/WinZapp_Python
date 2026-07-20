@@ -4,7 +4,7 @@ import wx
 from core.i18n import LANGUAGE_NAMES
 from core.sound_system import (
     SOUND_EVENTS, ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path,
-    DEFAULT_PACK_ID, import_soundpack,
+    DEFAULT_PACK_ID, import_soundpack, AlertPreviewController,
 )
 
 # Win32 modifier constants for RegisterHotKey
@@ -443,6 +443,11 @@ class SettingsDialog(wx.Dialog):
         )
         alert_sizer.Add(self._alert_private_combo, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._alert_private_preview_btn = wx.Button(
+            self._alert_page, label=i18n.t("preview_sound_play")
+        )
+        alert_sizer.Add(self._alert_private_preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self._alert_private_custom_label = wx.StaticText(
             self._alert_page, label=i18n.t("alert_tone_custom_path_label")
         )
@@ -459,6 +464,11 @@ class SettingsDialog(wx.Dialog):
         )
         alert_sizer.Add(self._alert_group_combo, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._alert_group_preview_btn = wx.Button(
+            self._alert_page, label=i18n.t("preview_sound_play")
+        )
+        alert_sizer.Add(self._alert_group_preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self._alert_group_custom_label = wx.StaticText(
             self._alert_page, label=i18n.t("alert_tone_custom_path_label")
         )
@@ -471,6 +481,19 @@ class SettingsDialog(wx.Dialog):
 
         self._alert_private_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
         self._alert_group_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
+
+        # Preview buttons — sharing a group so starting one stops the other.
+        _alert_preview_group = []
+        self._alert_private_preview = AlertPreviewController(
+            self.main_window, self._alert_private_preview_btn,
+            lambda: self._resolve_alert_preview_path("private"),
+            group=_alert_preview_group,
+        )
+        self._alert_group_preview = AlertPreviewController(
+            self.main_window, self._alert_group_preview_btn,
+            lambda: self._resolve_alert_preview_path("group"),
+            group=_alert_preview_group,
+        )
 
         # ── Audio playback tab ───────────────────────────────────────────────
         self._audio_page = wx.Panel(self._notebook)
@@ -830,6 +853,21 @@ class SettingsDialog(wx.Dialog):
 
     def _on_alert_choice_changed(self, event):
         self._update_alert_custom_field_state()
+
+    def _resolve_alert_preview_path(self, kind: str) -> str:
+        """Resolve whatever the private/group Alert Tones combo currently
+        has selected to an absolute path, for the preview buttons."""
+        if kind == "private":
+            combo, custom_field = self._alert_private_combo, self._alert_private_custom_field
+        else:
+            combo, custom_field = self._alert_group_combo, self._alert_group_custom_field
+        idx = combo.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self._alert_choice_keys):
+            return ""
+        choice = self._alert_choice_keys[idx]
+        active_pack = self.main_window.get_active_sound_pack()
+        default_pack = self.main_window._default_sound_pack
+        return resolve_alert_tone_path(active_pack, default_pack, choice, custom_field.GetValue().strip())
 
     def _on_custom_api_toggle(self, event):
         self._update_fields_state()
@@ -1254,6 +1292,8 @@ class SettingsDialog(wx.Dialog):
         grp_sel = self._alert_group_combo.GetSelection()
         self._alert_group_combo.Set(alert_choice_labels)
         self._alert_group_combo.SetSelection(grp_sel if grp_sel != wx.NOT_FOUND else 0)
+        self._alert_private_preview.refresh_label()
+        self._alert_group_preview.refresh_label()
 
         # Regenerate speed labels — decimal separator may have changed with language
         cur_sel = self._audio_speed_combo.GetSelection()
@@ -1264,12 +1304,18 @@ class SettingsDialog(wx.Dialog):
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
+    def _stop_alert_previews(self):
+        self._alert_private_preview.stop()
+        self._alert_group_preview.stop()
+
     def _on_ok(self, event):
         if self._apply_values():
+            self._stop_alert_previews()
             self._maybe_warn_restart_required()
             self.EndModal(wx.ID_OK)
 
     def _on_cancel(self, event):
+        self._stop_alert_previews()
         self.EndModal(wx.ID_CANCEL)
 
     def _on_apply(self, event):

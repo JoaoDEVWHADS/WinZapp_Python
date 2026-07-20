@@ -22,7 +22,9 @@ import wx
 import wx.adv
 from core.utils import format_number
 from app_paths import data_path
-from core.sound_system import ALERT_TONE_COUNT, alert_tone_choice_keys
+from core.sound_system import (
+    ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path, AlertPreviewController,
+)
 
 
 def _fmt_ts(ts, i18n):
@@ -97,6 +99,16 @@ class ConversationDataDialog(wx.Dialog):
         # Fetch data in background after the dialog is shown.
         threading.Thread(target=self._fetch_data, daemon=True).start()
 
+    def _on_back_button(self, event):
+        if hasattr(self, "_sound_preview"):
+            self._sound_preview.stop()
+        event.Skip()
+
+    def _on_dialog_char_hook(self, event):
+        if event.GetKeyCode() == wx.WXK_ESCAPE and hasattr(self, "_sound_preview"):
+            self._sound_preview.stop()
+        event.Skip()
+
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -106,6 +118,11 @@ class ConversationDataDialog(wx.Dialog):
         # wx.ID_CANCEL makes Esc close the dialog via the standard wx mechanism.
         back_btn = wx.Button(panel, wx.ID_CANCEL, label=self._i18n.t("back_btn"))
         outer.Add(back_btn, 0, wx.ALL, 8)
+        # wx's built-in Esc-to-cancel calls EndModal directly — it never goes
+        # through this button's click event — so stop any playing sound
+        # preview via a char hook too, not just the button handler.
+        back_btn.Bind(wx.EVT_BUTTON, self._on_back_button)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_dialog_char_hook)
 
         if self._is_group:
             self._build_group_ui(panel, outer)
@@ -164,6 +181,12 @@ class ConversationDataDialog(wx.Dialog):
         )
         sizer.Add(self._sound_combo, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._sound_preview_btn = wx.Button(panel, label=i18n.t("preview_sound_play"))
+        sizer.Add(self._sound_preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._sound_preview = AlertPreviewController(
+            self._mw, self._sound_preview_btn, self._resolve_conv_sound_preview_path,
+        )
+
         self._sound_custom_label = wx.StaticText(
             panel, label=i18n.t("conversation_sound_custom_path_label")
         )
@@ -182,6 +205,26 @@ class ConversationDataDialog(wx.Dialog):
 
         self._sound_combo.Bind(wx.EVT_COMBOBOX, self._on_conv_sound_changed)
         self._sound_custom_field.Bind(wx.EVT_TEXT, self._on_conv_sound_custom_path_changed)
+
+    def _resolve_conv_sound_preview_path(self) -> str:
+        """Resolve whatever the sound combo currently has selected to an
+        absolute path, for the preview button. "Padrão" resolves through the
+        private/group Alert Tones default — same as what would actually play
+        — not literally message_background.ogg."""
+        idx = self._sound_combo.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self._sound_choice_keys):
+            return ""
+        choice = self._sound_choice_keys[idx]
+        active_pack = self._mw.get_active_sound_pack()
+        default_pack = self._mw._default_sound_pack
+        if choice == "default":
+            is_group = self._jid.endswith("@g.us")
+            tones = self._mw.settings.get("alert_tones", {})
+            type_key = "group" if is_group else "private"
+            type_choice = tones.get(type_key, "default")
+            type_custom = tones.get(f"{type_key}_custom_path", "")
+            return resolve_alert_tone_path(active_pack, default_pack, type_choice, type_custom)
+        return resolve_alert_tone_path(active_pack, default_pack, choice, self._sound_custom_field.GetValue().strip())
 
     def _update_sound_custom_field_state(self):
         is_custom = self._sound_combo.GetSelection() == len(self._sound_choice_keys) - 1

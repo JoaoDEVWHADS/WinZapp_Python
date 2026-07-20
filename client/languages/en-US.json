@@ -530,5 +530,8 @@
     "soundpack_import_error_bad_manifest": "The sound pack file is invalid or corrupted.",
     "soundpack_import_error_absolute_path": "This sound pack contains absolute paths, which aren't allowed. Ask the pack's author to use relative paths instead.",
     "soundpack_import_error_missing_file": "This sound pack references a sound file that wasn't found in the folder.",
-    "soundpack_import_error_copy_failed": "Could not copy the sound pack into the program's sounds folder."
+    "soundpack_import_error_copy_failed": "Could not copy the sound pack into the program's sounds folder.",
+    "preview_sound_play": "Play sound preview",
+    "preview_sound_stop": "Stop sound preview",
+    "preview_sound_error": "Could not play the preview — invalid or missing sound file."
 }

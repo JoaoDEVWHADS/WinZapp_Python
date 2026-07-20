@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import sys
+import wx
 import sound_lib, sound_lib.output
 from sound_lib import stream
 from sound_lib.main import bass_call
@@ -429,3 +430,86 @@ def load_sound(sound_system, file, event_key=None, pack_id=None):
     except Exception as e:
         logging.warning("[sound_system] Could not load sound '%s': %s", file, e)
         return NullSound()
+
+
+class AlertPreviewController:
+    """Wires a single "preview this sound" wx.Button to play/stop whatever
+    file `resolve_path()` currently points at (an Alert Tones combo choice,
+    a per-conversation sound choice, ...). The button's label flips between
+    "play" and "stop" and flips back on its own once playback finishes —
+    polled via a short wx.Timer since sound_lib has no completion callback.
+
+    Multiple controllers can share a `group`: list (pass the same list to
+    each) so starting one stops any other that's currently previewing —
+    handy for the private/group pair on the Alert Tones tab, where only one
+    preview at a time makes sense.
+    """
+
+    def __init__(self, main_window, button, resolve_path, group=None,
+                 play_label_key="preview_sound_play", stop_label_key="preview_sound_stop"):
+        self.main_window = main_window
+        self.button = button
+        self.resolve_path = resolve_path
+        self.group = group if group is not None else [self]
+        if self not in self.group:
+            self.group.append(self)
+        self.play_label_key = play_label_key
+        self.stop_label_key = stop_label_key
+        self._sound = None
+        self._timer = wx.Timer(button)
+        button.Bind(wx.EVT_TIMER, self._on_timer, self._timer)
+        button.Bind(wx.EVT_BUTTON, self._on_click)
+
+    def _on_click(self, event):
+        if self._sound is not None:
+            self.stop()
+            return
+
+        path = self.resolve_path()
+        if not path or not os.path.isfile(path):
+            wx.MessageBox(
+                self.main_window.i18n.t("preview_sound_error"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR, self.button.GetTopLevelParent(),
+            )
+            return
+
+        for other in self.group:
+            if other is not self:
+                other.stop()
+
+        try:
+            snd = Sound(self.main_window.sound_system, path)
+            snd.play()
+        except Exception as e:
+            logging.warning("[sound_system] Preview playback failed for '%s': %s", path, e)
+            wx.MessageBox(
+                self.main_window.i18n.t("preview_sound_error"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR, self.button.GetTopLevelParent(),
+            )
+            return
+
+        self._sound = snd
+        self.button.SetLabel(self.main_window.i18n.t(self.stop_label_key))
+        self._timer.Start(300)
+
+    def _on_timer(self, event):
+        if self._sound is None or not self._sound.is_playing:
+            self.stop()
+
+    def stop(self):
+        self._timer.Stop()
+        if self._sound is not None:
+            try:
+                self._sound.stop()
+            except Exception:
+                pass
+            self._sound = None
+        self.button.SetLabel(self.main_window.i18n.t(self.play_label_key))
+
+    def refresh_label(self):
+        """Call after a language change to relabel the button correctly for
+        its current play/stop state."""
+        key = self.stop_label_key if self._sound is not None else self.play_label_key
+        self.button.SetLabel(self.main_window.i18n.t(key))

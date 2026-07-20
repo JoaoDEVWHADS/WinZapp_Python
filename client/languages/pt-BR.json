@@ -530,5 +530,8 @@
     "soundpack_import_error_bad_manifest": "O arquivo de pacote de som é inválido ou está corrompido.",
     "soundpack_import_error_absolute_path": "O pacote de som contém caminhos absolutos, o que não é permitido. Peça ao autor do pacote para usar caminhos relativos.",
     "soundpack_import_error_missing_file": "O pacote de som referencia um arquivo de som que não foi encontrado na pasta.",
-    "soundpack_import_error_copy_failed": "Não foi possível copiar o pacote de som para a pasta de sons do programa."
+    "soundpack_import_error_copy_failed": "Não foi possível copiar o pacote de som para a pasta de sons do programa.",
+    "preview_sound_play": "Reproduzir prévia do som",
+    "preview_sound_stop": "Parar prévia do som",
+    "preview_sound_error": "Não foi possível reproduzir a prévia — arquivo de som inválido ou não encontrado."
 }

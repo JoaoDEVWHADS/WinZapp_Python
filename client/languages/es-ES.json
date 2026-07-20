@@ -530,5 +530,8 @@
     "soundpack_import_error_bad_manifest": "El archivo de paquete de sonido no es válido o está dañado.",
     "soundpack_import_error_absolute_path": "El paquete de sonido contiene rutas absolutas, lo cual no está permitido. Pida al autor del paquete que use rutas relativas.",
     "soundpack_import_error_missing_file": "El paquete de sonido hace referencia a un archivo de sonido que no se encontró en la carpeta.",
-    "soundpack_import_error_copy_failed": "No se pudo copiar el paquete de sonido a la carpeta de sonidos del programa."
+    "soundpack_import_error_copy_failed": "No se pudo copiar el paquete de sonido a la carpeta de sonidos del programa.",
+    "preview_sound_play": "Reproducir vista previa del sonido",
+    "preview_sound_stop": "Detener vista previa del sonido",
+    "preview_sound_error": "No se pudo reproducir la vista previa: archivo de sonido inválido o no encontrado."
 }
