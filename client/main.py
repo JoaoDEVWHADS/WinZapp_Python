@@ -1056,6 +1056,9 @@ class MainWindow(wx.Frame):
 
         # Wipe the local database and downloaded media/voice-message caches.
         self._sync_completed = False
+        # A user-requested resync gets a fresh automatic-retry budget, even if
+        # earlier syncs this session already burned through it.
+        self._sync_retry_count = 0
         self.clear_local_data()
         try:
             media_failed_path = data_path("media_failed.json")
@@ -3537,12 +3540,38 @@ class MainWindow(wx.Frame):
         # local chats just refresh once and move on — the API is ready.
         _CHAT_RETRIES  = 6
         _CHAT_DELAY    = 5  # seconds between retries
+        # A fully failed call already burns ~6 min internally (5 escalating
+        # attempts), so cap how many *failures* we sit through here; the
+        # post-sync retry scheduled further down picks it up again later
+        # without blocking the UI.
+        _CHAT_MAX_FAILURES = 2
         has_local_chats = len(self.chats) > 0
+        chat_list_ok = False   # did list-chats ever actually answer?
+        failures     = 0
+        chat_list_error = None
         for attempt in range(_CHAT_RETRIES):
             prev_len = len(self.chats)
-            result   = self.get_remote_chats(dict(self.chats))
-            if result is not None:
-                self.chats = result
+            result   = self.get_remote_chats(dict(self.chats), notify_errors=False)
+            if result is None:
+                # The call itself failed (timeout/HTTP error). This must never
+                # be mistaken for "the API is ready": self.chats keeps growing
+                # in parallel through the WebSocket (on_new_message), so the
+                # "new chats appeared" exit condition below would break out of
+                # the loop and leave the sync running on nothing but the handful
+                # of chats WhatsApp happened to push over the socket.
+                failures += 1
+                chat_list_error = getattr(self, "_last_chat_fetch_error", None)
+                logging.warning(
+                    "[start_sync] Chat list fetch failed (%d/%d): %s",
+                    failures, _CHAT_MAX_FAILURES, chat_list_error,
+                )
+                if failures >= _CHAT_MAX_FAILURES:
+                    break
+                wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+                time.sleep(_CHAT_DELAY)
+                continue
+            self.chats   = result
+            chat_list_ok = True
             # Exit the retry loop as soon as either:
             #  (a) we already had local chats (reconnection — no need to wait), or
             #  (b) the API returned at least one new chat (first pairing ready), or
@@ -3551,6 +3580,16 @@ class MainWindow(wx.Frame):
                 break
             wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
             time.sleep(_CHAT_DELAY)
+        if not chat_list_ok:
+            # Report once, after every attempt is exhausted, instead of one
+            # modal dialog per attempt interrupting the screen reader.
+            wx.CallAfter(self.error_sound.play)
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{self.i18n.t('chat_retrieval_failed')} {chat_list_error}",
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_ERROR,
+            )
         self.chats = self.normalize_chats(self.chats)
 
         # Quick initial contacts fetch — may be incomplete on first QR pairing
@@ -3619,10 +3658,15 @@ class MainWindow(wx.Frame):
         self._build_lid_to_phone_cache()
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
-        self.sync_complete_sound.play()
         wx.CallAfter(self._set_status, "")
-        if not self.background_mode:
-            self.output(self.i18n.t("sync_complete"))
+        # Only announce completion when the chat list really came from the
+        # server — otherwise this is a partial sync that is about to be retried,
+        # and saying "conversations synchronized" over the few chats the socket
+        # delivered is exactly what makes the failure invisible to the user.
+        if chat_list_ok:
+            self.sync_complete_sound.play()
+            if not self.background_mode:
+                self.output(self.i18n.t("sync_complete"))
 
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
@@ -3631,19 +3675,52 @@ class MainWindow(wx.Frame):
         # WhatsApp connection to query new messages. If we synced while disconnected,
         # we only loaded the local cache, so keep _sync_completed = False so we can
         # trigger a real sync once WhatsApp connects.
-        if len(self.chats) > 0 and getattr(self, "_wa_connected", False):
+        # `chat_list_ok` is required too: when every list-chats attempt failed,
+        # self.chats holds only what the WebSocket pushed in the meantime (a
+        # fraction of the account), so marking the sync completed would leave
+        # the session permanently half-synced — trigger_sync_if_needed() checks
+        # that same flag and would never run a real sync again.
+        if len(self.chats) > 0 and getattr(self, "_wa_connected", False) and chat_list_ok:
             self._sync_completed = True
+            self._sync_retry_count = 0
         else:
             self._sync_completed = False
-            # Schedule a retry in 15 seconds to see if history has loaded
-            def _retry_sync():
-                time.sleep(15)
-                # Check if we are still connected and still have 0 chats
-                if getattr(self, "_wa_connected", False) and len(self.chats) == 0:
-                    logging.info("[start_sync] Retrying empty chats sync...")
+            self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
+            _MAX_SYNC_RETRIES = 4
+            if self._sync_retry_count > _MAX_SYNC_RETRIES:
+                logging.warning(
+                    "[start_sync] Incomplete sync after %d retries — giving up "
+                    "for this session (chat_list_ok=%s, chats=%d).",
+                    _MAX_SYNC_RETRIES, chat_list_ok, len(self.chats),
+                )
+            else:
+                # Back off a little further each round: the usual cause is the
+                # WhatsApp Web page still being busy with its initial history
+                # sync, which resolves on its own after a minute or two.
+                delay = 15 * self._sync_retry_count
+                logging.info(
+                    "[start_sync] Sync incomplete (chat_list_ok=%s, chats=%d) — "
+                    "retrying in %ds (attempt %d/%d).",
+                    chat_list_ok, len(self.chats), delay,
+                    self._sync_retry_count, _MAX_SYNC_RETRIES,
+                )
+
+                def _retry_sync(delay=delay):
+                    time.sleep(delay)
+                    # Wait out the media phase of the current sync so two syncs
+                    # never run in parallel (it clears _initial_sync_running).
+                    waited = 0
+                    while getattr(self, "_initial_sync_running", False) and waited < 600:
+                        time.sleep(5)
+                        waited += 5
+                    if not getattr(self, "_wa_connected", False):
+                        return
+                    if getattr(self, "_sync_completed", False) or getattr(self, "_initial_sync_running", False):
+                        return
+                    logging.info("[start_sync] Retrying incomplete sync...")
                     self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
                     self.sync_thread.start()
-            threading.Thread(target=_retry_sync, daemon=True).start()
+                threading.Thread(target=_retry_sync, daemon=True).start()
 
         # ── Phase 2: download media (silent) ──────────────────────────────
         wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
@@ -3860,8 +3937,19 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             return {}
 
-    def get_remote_chats(self, chats, persist_full: bool = True):
+    def get_remote_chats(self, chats, persist_full: bool = True, notify_errors: bool = True):
         """Fetch/merge the remote chat list into `chats`.
+
+        Returns the merged dict on success and **None** when every attempt
+        failed — callers must treat None as "the chat list is unknown", never
+        as "there are no chats", since `self.chats` may still be growing in
+        parallel from WebSocket events.  The last error is also left in
+        `self._last_chat_fetch_error` for the caller to report.
+
+        `notify_errors` controls whether a modal error dialog is shown when all
+        attempts fail.  The initial sync retries this call itself and reports
+        once at the end, so it passes False to avoid stacking one dialog per
+        attempt.
 
         `persist_full` controls whether the result is written via the
         expensive full clear-and-reimport `save_data()` path (appropriate
@@ -3881,21 +3969,34 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
 
-        # Retry up to 3 times with a fixed timeout and a short sleep between
-        # attempts so we don't hammer the API server during startup.
+        # Escalating per-request timeouts instead of a flat 120 s × 3.
+        #
+        # list-chats runs WPP.chat.list() inside the Puppeteer page, so it only
+        # answers once WhatsApp Web's single JS thread is free — right after a
+        # pairing that can take minutes.  A flat 120 s meant just 3 chances
+        # spread over 6 min, each an opaque 2-minute block.  A flat *short*
+        # timeout is worse: the attempt that actually succeeded in the field
+        # took ~35 s, so 30 s everywhere would have killed the good response
+        # and restarted the (expensive) evaluate for nothing.
+        #
+        # Starting short and growing gives more chances inside the same overall
+        # budget (~6 min): the healthy case answers in seconds, a warming-up
+        # server gets caught by the early cheap attempts, and the later patient
+        # ones still cover a page that stays busy for minutes.
         _RETRY_SLEEP = 5   # seconds between retries
-        _TIMEOUT     = 120  # seconds per request
+        _TIMEOUTS    = (30, 45, 60, 90, 120)  # seconds per request, per attempt
+        _ATTEMPTS    = len(_TIMEOUTS)
         last_error = None
-        for attempt in range(3):
+        for attempt, _timeout in enumerate(_TIMEOUTS):
             try:
-                response = requests.post(url, json={}, headers=headers, timeout=_TIMEOUT)
+                response = requests.post(url, json={}, headers=headers, timeout=_timeout)
                 if response.status_code not in (200, 201):
                     logging.error(
-                        "[get_remote_chats] API error %s (attempt %d/3): %s",
-                        response.status_code, attempt + 1, response.text[:200],
+                        "[get_remote_chats] API error %s (attempt %d/%d): %s",
+                        response.status_code, attempt + 1, _ATTEMPTS, response.text[:200],
                     )
                     last_error = f"HTTP {response.status_code}"
-                    if attempt < 2:
+                    if attempt < _ATTEMPTS - 1:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
                         continue
@@ -3909,11 +4010,11 @@ class MainWindow(wx.Frame):
                         body = response.json()
                 except Exception as json_err:
                     logging.error(
-                        "[get_remote_chats] Failed to parse JSON (attempt %d/3): %s. Body: %s",
-                        attempt + 1, json_err, response.text[:200],
+                        "[get_remote_chats] Failed to parse JSON (attempt %d/%d): %s. Body: %s",
+                        attempt + 1, _ATTEMPTS, json_err, response.text[:200],
                     )
                     last_error = json_err
-                    if attempt < 2:
+                    if attempt < _ATTEMPTS - 1:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
                         continue
@@ -4233,14 +4334,18 @@ class MainWindow(wx.Frame):
                 return chats
             except Exception as e:
                 last_error = e
-                logging.warning("[get_remote_chats] Attempt %d/3 failed: %s", attempt + 1, e)
-                if attempt < 2:
+                logging.warning(
+                    "[get_remote_chats] Attempt %d/%d (timeout=%ds) failed: %s",
+                    attempt + 1, _ATTEMPTS, _timeout, e,
+                )
+                if attempt < _ATTEMPTS - 1:
                     time.sleep(_RETRY_SLEEP)
                     continue
             else:
                 break
 
-        if last_error:
+        self._last_chat_fetch_error = last_error
+        if last_error and notify_errors:
             wx.CallAfter(self.error_sound.play)
             wx.CallAfter(
                 wx.MessageBox,
@@ -7744,6 +7849,12 @@ class MainWindow(wx.Frame):
             return
             
         updated_contacts = {}
+        # A single timeout is routine while WPPConnect is busy with the initial
+        # history sync, so don't throw away the rest of the batch over one —
+        # only give up when the API looks genuinely down (several in a row).
+        _MAX_CONSECUTIVE_ERRORS = 3
+        _REQUEST_TIMEOUT        = 10   # seconds; 4 s expired constantly during sync
+        consecutive_errors      = 0
         for lid_jid in jids:
             if not lid_jid.endswith("@lid"):
                 continue
@@ -7777,6 +7888,10 @@ class MainWindow(wx.Frame):
                     continue
                 self._resolving_lids.add(lid_jid)
                 
+            # Set when the API never actually answered (timeout, connection
+            # reset, dead session).  Such a failure says nothing about whether
+            # this LID is resolvable, so it must not feed the blacklists below.
+            transient_error = False
             try:
                 canonical_jid = getattr(self, "_lid_to_phone", {}).get(lid_jid)
                 headers = {
@@ -7788,7 +7903,7 @@ class MainWindow(wx.Frame):
                     # First, resolve pn-lid mapping
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/pn-lid/{lid_jid}"
                     logging.info(f"[LID Resolution] Querying WPPConnect pn-lid mapping for {lid_jid}...")
-                    response = requests.get(url, headers=headers, timeout=4)
+                    response = requests.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
                     if response.status_code in (200, 201):
                         res = response.json() or {}
                         logging.info(f"[LID Resolution] pn-lid response for {lid_jid}: {res}")
@@ -7841,7 +7956,7 @@ class MainWindow(wx.Frame):
                     target_jid = canonical_jid if canonical_jid else lid_jid
                     url_profile = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/contact/{target_jid}"
                     logging.info(f"[LID Resolution] Querying profile details for {target_jid}...")
-                    resp_profile = requests.get(url_profile, headers=headers, timeout=4)
+                    resp_profile = requests.get(url_profile, headers=headers, timeout=_REQUEST_TIMEOUT)
                     # Check profile response
                     if resp_profile.status_code in (200, 201):
                         res_prof = resp_profile.json() or {}
@@ -7912,33 +8027,53 @@ class MainWindow(wx.Frame):
                         # If the API returns 404/500 indicating the session was closed/disconnected, stop making calls immediately
                         if resp_profile.status_code in (404, 500) or "session is not active" in resp_profile.text.lower():
                             logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
+                            transient_error = True
                             break
                 # Throttle query loop so Puppeteer isn't overwhelmed and can prioritize message sending
+                consecutive_errors = 0
                 time.sleep(0.5)
             except requests.exceptions.RequestException as e:
-                logging.error(f"[LID Resolution] Network/API error during resolution of {lid_jid} (aborting loop): {e}")
-                # Abort the loop because the API is likely down, overloaded, or timing out.
-                break
+                transient_error     = True
+                consecutive_errors += 1
+                logging.warning(
+                    "[LID Resolution] Network/API error resolving %s (%d/%d): %s",
+                    lid_jid, consecutive_errors, _MAX_CONSECUTIVE_ERRORS, e,
+                )
+                # Only abort once the API looks genuinely down — a lone timeout
+                # while WPPConnect is busy must not cancel the whole batch.
+                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    logging.error(
+                        "[LID Resolution] API unresponsive after %d consecutive errors — aborting batch.",
+                        consecutive_errors,
+                    )
+                    break
             except Exception as e:
+                transient_error = True
                 logging.error(f"[LID Resolution] Exception during resolution of {lid_jid}: {e}")
             finally:
                 with self._lid_resolution_lock:
                     self._resolving_lids.discard(lid_jid)
-                    if query_pn and lid_jid not in getattr(self, "_lid_to_phone", {}):
-                        self._unresolvable_lids.add(lid_jid)
-                        try:
-                            self.db.add_unresolvable_lid(lid_jid)
-                        except Exception as exc:
-                            logging.warning("[LID Resolution] add_unresolvable_lid failed: %s", exc)
-                    if query_name:
-                        contact_now = self.contacts.get(lid_jid, {})
-                        has_name_now = contact_now.get("name") or contact_now.get("pushName")
-                        if not has_name_now:
-                            self._unresolvable_names.add(lid_jid)
+                    # Only blacklist when the API actually answered.  Both sets
+                    # are persisted to SQLite and consulted before every future
+                    # query, so recording a LID here after a mere timeout leaves
+                    # that contact stuck on "Contato sem nome" for good — across
+                    # restarts — even though it was perfectly resolvable.
+                    if not transient_error:
+                        if query_pn and lid_jid not in getattr(self, "_lid_to_phone", {}):
+                            self._unresolvable_lids.add(lid_jid)
                             try:
-                                self.db.add_unresolvable_name(lid_jid)
+                                self.db.add_unresolvable_lid(lid_jid)
                             except Exception as exc:
-                                logging.warning("[LID Resolution] add_unresolvable_name failed: %s", exc)
+                                logging.warning("[LID Resolution] add_unresolvable_lid failed: %s", exc)
+                        if query_name:
+                            contact_now = self.contacts.get(lid_jid, {})
+                            has_name_now = contact_now.get("name") or contact_now.get("pushName")
+                            if not has_name_now:
+                                self._unresolvable_names.add(lid_jid)
+                                try:
+                                    self.db.add_unresolvable_name(lid_jid)
+                                except Exception as exc:
+                                    logging.warning("[LID Resolution] add_unresolvable_name failed: %s", exc)
                 time.sleep(0.5)
 
         if updated_contacts:
