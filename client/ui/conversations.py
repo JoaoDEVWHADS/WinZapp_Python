@@ -2068,8 +2068,15 @@ class ConversationsPanel(wx.Panel):
                 self.conversation_panel.Layout()
 
         # ── Link detection ────────────────────────────────────────────────
-        # Always check the rendered text for URLs (regardless of msg_type)
-        rendered = self.messages_list.GetItemText(index)
+        # Always check the rendered text for URLs (regardless of msg_type).
+        # Must use _render_message_line(msg) — the full, untruncated text —
+        # not messages_list.GetItemText(index): SysListView32 (the native
+        # control wx.ListCtrl wraps) truncates each row's accessible name at
+        # _LIST_CTRL_TEXT_LIMIT characters, so a link further into a long
+        # message was silently invisible to link detection and never became
+        # Tab-focusable, even though the message itself displayed fine (via
+        # the "Ler mais" remainder).
+        rendered = self._render_message_line(msg)
         self._update_links_panel(self._extract_links(rendered))
 
         # ── Mention detection ─────────────────────────────────────────────
@@ -2095,7 +2102,9 @@ class ConversationsPanel(wx.Panel):
         # For text-based messages: open the first link if one is present,
         # otherwise show the full message text popup (same as Alt+C).
         if msg_type in ("conversation", "extendedTextMessage", ""):
-            rendered = self.messages_list.GetItemText(index)
+            # Full untruncated text — see the matching comment in
+            # _on_message_focused() for why GetItemText(index) is wrong here.
+            rendered = self._render_message_line(msg)
             links = self._extract_links(rendered)
             if links:
                 try:
