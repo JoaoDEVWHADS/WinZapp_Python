@@ -261,6 +261,8 @@
     "menu_mark_all_read": "Marcar todas as conversas como lidas",
     "menu_settings": "&Configurações",
     "menu_disconnect": "&Desconectar",
+    "disconnect_confirm_title": "Desconectar",
+    "disconnect_confirm_msg": "Tem a certeza de que pretende desconectar? Isto vai remover o emparelhamento e os dados locais desta conta.",
     "menu_exit": "&Sair",
     "menu_sync": "&Sincronização",
     "menu_resync_all": "&Ressincronizar todas as conversas",

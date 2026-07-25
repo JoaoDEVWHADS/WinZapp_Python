@@ -851,7 +851,7 @@ class MainWindow(wx.Frame):
         self.SetMenuBar(menubar)
         self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
-        self.Bind(wx.EVT_MENU, self._on_disconnect,    id=self._ID_DISCONNECT)
+        self.Bind(wx.EVT_MENU, self._on_menu_disconnect, id=self._ID_DISCONNECT)
         self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
         self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
@@ -940,6 +940,24 @@ class MainWindow(wx.Frame):
         panel.SetSizer(sizer)
         dialog.ShowModal()
         dialog.Destroy()
+
+    def _on_menu_disconnect(self, event=None):
+        """Arquivo > Desconectar / Ctrl+Alt+Shift+D: confirm before disconnecting.
+
+        This is a destructive, easy-to-trigger-by-accident action (wipes the
+        paired session and local data) — unlike _on_disconnect() itself,
+        which is also called from automatic/internal flows (e.g. WhatsApp
+        reporting the device was logged out elsewhere) where a confirmation
+        prompt would be wrong, since that already happened without the user
+        asking here.
+        """
+        if wx.MessageBox(
+            self.i18n.t("disconnect_confirm_msg"),
+            self.i18n.t("disconnect_confirm_title"),
+            wx.YES_NO | wx.ICON_QUESTION,
+            self,
+        ) == wx.YES:
+            self._on_disconnect()
 
     def _on_disconnect(self, event=None):
         """Disconnect from WhatsApp: wipe credentials, stop WebSocket and show pairing dialog."""

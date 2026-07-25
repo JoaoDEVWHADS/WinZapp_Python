@@ -261,6 +261,8 @@
     "menu_mark_all_read": "Mark all conversations as read",
     "menu_settings": "&Settings",
     "menu_disconnect": "&Disconnect",
+    "disconnect_confirm_title": "Disconnect",
+    "disconnect_confirm_msg": "Are you sure you want to disconnect? This will remove the pairing and local data for this account.",
     "menu_exit": "E&xit",
     "menu_sync": "S&ync",
     "menu_resync_all": "&Resync all conversations",
