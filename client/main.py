@@ -1810,6 +1810,7 @@ class MainWindow(wx.Frame):
             if hasattr(self, "conversations_panel"):
                 self.conversations_panel.on_incoming_message(remote_jid, msg)
             self._maybe_notify_reaction(remote_jid, msg)
+            self._track_last_reaction(remote_jid, msg)
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
@@ -2352,6 +2353,47 @@ class MainWindow(wx.Frame):
                     except Exception:
                         return ""
         return ""
+
+    def _track_last_reaction(self, remote_jid: str, msg: dict):
+        """Remember the most recent reaction in this chat so
+        _last_msg_preview() can show it in place of the last real message
+        when it is genuinely the newest event. reactionMessage records are
+        deliberately never added to a chat's regular records list (see
+        on_new_message() — keeping them out of the message list/unread
+        counts is intentional), so without a side-channel like this the
+        chat-list preview always fell back to the last real message even
+        when a reaction to it arrived afterwards.
+        """
+        chat = self.chats.get(remote_jid)
+        if chat is None:
+            return
+        reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+        emoji = (reaction.get("text") or "").strip()
+        if not emoji:
+            # Empty emoji = the reaction was removed. Clear any stored
+            # reaction for this same target message so the preview falls
+            # back to the last real message instead of showing a reaction
+            # that no longer exists.
+            target_id = (reaction.get("key") or {}).get("id", "")
+            if chat.get("_last_reaction", {}).get("target_id") == target_id:
+                chat.pop("_last_reaction", None)
+            return
+        ts = msg.get("messageTimestamp")
+        try:
+            ts_val = int(ts) if ts else 0
+        except (TypeError, ValueError):
+            ts_val = 0
+        if ts_val > 1_000_000_000_000:
+            ts_val //= 1000
+        key = msg.get("key", {})
+        chat["_last_reaction"] = {
+            "emoji": emoji,
+            "target_id": (reaction.get("key") or {}).get("id", ""),
+            "from_me": bool(key.get("fromMe")),
+            "participant": key.get("participant") or key.get("remoteJid") or "",
+            "push_name": msg.get("pushName", ""),
+            "timestamp": ts_val,
+        }
 
     def _maybe_notify_reaction(self, remote_jid: str, msg: dict):
         """
@@ -10212,54 +10254,54 @@ class MainWindow(wx.Frame):
                 default=None,
             )
         except Exception:
-            return ""
-        if last is None:
-            return ""
+            last = None
 
-        from_me  = last.get("key", {}).get("fromMe", False)
-        msg_type = last.get("messageType", "conversation")
-        msg_obj  = last.get("message") or {}
-        i18n     = self.i18n
+        i18n = self.i18n
 
-        # If latest message is a reaction, show it inline instead of skipping
-        if msg_type == "reactionMessage":
-            reaction = msg_obj.get("reactionMessage") or {}
-            emoji = reaction.get("text", "")
-            orig_id = (reaction.get("key") or {}).get("id", "")
+        # A reaction is deliberately never added to `records` (on_new_message
+        # returns early for messageType == "reactionMessage" so it can't
+        # pollute the message list or unread counts) — it's tracked
+        # separately in chat["_last_reaction"] instead (see
+        # _track_last_reaction()). Show it here in place of the last real
+        # message only when it is genuinely the most recent event in the
+        # chat; a reaction to an older message must not resurrect itself as
+        # the preview once newer messages have since arrived.
+        last_reaction = chat.get("_last_reaction")
+        if last_reaction and last_reaction.get("timestamp", 0) >= _get_ts(last):
+            emoji = last_reaction.get("emoji", "")
             orig_text = ""
-            for m in records:
-                if isinstance(m, dict) and m.get("key", {}).get("id") == orig_id:
-                    orig_type = m.get("messageType", "")
-                    orig_obj  = m.get("message") or {}
-                    if orig_type == "conversation":
-                        orig_text = (orig_obj.get("conversation") or "")
-                    elif orig_type == "extendedTextMessage":
-                        orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
-                    elif orig_type == "audioMessage":
-                        orig_text = i18n.t("message_type_audio")
-                    elif orig_type == "videoMessage":
-                        orig_text = i18n.t("video")
-                    elif orig_type == "imageMessage":
-                        orig_text = i18n.t("photo")
-                    elif orig_type == "documentMessage":
-                        orig_text = i18n.t("document")
-                    elif orig_type == "stickerMessage":
-                        orig_text = i18n.t("sticker")
-                    elif orig_type == "contactMessage":
-                        orig_text = i18n.t("notif_contact")
-                    elif orig_type == "locationMessage":
-                        orig_text = i18n.t("notif_location")
-                    else:
-                        orig_text = i18n.t("notif_unsupported")
-                    break
-            ts = last.get("messageTimestamp")
+            target_id = last_reaction.get("target_id", "")
+            if target_id:
+                for m in records:
+                    if isinstance(m, dict) and m.get("key", {}).get("id") == target_id:
+                        orig_type = m.get("messageType", "")
+                        orig_obj  = m.get("message") or {}
+                        if orig_type == "conversation":
+                            orig_text = (orig_obj.get("conversation") or "")
+                        elif orig_type == "extendedTextMessage":
+                            orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")
+                        elif orig_type == "audioMessage":
+                            orig_text = i18n.t("message_type_audio")
+                        elif orig_type == "videoMessage":
+                            orig_text = i18n.t("video")
+                        elif orig_type == "imageMessage":
+                            orig_text = i18n.t("photo")
+                        elif orig_type == "documentMessage":
+                            orig_text = i18n.t("document")
+                        elif orig_type == "stickerMessage":
+                            orig_text = i18n.t("sticker")
+                        elif orig_type == "contactMessage":
+                            orig_text = i18n.t("notif_contact")
+                        elif orig_type == "locationMessage":
+                            orig_text = i18n.t("notif_location")
+                        else:
+                            orig_text = i18n.t("notif_unsupported")
+                        break
+            ts_val = last_reaction.get("timestamp", 0)
             time_str = ""
-            if ts:
+            if ts_val:
                 try:
                     from datetime import datetime as _dt
-                    ts_val = int(ts)
-                    if ts_val > 1_000_000_000_000:
-                        ts_val //= 1000
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
@@ -10268,12 +10310,11 @@ class MainWindow(wx.Frame):
                         time_str = dt.strftime(i18n.t("datetime_fmt"))
                 except Exception:
                     pass
-            if from_me:
+            if last_reaction.get("from_me"):
                 label = i18n.t("reaction_preview_you").format(emoji=emoji)
             else:
-                p_key      = last.get("key", {})
-                sender_jid = last.get("participant") or p_key.get("participant", "") or p_key.get("remoteJid", "")
-                push       = last.get("pushName", "")
+                sender_jid = last_reaction.get("participant", "")
+                push       = last_reaction.get("push_name", "")
                 if sender_jid.endswith("@g.us") and push and push.isdigit():
                     sender_jid = f"{push}@s.whatsapp.net"
                 sender_name = (
@@ -10288,6 +10329,13 @@ class MainWindow(wx.Frame):
             if time_str:
                 parts.append(time_str)
             return " ".join(parts)
+
+        if last is None:
+            return ""
+
+        from_me  = last.get("key", {}).get("fromMe", False)
+        msg_type = last.get("messageType", "conversation")
+        msg_obj  = last.get("message") or {}
 
         # Build compact content
         def _dur(secs):
