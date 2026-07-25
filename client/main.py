@@ -9953,38 +9953,6 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             return self._classify_send_exception(exc, "send_media")
 
-    def save_contact_to_phone(self, phone: str, name: str,
-                              surname: str = "", sync: bool = True) -> bool:
-        """
-        Save a contact to WhatsApp (and, when sync is True, to the device
-        address book) via the WPPConnect add-new-contact endpoint, which calls
-        WPP.contact.save(..., {syncAddressBook}). Returns True on success.
-        """
-        digits = "".join(c for c in str(phone) if c.isdigit())
-        if not digits or not name:
-            return False
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/add-new-contact"
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "phone":             digits,
-            "name":              name,
-            "surname":           surname or "",
-            "syncToAddressbook": bool(sync),
-        }
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=20)
-            if r.status_code in (200, 201):
-                return True
-            logging.error("[save_contact_to_phone] HTTP %s: %s",
-                          r.status_code, r.text[:300])
-            return False
-        except Exception as exc:
-            logging.error("[save_contact_to_phone] exception: %s", exc)
-            return False
-
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""

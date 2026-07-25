@@ -422,7 +422,6 @@
     "group_no_contacts": "No saved contacts. Use the field below to type the number.",
     "create_group": "Create &group",
     "create_contact": "&Add contact",
-    "sync_contact_to_phone": "Sync contact to phone",
     "create_group_error": "Error creating group: {error}",
     "create_contact_error": "Could not add the contact. Please check the number provided.",
     "no_results": "No results found.",
