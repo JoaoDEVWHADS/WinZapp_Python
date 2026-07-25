@@ -15,6 +15,7 @@ Screen-reader accessibility is achieved through standard wxPython controls
 and proper label association — no visual-only information is presented.
 """
 
+import logging
 import os
 import threading
 from datetime import datetime
@@ -313,36 +314,56 @@ class ConversationDataDialog(wx.Dialog):
     # ── Data fetch (background thread) ───────────────────────────────────────
 
     def _fetch_data(self):
-        if self._is_group:
-            data = self._mw.get_group_info(self._jid)
-            participants = data.get("participants", [])
-            lid_jids_to_resolve = []
-            lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
-            for p in participants:
-                if not isinstance(p, dict):
-                    continue
-                p_jid = p.get("id", "")
-                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
-                    lid_jids_to_resolve.append(p_jid)
-            if lid_jids_to_resolve:
-                try:
-                    self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
-                except Exception:
-                    pass
-            wx.CallAfter(self._populate_group, data)
-        else:
-            if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
-                try:
-                    self._mw.resolve_lid_jids_via_api([self._jid])
-                except Exception:
-                    pass
-            data = self._mw.get_contact_profile(self._jid)
-            wx.CallAfter(self._populate_personal, data)
+        # This runs on a background thread with no caller to report failures
+        # to — an uncaught exception here just kills the thread silently (in
+        # a compiled windowed build, its traceback goes nowhere), leaving the
+        # dialog showing "loading" forever with no way to know why. Wrap the
+        # whole thing so a real bug still logs a traceback and still clears
+        # the "loading" placeholders instead of leaving them stuck.
+        try:
+            if self._is_group:
+                data = self._mw.get_group_info(self._jid)
+                participants = data.get("participants", [])
+                lid_jids_to_resolve = []
+                lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+                for p in participants:
+                    if not isinstance(p, dict):
+                        continue
+                    p_jid = p.get("id", "")
+                    if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                        lid_jids_to_resolve.append(p_jid)
+                if lid_jids_to_resolve:
+                    try:
+                        self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                    except Exception:
+                        pass
+                wx.CallAfter(self._populate_group, data)
+            else:
+                if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
+                    try:
+                        self._mw.resolve_lid_jids_via_api([self._jid])
+                    except Exception:
+                        pass
+                data = self._mw.get_contact_profile(self._jid)
+                wx.CallAfter(self._populate_personal, data)
+        except Exception:
+            logging.exception("[ConversationDataDialog] _fetch_data failed for %s", self._jid)
+            if self._is_group:
+                wx.CallAfter(self._populate_group, {})
+            else:
+                wx.CallAfter(self._populate_personal, {})
 
     def _populate_personal(self, data: dict):
         """Fill the personal-chat TextCtrl (called on main thread)."""
         if not self or not self.IsShown():
             return
+        try:
+            self._populate_personal_unsafe(data)
+        except Exception:
+            # See _populate_group()'s equivalent guard.
+            logging.exception("[ConversationDataDialog] _populate_personal failed for %s", self._jid)
+
+    def _populate_personal_unsafe(self, data: dict):
         i18n  = self._i18n
         lines = []
         # The API wraps the contact under "response"; the top-level "status" is
@@ -395,14 +416,37 @@ class ConversationDataDialog(wx.Dialog):
         """Fill the group Notebook tabs (called on main thread)."""
         if not self or not self.IsShown():
             return
+        try:
+            self._populate_group_unsafe(data)
+        except Exception:
+            # See _fetch_data(): this runs from a wx.CallAfter callback, so an
+            # uncaught exception here is swallowed by wx's event loop with no
+            # visible trace — the three tabs simply stay on "loading" forever
+            # with no clue why. get_group_info()'s real response field names
+            # (description/createdAt/isAdmin, no top-level "size") didn't
+            # match what this method originally read (desc/creation/admin/
+            # size), so real data always kept the Overview tab wrong or
+            # (depending on exactly which field access failed) never reached
+            # SetValue() at all. Fixed those below, but keep this guard too:
+            # any other unexpected shape from the API should log instead of
+            # silently hanging the dialog.
+            logging.exception("[ConversationDataDialog] _populate_group failed for %s", self._jid)
 
+    def _populate_group_unsafe(self, data: dict):
         i18n = self._i18n
 
         # ── Overview ─────────────────────────────────────────────────────────
         subject  = data.get("subject") or self._name
-        desc     = data.get("desc") or ""
-        creation = _fmt_ts(data.get("creation"), i18n)
-        size     = data.get("size", 0)
+        # get_group_info() (main.py) returns the raw group-info response,
+        # whose real field names are "description" and "createdAt" — this
+        # used to read "desc"/"creation", which don't exist in that response,
+        # so the description and creation date silently never showed.
+        desc     = data.get("description") or data.get("desc") or ""
+        creation = _fmt_ts(data.get("createdAt") or data.get("creation"), i18n)
+        participants_list = data.get("participants") or []
+        # The API response has no top-level "size" field at all — it must be
+        # derived from the participants list.
+        size     = data.get("size") or len(participants_list)
 
         ov_lines = [
             f"{i18n.t('conversations')}: {subject}",
@@ -441,7 +485,9 @@ class ConversationDataDialog(wx.Dialog):
             p_name = self._mw._resolve_jid_name(p_jid)
             if not p_name or p_name == p_phone or p_name.isdigit() or p_name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 p_name = p_phone
-            is_admin = "admin" if p.get("admin") else ""
+            # get_group_info()'s real participant shape is {"id", "isAdmin"}
+            # — "admin" doesn't exist on it, so this always read False.
+            is_admin = "admin" if (p.get("isAdmin") or p.get("admin")) else ""
             if is_admin and my_digits and p_jid.split("@")[0] in my_digits:
                 user_is_admin = True
             idx = self._part_list.GetItemCount()
