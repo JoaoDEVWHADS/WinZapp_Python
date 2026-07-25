@@ -3778,7 +3778,11 @@ class MainWindow(wx.Frame):
             settings_dirty = True
         else:
             self._muted_chats = dict(self.db.get_metadata_json("muted_chats", {}))
-            
+
+        # 6. blocked_contacts — stored as bare phone-digit strings, matching
+        # what WPPConnect's /blocklist endpoint returns (see get_block_list()).
+        self._blocked_contacts = set(self.db.get_metadata_json("blocked_contacts", []))
+
         if settings_dirty:
             self.save_settings()
 
@@ -4305,6 +4309,7 @@ class MainWindow(wx.Frame):
         # has received all contacts from WhatsApp — solving the first-pairing
         # issue where names were missing because the initial fetch was too early.
         self.get_remote_contacts()
+        self.get_block_list()
 
         # ── Refresh chat-level state now that messages are indexed ───────────
         # The unreadCount/pin/archive values used so far came from the very
@@ -5749,6 +5754,7 @@ class MainWindow(wx.Frame):
                     if elapsed >= _CONTACT_POLL_SECONDS:
                         elapsed = 0
                         self.get_remote_contacts()
+                        self.get_block_list()
                     result = self.get_remote_chats(dict(self.chats), persist_full=False,
                                                    notify_errors=False)
                     if result is not None:
@@ -9196,9 +9202,93 @@ class MainWindow(wx.Frame):
 
     # ── Block ─────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _bare_phone_digits(jid: str) -> str:
+        """Strip the @suffix and any Baileys device suffix (':N'), leaving
+        bare phone digits — the form WPPConnect's /blocklist endpoint returns
+        (see get_block_list())."""
+        if not jid:
+            return ""
+        local = jid.split("@", 1)[0]
+        return local.split(":", 1)[0]
+
+    def is_contact_blocked(self, jid: str) -> bool:
+        digits = self._bare_phone_digits(jid)
+        if not digits:
+            return False
+        if digits in self._blocked_contacts:
+            return True
+        # Brazilian mobile 8/9-digit interchangeable form — a contact can be
+        # blocked under either digit count depending on how WhatsApp/the
+        # phone reported it, same tolerance _get_contact_tolerant() applies.
+        if digits.startswith("55"):
+            if len(digits) == 13 and digits[4] == "9":
+                if (digits[:4] + digits[5:]) in self._blocked_contacts:
+                    return True
+            elif len(digits) == 12:
+                if (digits[:4] + "9" + digits[4:]) in self._blocked_contacts:
+                    return True
+        return False
+
+    def get_block_list(self):
+        """Fetch the account's blocked-contacts list from WPPConnect and sync
+        it into _blocked_contacts. Block state is account-wide, not a
+        per-chat field WPPConnect's list-chats response carries (unlike
+        mute/pin/archive), so it needs its own endpoint — called from the
+        full sync and the periodic chat/contact poll."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/blocklist"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code not in (200, 201):
+                logging.warning("[get_block_list] HTTP %s", resp.status_code)
+                return
+            data = resp.json()
+            entries = data.get("response", []) if isinstance(data, dict) else []
+            digits_set = set()
+            for entry in entries:
+                if isinstance(entry, dict):
+                    phone = entry.get("phone", "")
+                elif isinstance(entry, str):
+                    phone = entry.split("@")[0]
+                else:
+                    phone = ""
+                if phone:
+                    digits_set.add(phone)
+            if digits_set != self._blocked_contacts:
+                self._blocked_contacts = digits_set
+                if hasattr(self, "db") and self.db is not None:
+                    self.db.set_metadata_json("blocked_contacts", list(self._blocked_contacts))
+                wx.CallAfter(self._schedule_set_chats)
+        except Exception as e:
+            logging.warning("[get_block_list] failed: %s", e)
+
+    def _apply_block_state(self, jid: str, blocked: bool):
+        """Local-only half of block/unblock: mutate _blocked_contacts,
+        persist to DB metadata, and refresh the chat list. Split out so
+        block_contact() can call this again to roll back the optimistic
+        change if WhatsApp rejects it. Safe to call off the main thread —
+        _schedule_set_chats() is documented safe from any thread."""
+        digits = self._bare_phone_digits(jid)
+        if not digits:
+            return
+        if blocked:
+            self._blocked_contacts.add(digits)
+        else:
+            self._blocked_contacts.discard(digits)
+        if hasattr(self, "db") and self.db is not None:
+            self.db.set_metadata_json("blocked_contacts", list(self._blocked_contacts))
+        self._schedule_set_chats()
+
     def block_contact(self, jid: str, action: str = "block"):
-        """action: 'block' or 'unblock'"""
-        endpoint = "block-contact" if action == "block" else "unblock-contact"
+        """action: 'block' or 'unblock'. Runs on a background thread (see
+        callers in conversations.py)."""
+        blocked = action == "block"
+        self._apply_block_state(jid, blocked)
+        endpoint = "block-contact" if blocked else "unblock-contact"
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/{endpoint}"
@@ -9208,12 +9298,39 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            requests.post(
+            resp = requests.post(
                 url, json={"phone": jid},
                 headers=headers, timeout=10,
             )
-        except Exception:
-            pass
+            if not resp.ok:
+                logging.warning(
+                    "[block_contact] API error %s for %s (%s): %s",
+                    resp.status_code, jid, action, resp.text[:200],
+                )
+                # This call used to be fire-and-forget with no response
+                # check at all — the menu item never reflected the real
+                # block state (always showed "Bloquear", never toggled to
+                # "Desbloquear") and a rejected request left WinZapp
+                # believing a contact was blocked when WhatsApp never
+                # actually blocked it. Roll back immediately instead.
+                wx.CallAfter(self._on_block_sync_rejected, jid, blocked)
+        except Exception as exc:
+            logging.warning("[block_contact] request failed for %s: %s", jid, exc)
+            wx.CallAfter(self._on_block_sync_rejected, jid, blocked)
+
+    def _on_block_sync_rejected(self, jid: str, attempted_blocked: bool):
+        """Revert an optimistic block/unblock that WhatsApp did not actually
+        accept, and tell the user (runs on the wx main thread)."""
+        self._apply_block_state(jid, not attempted_blocked)
+        if not self.background_mode:
+            self.error_sound.play()
+            key = "block_contact_failed" if attempted_blocked else "unblock_contact_failed"
+            wx.MessageBox(
+                self.i18n.t(key),
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_WARNING,
+                self,
+            )
 
     # ── Mute ──────────────────────────────────────────────────────────────────
 
@@ -9225,24 +9342,34 @@ class MainWindow(wx.Frame):
             return True  # permanent
         return time.time() < expiry
 
+    def _apply_mute_state(self, jid: str, expiry):
+        """Local-only half of mute/unmute: mutate _muted_chats, persist to
+        DB metadata, and refresh the chat list. Split out from
+        mute_chat()/unmute_chat() so _sync_mute_to_server() can call this
+        again to roll back the optimistic change if WhatsApp rejects it."""
+        if expiry is None:
+            self._muted_chats.pop(jid, None)
+        else:
+            self._muted_chats[jid] = expiry
+        if hasattr(self, "db") and self.db is not None:
+            self.db.set_metadata_json("muted_chats", self._muted_chats)
+        self._schedule_set_chats()
+
     def mute_chat(self, jid: str, duration_secs: int):
         """duration_secs=-1 means mute permanently."""
-        if duration_secs == -1:
-            self._muted_chats[jid] = -1
-        else:
-            self._muted_chats[jid] = int(time.time()) + duration_secs
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("muted_chats", self._muted_chats)
-        self._sync_mute_to_server(jid, duration_secs)
+        expiry = -1 if duration_secs == -1 else int(time.time()) + duration_secs
+        self._apply_mute_state(jid, expiry)
+        self._sync_mute_to_server(jid, duration_secs, rollback_expiry=None)
 
     def unmute_chat(self, jid: str):
-        self._muted_chats.pop(jid, None)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("muted_chats", self._muted_chats)
-        self._sync_mute_to_server(jid, 0)
+        previous_expiry = self._muted_chats.get(jid)
+        self._apply_mute_state(jid, None)
+        self._sync_mute_to_server(jid, 0, rollback_expiry=previous_expiry)
 
-    def _sync_mute_to_server(self, jid: str, duration_secs: int):
-        """Send mute/unmute to WPPConnect in a background thread. duration_secs=0 = unmute."""
+    def _sync_mute_to_server(self, jid: str, duration_secs: int, rollback_expiry=None):
+        """Send mute/unmute to WPPConnect in a background thread. duration_secs=0 = unmute.
+        rollback_expiry is the _muted_chats value to restore if the request
+        is rejected (None means "was not muted before this call")."""
         def _do():
             try:
                 if duration_secs == 0:
@@ -9270,15 +9397,44 @@ class MainWindow(wx.Frame):
                     "type": wpp_type,
                     "isGroup": jid.endswith("@g.us"),
                 }
-                requests.post(
+                resp = requests.post(
                     url,
                     json=payload,
                     headers={"Authorization": f"Bearer {self.token}"},
                     timeout=10,
                 )
-            except Exception:
-                pass
+                if not resp.ok:
+                    logging.warning(
+                        "[mute_chat] API error %s for %s: %s",
+                        resp.status_code, jid, resp.text[:200],
+                    )
+                    # The mute/unmute call was previously fire-and-forget —
+                    # nothing checked whether WPPConnect actually applied it,
+                    # so a rejected request (bad JID form, session hiccup,
+                    # WPPConnect error) left WinZapp showing a chat as muted
+                    # that WhatsApp never muted, until the next full resync
+                    # silently "corrected" it back — exactly the "mutei para
+                    # sempre, funcionou, mas sumiu depois de reabrir o
+                    # programa" report. Roll back immediately instead.
+                    wx.CallAfter(self._on_mute_sync_rejected, jid, duration_secs != 0, rollback_expiry)
+            except Exception as exc:
+                logging.warning("[mute_chat] request failed for %s: %s", jid, exc)
+                wx.CallAfter(self._on_mute_sync_rejected, jid, duration_secs != 0, rollback_expiry)
         threading.Thread(target=_do, daemon=True).start()
+
+    def _on_mute_sync_rejected(self, jid: str, attempted_mute: bool, rollback_expiry=None):
+        """Revert an optimistic mute/unmute that WhatsApp did not actually
+        accept, and tell the user (runs on the wx main thread)."""
+        self._apply_mute_state(jid, None if attempted_mute else rollback_expiry)
+        if not self.background_mode:
+            self.error_sound.play()
+            key = "mute_chat_failed" if attempted_mute else "unmute_chat_failed"
+            wx.MessageBox(
+                self.i18n.t(key),
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_WARNING,
+                self,
+            )
 
     # ── Archive ───────────────────────────────────────────────────────────────
 
@@ -10523,6 +10679,8 @@ class MainWindow(wx.Frame):
                     text += f" {presence_label}"
             if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
                 text += f" ({self.i18n.t('muted')})"
+            if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
+                text += f" ({self.i18n.t('blocked')})"
             return text
 
         displayed_chats: list = []

@@ -1916,10 +1916,12 @@ class ConversationsPanel(wx.Panel):
         if not is_group:
             menu.AppendSeparator()
             if not is_self:
-                block_item = menu.Append(wx.ID_ANY, f"{i18n.t('block_contact')}\tCtrl+Shift+B")
+                is_blocked = mw.is_contact_blocked(jid)
+                label = "unblock_contact" if is_blocked else "block_contact"
+                block_item = menu.Append(wx.ID_ANY, f"{i18n.t(label)}\tCtrl+Shift+B")
                 self.Bind(
                     wx.EVT_MENU,
-                    lambda e, c=chat, j=jid: self._on_menu_block(c, j),
+                    lambda e, c=chat, j=jid, b=is_blocked: self._on_menu_block(c, j, b),
                     block_item,
                 )
             copy_num_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_number')}\tAlt+Shift+C")
@@ -5003,22 +5005,25 @@ class ConversationsPanel(wx.Panel):
     def _on_menu_unmute(self, jid: str):
         self.main_window.unmute_chat(jid)
 
-    def _on_menu_block(self, chat: dict, jid: str):
+    def _on_menu_block(self, chat: dict, jid: str, currently_blocked: bool = False):
         name = (
             self.main_window._resolve_contact_name(chat)
             or self.main_window.find_name_through_messages(chat)
             or format_number(jid)
         )
-        msg = self.main_window.i18n.t("block_confirm_msg").format(name=name)
+        action = "unblock" if currently_blocked else "block"
+        msg_key = "unblock_confirm_msg" if currently_blocked else "block_confirm_msg"
+        title_key = "unblock_contact" if currently_blocked else "block_contact"
+        msg = self.main_window.i18n.t(msg_key).format(name=name)
         if wx.MessageBox(
             msg,
-            self.main_window.i18n.t("block_contact"),
+            self.main_window.i18n.t(title_key),
             wx.YES_NO | wx.ICON_QUESTION,
             self,
         ) == wx.YES:
             threading.Thread(
                 target=self.main_window.block_contact,
-                args=(jid, "block"),
+                args=(jid, action),
                 daemon=True,
             ).start()
 
@@ -5680,7 +5685,7 @@ class ConversationsPanel(wx.Panel):
             return
         if self.main_window._is_self_jid(jid):
             return  # cannot block yourself
-        self._on_menu_block(self.conversation, jid)
+        self._on_menu_block(self.conversation, jid, self.main_window.is_contact_blocked(jid))
 
     def _on_accel_toggle_read(self, event):
         """Ctrl+Shift+M: mark conversation as read if it has unreads, else unread."""
@@ -5771,7 +5776,7 @@ class ConversationsPanel(wx.Panel):
         jid = chat.get("remoteJid", "")
         if not jid or jid.endswith("@g.us") or self.main_window._is_self_jid(jid):
             return
-        self._on_menu_block(chat, jid)
+        self._on_menu_block(chat, jid, self.main_window.is_contact_blocked(jid))
 
     def _on_accel_clear_list(self, event):
         chat = self._selected_chat_from_list()
