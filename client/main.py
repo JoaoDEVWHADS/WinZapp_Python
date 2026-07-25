@@ -2,7 +2,11 @@ import os
 import sys
 import time
 
-# Add lib/ directory to Windows DLL search path so BASS plugins can find their dependencies (e.g. libopus-0.dll)
+# Add lib/ directory to Windows DLL search path so BASS and its plugins
+# (bass.dll, bassopus.dll) can find each other regardless of the process's
+# working directory. Voice-message recording no longer needs a standalone
+# libopus DLL here — encoding now goes through the bundled ffmpeg binary
+# (see _convert_wav_to_ogg), which has libopus compiled in.
 if sys.platform == 'win32':
     _lib_path = ""
     if getattr(sys, 'frozen', False):
