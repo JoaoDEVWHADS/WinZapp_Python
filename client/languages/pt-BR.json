@@ -244,6 +244,7 @@
     "update_progress_title": "WinZapp | Instalando atualização",
     "update_error_title": "Erro ao atualizar",
     "update_error_msg": "Ocorreu um erro durante a atualização:\n\n{error}\n\nDeseja tentar novamente?",
+    "update_uac_declined": "A permissão de administrador foi negada, então a atualização não pôde ser instalada.",
     "update_not_available": "Não há atualizações disponíveis. Você já está usando a versão mais recente.",
     "update_not_available_title": "Sem atualizações",
     "menu_file": "&Arquivo",

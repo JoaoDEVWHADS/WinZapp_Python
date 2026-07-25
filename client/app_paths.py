@@ -63,23 +63,24 @@ def resource_path(*parts: str) -> str:
     return os.path.join(_get_base_dir(), *parts)
 
 
+def _writable_base_dir() -> str:
+    """Return the directory external writable data/logs live under when frozen."""
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.dirname(sys.executable)
+    if sys.argv and sys.argv[0]:
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.dirname(sys.executable)
+
+
 def data_path(*parts: str) -> str:
     """Absolute path inside the writable data directory."""
     if _is_frozen():
-        if hasattr(sys, "_MEIPASS"):
-            base = os.path.dirname(sys.executable)
-        else:
-            base = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else os.path.dirname(sys.executable)
-        return os.path.join(base, "data", *parts)
+        return os.path.join(_writable_base_dir(), "data", *parts)
     return os.path.join(os.getcwd(), "data", *parts)
 
 
 def log_path(*parts: str) -> str:
     """Absolute path inside the writable logs directory."""
     if _is_frozen():
-        if hasattr(sys, "_MEIPASS"):
-            base = os.path.dirname(sys.executable)
-        else:
-            base = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else os.path.dirname(sys.executable)
-        return os.path.join(base, "logs", *parts)
+        return os.path.join(_writable_base_dir(), "logs", *parts)
     return os.path.join(os.getcwd(), "logs", *parts)

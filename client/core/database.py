@@ -237,11 +237,6 @@ class DatabaseManager:
                 pass
             self._conn = None
 
-    @property
-    async def is_connected(self) -> bool:
-        """Check whether the database connection is open."""
-        return self._conn is not None
-
     # ── Internal helpers ───────────────────────────────────────────────────
 
     def _encrypt(self, plain: str) -> str:
@@ -387,40 +382,45 @@ class DatabaseManager:
             }
         }
 
+    def _build_chat_values(self, jid: str, data: dict, updated_at: int) -> tuple:
+        """Compute the 10-tuple bound to the chats upsert, shared by every
+        chat-import path (upsert_chat/upsert_chats_batch/import_from_dict)."""
+        remote_jid = data.get("remoteJid", jid)
+        unread = int(data.get("unreadCount", 0) or 0)
+        push_name = data.get("pushName", "") or ""
+        name = data.get("name", "") or ""
+        archived = 1 if (data.get("archived") or data.get("archive")) else 0
+        chat_type = data.get("type", "chat") or "chat"
+        last_msg = data.get("lastMessage")
+        last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
+
+        t = 0
+        if "t" in data:
+            try:
+                t = int(data.get("t") or 0)
+            except (TypeError, ValueError):
+                t = 0
+        if not t and isinstance(last_msg, dict):
+            try:
+                t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
+            except (TypeError, ValueError):
+                t = 0
+        if t > 1_000_000_000_000:
+            t //= 1000
+
+        return (jid, remote_jid, unread, push_name, name,
+                archived, chat_type, last_msg_enc, t, updated_at)
+
     async def upsert_chat(self, jid: str, data: dict) -> None:
         """Insert or replace a chat record from a chat dict."""
         async with self._write_lock:
             conn = await self._ensure_conn()
-            remote_jid = data.get("remoteJid", jid)
-            unread = int(data.get("unreadCount", 0))
-            push_name = data.get("pushName", "")
-            name = data.get("name", "")
-            archived = 1 if (data.get("archived") or data.get("archive")) else 0
-            chat_type = data.get("type", "chat")
-            last_msg = data.get("lastMessage")
-            last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
-
-            t = 0
-            if "t" in data:
-                try:
-                    t = int(data.get("t") or 0)
-                except (TypeError, ValueError):
-                    t = 0
-            if not t and isinstance(last_msg, dict):
-                try:
-                    t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
-                except (TypeError, ValueError):
-                    t = 0
-            if t > 1_000_000_000_000:
-                t //= 1000
-
             await conn.execute(
                 """INSERT OR REPLACE INTO chats
                    (jid, remote_jid, unread_count, push_name, name,
                     archived, chat_type, last_message_json, t, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (jid, remote_jid, unread, push_name, name,
-                 archived, chat_type, last_msg_enc, t, _now_ts()),
+                self._build_chat_values(jid, data, _now_ts()),
             )
             await conn.commit()
 
@@ -431,36 +431,12 @@ class DatabaseManager:
             try:
                 await conn.execute("BEGIN")
                 for jid, data in chats.items():
-                    remote_jid = data.get("remoteJid", jid)
-                    unread = int(data.get("unreadCount", 0))
-                    push_name = data.get("pushName", "")
-                    name = data.get("name", "")
-                    archived = 1 if (data.get("archived") or data.get("archive")) else 0
-                    chat_type = data.get("type", "chat")
-                    last_msg = data.get("lastMessage")
-                    last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
-
-                    t = 0
-                    if "t" in data:
-                        try:
-                            t = int(data.get("t") or 0)
-                        except (TypeError, ValueError):
-                            t = 0
-                    if not t and isinstance(last_msg, dict):
-                        try:
-                            t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
-                        except (TypeError, ValueError):
-                            t = 0
-                    if t > 1_000_000_000_000:
-                        t //= 1000
-
                     await conn.execute(
                         """INSERT OR REPLACE INTO chats
                            (jid, remote_jid, unread_count, push_name, name,
                             archived, chat_type, last_message_json, t, updated_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (jid, remote_jid, unread, push_name, name,
-                         archived, chat_type, last_msg_enc, t, _now_ts()),
+                        self._build_chat_values(jid, data, _now_ts()),
                     )
                 await conn.commit()
             except Exception:
@@ -627,17 +603,31 @@ class DatabaseManager:
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
 
-    async def insert_message(self, remote_jid: str, msg: dict) -> None:
-        """Insert a single message record."""
+    def _build_message_values(self, remote_jid: str, msg: dict) -> tuple | None:
+        """Compute the 8-tuple bound to the messages upsert, shared by every
+        message-import path (insert_message/insert_messages_batch/
+        import_from_dict). Returns None for an id-less message — an empty
+        message_id is not "no ID yet", it IS a value, and the
+        (message_id, remote_jid) primary key means every id-less message in
+        the same chat would silently overwrite the previous one via
+        INSERT OR REPLACE. That has already happened in the wild with
+        malformed/edge-case payloads; callers must skip instead of quietly
+        losing messages against each other."""
         key = msg.get("key", {})
         mid = _msg_id(key)
         if not mid:
-            # An empty message_id is not "no ID yet" — it IS a value, and the
-            # (message_id, remote_jid) primary key means every id-less message
-            # in the same chat would silently overwrite the previous one via
-            # INSERT OR REPLACE. That has already happened in the wild with
-            # malformed/edge-case payloads; skip instead of quietly losing
-            # messages against each other.
+            return None
+        from_me = 1 if key.get("fromMe") else 0
+        participant = key.get("participant", "") or ""
+        mtype = _message_type(msg)
+        ts = _timestamp(msg)
+        msg_enc = self._encrypt_json(msg)
+        return (mid, remote_jid, from_me, participant, mtype, msg_enc, ts, 0)
+
+    async def insert_message(self, remote_jid: str, msg: dict) -> None:
+        """Insert a single message record."""
+        values = self._build_message_values(remote_jid, msg)
+        if values is None:
             log.warning(
                 "[insert_message] dropping message with empty key.id for %s "
                 "(would collide with any other id-less message in this chat)",
@@ -646,19 +636,12 @@ class DatabaseManager:
             return
         async with self._write_lock:
             conn = await self._ensure_conn()
-            from_me = 1 if key.get("fromMe") else 0
-            participant = key.get("participant", "")
-            mtype = _message_type(msg)
-            ts = _timestamp(msg)
-            msg_enc = self._encrypt_json(msg)
-
             await conn.execute(
                 """INSERT OR REPLACE INTO messages
                    (message_id, remote_jid, from_me, participant,
                     message_type, message_json, timestamp, status)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (mid, remote_jid, from_me, participant,
-                 mtype, msg_enc, ts, 0),
+                values,
             )
             await conn.commit()
 
@@ -674,26 +657,20 @@ class DatabaseManager:
             try:
                 await conn.execute("BEGIN")
                 for msg in msgs:
-                    key = msg.get("key", {})
-                    mid = _msg_id(key)
-                    if not mid:
-                        # See insert_message() — an empty id-less message would
-                        # silently overwrite another id-less message in the
-                        # same batch/chat instead of being rejected.
+                    values = self._build_message_values(remote_jid, msg)
+                    if values is None:
+                        # See _build_message_values() — an empty id-less
+                        # message would silently overwrite another id-less
+                        # message in the same batch/chat instead of being
+                        # rejected.
                         skipped += 1
                         continue
-                    from_me = 1 if key.get("fromMe") else 0
-                    participant = key.get("participant", "")
-                    mtype = _message_type(msg)
-                    ts = _timestamp(msg)
-                    msg_enc = self._encrypt_json(msg)
                     await conn.execute(
                         """INSERT OR REPLACE INTO messages
                            (message_id, remote_jid, from_me, participant,
                             message_type, message_json, timestamp, status)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (mid, remote_jid, from_me, participant,
-                         mtype, msg_enc, ts, 0),
+                        values,
                     )
                 await conn.commit()
             except Exception:
@@ -988,36 +965,13 @@ class DatabaseManager:
                 # ── Chats + messages ─────────────────────────────────────
                 now = _now_ts()
                 for jid, chat in data.get("chats", {}).items():
-                    remote_jid  = chat.get("remoteJid", jid)
-                    unread      = int(chat.get("unreadCount", 0) or 0)
-                    push_name   = chat.get("pushName", "") or ""
-                    name        = chat.get("name", "") or ""
-                    archived    = 1 if (chat.get("archived") or chat.get("archive")) else 0
-                    chat_type   = chat.get("type", "chat") or "chat"
-                    last_msg    = chat.get("lastMessage")
-                    last_msg_enc = self._encrypt_json(last_msg) if last_msg else ""
-
-                    t = 0
-                    if "t" in chat:
-                        try:
-                            t = int(chat.get("t") or 0)
-                        except (TypeError, ValueError):
-                            t = 0
-                    if not t and isinstance(last_msg, dict):
-                        try:
-                            t = int(last_msg.get("timestamp") or last_msg.get("messageTimestamp") or last_msg.get("t") or 0)
-                        except (TypeError, ValueError):
-                            t = 0
-                    if t > 1_000_000_000_000:
-                        t //= 1000
-
+                    remote_jid = chat.get("remoteJid", jid)
                     await conn.execute(
                         """INSERT OR REPLACE INTO chats
                            (jid, remote_jid, unread_count, push_name, name,
                             archived, chat_type, last_message_json, t, updated_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (jid, remote_jid, unread, push_name, name,
-                         archived, chat_type, last_msg_enc, t, now),
+                        self._build_chat_values(jid, chat, now),
                     )
                     total += 1
 
@@ -1027,24 +981,18 @@ class DatabaseManager:
                             .get("records", [])
                     )
                     for msg in records:
-                        key   = msg.get("key", {})
-                        mid   = _msg_id(key)
-                        if not mid:
-                            # See insert_message(): an id-less message would
-                            # silently overwrite any other id-less message in
-                            # the same chat under INSERT OR REPLACE.
+                        values = self._build_message_values(remote_jid, msg)
+                        if values is None:
+                            # See _build_message_values(): an id-less message
+                            # would silently overwrite any other id-less
+                            # message in the same chat under INSERT OR REPLACE.
                             continue
-                        fm    = 1 if key.get("fromMe") else 0
-                        part  = key.get("participant", "") or ""
-                        mtype = _message_type(msg)
-                        ts    = _timestamp(msg)
-                        menc  = self._encrypt_json(msg)
                         await conn.execute(
                             """INSERT OR REPLACE INTO messages
                                (message_id, remote_jid, from_me, participant,
                                 message_type, message_json, timestamp, status)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (mid, remote_jid, fm, part, mtype, menc, ts, 0),
+                            values,
                         )
                         total += 1
 

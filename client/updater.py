@@ -28,6 +28,21 @@ from config import GITHUB_API_LATEST_RELEASE
 from version import __version__
 
 
+def _safe_extract_zip(zf: zipfile.ZipFile, dest_dir: str) -> None:
+    """Extract *zf* into *dest_dir*, rejecting any member whose path would
+    land outside dest_dir (zip-slip: a member name like "../../evil.exe" or
+    an absolute path). zipfile.ZipFile.extractall() sanitizes some of this on
+    modern Python but not all of it, and this ZIP is untrusted content
+    downloaded over the network (a GitHub release asset, but still an
+    external input) rather than something WinZapp generated itself."""
+    dest_dir = os.path.abspath(dest_dir)
+    for member in zf.namelist():
+        target = os.path.abspath(os.path.join(dest_dir, member))
+        if not (target == dest_dir or target.startswith(dest_dir + os.sep)):
+            raise ValueError(f"Refusing to extract unsafe zip member path: {member!r}")
+    zf.extractall(dest_dir)
+
+
 # ── Version helpers ───────────────────────────────────────────────────────────
 
 _PRE_ORDER = {"dev": 0, "alpha": 1, "beta": 2, "": 3}
@@ -124,7 +139,7 @@ def _needs_admin() -> bool:
         return True
 
 
-def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300):
+def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300) -> bool:
     """
     Write a batch script that:
       1. Waits for PID to exit.
@@ -132,6 +147,12 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
       3. Copies all extracted files to install_dir.
       4. Restarts the client executable.
     Then launches it (elevated if the directory needs admin).
+
+    Returns True if the script was actually launched. Callers must check
+    this — previously it was ignored, so a declined UAC prompt (ShellExecuteW
+    returns an error code <= 32, e.g. ERROR_CANCELLED when the user clicks
+    "No") still reported the update as successful and closed the app, even
+    though the batch script never ran and nothing was actually installed.
     """
     source_dir = extracted_dir
     winzapp_sub = os.path.join(extracted_dir, "WinZapp")
@@ -155,9 +176,18 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         "timeout /t 2 /nobreak >NUL\n"
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
-        f'taskkill /F /FI "WINDOWTITLE eq WinZapp*" /IM node.exe >NUL 2>&1\n'
         "timeout /t 1 /nobreak >NUL\n"
+        # xcopy's exit code was previously never checked, so a failed copy
+        # (locked file, disk full, permissions) silently relaunched whatever
+        # was already in install_dir — the user saw the app come back and
+        # assumed the update worked. errorlevel 4+ means xcopy itself failed
+        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
+        # leave a marker file WinZapp checks on next startup so the user is
+        # told instead of silently running a stale/partial install.
         f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
+        "if errorlevel 4 (\n"
+        f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
+        ")\n"
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
     )
@@ -169,17 +199,33 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     if sys.platform == "win32":
         needs_admin = _needs_admin()
         if needs_admin:
-            ctypes.windll.shell32.ShellExecuteW(
+            # ShellExecuteW returns an HINSTANCE-shaped value that is > 32 on
+            # success and an SE_ERR_* code <= 32 on failure — notably
+            # ERROR_CANCELLED (1223) when the user clicks "No" on the UAC
+            # consent prompt. That return value used to be discarded, so a
+            # declined prompt still left the caller believing the update had
+            # been launched (self._install_ok = True), when in fact nothing
+            # ran and the app was about to close having done nothing.
+            result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
             )
+            if result <= 32:
+                logging.warning(
+                    "Auto-updater: ShellExecuteW('runas', ...) failed or was "
+                    "declined by the user (result=%s); batch installer was "
+                    "not launched.", result,
+                )
+                return False
         else:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACH_PROCESS", 0)
             subprocess.Popen(
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,
             )
+        return True
     else:
         logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
+        return False
 
 
 # ── WhatsNewDialog ────────────────────────────────────────────────────────────
@@ -306,7 +352,7 @@ class UpdateProgressDialog(wx.Dialog):
             extract_dir = tempfile.mkdtemp(prefix="winzapp_ext_")
             logging.info("Auto-updater: Extracting update to %s", extract_dir)
             with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(extract_dir)
+                _safe_extract_zip(zf, extract_dir)
             os.remove(zip_path)
 
             # If the ZIP placed all files inside a single top-level folder,
@@ -340,7 +386,11 @@ class UpdateProgressDialog(wx.Dialog):
             pid         = os.getpid()
 
             logging.info("Auto-updater: Launching batch installer from %s (PID %d)", install_dir, pid)
-            _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "wpp_port", 6300))
+            launched = _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "wpp_port", 6300))
+            if not launched:
+                self._error_msg = self._main_window.i18n.t("update_uac_declined")
+                wx.CallAfter(self.EndModal, wx.ID_ABORT)
+                return
             self._install_ok = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
 

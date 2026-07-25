@@ -13,58 +13,6 @@ from sound_lib.main import bass_call
 import sound_lib.main as _bass_main
 
 
-def _load_bass_plugin_explicit(dll_name: str) -> bool:
-    """Load a BASS plugin DLL using ctypes BASS_PluginLoad with an absolute path.
-
-    pybassopus/pybass_aac may import without error even when their internal
-    libloader search fails silently — so we always try the explicit load too.
-    """
-    candidates_dirs = []
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        candidates_dirs += [exe_dir, os.path.join(exe_dir, 'lib')]
-    if hasattr(sys, '_MEIPASS'):
-        candidates_dirs += [sys._MEIPASS, os.path.join(sys._MEIPASS, 'lib')]
-    # dev mode: source tree lib/ next to this file's parent package
-    _src_lib = os.path.join(os.path.dirname(__file__), '..', 'lib')
-    candidates_dirs.append(os.path.normpath(_src_lib))
-
-    for d in candidates_dirs:
-        path = os.path.join(d, dll_name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            # Load via ctypes directly — works even if BASS_PluginLoad wrapper
-            # in sound_lib has a different calling convention expectation.
-            bass_dll = ctypes.WinDLL("bass.dll")
-            BASS_PluginLoad = bass_dll.BASS_PluginLoad
-            BASS_PluginLoad.restype  = ctypes.c_ulong
-            BASS_PluginLoad.argtypes = [ctypes.c_char_p, ctypes.c_ulong]
-            handle = BASS_PluginLoad(path.encode('utf-8'), 0)
-            if handle:
-                logging.info(
-                    "[sound_system] BASS_PluginLoad OK: %s from %s (handle=%s)",
-                    dll_name, path, handle
-                )
-                return True
-            else:
-                # GetLastError via BASS_ErrorGetCode
-                try:
-                    err = bass_dll.BASS_ErrorGetCode()
-                except Exception:
-                    err = "?"
-                logging.warning(
-                    "[sound_system] BASS_PluginLoad returned 0 for %s at %s (BASS error=%s)",
-                    dll_name, path, err
-                )
-        except Exception as _ex:
-            logging.warning(
-                "[sound_system] explicit BASS_PluginLoad failed for %s at %s: %s",
-                dll_name, path, _ex
-            )
-    return False
-
-
 # ── Import plugin modules (early, so their symbols are available) ─────────────
 try:
     import sound_lib.external.pybassopus as _pybassopus

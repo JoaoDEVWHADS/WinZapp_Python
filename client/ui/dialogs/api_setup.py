@@ -276,6 +276,15 @@ class ApiSetupDialog(wx.Dialog):
                         continue
 
                     dest = os.path.join(api_dir, rel_os)
+                    # Guard against a malicious/corrupted zip entry (e.g.
+                    # "../../evil.dll") writing outside api_dir — GitHub's
+                    # own archive generator shouldn't produce these, but this
+                    # is still external network content, not something
+                    # WinZapp generated itself.
+                    dest_abs = os.path.abspath(dest)
+                    api_dir_abs = os.path.abspath(api_dir)
+                    if dest_abs != api_dir_abs and not dest_abs.startswith(api_dir_abs + os.sep):
+                        raise ValueError(f"Unsafe zip member path: {member.filename!r}")
 
                     if member.is_dir() or rel.endswith("/"):
                         os.makedirs(dest, exist_ok=True)

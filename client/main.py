@@ -471,6 +471,16 @@ class MainWindow(wx.Frame):
         #Set basic variables
         self.chats = {}
         self.chat_names = []
+        # Incremented every time a chat-list rebuild is kicked off (set_chats
+        # / _do_scheduled_set_chats). Each background computation captures its
+        # own generation number and _apply_chat_lists_if_current() discards
+        # the result if a newer rebuild has since started — wx.CallAfter only
+        # preserves the order calls were *registered* in, not the order the
+        # background threads that produced their arguments actually finished,
+        # so without this a slower-finishing older rebuild could overwrite
+        # the UI with stale chat order/unread badges after a newer one had
+        # already applied fresher data.
+        self._chat_list_generation = 0
         self.contacts = {}
         # Presence cache: maps JID → {lastKnownPresence, lastSeen}. Must be
         # initialized here (not lazily in _build_lid_to_phone_cache, which only
@@ -1754,7 +1764,6 @@ class MainWindow(wx.Frame):
             self._store_status_update(msg)
             return
         if remote_jid.endswith("@newsletter"):
-            return
             return
 
         # Reaction messages only update the live display of an existing message;
@@ -3503,8 +3512,22 @@ class MainWindow(wx.Frame):
 
     def save_settings(self):
         try:
-            with open(data_path("settings.json"), "w") as f:
+            target = data_path("settings.json")
+            # Write to a temp file in the same directory, then atomically
+            # replace the real file. Writing settings.json in place used to
+            # truncate it immediately on open("w") — a crash, forced
+            # shutdown, or antivirus lock mid-write (this fires often, via
+            # the debounced timer below, e.g. on every presence-update burst)
+            # left a truncated/corrupt file. load_settings() has no recovery
+            # for that: it shows an error and calls sys.exit(), so a
+            # corrupted settings.json bricked the app until the user found
+            # and deleted/fixed the file by hand. os.replace() is atomic on
+            # both Windows and POSIX — the old file is never observably
+            # partial, even if the process dies mid-write.
+            tmp = f"{target}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=4)
+            os.replace(tmp, target)
         except Exception:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
@@ -4185,9 +4208,6 @@ class MainWindow(wx.Frame):
         # synced (by then the API has received all contacts from WhatsApp).
         self.get_remote_contacts()
 
-        # ── Start background resolving of unknown LIDs ──────────────────
-        self.start_background_lid_resolution()
-
         # Show the contact list immediately from get_remote_chats() metadata
         # (name, pushName, unreadCount) so the user is not staring at a blank
         # screen while the per-chat message sync runs below.
@@ -4443,10 +4463,6 @@ class MainWindow(wx.Frame):
             self._unresolvable_lids.clear()
         else:
             self._unresolvable_lids = set()
-        if hasattr(self, "_unresolvable_names"):
-            self._unresolvable_names.clear()
-        else:
-            self._unresolvable_names = set()
         if hasattr(self, "_unresolvable_names"):
             self._unresolvable_names.clear()
         else:
@@ -5577,11 +5593,21 @@ class MainWindow(wx.Frame):
                 contact["type"] = "contact"
             logging.info(f"[get_remote_contacts] Downloaded {len(response_data)} contacts from WPPConnect API.")
             active_jids = set(self.chats.keys())
+            # NOTE: this used to also require c.get("type") == "contact" — but
+            # every entry was unconditionally stamped type="contact" a few
+            # lines above, *before* this filter ever ran, so that clause could
+            # never be false and never actually excluded anything. Removed
+            # rather than "fixed" with a guessed replacement value: the
+            # WPPConnect all-contacts response's real (pre-stamp) type field
+            # isn't documented anywhere in this codebase, and filtering on a
+            # wrong guess risks silently dropping legitimate contacts, which
+            # is worse than the current (redundant but harmless) no-op. The
+            # three checks below already do the real filtering work.
             filtered_contacts = [
-                c for c in response_data 
-                if isinstance(c, dict) and c.get("type", "") == "contact" and (
-                    c.get("isMyContact") is True 
-                    or c.get("isMe") is True 
+                c for c in response_data
+                if isinstance(c, dict) and (
+                    c.get("isMyContact") is True
+                    or c.get("isMe") is True
                     or self._normalize_jid(c.get("remoteJid") or c.get("id", "")) in active_jids
                 )
             ]
@@ -5681,6 +5707,39 @@ class MainWindow(wx.Frame):
                 return b[:4] + b[5:] == a
         return False
 
+    def _get_contact_tolerant(self, jid: str) -> "dict | None":
+        """Look up ``self.contacts`` by *jid*, tolerating two things a plain
+        ``dict.get()`` misses: a Baileys per-device suffix (``:N``) on the
+        local part, and the Brazilian mobile 8/9-digit interchangeability
+        (``5511999999999`` vs ``551199999999``) — a contact can legitimately
+        be saved under either digit count depending on when/how it was added.
+        Was reimplemented as an identical local closure in three different
+        methods; consolidated here so a future fix to this logic doesn't need
+        to be repeated three times (and re-drift, as two of the three already
+        had — one was missing the device-suffix strip the others had).
+        """
+        if not jid:
+            return None
+        if ":" in jid:
+            parts = jid.split("@")
+            if len(parts) == 2:
+                jid = parts[0].split(":")[0] + "@" + parts[1]
+        c = self.contacts.get(jid)
+        if c:
+            return c
+        if jid.endswith("@s.whatsapp.net"):
+            phone = jid.split("@")[0]
+            if phone.startswith("55"):
+                if len(phone) == 13 and phone[4] == "9":
+                    # e.g., 5511999999999 -> try 551199999999
+                    alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
+                    return self.contacts.get(alt)
+                elif len(phone) == 12:
+                    # e.g., 551199999999 -> try 5511999999999
+                    alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
+                    return self.contacts.get(alt)
+        return None
+
     def self_reference_label(self) -> str:
         """Return the word used for the user's own messages/replies in the
         messages list ("Eu"/"Você"/a custom word), per the "Como se referir
@@ -5778,17 +5837,7 @@ class MainWindow(wx.Frame):
                 continue
                 
             def get_valid_name(val):
-                if not val or not isinstance(val, str):
-                    return ""
-                val = val.strip()
-                if not val or val.isdigit() or is_phone_like(val):
-                    return ""
-                if looks_like_binary_blob(val):
-                    return ""
-                val_lower = val.lower()
-                if "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido"):
-                    return ""
-                return val
+                return "" if self._is_bad_contact_name(val) else val.strip()
 
             if jid.endswith("@lid"):
                 phone_jid = getattr(self, "_lid_to_phone", {}).get(jid) or self._find_alt_jid_from_messages(chat)
@@ -5822,10 +5871,8 @@ class MainWindow(wx.Frame):
                     name = msg_push or get_valid_name(chat.get("name", ""))
             
             # Treat placeholders as empty to trigger phone number fallback
-            if name:
-                name_lower = name.lower().strip()
-                if "sem nome" in name_lower or "unnamed" in name_lower or name_lower in ("no name", "unknown", "desconhecido") or name == self.i18n.t("unknown_contact"):
-                    name = ""
+            if name and (self._is_bad_contact_name(name) or name == self.i18n.t("unknown_contact")):
+                name = ""
 
             if not name or not name.strip():
                 if jid.endswith("@g.us"):
@@ -5975,16 +6022,32 @@ class MainWindow(wx.Frame):
         # disrupts NVDA focus (see tray_manager.py update_tooltip docstring).
         self._update_title()
 
+    def _apply_chat_lists_if_current(self, generation: int, *args):
+        """Apply a chat-list rebuild only if no newer one has been kicked off
+        since. See ``_chat_list_generation`` for why this matters — without
+        it, two rebuilds racing (e.g. a message arriving right as sync
+        finishes) could apply in the wrong order and leave the UI showing the
+        older/stale one."""
+        if generation != self._chat_list_generation:
+            logging.debug(
+                "[chat_lists] discarding stale rebuild (generation=%d, current=%d)",
+                generation, self._chat_list_generation,
+            )
+            return
+        self._apply_chat_lists(*args)
+
     def set_chats(self):
         # NOTE: _build_lid_to_phone_cache() is intentionally NOT called here.
         # It scans every message in every chat (O(chats × messages)) and is
         # too expensive to run on the wx main thread. The cache is built once
         # at startup (in init_chats) and then maintained incrementally by
         # _extract_lid_mapping() on each new message.
+        self._chat_list_generation += 1
+        generation = self._chat_list_generation
         def _bg():
             try:
                 result = self._compute_chat_lists()
-                wx.CallAfter(self._apply_chat_lists, *result)
+                wx.CallAfter(self._apply_chat_lists_if_current, generation, *result)
             except Exception:
                 logging.exception("[set_chats] Unhandled error during bg set_chats")
         threading.Thread(target=_bg, daemon=True).start()
@@ -6000,6 +6063,8 @@ class MainWindow(wx.Frame):
     def _do_scheduled_set_chats(self):
         """Run heavy computation in background; apply UI changes on main thread."""
         self._set_chats_pending = False
+        self._chat_list_generation += 1
+        generation = self._chat_list_generation
         def _bg():
             try:
                 # _build_lid_to_phone_cache() is intentionally NOT called here.
@@ -6008,7 +6073,7 @@ class MainWindow(wx.Frame):
                 # maintained incrementally by _extract_lid_mapping() on each new
                 # message, and rebuilt in full only at startup (set_chats calls).
                 result = self._compute_chat_lists()
-                wx.CallAfter(self._apply_chat_lists, *result)
+                wx.CallAfter(self._apply_chat_lists_if_current, generation, *result)
             except Exception:
                 logging.exception("[_do_scheduled_set_chats] Unhandled error during scheduled set_chats")
         threading.Thread(target=_bg, daemon=True).start()
@@ -6084,6 +6149,13 @@ class MainWindow(wx.Frame):
                 participant = ""
 
         updated = False
+        # Pairs actually changed by *this* call — the only ones that need a
+        # DB write below. Previously the save step looped over the entire
+        # _lid_to_phone cache and wrote every mapping back to SQLite on every
+        # single new mapping learned, so an account with hundreds of resolved
+        # LIDs did hundreds of synchronous writes on the wx main thread (this
+        # runs off on_new_message, via wx.CallAfter) for one new pair.
+        updated_pairs = []
         # Initialize dictionary if not present
         if not hasattr(self, "_lid_to_phone"):
             self._lid_to_phone = {}
@@ -6095,14 +6167,16 @@ class MainWindow(wx.Frame):
                 self._lid_to_phone[remote] = alt
                 self._phone_to_lid[alt] = remote
                 updated = True
+                updated_pairs.append((remote, alt))
                 logging.info(f"[LID Mapping] Extracted mapping from message key: {remote} <-> {alt}")
         elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
             if self._lid_to_phone.get(alt) != remote:
                 self._lid_to_phone[alt] = remote
                 self._phone_to_lid[remote] = alt
                 updated = True
+                updated_pairs.append((alt, remote))
                 logging.info(f"[LID Mapping] Extracted mapping from message key (alt): {alt} <-> {remote}")
-                
+
         # Direct mapping between remote (LID) and participant (phone) for 1:1 chats
         # ONLY if the message is NOT fromMe (if fromMe is True, participant is the user, and remote is the contact!)
         if not key.get("fromMe", False):
@@ -6111,12 +6185,14 @@ class MainWindow(wx.Frame):
                     self._lid_to_phone[remote] = participant
                     self._phone_to_lid[participant] = remote
                     updated = True
+                    updated_pairs.append((remote, participant))
                     logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key: {remote} <-> {participant}")
             elif remote.endswith("@s.whatsapp.net") and participant.endswith("@lid"):
                 if self._lid_to_phone.get(participant) != remote:
                     self._lid_to_phone[participant] = remote
                     self._phone_to_lid[remote] = participant
                     updated = True
+                    updated_pairs.append((participant, remote))
                     logging.info(f"[LID Mapping] Extracted mapping from 1:1 chat key (reversed): {participant} <-> {remote}")
 
         if updated:
@@ -6130,9 +6206,9 @@ class MainWindow(wx.Frame):
                         self.contacts[lid]["remoteJid"] = lid
                         contacts_to_update[lid] = self.contacts[lid]
 
-            # Save mapping and updated contacts incrementally
+            # Save only the mapping(s) this call actually changed.
             try:
-                for lid, phone in list(self._lid_to_phone.items()):
+                for lid, phone in updated_pairs:
                     self.db.set_lid_mapping(lid, phone)
                 if contacts_to_update:
                     self.db.upsert_contacts_batch(contacts_to_update)
@@ -6423,51 +6499,21 @@ class MainWindow(wx.Frame):
 
         def _name_from_contact(c):
             # Prefer the address-book name ('name') over the WhatsApp profile
-            # name ('pushName').  Both fields may be absent or a bare phone
-            # number — reject those in either case.
+            # name ('pushName'). Both fields may be absent, a bare phone
+            # number, binary garbage, or a placeholder like "Contato sem
+            # nome" — reject all of those in either case.
             for field in ("name", "pushName"):
                 val = c.get(field)
-                if val and isinstance(val, str):
-                    val = val.strip()
-                    if val and not val.isdigit() and not is_phone_like(val) and not looks_like_binary_blob(val):
-                        # Reject placeholder names (e.g. "Contato sem nome")
-                        val_lower = val.lower()
-                        if "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido"):
-                            logging.info(f"[LID Mapping] Rejecting placeholder name '{val}' for contact JID '{c.get('id') or c.get('remoteJid')}'")
-                            continue
-                        return val
+                if val and isinstance(val, str) and not self._is_bad_contact_name(val):
+                    return val.strip()
             return None
 
         ppm = getattr(self, "_presence_pushname_map", {})
 
-        def _get_contact_tolerant(jid):
-            if not jid:
-                return None
-            if ":" in jid:
-                parts = jid.split("@")
-                if len(parts) == 2:
-                    jid = parts[0].split(":")[0] + "@" + parts[1]
-            c = self.contacts.get(jid)
-            if c:
-                return c
-            # Brazilian number 9-digit tolerance fallback
-            if jid.endswith("@s.whatsapp.net"):
-                phone = jid.split("@")[0]
-                if phone.startswith("55"):
-                    if len(phone) == 13 and phone[4] == "9":
-                        # e.g., 5511999999999 -> try 551199999999
-                        alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
-                        return self.contacts.get(alt)
-                    elif len(phone) == 12:
-                        # e.g., 551199999999 -> try 5511999999999
-                        alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
-                        return self.contacts.get(alt)
-            return None
-
         def _try(jid: str) -> str:
             if not jid:
                 return ""
-            c = _get_contact_tolerant(jid)
+            c = self._get_contact_tolerant(jid)
             if c:
                 return _name_from_contact(c) or ""
             return ""
@@ -6514,14 +6560,8 @@ class MainWindow(wx.Frame):
 
         # Fall back to the chat's own 'name' field
         chat_name = chat.get("name", "")
-        if chat_name and isinstance(chat_name, str):
-            chat_name = chat_name.strip()
-            if chat_name and not chat_name.isdigit() and not is_phone_like(chat_name):
-                chat_name_lower = chat_name.lower()
-                if "sem nome" in chat_name_lower or "unnamed" in chat_name_lower or chat_name_lower in ("no name", "unknown", "desconhecido"):
-                    pass
-                else:
-                    return chat_name
+        if chat_name and isinstance(chat_name, str) and not self._is_bad_contact_name(chat_name):
+            return chat_name.strip()
 
         return None
 
@@ -6629,14 +6669,6 @@ class MainWindow(wx.Frame):
 
         # Persist the set of expired IDs accumulated during this sync run.
         self._save_media_failed_ids()
-
-    def sync_chat_media(self, chat):
-        records = chat.get("messages", {}).get("messages", {}).get("records", [])
-        for message in records:
-            try:
-                self.sync_if_media(message)
-            except Exception:
-                pass
 
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
@@ -7124,23 +7156,9 @@ class MainWindow(wx.Frame):
 
 
 
-    def _bg_resolve_lid_for_send(self, jid: str):
-        """Background helper: resolve a single @lid and log the result."""
-        try:
-            self.resolve_lid_jids_via_api([jid])
-        except Exception as exc:
-            logging.warning("[_resolve_jid_for_send] background resolve failed for %s: %s", jid, exc)
-        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
-        if phone_jid:
-            logging.info("[_resolve_jid_for_send] Background resolved %s → %s", jid, phone_jid)
-        else:
-            if hasattr(self, "_unresolvable_lids"):
-                self._unresolvable_lids.add(jid)
-            logging.warning("[_resolve_jid_for_send] Background resolve failed for %s — marked unresolvable", jid)
-
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
-        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
         remote_jid = self._resolve_jid_for_send(remote_jid)
 
         headers = {
@@ -7367,7 +7385,7 @@ class MainWindow(wx.Frame):
                    disk read and OGG encoding entirely — just base64 + POST.
                    On retry (ogg_bytes=None) falls back to reading wav_path.
         """
-        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
         import time as _time
         _tsend0 = _time.perf_counter()
         remote_jid = self._resolve_jid_for_send(remote_jid)
@@ -7736,23 +7754,6 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback)."""
-        def _get_contact_tolerant(jid):
-            if not jid:
-                return None
-            c = self.contacts.get(jid)
-            if c:
-                return c
-            if jid.endswith("@s.whatsapp.net"):
-                phone = jid.split("@")[0]
-                if phone.startswith("55"):
-                    if len(phone) == 13 and phone[4] == "9":
-                        alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
-                        return self.contacts.get(alt)
-                    elif len(phone) == 12:
-                        alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
-                        return self.contacts.get(alt)
-            return None
-
         ppm = getattr(self, "_presence_pushname_map", {})
 
         # Build candidate list covering all three JID formats for the same person.
@@ -7772,7 +7773,7 @@ class MainWindow(wx.Frame):
                 candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
 
         for cjid in candidates:
-            contact = _get_contact_tolerant(cjid)
+            contact = self._get_contact_tolerant(cjid)
             if contact:
                 name = (contact.get("name") or contact.get("pushName") or "").strip()
                 if name and not name.isdigit():
@@ -8306,12 +8307,15 @@ class MainWindow(wx.Frame):
             logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
             return []
 
-        # Use remote_jid resolved to @lid (if available) for the URL parameter.
-        # WPPConnect has a special evaluate-bypass in /get-messages/:phone for @lid JIDs.
+        # Resolved phone/@c.us form of the chat JID — used both as the URL
+        # parameter (WPPConnect has a special evaluate-bypass in
+        # /get-messages/:phone for @lid JIDs) and as the chat segment of the
+        # serialized message ID below, since the message ID key in
+        # WPPConnect's browser store also matches the chat JID (LID if
+        # available). These used to be computed twice under two different
+        # names for no reason.
         phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
-
-        # The message ID key in WPPConnect's browser store also matches the chat JID (LID if available).
-        resolved_phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
+        resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "")
@@ -8873,9 +8877,7 @@ class MainWindow(wx.Frame):
                             logging.warning("[LID Resolution] Session is disconnected/not active. Aborting loop.")
                             transient_error = True
                             break
-                # Throttle query loop so Puppeteer isn't overwhelmed and can prioritize message sending
                 consecutive_errors = 0
-                time.sleep(0.5)
             except requests.exceptions.RequestException as e:
                 transient_error     = True
                 consecutive_errors += 1
@@ -8918,6 +8920,13 @@ class MainWindow(wx.Frame):
                                     self.db.add_unresolvable_name(lid_jid)
                                 except Exception as exc:
                                     logging.warning("[LID Resolution] add_unresolvable_name failed: %s", exc)
+                # Throttle the query loop exactly once per iteration (success
+                # or failure) so Puppeteer isn't overwhelmed and can prioritize
+                # message sending. This used to also sleep on the try block's
+                # success path above, silently doubling the 0.5s throttle to
+                # 1s and, over a large batch of unresolved LIDs, doubling how
+                # long a fresh account spends with "Participante sem nome"
+                # showing in groups.
                 time.sleep(0.5)
 
         if updated_contacts:
@@ -9082,9 +9091,6 @@ class MainWindow(wx.Frame):
                     logging.error("[subscribe_presence] Error subscribing to %s: %s", phone, e)
         threading.Thread(target=_api, daemon=True).start()
 
-    def start_background_lid_resolution(self):
-        pass
-
     def get_group_info(self, jid: str) -> dict:
         """Fetch group metadata via GET /api/{session}/group-info/{groupId}"""
         url = (
@@ -9162,8 +9168,19 @@ class MainWindow(wx.Frame):
                     wpp_time, wpp_type = 0, "hours"
                 elif duration_secs == -1:
                     wpp_time, wpp_type = 8766, "hours"  # ~1 year (closest to permanent)
+                elif duration_secs < 3600:
+                    # WPPConnect's sendMute also accepts "minutes" granularity
+                    # (see WAPI.sendMute's timeType switch: hours/minutes/year)
+                    # — using it for sub-hour durations instead of always
+                    # rounding up to a full hour matters if this is ever
+                    # called with a shorter duration than the UI currently
+                    # offers (today's mute presets are all >= 1h, so this
+                    # branch is dormant but correct rather than silently
+                    # wrong).
+                    wpp_time = max(1, duration_secs // 60)
+                    wpp_type = "minutes"
                 else:
-                    wpp_time = max(1, duration_secs // 3600)
+                    wpp_time = duration_secs // 3600
                     wpp_type = "hours"
                 url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mute"
                 payload = {
@@ -9591,7 +9608,7 @@ class MainWindow(wx.Frame):
         (no 33 % overhead, no JSON body-size limit).
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
-        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
         remote_jid = self._resolve_jid_for_send(remote_jid)
         import mimetypes
         try:
@@ -9711,7 +9728,7 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
-        # Always resolve phone JID to @lid JID if available so WPPConnect finds the open chat.
+        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
         remote_jid = self._resolve_jid_for_send(remote_jid)
         is_group = remote_jid.endswith("@g.us")
         if is_group:
@@ -9881,30 +9898,13 @@ class MainWindow(wx.Frame):
         """
         if not jid:
             return ""
-        def _get_contact_tolerant(j):
-            if not j:
-                return None
-            c = self.contacts.get(j)
-            if c:
-                return c
-            if j.endswith("@s.whatsapp.net"):
-                phone = j.split("@")[0]
-                if phone.startswith("55"):
-                    if len(phone) == 13 and phone[4] == "9":
-                        alt = phone[:4] + phone[5:] + "@s.whatsapp.net"
-                        return self.contacts.get(alt)
-                    elif len(phone) == 12:
-                        alt = phone[:4] + "9" + phone[4:] + "@s.whatsapp.net"
-                        return self.contacts.get(alt)
-            return None
-
         ppm = getattr(self, "_presence_pushname_map", {})
         phone_jid = ""
-        contact = _get_contact_tolerant(jid)
+        contact = self._get_contact_tolerant(jid)
         if not contact and jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
             if phone_jid:
-                contact = _get_contact_tolerant(phone_jid)
+                contact = self._get_contact_tolerant(phone_jid)
         if contact:
             name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):

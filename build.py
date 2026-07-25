@@ -127,12 +127,16 @@ API_EXCLUDE_SUB_DIRS = {"tests", "types"}
 # visible/patchable directly from an extracted install, not just at dev time.
 API_CUSTOM_SRC_FILES = [
     "src/config.ts",
+    "src/index.ts",
     "src/util/createSessionUtil.ts",
+    "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/routes/index.ts",
+    "decrypt.js",
 ]
 
 # -- CLI --------------------------------------------------------------------

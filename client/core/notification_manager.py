@@ -278,7 +278,17 @@ def _resolve_participant_name(p_jid: str, push_name: str, main_window) -> str:
             candidates.append(local + "@s.whatsapp.net")
 
         for cjid in candidates:
-            p_chat = main_window.chats.get(cjid) or main_window.contacts.get(cjid) or {"remoteJid": cjid}
+            p_chat = (
+                main_window.chats.get(cjid)
+                or main_window.contacts.get(cjid)
+                # Falls back to the Brazilian 8/9-digit interchangeable form
+                # (e.g. a contact saved as 551199999999 while the message
+                # arrives as 5511999999999) — a plain dict lookup above
+                # misses that and used to show the raw number instead of the
+                # saved contact name for these participants.
+                or main_window._get_contact_tolerant(cjid)
+                or {"remoteJid": cjid}
+            )
             saved = main_window._resolve_contact_name(p_chat)
             if saved:
                 return saved

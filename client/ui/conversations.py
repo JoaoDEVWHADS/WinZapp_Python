@@ -681,9 +681,6 @@ class ConversationsPanel(wx.Panel):
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
         self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
-        # ── Conv-list shortcuts ───────────────────────────────────────────────
-        self.ID_CONV_PIN        = wx.NewIdRef()  # pin / unpin chat        (Ctrl+P)
-        self.ID_CONV_ARCHIVE    = wx.NewIdRef()  # archive / unarchive     (Ctrl+Q)
         # ── Group actions ────────────────────────────────────────────────────
         self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
@@ -1197,10 +1194,24 @@ class ConversationsPanel(wx.Panel):
         # ── Edit mode: update existing message ──────────────────────────────
         if self._editing_message_id is not None:
             msg_id = self._editing_message_id
-            idx    = self._editing_message_index
 
             # Call WPPConnect API to update the message
             self.main_window.edit_message(remote_jid, msg_id, text)
+
+            # Re-locate the message by ID rather than trusting the row index
+            # captured when edit mode was entered: a background sync can call
+            # populate_messages() at any point while the user is typing,
+            # which fully rebuilds _sorted_messages — the old index could by
+            # then point at an unrelated row, silently overwriting a
+            # different message's local content/cache with the edited text
+            # (the server-side edit_message() call above is unaffected, since
+            # it addresses the message by ID, not by index — only the local
+            # display was at risk).
+            idx = next(
+                (i for i, m in enumerate(self._sorted_messages)
+                 if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id),
+                -1,
+            )
 
             # Update local state
             if 0 <= idx < len(self._sorted_messages):
@@ -3058,12 +3069,7 @@ class ConversationsPanel(wx.Panel):
                         logging.info(f"[_load_older_messages] Prepend finished. Added {n_new} new unique messages. Rebuilding UI list.")
                         
                         if n_new > 0:
-                            # Recalculate unread separator index
-                            self._unread_sep_idx = -1
-                            for idx, msg in enumerate(self._sorted_messages):
-                                if self._is_separator(msg):
-                                    self._unread_sep_idx = idx
-                                    break
+                            self._recompute_unread_sep_idx()
                                 
                             self.messages_list.DeleteAllItems()
                             for msg in self._sorted_messages:
@@ -3198,13 +3204,8 @@ class ConversationsPanel(wx.Panel):
                     self._reached_server_start[phone_jid_val] = True
                 return
             
-            # Recalculate unread separator index
-            self._unread_sep_idx = -1
-            for idx, msg in enumerate(self._sorted_messages):
-                if self._is_separator(msg):
-                    self._unread_sep_idx = idx
-                    break
-                
+            self._recompute_unread_sep_idx()
+
             self.messages_list.DeleteAllItems()
             for msg in self._sorted_messages:
                 self.messages_list.Append((self._render_message_line(msg),))
@@ -4538,6 +4539,21 @@ class ConversationsPanel(wx.Panel):
     def _is_separator(self, msg: dict) -> bool:
         """Return True if msg is the unread-messages separator sentinel."""
         return isinstance(msg, dict) and msg.get("_type") == "unread_separator"
+
+    def _recompute_unread_sep_idx(self):
+        """Re-locate the unread separator's row index by scanning
+        ``_sorted_messages`` from scratch, setting ``_unread_sep_idx`` to -1
+        if it isn't present. Call after prepending older history — the
+        separator's row shifts by however many rows were inserted above it,
+        and a plain offset adjustment isn't available in every caller.
+        Duplicated as an identical inline loop in two separate call sites
+        before this existed.
+        """
+        self._unread_sep_idx = -1
+        for idx, msg in enumerate(self._sorted_messages):
+            if self._is_separator(msg):
+                self._unread_sep_idx = idx
+                break
 
     def _render_separator(self, count: int) -> str:
         i18n = self.main_window.i18n
@@ -5991,9 +6007,18 @@ class ConversationsPanel(wx.Panel):
             self._search_result_idx = -1
             return
         qlow = query.lower()
+        # Store message IDs, not raw row indices: _sorted_messages can be
+        # mutated (a new message arrives, more history is paginated in, a
+        # message is deleted) between when the query runs and when the user
+        # actually jumps to a result, which silently sent "next result" to
+        # whatever unrelated row now sits at that same index. Messages with
+        # no id (essentially never, in practice) are skipped rather than
+        # matched by an ambiguous empty key.
         self._search_results = [
-            i for i, msg in enumerate(self._sorted_messages)
+            msg.get("key", {}).get("id", "")
+            for msg in self._sorted_messages
             if not self._is_separator(msg)
+            and msg.get("key", {}).get("id")
             and qlow in self._render_message_line(msg).lower()
         ]
         self._search_result_idx = -1
@@ -6026,8 +6051,30 @@ class ConversationsPanel(wx.Panel):
         self._jump_to_search_result()
 
     def _jump_to_search_result(self):
-        i18n  = self.main_window.i18n
-        idx   = self._search_results[self._search_result_idx]
+        i18n = self.main_window.i18n
+        idx = -1
+        # Resolve the stored message ID to its CURRENT row. Drop any result
+        # whose message is no longer present (paginated out, deleted) instead
+        # of silently focusing whatever unrelated row now sits at a stale
+        # index.
+        while self._search_results:
+            if not (0 <= self._search_result_idx < len(self._search_results)):
+                self._search_result_idx = 0
+            msg_id = self._search_results[self._search_result_idx]
+            idx = next(
+                (i for i, m in enumerate(self._sorted_messages)
+                 if m.get("key", {}).get("id") == msg_id),
+                -1,
+            )
+            if idx >= 0:
+                break
+            del self._search_results[self._search_result_idx]
+            idx = -1
+
+        if idx < 0:
+            self.main_window.output(i18n.t("search_no_results"), interrupt=True)
+            return
+
         total = len(self._search_results)
         self.messages_list.Focus(idx)
         self.messages_list.Select(idx, True)
@@ -6426,15 +6473,19 @@ class ConversationsPanel(wx.Panel):
         for child in list(panel.GetChildren()):
             child.Destroy()
         sizer.Clear()
-        for att in self._staged_attachments:
+        for idx, att in enumerate(self._staged_attachments):
             filename = os.path.basename(att["path"])
             btn = wx.Button(
                 panel,
                 label=f"{i18n.t('remove_attachment')} {filename}",
             )
+            # Bind by index, not path: the same file can legitimately be
+            # staged twice (attached in two separate picks), and removing by
+            # path used to delete every entry sharing it instead of just the
+            # one the user clicked remove on.
             btn.Bind(
                 wx.EVT_BUTTON,
-                lambda evt, p=att["path"]: self._on_remove_attachment(p),
+                lambda evt, i=idx: self._on_remove_attachment(i),
             )
             sizer.Add(btn, 0, wx.BOTTOM, 3)
         panel.Layout()
@@ -6442,11 +6493,10 @@ class ConversationsPanel(wx.Panel):
             self._attachment_panel.Layout()
             self.conversation_panel.Layout()
 
-    def _on_remove_attachment(self, path: str):
+    def _on_remove_attachment(self, index: int):
         """Remove one staged file and rebuild the list (or close the panel)."""
-        self._staged_attachments = [
-            a for a in self._staged_attachments if a["path"] != path
-        ]
+        if 0 <= index < len(self._staged_attachments):
+            del self._staged_attachments[index]
         if not self._staged_attachments:
             self._hide_attachment_panel()
         else:

@@ -129,11 +129,23 @@ jobs:
             $hasLib      = ($entries | Where-Object { $_ -like "WinZapp/lib/bass.dll" }).Count -gt 0
             $hasBassOpus = ($entries | Where-Object { $_ -like "WinZapp/lib/bassopus.dll" }).Count -gt 0
             $hasExe      = ($entries | Where-Object { $_ -eq   "WinZapp/WinZapp.exe" }).Count -gt 0
-            Write-Host "WinZapp.exe    : $hasExe"
-            Write-Host "sounds/*       : $hasSounds"
-            Write-Host "lib/bass.dll   : $hasLib"
-            Write-Host "lib/bassopus   : $hasBassOpus"
-            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe)) {
+            # These three are what actually let WinZapp start the local
+            # WPPConnect Server at runtime — without them the app launches
+            # but every WhatsApp feature is dead. None of the checks above
+            # would have caught a broken/missing node/ or api/dist/server.js,
+            # so a build that silently failed to bundle them would still have
+            # passed this gate and shipped a release that can't connect.
+            $hasNodeExe  = ($entries | Where-Object { $_ -eq   "WinZapp/node/node.exe" }).Count -gt 0
+            $hasServerJs = ($entries | Where-Object { $_ -eq   "WinZapp/api/dist/server.js" }).Count -gt 0
+            $hasFfmpeg   = ($entries | Where-Object { $_ -eq   "WinZapp/lib/ffmpeg.exe" }).Count -gt 0
+            Write-Host "WinZapp.exe        : $hasExe"
+            Write-Host "sounds/*           : $hasSounds"
+            Write-Host "lib/bass.dll       : $hasLib"
+            Write-Host "lib/bassopus       : $hasBassOpus"
+            Write-Host "node/node.exe      : $hasNodeExe"
+            Write-Host "api/dist/server.js : $hasServerJs"
+            Write-Host "ffmpeg             : $hasFfmpeg"
+            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe -and $hasNodeExe -and $hasServerJs -and $hasFfmpeg)) {
               Write-Error "dist/WinZapp.zip is missing required entries — build failed."
               exit 1
             }

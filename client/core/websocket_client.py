@@ -38,6 +38,15 @@ class WebSocketClient:
         self.sio.on("chats-update", self.on_chats_update)
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
+        # These two handlers existed but were never registered — contact
+        # name/photo updates and presence changes only ever reached the app
+        # through onpresencechanged and the 5-minute contacts poll, so a
+        # renamed contact or a fresh presence event could sit stale for
+        # minutes. Registering them is a no-op if WPPConnect never actually
+        # emits these two event names (both bodies are already wrapped in
+        # try/except), so there is nothing to lose by listening for them too.
+        self.sio.on("contacts.update", self.on_contacts_update)
+        self.sio.on("presence.update", self.on_presence_update)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
