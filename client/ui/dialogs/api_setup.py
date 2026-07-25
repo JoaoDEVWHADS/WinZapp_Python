@@ -88,6 +88,30 @@ _PRESERVE = {"start.js", ".env", "config.json"}
 # Runtime state dirs/files that should survive a re-download.
 _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
+# WinZapp's patches on top of upstream wppconnect-server — same list as
+# setup_api.py's custom_files and build.py's API_CUSTOM_SRC_FILES. Unlike
+# _PRESERVE (root-level files skipped outright during extraction), these live
+# under src/ and get deleted by the "clean previous partial setup" step and
+# then are not part of _PRESERVE's skip-list during extraction, so a vanilla
+# ZIP re-download used to silently replace them with unpatched upstream code
+# — every call to this dialog (first-run setup AND the update/force-reinstall
+# flow) stripped WinZapp's own controller/util/middleware fixes with no
+# restoration step. _run_setup() now stashes their content before the clean
+# step and restores it after extraction, mirroring setup_api.py's approach.
+_CUSTOM_SRC_FILES = [
+    "src/config.ts",
+    "src/index.ts",
+    "src/util/createSessionUtil.ts",
+    "src/util/sessionUtil.ts",
+    "src/util/functions.ts",
+    "src/middleware/statusConnection.ts",
+    "src/controller/deviceController.ts",
+    "src/controller/messageController.ts",
+    "src/controller/sessionController.ts",
+    "src/routes/index.ts",
+    "decrypt.js",
+]
+
 
 class ApiSetupDialog(wx.Dialog):
     """Progress dialog for the WPPConnect Server download + build setup.
@@ -397,6 +421,21 @@ class ApiSetupDialog(wx.Dialog):
                 if self._cancelled:
                     return
 
+                # Stash WinZapp's own patches before they get wiped below —
+                # see _CUSTOM_SRC_FILES for why this is needed.
+                custom_contents = {}
+                for rel_path in _CUSTOM_SRC_FILES:
+                    full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
+                    if os.path.isfile(full_path):
+                        try:
+                            with open(full_path, "rb") as fh:
+                                custom_contents[rel_path] = fh.read()
+                        except Exception as exc:
+                            logging.warning(
+                                "[api_setup] Failed to stash custom file %s: %s",
+                                rel_path, exc,
+                            )
+
                 # ── Step 2: clean previous partial setup ──────────────────
                 self._set_status("Preparando pasta da API...")
                 for item in os.listdir(api_dir):
@@ -418,6 +457,21 @@ class ApiSetupDialog(wx.Dialog):
                 ok = self._extract_zip(tmp_zip, api_dir)
                 if not ok:
                     return
+
+                # Restore WinZapp's patches over the freshly-extracted
+                # vanilla upstream files.
+                for rel_path, content in custom_contents.items():
+                    full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
+                    try:
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, "wb") as fh:
+                            fh.write(content)
+                        logging.info("[api_setup] Restored custom file: %s", rel_path)
+                    except Exception as exc:
+                        logging.warning(
+                            "[api_setup] Failed to restore custom file %s: %s",
+                            rel_path, exc,
+                        )
 
             finally:
                 try:

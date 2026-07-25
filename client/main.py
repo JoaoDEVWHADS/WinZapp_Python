@@ -559,6 +559,14 @@ class MainWindow(wx.Frame):
         self.offline_mode = False
         self._user_offline = False
         self._auto_offline = False
+        # True only while _update_wpp_server() is stopping/reinstalling/
+        # restarting the local WPPConnect Server (Help > forced reinstall or
+        # the background WppUpdateChecker). The health checker below polls
+        # status-session every 30s regardless of what else is happening, so
+        # without this flag it would catch the server mid-restart, get a
+        # connection error, and declare "offline/disconnected" — even though
+        # nothing about the actual WhatsApp session changed.
+        self._wpp_updating = False
         # True while WhatsApp Web itself is reachable (verified against the
         # WPPConnect /check-connection-session endpoint, which runs the very
         # same isConnected() test the server uses to answer 404/Disconnected
@@ -1353,39 +1361,48 @@ class MainWindow(wx.Frame):
         logging.info("[wpp_update] Stopping WPPConnect Server before update to %s...", target_tag)
         if not self.background_mode:
             self.output(self.i18n.t("wpp_update_in_progress"), interrupt=True)
-        self._stop_wpp_server()
-        self.wpp_process = None
+        # Set before stopping the server and only cleared in `finally` below —
+        # the health checker (running on its own thread every 30s) would
+        # otherwise catch the server mid-stop/reinstall/restart, fail its
+        # status-session probe, and declare the app offline/disconnected even
+        # though the actual WhatsApp session never dropped.
+        self._wpp_updating = True
+        try:
+            self._stop_wpp_server()
+            self.wpp_process = None
 
-        from ui.dialogs.api_setup import ApiSetupDialog
-        dlg = ApiSetupDialog(
-            self,
-            title_override=self.i18n.t("api_update_dialog_title"),
-            forced_tag=target_tag,
-        )
-        result = dlg.ShowModal()
-        dlg.Destroy()
-
-        if result != wx.ID_OK:
-            logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
-            self.error_sound.play()
-            wx.MessageBox(
-                self.i18n.t("wpp_update_failed_msg"),
-                self.i18n.t("update_error_title"),
-                wx.OK | wx.ICON_ERROR,
+            from ui.dialogs.api_setup import ApiSetupDialog
+            dlg = ApiSetupDialog(
                 self,
+                title_override=self.i18n.t("api_update_dialog_title"),
+                forced_tag=target_tag,
             )
-            # Whatever is left on disk (the previous install if the failure
-            # happened before ApiSetupDialog's cleanup step, nothing at all if
-            # it happened after) — ensure_wpp_running() already knows how to
-            # handle both: start what's there, or silently do nothing if the
-            # required files are missing.
-            self.ensure_wpp_running()
-            return
+            result = dlg.ShowModal()
+            dlg.Destroy()
 
-        logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
-        self.ensure_wpp_running()
-        if not self.background_mode:
-            self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
+            if result != wx.ID_OK:
+                logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
+                self.error_sound.play()
+                wx.MessageBox(
+                    self.i18n.t("wpp_update_failed_msg"),
+                    self.i18n.t("update_error_title"),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                # Whatever is left on disk (the previous install if the failure
+                # happened before ApiSetupDialog's cleanup step, nothing at all if
+                # it happened after) — ensure_wpp_running() already knows how to
+                # handle both: start what's there, or silently do nothing if the
+                # required files are missing.
+                self.ensure_wpp_running()
+                return
+
+            logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
+            self.ensure_wpp_running()
+            if not self.background_mode:
+                self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
+        finally:
+            self._wpp_updating = False
 
     # ── Tray / window lifecycle ───────────────────────────────────────────────
 
@@ -3809,7 +3826,10 @@ class MainWindow(wx.Frame):
                     # offline mode was entered automatically (connection lost)
                     # this loop is precisely what notices the connection coming
                     # back, so skipping it there would make the state permanent.
-                    if not getattr(self, "_user_offline", False):
+                    # A WPPConnect reinstall in progress also pauses it — the
+                    # server is deliberately down for a few seconds there, and
+                    # that is not a real connection loss (see _wpp_updating).
+                    if not getattr(self, "_user_offline", False) and not getattr(self, "_wpp_updating", False):
                         self.check_wa_connection_http()
                         # Safety net for a sync that failed or never started
                         # while the connection was down: retry it as soon as
@@ -4200,6 +4220,19 @@ class MainWindow(wx.Frame):
                 self.i18n.t("error").format(app_name=self.app_name),
                 wx.OK | wx.ICON_ERROR,
             )
+        # The list-chats retry loop above can leave "preparing_to_sync" as the
+        # last status text if it never settled and exhausted its retries
+        # (line ~4204) — normally invisible because a reconnect with an
+        # existing local cache satisfies `covers_cache` on an early attempt,
+        # but a full F5 resync starts from an empty self.chats (cleared by
+        # clear_local_data()), so `covers_cache` can never be true and the
+        # loop is far more likely to run through every retry. Nothing between
+        # here and the "downloading_media" status (phase 2, which can be
+        # minutes away for a full resync) ever updates the status text again,
+        # so without this the title/tray stayed stuck reading "preparing to
+        # sync" throughout the entire message-sync phase even though syncing
+        # was well underway.
+        wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
         self.chats = self.normalize_chats(self.chats)
 
         # Quick initial contacts fetch — may be incomplete on first QR pairing
@@ -5688,7 +5721,7 @@ class MainWindow(wx.Frame):
                         self.chats = result
                     wx.CallAfter(self._schedule_set_chats)
                 except Exception as e:
-                    print(f"[periodic_contacts_sync] error: {e}")
+                    logging.warning(f"[periodic_contacts_sync] error: {e}")
 
         threading.Thread(target=_loop, daemon=True).start()
 
@@ -9453,42 +9486,38 @@ class MainWindow(wx.Frame):
     def is_chat_pinned(self, jid: str) -> bool:
         return jid in self._pinned_chats
 
-    def pin_chat(self, jid: str):
+    def _apply_pin_state(self, jid: str, pinned: bool):
+        """Local-only half of pin/unpin: mutate _pinned_chats (+ its alt-JID
+        mirror), persist to DB metadata, and refresh the chat list. Split out
+        from pin_chat()/unpin_chat() so _sync_pin_to_server() can call this
+        again to roll back the optimistic change if WhatsApp rejects it,
+        without recursing back into a server call."""
         normalized = self._normalize_jid(jid)
-        if normalized not in self._pinned_chats:
+        if pinned:
             self._pinned_chats.add(normalized)
-        # Also pin the alternate JID if present
+        else:
+            self._pinned_chats.discard(normalized)
+        # Also mirror onto the alternate JID form if present
         if normalized.endswith("@lid"):
             alt = getattr(self, "_lid_to_phone", {}).get(normalized, "")
             if alt:
-                self._pinned_chats.add(self._normalize_jid(alt))
+                alt = self._normalize_jid(alt)
+                self._pinned_chats.add(alt) if pinned else self._pinned_chats.discard(alt)
         else:
             alt = getattr(self, "_phone_to_lid", {}).get(normalized, "")
             if alt:
-                self._pinned_chats.add(alt)
+                self._pinned_chats.add(alt) if pinned else self._pinned_chats.discard(alt)
 
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
         self._schedule_set_chats()
+
+    def pin_chat(self, jid: str):
+        self._apply_pin_state(jid, True)
         self._sync_pin_to_server(jid, pinned=True)
 
     def unpin_chat(self, jid: str):
-        normalized = self._normalize_jid(jid)
-        if normalized in self._pinned_chats:
-            self._pinned_chats.remove(normalized)
-        # Also unpin the alternate JID if present
-        if normalized.endswith("@lid"):
-            alt = getattr(self, "_lid_to_phone", {}).get(normalized, "")
-            if alt:
-                self._pinned_chats.discard(self._normalize_jid(alt))
-        else:
-            alt = getattr(self, "_phone_to_lid", {}).get(normalized, "")
-            if alt:
-                self._pinned_chats.discard(alt)
-
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
-        self._schedule_set_chats()
+        self._apply_pin_state(jid, False)
         self._sync_pin_to_server(jid, pinned=False)
 
     def _sync_pin_to_server(self, jid: str, pinned: bool):
@@ -9518,9 +9547,36 @@ class MainWindow(wx.Frame):
                 if not resp.ok:
                     logging.warning("[pin_chat] API error %s for %s (api_jid: %s): %s",
                                     resp.status_code, jid, api_jid, resp.text[:200])
-            except Exception:
-                pass
+                    # WhatsApp rejected the change — most commonly because it
+                    # only allows 3 pinned chats at once, an existing-account
+                    # rule WPPConnect enforces server-side that WinZapp never
+                    # checked before sending the request. The optimistic local
+                    # update above (_apply_pin_state, already applied before
+                    # this thread ran) was never actually accepted by
+                    # WhatsApp, so left uncorrected it silently drifted out of
+                    # sync — the chat looked pinned in WinZapp until the next
+                    # periodic chat-list poll (up to 60s later) quietly
+                    # "unpinned" it again, which is exactly the erratic
+                    # pin behaviour reported. Roll it back immediately and
+                    # tell the user why instead of waiting for that poll.
+                    wx.CallAfter(self._on_pin_sync_rejected, jid, pinned)
+            except Exception as exc:
+                logging.warning("[pin_chat] request failed for %s: %s", jid, exc)
         threading.Thread(target=_do, daemon=True).start()
+
+    def _on_pin_sync_rejected(self, jid: str, attempted_pinned: bool):
+        """Revert an optimistic pin/unpin that WhatsApp did not actually
+        accept, and tell the user (runs on the wx main thread)."""
+        self._apply_pin_state(jid, not attempted_pinned)
+        if not self.background_mode:
+            self.error_sound.play()
+            key = "pin_chat_failed" if attempted_pinned else "unpin_chat_failed"
+            wx.MessageBox(
+                self.i18n.t(key),
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_WARNING,
+                self,
+            )
 
     # ── Group ─────────────────────────────────────────────────────────────────
 

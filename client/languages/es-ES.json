@@ -167,6 +167,8 @@
     "leave_group": "Salir del grupo",
     "pin_chat": "&Fijar conversación",
     "unpin_chat": "&Desfijar conversación",
+    "pin_chat_failed": "No se pudo fijar esta conversación. WhatsApp solo permite fijar hasta 3 conversaciones a la vez — desfija otra conversación e inténtalo de nuevo.",
+    "unpin_chat_failed": "No se pudo desfijar esta conversación. Inténtalo de nuevo en unos instantes.",
     "copy_number": "Copiar número",
     "add_attachment": "Agregar &archivo adjunto",
     "attachment_photos_videos": "Fotos y vídeos",

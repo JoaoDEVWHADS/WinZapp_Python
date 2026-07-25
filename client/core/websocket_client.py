@@ -448,7 +448,13 @@ class WebSocketClient:
                     if isinstance(pin, bool):
                         is_pinned = pin
                     elif isinstance(pin, (int, float)):
-                        is_pinned = pin > 0
+                        # Matches the threshold get_remote_chats() (main.py)
+                        # uses for the same field from the polled list-chats
+                        # response — pin is a pin-timestamp in real WhatsApp
+                        # data, so any genuine value is always far above this,
+                        # but keeping both call sites on the same threshold
+                        # avoids the two ever disagreeing on a borderline value.
+                        is_pinned = pin > 1_000_000
                     wx.CallAfter(self.main_window.on_chat_pin_update, jid, is_pinned)
         except Exception:
             logging.exception("[WebSocketClient] on_chats_update error")

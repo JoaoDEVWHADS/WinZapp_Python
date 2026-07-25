@@ -167,6 +167,8 @@
     "leave_group": "Sair do grupo",
     "pin_chat": "&Afixar conversa",
     "unpin_chat": "&Desafixar conversa",
+    "pin_chat_failed": "Não foi possível fixar esta conversa. O WhatsApp permite fixar no máximo 3 conversas de cada vez — desafixe outra conversa e tente novamente.",
+    "unpin_chat_failed": "Não foi possível desafixar esta conversa. Tente novamente dentro de instantes.",
     "copy_number": "Copiar número",
     "add_attachment": "Adicionar um &anexo",
     "attachment_photos_videos": "&Fotos & vídeos",

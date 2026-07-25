@@ -167,6 +167,8 @@
     "leave_group": "Leave group",
     "pin_chat": "&Pin chat",
     "unpin_chat": "&Unpin chat",
+    "pin_chat_failed": "This chat could not be pinned. WhatsApp only allows up to 3 pinned chats at a time — unpin another chat and try again.",
+    "unpin_chat_failed": "This chat could not be unpinned. Please try again in a moment.",
     "copy_number": "Copy number",
     "add_attachment": "Add &attachment",
     "attachment_photos_videos": "Photos and videos",
