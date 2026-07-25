@@ -264,6 +264,19 @@ class WebSocketClient:
         except Exception:
             pass
 
+        # Reset connection state as if this were a fresh launch — see the
+        # matching comment in main.py's _on_disconnect() for why: without
+        # this, _set_wa_connected()'s startup grace window stays permanently
+        # disabled after re-pairing (it only applies while
+        # "never _wa_connect_announced"), so the first not-yet-settled check
+        # right after the new pairing completes gets mistaken for a real
+        # outage.
+        mw._wa_connected = False
+        mw._wa_connect_announced = False
+        mw._auto_offline = False
+        mw._wa_offline_strikes = 0
+        mw._wa_startup_time = time.time()
+
         # Redirect to pairing dialog.
         self.connect.show_connection_dial()
 
@@ -271,14 +284,31 @@ class WebSocketClient:
         # Destroy dialogs on the main thread to avoid wx thread-safety issues.
         # Guards against the case where the app is already paired (no dialogs open).
         def _close_dialogs():
+            # connection_dial (and pairing_dial, its child) are shown via
+            # ShowModal() — Destroy()ing a dialog directly while its modal
+            # loop is still running never signals that loop to unwind, so
+            # wx never re-enables the parent window ShowModal() disabled
+            # when it started. The dialog object goes away but the main
+            # window stays blocked for input — reported live as "reconnected
+            # successfully, but the main window was frozen/unusable and kept
+            # announcing 'connection restored' in the background". EndModal()
+            # first, exactly like the existing Cancel path already does
+            # (self.pairing_dial.EndModal(wx.ID_CANCEL) elsewhere in
+            # connect.py) — only then is it safe to Destroy().
             if hasattr(self.connect, 'pairing_dial'):
                 try:
-                    self.connect.pairing_dial.Destroy()
+                    dlg = self.connect.pairing_dial
+                    if dlg.IsModal():
+                        dlg.EndModal(wx.ID_OK)
+                    dlg.Destroy()
                 except Exception:
                     pass
             if hasattr(self.connect, 'connection_dial'):
                 try:
-                    self.connect.connection_dial.Destroy()
+                    dlg = self.connect.connection_dial
+                    if dlg.IsModal():
+                        dlg.EndModal(wx.ID_OK)
+                    dlg.Destroy()
                 except Exception:
                     pass
 

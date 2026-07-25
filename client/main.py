@@ -969,6 +969,21 @@ class MainWindow(wx.Frame):
         self.token = ""
         self.save_settings()
         self.clear_local_data()
+        # Reset the connection state as if this were a fresh app launch, not
+        # just a fresh WebSocket. Without this, _wa_connect_announced stayed
+        # True from the connection that just ended, which permanently
+        # disables _set_wa_connected()'s startup grace window (it only
+        # applies while "never_connected_yet") — so the very first
+        # not-yet-settled status check after re-pairing (WPPConnect/Chrome
+        # still booting a fresh session) looked identical to a real outage
+        # and immediately declared full auto-offline, seconds after a
+        # successful pairing. Reported live as "reconnected, but the app
+        # decided I was offline right away, which was wrong."
+        self._wa_connected = False
+        self._wa_connect_announced = False
+        self._auto_offline = False
+        self._wa_offline_strikes = 0
+        self._wa_startup_time = time.time()
         # Best-effort: close the WPPConnect session so Chrome is released.
         if old_token:
             def _close():
