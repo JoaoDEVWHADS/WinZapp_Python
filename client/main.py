@@ -1240,50 +1240,70 @@ class MainWindow(wx.Frame):
 
     def _resync_all_worker(self):
         """Background worker for _on_menu_resync_all(). See that method."""
-        ui_ready = threading.Event()
-
-        def _prepare_ui():
-            try:
-                panel = self.conversations_panel
-                panel._stop_audio()
-                panel.close_conversation()
-                panel.chats_list = []
-                panel.chat_names = []
-                panel._all_chats_list = []
-                panel._all_chat_names = []
-                panel._displayed_jids = None
-                panel.conversations_list.DeleteAllItems()
-                if hasattr(self, "archived_conversations_panel"):
-                    ap = self.archived_conversations_panel
-                    ap.chats_list = []
-                    ap.chat_names = []
-                    ap._all_chats_list = []
-                    ap._all_chat_names = []
-                    ap._displayed_jids = None
-                    ap.conversations_list.DeleteAllItems()
-            finally:
-                ui_ready.set()
-
-        wx.CallAfter(_prepare_ui)
-        ui_ready.wait(timeout=5)
-
-        # Wipe the local database and downloaded media/voice-message caches.
-        self._sync_completed = False
-        # A user-requested resync gets a fresh automatic-retry budget, even if
-        # earlier syncs this session already burned through it.
-        self._sync_retry_count = 0
-        self.clear_local_data()
+        # Claim this immediately, before clear_local_data() runs — not just
+        # inside start_sync() further down. clear_local_data() can take a
+        # noticeable moment (wipes the whole DB), and the connection health
+        # checker calls trigger_sync_if_needed() every 30s independently; that
+        # method's own guard checks this same flag, but only start_sync()
+        # itself used to set it, leaving a window where the health checker
+        # could see _sync_completed already False (set below) and
+        # _initial_sync_running still False, and spawn its own concurrent
+        # start_sync() — two overlapping syncs racing on self.chats and on
+        # which one's status/sound/speech calls land last.
+        self._initial_sync_running = True
         try:
-            media_failed_path = data_path("media_failed.json")
-            if os.path.isfile(media_failed_path):
-                os.remove(media_failed_path)
-        except Exception as exc:
-            logging.warning("[resync_all] failed to remove media_failed.json: %s", exc)
-        self._media_failed_ids = set()
+            ui_ready = threading.Event()
 
-        # Resync from scratch, exactly like a fresh pairing.
-        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-        self.sync_thread.start()
+            def _prepare_ui():
+                try:
+                    panel = self.conversations_panel
+                    panel._stop_audio()
+                    panel.close_conversation()
+                    panel.chats_list = []
+                    panel.chat_names = []
+                    panel._all_chats_list = []
+                    panel._all_chat_names = []
+                    panel._displayed_jids = None
+                    panel.conversations_list.DeleteAllItems()
+                    if hasattr(self, "archived_conversations_panel"):
+                        ap = self.archived_conversations_panel
+                        ap.chats_list = []
+                        ap.chat_names = []
+                        ap._all_chats_list = []
+                        ap._all_chat_names = []
+                        ap._displayed_jids = None
+                        ap.conversations_list.DeleteAllItems()
+                finally:
+                    ui_ready.set()
+
+            wx.CallAfter(_prepare_ui)
+            ui_ready.wait(timeout=5)
+
+            # Wipe the local database and downloaded media/voice-message caches.
+            self._sync_completed = False
+            # A user-requested resync gets a fresh automatic-retry budget, even if
+            # earlier syncs this session already burned through it.
+            self._sync_retry_count = 0
+            self.clear_local_data()
+            try:
+                media_failed_path = data_path("media_failed.json")
+                if os.path.isfile(media_failed_path):
+                    os.remove(media_failed_path)
+            except Exception as exc:
+                logging.warning("[resync_all] failed to remove media_failed.json: %s", exc)
+            self._media_failed_ids = set()
+
+            # Resync from scratch, exactly like a fresh pairing. start_sync()
+            # takes over _initial_sync_running from here (it sets it True
+            # again itself and clears it in its own finally on any exit path).
+            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+            self.sync_thread.start()
+        except Exception:
+            # Something above raised before start_sync() could take over
+            # ownership of _initial_sync_running — clear it ourselves so a
+            # crash here doesn't permanently block every future sync attempt.
+            logging.exception("[_resync_all_worker] Unhandled error before sync could start")
+            self._initial_sync_running = False
 
     def _on_force_update(self, event):
         if self._update_checker is None:
@@ -4116,11 +4136,22 @@ class MainWindow(wx.Frame):
         logging.info("[start_sync] WhatsApp connected. Waiting 5s for stores to initialize...")
         time.sleep(5)
 
-        # Play sound and announce synchronization start immediately to give instant user feedback
-        self.synchronizing_sound.play()
-        wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
-        if not self.background_mode:
-            self.output(self.i18n.t("synchronization_started"), interrupt=True)
+        # Bundle the title/tray text, sound and speech for this stage into a
+        # single wx.CallAfter so they can never visibly fall out of step.
+        # Previously the sound and speech ran immediately on this background
+        # thread while _set_status() was merely queued via its own separate
+        # wx.CallAfter — the user heard "sincronizando" and the sound played
+        # right away, but the title kept showing whatever the previous stage
+        # was (e.g. "preparando-se para sincronizar") until wx's event loop
+        # got around to draining that queued call, which could visibly lag
+        # by a few seconds. Doing all three in one callback guarantees they
+        # land in the same UI-thread tick.
+        def _announce_synchronizing():
+            self._set_status(self.i18n.t("synchronizing"))
+            self.synchronizing_sound.play()
+            if not self.background_mode:
+                self.output(self.i18n.t("synchronization_started"), interrupt=True)
+        wx.CallAfter(_announce_synchronizing)
 
         # After first pairing the API may need a few seconds to populate chats.
         # Retry only when starting cold (no local cache); if we already have
@@ -4171,7 +4202,13 @@ class MainWindow(wx.Frame):
                 )
                 if failures >= _CHAT_MAX_FAILURES:
                     break
-                wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+                # Status intentionally stays "synchronizing" through this
+                # retry — regressing it back to "preparing_to_sync" here
+                # (the previous behaviour) broke the stage ordering the UI
+                # promises the user (conectando -> preparando-se para
+                # sincronizar -> sincronizando -> baixando mídias -> pronto):
+                # "preparando" is the state *before* the sincronizando
+                # announcement fires, never after.
                 time.sleep(_CHAT_DELAY)
                 continue
             self.chats   = result
@@ -4201,7 +4238,8 @@ class MainWindow(wx.Frame):
                 )
                 break
             prev_server_count = server_count
-            wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+            # See the comment on the other retry branch above — status stays
+            # "synchronizing" here too.
             time.sleep(_CHAT_DELAY)
         if disconnected:
             # Not an error the user has to acknowledge — just no connection.
@@ -4220,19 +4258,6 @@ class MainWindow(wx.Frame):
                 self.i18n.t("error").format(app_name=self.app_name),
                 wx.OK | wx.ICON_ERROR,
             )
-        # The list-chats retry loop above can leave "preparing_to_sync" as the
-        # last status text if it never settled and exhausted its retries
-        # (line ~4204) — normally invisible because a reconnect with an
-        # existing local cache satisfies `covers_cache` on an early attempt,
-        # but a full F5 resync starts from an empty self.chats (cleared by
-        # clear_local_data()), so `covers_cache` can never be true and the
-        # loop is far more likely to run through every retry. Nothing between
-        # here and the "downloading_media" status (phase 2, which can be
-        # minutes away for a full resync) ever updates the status text again,
-        # so without this the title/tray stayed stuck reading "preparing to
-        # sync" throughout the entire message-sync phase even though syncing
-        # was well underway.
-        wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
         self.chats = self.normalize_chats(self.chats)
 
         # Quick initial contacts fetch — may be incomplete on first QR pairing
@@ -4312,19 +4337,28 @@ class MainWindow(wx.Frame):
         self._build_lid_to_phone_cache()
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
-        wx.CallAfter(self._set_status, "")
-        # Only announce completion when the chat list really came from the
-        # server — otherwise this is a partial sync that is about to be retried,
-        # and saying "conversations synchronized" over the few chats the socket
-        # delivered is exactly what makes the failure invisible to the user.
-        # …and only when that list had settled: announcing "conversations
-        # synchronized" over a chat list the server was still filling in is
-        # precisely what made the 3-or-4-conversations failure look like a
-        # success, right before the sync restarted itself.
-        if chat_list_ok and chat_list_settled:
-            self.sync_complete_sound.play()
-            if not self.background_mode:
-                self.output(self.i18n.t("sync_complete"))
+
+        # Same bundling as the "synchronizing" announcement above — status,
+        # sound and speech for this stage transition all happen in one
+        # wx.CallAfter so they land together instead of the sound/speech
+        # (previously fired directly on this background thread) visibly
+        # outrunning the queued status-text clear.
+        def _announce_messages_synced():
+            self._set_status("")
+            # Only announce completion when the chat list really came from the
+            # server — otherwise this is a partial sync that is about to be
+            # retried, and saying "conversations synchronized" over the few
+            # chats the socket delivered is exactly what makes the failure
+            # invisible to the user. …and only when that list had settled:
+            # announcing "conversations synchronized" over a chat list the
+            # server was still filling in is precisely what made the
+            # 3-or-4-conversations failure look like a success, right before
+            # the sync restarted itself.
+            if chat_list_ok and chat_list_settled:
+                self.sync_complete_sound.play()
+                if not self.background_mode:
+                    self.output(self.i18n.t("sync_complete"))
+        wx.CallAfter(_announce_messages_synced)
 
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
