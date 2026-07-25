@@ -32,7 +32,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, parse_bool_flag as _parse_bool_flag
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -64,10 +64,12 @@ def _fmt_last_seen(ts, i18n) -> str:
 
 
 class ConversationsPanel(wx.Panel):
-    # Windows' native SysListView32 (the classic wx.ListCtrl) truncates each
-    # item's accessible text to this many characters — used to decide whether
-    # the "Ler mais" button should appear for the focused row.
-    _LIST_CTRL_TEXT_LIMIT = 512
+    # Windows' native SysListView32 (the classic wx.ListCtrl) reads each item's
+    # text through a 512-character buffer whose last slot holds the terminating
+    # NUL — so exactly 511 characters survive.  Slicing the remainder at 512
+    # skipped the 512th character, which is why "Ler mais" used to resume in the
+    # middle of a word with one letter missing.
+    _LIST_CTRL_TEXT_LIMIT = 511
 
     def __init__(self, main_window, parent):
         super().__init__(parent)
@@ -4219,6 +4221,10 @@ class ConversationsPanel(wx.Panel):
             ]
 
             def _name(j: str) -> str:
+                # Our own JID gets the self label ("Eu") rather than a phone
+                # number, exactly as in a normal message line.
+                if self.main_window._is_self_jid(j):
+                    return self.main_window.self_reference_label()
                 return self._sender_label({"key": {"participant": j, "remoteJid": j, "fromMe": False}})
 
             author_name = _name(author_jid) if author_jid else ""
@@ -4238,14 +4244,63 @@ class ConversationsPanel(wx.Panel):
                 return i18n.t("group_notif_promoted").format(author=author_name, names=names)
             if subtype in ("demote", "demotion"):
                 return i18n.t("group_notif_demoted").format(author=author_name, names=names)
+            # WhatsApp sends the new group name / description text in the body
+            # of the notification; showing it turns a vague "X alterou o nome do
+            # grupo" into something that actually says what changed.
+            detail = (notif.get("body") or "").strip()
             if subtype == "subject":
+                if detail:
+                    return i18n.t("group_notif_subject_changed_to").format(
+                        author=author_name, subject=detail)
                 return i18n.t("group_notif_subject_changed").format(author=author_name)
             if subtype == "description":
+                if detail:
+                    return i18n.t("group_notif_description_changed_to").format(
+                        author=author_name, description=detail)
                 return i18n.t("group_notif_description_changed").format(author=author_name)
             if subtype == "picture":
                 return i18n.t("group_notif_picture_changed").format(author=author_name)
             if subtype == "create":
                 return i18n.t("group_notif_created").format(author=author_name)
+            # Group settings changes. WPPConnect reports the new value in
+            # "body"/"value" as "on"/"off" (or true/false) depending on version.
+            def _on_off(default=True) -> bool:
+                raw = notif.get("value")
+                if raw is None:
+                    raw = detail
+                if isinstance(raw, str):
+                    low = raw.strip().lower()
+                    if low in ("on", "true", "1", "yes", "announcement", "locked"):
+                        return True
+                    if low in ("off", "false", "0", "no", "unlocked"):
+                        return False
+                parsed = _parse_bool_flag(raw)
+                return default if parsed is None else parsed
+
+            if subtype in ("announce", "announcement", "restrict_messages"):
+                key = "group_notif_announce_on" if _on_off() else "group_notif_announce_off"
+                return i18n.t(key).format(author=author_name)
+            if subtype in ("restrict", "locked", "settings"):
+                key = "group_notif_restrict_on" if _on_off() else "group_notif_restrict_off"
+                return i18n.t(key).format(author=author_name)
+            if subtype in ("ephemeral", "disappearing_mode"):
+                key = "group_notif_ephemeral_on" if _on_off() else "group_notif_ephemeral_off"
+                return i18n.t(key).format(author=author_name)
+            if subtype in ("revoke_invite", "link_revoke"):
+                return i18n.t("group_notif_link_revoked").format(author=author_name)
+            if subtype in ("membership_approval_mode", "membership_approval_request"):
+                return i18n.t("group_notif_approval_mode").format(author=author_name)
+            # Unknown subtype: still say who did it and what WhatsApp called it,
+            # instead of an anonymous "Atualização do grupo" that tells the user
+            # nothing about what actually happened.
+            label = detail or subtype or ""
+            if author_name and label:
+                return i18n.t("group_notif_generic_detail").format(
+                    author=author_name, detail=label)
+            if label:
+                return f"{i18n.t('group_notif_generic')}: {label}"
+            if author_name:
+                return i18n.t("group_notif_generic_author").format(author=author_name)
             return i18n.t("group_notif_generic")
 
         # ── Fallback ─────────────────────────────────────────────────────────
@@ -4644,6 +4699,17 @@ class ConversationsPanel(wx.Panel):
 
         return self._get_participant_name(clean_p)
 
+    @staticmethod
+    def _is_system_event(msg) -> bool:
+        """True for messages WhatsApp itself generated, not sent by a person.
+
+        These render as a complete sentence that already contains the name of
+        whoever triggered them, so they must not be prefixed with a sender.
+        """
+        if not isinstance(msg, dict):
+            return False
+        return msg.get("messageType") == "groupNotification"
+
     def _render_message_line(self, msg) -> str:
         """Produce the full display string for a single message row."""
         # Unread separator sentinel
@@ -4660,12 +4726,19 @@ class ConversationsPanel(wx.Panel):
         ctx           = self._get_context_info(msg)
         quoted_sender = self._get_quoted_sender(ctx, msg) if ctx else ""
 
-        if quoted_sender:
-            header = f"{sender}, {i18n.t('replying_to').format(name=quoted_sender)}"
+        if self._is_system_event(msg):
+            # System events ("Carlos saiu do grupo", "Ana alterou o nome do
+            # grupo") already name whoever acted, inside the sentence. Prefixing
+            # them with the sender produced "Carlos: Carlos saiu do grupo",
+            # which a screen reader reads out twice.
+            pieces = [body]
         else:
-            header = sender
+            if quoted_sender:
+                header = f"{sender}, {i18n.t('replying_to').format(name=quoted_sender)}"
+            else:
+                header = sender
 
-        pieces = [f"{header}: {body}"]
+            pieces = [f"{header}: {body}"]
         if msg.get("starred"):
             pieces[0] = f"★ {pieces[0]}"
         if time_str:
@@ -4921,14 +4994,18 @@ class ConversationsPanel(wx.Panel):
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
-        # Refresh the conversations list immediately so the now-empty chat is
-        # removed, keeping focus on a neighbouring conversation.
+        # Refresh the conversations list so the emptied preview disappears.
+        # The conversation itself stays in the list — clearing is not deleting.
         self.main_window._schedule_set_chats()
 
     def _on_menu_delete_chat(self, jid: str):
         i18n = self.main_window.i18n
+        # Deleting a group is local-only (see MainWindow.delete_chat: asking
+        # WhatsApp to delete a group chat makes it exit the group first). Say so
+        # in the prompt, so the difference from "Sair do grupo" is explicit.
+        confirm_key = "delete_group_confirm_msg" if jid.endswith("@g.us") else "delete_confirm_msg"
         if wx.MessageBox(
-            i18n.t("delete_confirm_msg"),
+            i18n.t(confirm_key),
             i18n.t("delete_chat"),
             wx.YES_NO | wx.ICON_QUESTION,
             self,
@@ -4940,8 +5017,10 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_leave_group(self, jid: str):
         i18n = self.main_window.i18n
+        # Own confirmation text: this one really does remove the user from the
+        # group, and it used to share the generic "delete conversation" wording.
         if wx.MessageBox(
-            i18n.t("delete_confirm_msg"),
+            i18n.t("leave_group_confirm_msg"),
             i18n.t("leave_group"),
             wx.YES_NO | wx.ICON_QUESTION,
             self,

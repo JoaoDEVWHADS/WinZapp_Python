@@ -39,7 +39,7 @@ from core.sound_system import (
 )
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, parse_bool_flag as _parse_bool_flag
 from core.database_bridge import DatabaseBridge
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
@@ -528,10 +528,25 @@ class MainWindow(wx.Frame):
             logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
             self.ensure_wpp_running()
 
+        # Effective offline state = user-toggled OR auto-detected (no WhatsApp
+        # connection).  Kept as a single attribute because everything else in
+        # the app (MessageQueue, media sync, title bar) just asks "are we
+        # offline?"; the two sources are tracked separately so the automatic
+        # one can be cleared the moment connectivity returns without wiping a
+        # deliberate user choice.
         self.offline_mode = False
-        # True while the Baileys/WhatsApp WebSocket is connected; False after a
-        # "Connection Closed" error. The MessageQueue checks this before sending.
+        self._user_offline = False
+        self._auto_offline = False
+        # True while WhatsApp Web itself is reachable (verified against the
+        # WPPConnect /check-connection-session endpoint, which runs the very
+        # same isConnected() test the server uses to answer 404/Disconnected
+        # on every other route). False means "the local API is up but WhatsApp
+        # is not connected" — the state the app used to mistake for online.
         self._wa_connected = False
+        # Set once the first real WhatsApp connection of this session is
+        # confirmed, so the "connected" sound plays on connection to WhatsApp
+        # and not merely on connection to the local API.
+        self._wa_connect_announced = False
         # IDs of messages sent by WinZapp itself (via MessageQueue).  Used by
         # WebSocketClient.on_messages_upsert to distinguish "echo of our own
         # send" (skip — already in UI) from "sent on another device" (show).
@@ -540,6 +555,8 @@ class MainWindow(wx.Frame):
         # corresponding WebSocket echo event can be processed.
         self._own_sent_ids: set = set()
         self._own_sent_ids_lock = threading.Lock()
+        # Consecutive failed network probes (see check_whatsapp_reachable).
+        self._offline_probe_strikes = 0
         # (Locks initialized early at the top of __init__)
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
         self._tray_status = ""
@@ -956,7 +973,7 @@ class MainWindow(wx.Frame):
         """
         title   = self.i18n.t("app_name")
         if not getattr(self, "_initial_sync_running", False):
-            deleted = set(self.settings.get("deleted_chats", []))
+            deleted = self._deleted_chats
             unread_chats = sum(
                 1 for jid, chat in list(self.chats.items())
                 if jid not in deleted and effective_unread_count(chat) > 0
@@ -987,17 +1004,86 @@ class MainWindow(wx.Frame):
         While offline the outgoing message queue is suspended; disabling it
         wakes the queue so pending messages are sent immediately.
         """
-        self.offline_mode = not self.offline_mode
+        self._user_offline = not self._user_offline
         self.offline_mode_sound.play()
-        if self.offline_mode:
+        if self._user_offline:
             self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
+        elif self._auto_offline:
+            # Turning the manual switch off does not put us back online when
+            # the connection itself is down — say so instead of announcing a
+            # state change that did not happen.
+            self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=True)
         else:
             self.output(self.i18n.t("offline_mode_disabled"), interrupt=True)
-            if getattr(self, "message_queue", None) is not None:
-                self.message_queue.flush()
-        self._update_title()
-        if getattr(self, "_sync_offline_menu_item", None) is not None:
-            self._sync_offline_menu_item.Check(bool(self.offline_mode))
+        self._apply_offline_state()
+
+    def _apply_offline_state(self):
+        """Recompute self.offline_mode from its two sources and refresh the UI.
+
+        Safe to call from any thread — the wx work is marshalled with CallAfter.
+        """
+        effective = bool(self._user_offline or self._auto_offline)
+        was_offline = bool(self.offline_mode)
+        self.offline_mode = effective
+        if was_offline and not effective and getattr(self, "message_queue", None) is not None:
+            # Back online: send whatever piled up while we were paused.
+            self.message_queue.flush()
+
+        def _ui():
+            self._update_title()
+            if getattr(self, "_sync_offline_menu_item", None) is not None:
+                # The menu item reflects the *user* toggle only: an automatic
+                # offline caused by a dead connection is not something the user
+                # can uncheck, and showing it checked would make the next click
+                # a no-op from their point of view.
+                self._sync_offline_menu_item.Check(bool(self._user_offline))
+        if wx.IsMainThread():
+            _ui()
+        else:
+            wx.CallAfter(_ui)
+
+    def _set_wa_connected(self, connected: bool, reason: str = "", announce: bool = True):
+        """Single entry point for every WhatsApp connection-state transition.
+
+        Keeps three things in lockstep that used to drift apart: the
+        ``_wa_connected`` flag the MessageQueue and the sync gate read, the
+        automatic offline mode, and the "connected" sound/announcement — which
+        previously fired on startup just because the *local* WPPConnect API had
+        answered, even with no internet at all.
+        """
+        connected = bool(connected)
+        was = bool(getattr(self, "_wa_connected", False))
+        self._wa_connected = connected
+        # Nothing to do only when the flag *and* the derived offline state are
+        # both already consistent with `connected`.
+        if connected == was and self._auto_offline == (not connected):
+            return
+
+        if connected:
+            self._auto_offline = False
+            self._apply_offline_state()
+            logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
+            if not self._wa_connect_announced:
+                self._wa_connect_announced = True
+                if not self.background_mode:
+                    self.connected_sound.play()
+            elif announce and not self.background_mode:
+                self.output(self.i18n.t("connection_restored"), interrupt=False)
+            # Clear only the "disconnected" text — a sync running in parallel
+            # owns the status line otherwise ("sincronizando", "baixando mídias").
+            if self._tray_status == self.i18n.t("tray_wa_disconnected"):
+                wx.CallAfter(self._set_status, "")
+            # A sync that never ran (or stopped half-way) because there was no
+            # connection gets picked up here, the moment the connection is back.
+            self._sync_retry_count = 0
+            self.trigger_sync_if_needed()
+        else:
+            self._auto_offline = True
+            self._apply_offline_state()
+            logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
+            wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
+            if announce and was and not self.background_mode:
+                self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=False)
 
     def _on_menu_toggle_offline(self, event=None):
         """Sincronização menu / Ctrl+Alt+Shift+O: toggle offline mode."""
@@ -1547,6 +1633,21 @@ class MainWindow(wx.Frame):
             lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
             if lid_jid:
                 self._merge_lid_into_phone(lid_jid, remote_jid)
+
+        # A conversation the user deleted comes back the moment it receives a
+        # new message — that is what WhatsApp itself does.  Without lifting the
+        # deleted flag here the chat would be re-created in self.chats but
+        # filtered out of every list, so the message would arrive invisibly.
+        if remote_jid in self._deleted_chats:
+            self._deleted_chats.discard(remote_jid)
+            alt = (getattr(self, "_phone_to_lid", {}).get(remote_jid)
+                   or getattr(self, "_lid_to_phone", {}).get(remote_jid))
+            if alt:
+                self._deleted_chats.discard(alt)
+            if hasattr(self, "db") and self.db is not None:
+                self.db.set_metadata_json("deleted_chats", list(self._deleted_chats))
+            logging.info("[on_new_message] %s was deleted locally — restored by a new message.",
+                         remote_jid)
 
         # ── Ensure the chat record exists ─────────────────────────────────────
         if remote_jid not in self.chats:
@@ -3353,7 +3454,11 @@ class MainWindow(wx.Frame):
             logging.info("[startup] pruned bloated quoted-message data from messages.dat")
             self._schedule_save()
         self.scan_all_cached_messages_for_mentions()
-        self.connected_sound.play()
+        # NOTE: the "connected" sound is deliberately NOT played here. Reaching
+        # this point only proves the *local* WPPConnect API answered — with no
+        # internet the app would happily announce itself connected and then
+        # fail every WhatsApp call with 404/Disconnected. _set_wa_connected()
+        # plays it once the connection to WhatsApp is actually confirmed.
         # Reset per-session sync guard so on_messages_set() can start a fresh
         # sync.  Without this, _sync_completed stays True from the previous
         # session and messages.set never triggers start_sync() again.
@@ -3375,13 +3480,95 @@ class MainWindow(wx.Frame):
             time.sleep(30)
             while True:
                 try:
-                    if not getattr(self, "offline_mode", False):
+                    # Only a *user-requested* offline pauses the checker.  When
+                    # offline mode was entered automatically (connection lost)
+                    # this loop is precisely what notices the connection coming
+                    # back, so skipping it there would make the state permanent.
+                    if not getattr(self, "_user_offline", False):
                         self.check_wa_connection_http()
+                        # Safety net for a sync that failed or never started
+                        # while the connection was down: retry it as soon as
+                        # WhatsApp is reachable again, for as long as it takes.
+                        self.trigger_sync_if_needed()
                 except Exception as e:
                     logging.warning(f"[health_checker] Error checking connection in background: {e}")
                 time.sleep(30)
 
         threading.Thread(target=_loop, daemon=True).start()
+
+    # A single failed network probe is not proof of an outage (a slow proxy, a
+    # captive portal check, a momentary DNS hiccup); two in a row is.  Keeping
+    # this at 2 means an outage is detected within one health-check cycle
+    # (~30-60 s) while a blip never drops the app into offline mode.
+    _OFFLINE_PROBE_STRIKES = 2
+
+    def _probe_whatsapp_host(self) -> bool:
+        """True if WhatsApp's own servers answer over the network.
+
+        Any HTTP answer counts as reachable — we only care about whether the
+        machine can talk to WhatsApp at all, not what it replies.  Only a
+        transport-level failure (no DNS, no route, timeout) means offline.
+        No third-party host is contacted: this is the same service the app
+        already talks to through the browser session.
+        """
+        try:
+            # Reuses the module-level pooled session (requests.head is not one
+            # of the patched, pooled helpers).
+            _http_session.head("https://web.whatsapp.com", timeout=6,
+                               allow_redirects=False)
+            return True
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            logging.info("[_probe_whatsapp_host] network unreachable: %s", e)
+            return False
+        except Exception:
+            # Anything else (odd TLS/proxy behaviour) still proves we reached
+            # something — do not call that an outage.
+            return True
+
+    def check_whatsapp_reachable(self) -> bool:
+        """Decide whether WhatsApp traffic can actually flow right now.
+
+        ``/status-session`` cannot answer this: it just echoes the session
+        status string WPPConnect cached when the session was created, so it
+        keeps saying CONNECTED with the network cable unplugged — which is why
+        the app used to announce itself connected, start a sync and fire the
+        send queue with no internet at all.
+
+        Two sources are combined:
+
+        * ``/check-connection-session``, which reports the session as
+          Disconnected when WhatsApp Web itself has gone down inside the
+          browser.  (It only reports a failure when the underlying call
+          *throws*, so a False here is meaningful but a True is not conclusive.)
+        * a direct reachability probe against WhatsApp's servers, which is what
+          catches the plain "this machine has no internet" case.
+        """
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/check-connection-session"
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                if not data.get("status"):
+                    self._offline_probe_strikes = self._OFFLINE_PROBE_STRIKES
+                    return False
+            elif resp.status_code == 404:
+                self._offline_probe_strikes = self._OFFLINE_PROBE_STRIKES
+                return False
+        except Exception as e:
+            logging.warning("[check_whatsapp_reachable] session probe failed: %s", e)
+
+        if self._probe_whatsapp_host():
+            self._offline_probe_strikes = 0
+            return True
+        self._offline_probe_strikes = getattr(self, "_offline_probe_strikes", 0) + 1
+        if self._offline_probe_strikes >= self._OFFLINE_PROBE_STRIKES:
+            return False
+        # First strike: give it one more cycle before going offline.
+        return bool(getattr(self, "_wa_connected", False))
 
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
@@ -3423,7 +3610,16 @@ class MainWindow(wx.Frame):
                 # Robust check: Only call start-session if the instance is explicitly CLOSED, DESTROYED, or completely inactive.
                 # WPPConnect status values include: CONNECTED, open, INITIALIZING, QRCODE, PHONECODE, notLogged, inChat, PAIRED, etc.
                 if status in ("CONNECTED", "open"):
-                    self._wa_connected = True
+                    # "CONNECTED" only means the WPPConnect session object is
+                    # alive — it is a cached string that stays put when the
+                    # machine loses internet.  Confirm against the live
+                    # isConnected() probe before declaring ourselves online,
+                    # otherwise the app plays the "connected" sound, starts a
+                    # sync and lets the send queue fire with no connectivity.
+                    if not self.check_whatsapp_reachable():
+                        self._set_wa_connected(False, "status-session CONNECTED but isConnected() false")
+                        return
+                    self._set_wa_connected(True, "status-session CONNECTED")
                     try:
                         dev_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/host-device"
                         dev_resp = requests.get(dev_url, headers=headers, timeout=5)
@@ -3446,6 +3642,7 @@ class MainWindow(wx.Frame):
                     except Exception as e:
                         logging.error("[check_wa_connection_http] Failed to fetch host device JID: %s", e)
                 elif status in ("CLOSED", "DESTROYED", ""):
+                    self._set_wa_connected(False, f"status-session {status or 'unknown'}")
                     # Status is CLOSED or unknown: safe to start a new session.
                     # But skip if the connection dialog is currently open (pairing in progress)
                     # to avoid spawning a duplicate Chrome alongside the one the pairing flow manages.
@@ -3461,6 +3658,9 @@ class MainWindow(wx.Frame):
                 else:
                     # Instance is in some active state (e.g. notLogged, inChat, QRCODE, INITIALIZING, etc.)
                     # We should NOT call start-session to avoid launching duplicate Puppeteer tabs.
+                    # None of these states can carry WhatsApp traffic, so the
+                    # app must consider itself offline while they last.
+                    self._set_wa_connected(False, f"status-session {status}")
                     logging.info(
                         "[check_wa_connection_http] Session is in active state '%s' — skipping /start-session to avoid browser conflict.",
                         status,
@@ -3482,14 +3682,39 @@ class MainWindow(wx.Frame):
                         else:
                             wx.CallAfter(self._on_disconnect)
         except Exception as e:
+            # The local API itself did not answer — we certainly cannot reach
+            # WhatsApp through it either.
+            self._set_wa_connected(False, f"status-session request failed: {e}")
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
+
+    # Minimum gap between two sync attempts.  The health checker calls
+    # trigger_sync_if_needed() every 30 s so an interrupted sync always resumes
+    # on its own, but a sync that keeps failing for some other reason must not
+    # turn that into a request storm against the Puppeteer session.
+    _SYNC_RETRY_COOLDOWN = 120
 
     def trigger_sync_if_needed(self):
         # Trigger sync only if it hasn't completed, isn't already running, and we are connected.
-        if getattr(self, "_wa_connected", False) and not getattr(self, "_sync_completed", False) and not getattr(self, "_initial_sync_running", False):
-            logging.info("[trigger_sync_if_needed] WhatsApp connected and sync is incomplete. Triggering sync thread...")
-            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-            self.sync_thread.start()
+        if not getattr(self, "_wa_connected", False):
+            return
+        if getattr(self, "_sync_completed", False) or getattr(self, "_initial_sync_running", False):
+            return
+        existing = getattr(self, "sync_thread", None)
+        if existing is not None and existing.is_alive():
+            return
+        # Back off further after each failed round (the usual cause is the
+        # WhatsApp Web page still busy with its own history sync), but never
+        # stop retrying: capped at 10 minutes.
+        cooldown = min(
+            self._SYNC_RETRY_COOLDOWN * max(1, getattr(self, "_sync_retry_count", 0)),
+            600,
+        )
+        since = time.time() - getattr(self, "_last_sync_attempt_ts", 0)
+        if since < cooldown:
+            return
+        logging.info("[trigger_sync_if_needed] WhatsApp connected and sync is incomplete. Triggering sync thread...")
+        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+        self.sync_thread.start()
 
     def start_sync(self):
         # Block until init_UI() completes.  This prevents wx.CallAfter calls
@@ -3499,6 +3724,7 @@ class MainWindow(wx.Frame):
             return  # UI never initialized; bail out silently
 
         self._initial_sync_running = True
+        self._last_sync_attempt_ts = time.time()
         try:
             self._run_sync()
         except Exception:
@@ -3522,12 +3748,20 @@ class MainWindow(wx.Frame):
             time.sleep(1)
             waited += 1
         if not getattr(self, "_wa_connected", False):
-            logging.warning("[start_sync] Sync starting without active WhatsApp connection (timeout).")
-        else:
-            # Give WPPConnect/WA-JS internal stores a few seconds to fully initialize
-            # before querying chats and contacts. This prevents HTTP 500/TypeError crashes.
-            logging.info("[start_sync] WhatsApp connected. Waiting 5s for stores to initialize...")
-            time.sleep(5)
+            # Do NOT sync without a connection.  Every WPPConnect route answers
+            # 404 "Disconnected" in this state, so the old behaviour was to
+            # announce "synchronizing", spend minutes timing out and then pop a
+            # modal error over the screen reader — for something as ordinary as
+            # the Wi-Fi being off.  Bail out silently; the connection health
+            # checker calls trigger_sync_if_needed() every 30 s and starts this
+            # again the moment WhatsApp is reachable.
+            logging.warning("[start_sync] No WhatsApp connection — skipping sync until it returns.")
+            self._sync_completed = False
+            return
+        # Give WPPConnect/WA-JS internal stores a few seconds to fully initialize
+        # before querying chats and contacts. This prevents HTTP 500/TypeError crashes.
+        logging.info("[start_sync] WhatsApp connected. Waiting 5s for stores to initialize...")
+        time.sleep(5)
 
         # Play sound and announce synchronization start immediately to give instant user feedback
         self.synchronizing_sound.play()
@@ -3546,13 +3780,30 @@ class MainWindow(wx.Frame):
         # without blocking the UI.
         _CHAT_MAX_FAILURES = 2
         has_local_chats = len(self.chats) > 0
+        local_chat_count = len(self.chats)
         chat_list_ok = False   # did list-chats ever actually answer?
+        chat_list_settled = False  # …and did it answer with a stable snapshot?
         failures     = 0
         chat_list_error = None
+        disconnected = False
+        # Number of chats the *server* returned on the previous successful
+        # attempt.  WhatsApp Web fills its chat store progressively after a
+        # (re)connection, so the first answer can legitimately be "4 chats"
+        # while the account has hundreds — accepting it is what left users with
+        # three or four synced conversations and a sync that then restarted
+        # itself over and over.  Waiting for two consecutive answers of the
+        # same size means we only ever sync a settled snapshot.
+        prev_server_count = -1
         for attempt in range(_CHAT_RETRIES):
-            prev_len = len(self.chats)
             result   = self.get_remote_chats(dict(self.chats), notify_errors=False)
             if result is None:
+                if getattr(self, "_last_chat_fetch_disconnected", False):
+                    # WhatsApp went down mid-sync: stop immediately, stay
+                    # incomplete, and let the health checker restart us.
+                    disconnected = True
+                    chat_list_error = getattr(self, "_last_chat_fetch_error", None)
+                    logging.warning("[start_sync] Chat list unavailable — WhatsApp disconnected.")
+                    break
                 # The call itself failed (timeout/HTTP error). This must never
                 # be mistaken for "the API is ready": self.chats keeps growing
                 # in parallel through the WebSocket (on_new_message), so the
@@ -3572,14 +3823,40 @@ class MainWindow(wx.Frame):
                 continue
             self.chats   = result
             chat_list_ok = True
+            server_count = getattr(self, "_last_chat_fetch_count", 0)
+            logging.info(
+                "[start_sync] list-chats attempt %d returned %d chats (previous: %d, local cache: %d)",
+                attempt + 1, server_count, prev_server_count, local_chat_count,
+            )
             # Exit the retry loop as soon as either:
-            #  (a) we already had local chats (reconnection — no need to wait), or
-            #  (b) the API returned at least one new chat (first pairing ready), or
+            #  (a) the server returned the same number of chats twice in a row
+            #      (its store has settled — this is the normal exit), or
+            #  (b) the server already accounts for everything we had cached
+            #      locally, which on a reconnection means it is fully warmed up, or
             #  (c) we've exhausted retries.
-            if has_local_chats or len(self.chats) > prev_len or attempt == _CHAT_RETRIES - 1:
+            settled = server_count > 0 and server_count == prev_server_count
+            covers_cache = has_local_chats and server_count >= local_chat_count
+            if settled or covers_cache:
+                chat_list_settled = True
                 break
+            if attempt == _CHAT_RETRIES - 1:
+                # Still growing when we ran out of attempts: use what we have,
+                # but do NOT call this sync complete — it gets retried below.
+                logging.warning(
+                    "[start_sync] Chat list never settled (last count: %d) — "
+                    "treating this sync as incomplete.", server_count,
+                )
+                break
+            prev_server_count = server_count
             wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
             time.sleep(_CHAT_DELAY)
+        if disconnected:
+            # Not an error the user has to acknowledge — just no connection.
+            # Leave the sync marked incomplete and stop here so nothing else
+            # hammers the API; the health checker resumes it automatically.
+            logging.info("[start_sync] Aborting sync: WhatsApp is disconnected.")
+            self._sync_completed = False
+            return
         if not chat_list_ok:
             # Report once, after every attempt is exhausted, instead of one
             # modal dialog per attempt interrupting the screen reader.
@@ -3641,6 +3918,20 @@ class MainWindow(wx.Frame):
         # issue where names were missing because the initial fetch was too early.
         self.get_remote_contacts()
 
+        # ── Refresh chat-level state now that messages are indexed ───────────
+        # The unreadCount/pin/archive values used so far came from the very
+        # first list-chats call, made before WhatsApp Web had finished syncing
+        # its chat store — so conversations that really do have unread messages
+        # showed up as read, and stayed that way until the 5-minute background
+        # poll happened to correct them (which users experienced as "it takes
+        # forever to notice the conversation is unread").  One extra call here
+        # settles it right after the message sync, while messages_set_completed
+        # is already True so server-reported counts are accepted as truth.
+        refreshed = self.get_remote_chats(dict(self.chats), persist_full=False,
+                                          notify_errors=False)
+        if refreshed is not None:
+            self.chats = refreshed
+
         # Resolve all unresolved @lid JIDs in our chat list via WPPConnect API
         unresolved_lids = [
             jid for jid in self.chats.keys() 
@@ -3663,7 +3954,11 @@ class MainWindow(wx.Frame):
         # server — otherwise this is a partial sync that is about to be retried,
         # and saying "conversations synchronized" over the few chats the socket
         # delivered is exactly what makes the failure invisible to the user.
-        if chat_list_ok:
+        # …and only when that list had settled: announcing "conversations
+        # synchronized" over a chat list the server was still filling in is
+        # precisely what made the 3-or-4-conversations failure look like a
+        # success, right before the sync restarted itself.
+        if chat_list_ok and chat_list_settled:
             self.sync_complete_sound.play()
             if not self.background_mode:
                 self.output(self.i18n.t("sync_complete"))
@@ -3680,47 +3975,33 @@ class MainWindow(wx.Frame):
         # fraction of the account), so marking the sync completed would leave
         # the session permanently half-synced — trigger_sync_if_needed() checks
         # that same flag and would never run a real sync again.
-        if len(self.chats) > 0 and getattr(self, "_wa_connected", False) and chat_list_ok:
+        # `chat_list_settled` is required for the same reason: a snapshot the
+        # server was still growing is a partial account, not a finished sync.
+        if (len(self.chats) > 0 and getattr(self, "_wa_connected", False)
+                and chat_list_ok and chat_list_settled):
             self._sync_completed = True
             self._sync_retry_count = 0
         else:
             self._sync_completed = False
             self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
-            _MAX_SYNC_RETRIES = 4
-            if self._sync_retry_count > _MAX_SYNC_RETRIES:
-                logging.warning(
-                    "[start_sync] Incomplete sync after %d retries — giving up "
-                    "for this session (chat_list_ok=%s, chats=%d).",
-                    _MAX_SYNC_RETRIES, chat_list_ok, len(self.chats),
-                )
-            else:
-                # Back off a little further each round: the usual cause is the
-                # WhatsApp Web page still being busy with its initial history
-                # sync, which resolves on its own after a minute or two.
-                delay = 15 * self._sync_retry_count
-                logging.info(
-                    "[start_sync] Sync incomplete (chat_list_ok=%s, chats=%d) — "
-                    "retrying in %ds (attempt %d/%d).",
-                    chat_list_ok, len(self.chats), delay,
-                    self._sync_retry_count, _MAX_SYNC_RETRIES,
-                )
+            # No bespoke retry thread and no "give up for this session" cap any
+            # more.  Both were bugs in practice: the retry thread returned
+            # immediately when _wa_connected was False (i.e. exactly when the
+            # cause was a dropped connection), so a sync interrupted by an
+            # internet outage was never resumed even after the connection came
+            # back.  The connection health checker now owns retrying — it runs
+            # every 30 s for the whole session and calls trigger_sync_if_needed(),
+            # which only fires while connected and honours a growing cooldown.
+            logging.info(
+                "[start_sync] Sync incomplete (chat_list_ok=%s, settled=%s, chats=%d) — "
+                "the health checker will retry it (attempt %d so far).",
+                chat_list_ok, chat_list_settled, len(self.chats), self._sync_retry_count,
+            )
 
-                def _retry_sync(delay=delay):
-                    time.sleep(delay)
-                    # Wait out the media phase of the current sync so two syncs
-                    # never run in parallel (it clears _initial_sync_running).
-                    waited = 0
-                    while getattr(self, "_initial_sync_running", False) and waited < 600:
-                        time.sleep(5)
-                        waited += 5
-                    if not getattr(self, "_wa_connected", False):
-                        return
-                    if getattr(self, "_sync_completed", False) or getattr(self, "_initial_sync_running", False):
-                        return
-                    logging.info("[start_sync] Retrying incomplete sync...")
-                    self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-                    self.sync_thread.start()
-                threading.Thread(target=_retry_sync, daemon=True).start()
+        # Start the background chat/contact poller before the media phase, not
+        # after it: media downloads can run for many minutes, and until this
+        # loop existed nothing refreshed unread badges in the meantime.
+        self.start_periodic_contacts_sync()
 
         # ── Phase 2: download media (silent) ──────────────────────────────
         wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
@@ -3732,9 +4013,6 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self._set_status, "")
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
-
-        # Start periodic background contacts sync (every 5 minutes)
-        self.start_periodic_contacts_sync()
         # _initial_sync_running is reset by start_sync()'s finally block.
 
     def wait_messages_set(self):
@@ -3987,6 +4265,8 @@ class MainWindow(wx.Frame):
         _TIMEOUTS    = (30, 45, 60, 90, 120)  # seconds per request, per attempt
         _ATTEMPTS    = len(_TIMEOUTS)
         last_error = None
+        self._last_chat_fetch_count = 0
+        self._last_chat_fetch_disconnected = False
         for attempt, _timeout in enumerate(_TIMEOUTS):
             try:
                 response = requests.post(url, json={}, headers=headers, timeout=_timeout)
@@ -3996,6 +4276,16 @@ class MainWindow(wx.Frame):
                         response.status_code, attempt + 1, _ATTEMPTS, response.text[:200],
                     )
                     last_error = f"HTTP {response.status_code}"
+                    # HTTP 404 {"status": "Disconnected"} is WPPConnect saying
+                    # WhatsApp itself is unreachable (typically: the machine has
+                    # no internet).  Retrying it five times with growing
+                    # timeouts just burns ~6 minutes and ends in a modal error
+                    # dialog; bail out at once, flag the connection as down and
+                    # let the health checker restart the sync when it returns.
+                    if self._check_wa_connection_closed(response):
+                        self._last_chat_fetch_disconnected = True
+                        self._last_chat_fetch_error = last_error
+                        return None
                     if attempt < _ATTEMPTS - 1:
                         logging.info("[get_remote_chats] Retrying in %ds...", _RETRY_SLEEP)
                         time.sleep(_RETRY_SLEEP)
@@ -4031,6 +4321,13 @@ class MainWindow(wx.Frame):
                 if not isinstance(response_data, list):
                     response_data = []
 
+                # How many chats the *server* returned this time.  Callers use
+                # it to tell "the API is warmed up and gave us the whole
+                # account" from "the API answered early with a handful of
+                # chats" — len(self.chats) cannot do that, since it also grows
+                # from WebSocket traffic while the sync runs.
+                self._last_chat_fetch_count = len(response_data)
+
                 # Traduzir as chaves do WPPConnect (remoteJid)
                 for chat in response_data:
                     if not isinstance(chat, dict):
@@ -4046,7 +4343,12 @@ class MainWindow(wx.Frame):
                     logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
                     logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
 
-                deleted = set(self.settings.get("deleted_chats", []))
+                # The deleted-chat list lives in DB metadata (self._deleted_chats)
+                # since 0.17 — prepare_sync() pops it out of settings.json on
+                # first run.  Reading settings here therefore returned an empty
+                # set on every modern install, which is why chats deleted by the
+                # user came straight back on the next sync/restart.
+                deleted = set(self._deleted_chats)
                 cleared = self.settings.get("cleared_chats", {})
 
                 for chat in response_data:
@@ -4084,6 +4386,7 @@ class MainWindow(wx.Frame):
                     # Skip status@broadcast — statuses are shown in the Status tab
                     if not jid or jid.endswith("@broadcast"):
                         continue
+
                     # Populate/update self.contacts from chat name metadata
                     if jid and not jid.endswith("@g.us"):
                         name = chat.get("name")
@@ -4210,9 +4513,10 @@ class MainWindow(wx.Frame):
                                 self._group_name_cache = getattr(self, "_group_name_cache", {})
                                 self._group_name_cache[jid] = subj
 
-                # Sync mute and pin state from server into DB metadata
+                # Sync mute, pin and archive state from server into DB metadata
                 now = int(time.time())
                 db_changed = False
+                archive_changed = False
                 for chat in response_data:
                     if not isinstance(chat, dict):
                         continue
@@ -4229,6 +4533,31 @@ class MainWindow(wx.Frame):
                         elif jid in self._muted_chats:
                             del self._muted_chats[jid]
                             db_changed = True
+
+                    # ── Archive state: two-way sync ──────────────────────────
+                    # This used to be add-only (normalize_chats() could put a
+                    # JID into _archived_chats but nothing ever took it out),
+                    # so a single spurious/stale "archived" value pinned the
+                    # conversation to the Archived tab forever — including
+                    # conversations the user had never archived on WhatsApp.
+                    # Whenever the server states the archive flag, it wins.
+                    raw_archive = chat.get("archive")
+                    if raw_archive is None:
+                        raw_archive = chat.get("archived")
+                    server_archived = _parse_bool_flag(raw_archive)
+                    if server_archived is not None:
+                        chat["archive"] = server_archived
+                        chat["archived"] = server_archived
+                        if jid in chats:
+                            chats[jid]["archive"] = server_archived
+                            chats[jid]["archived"] = server_archived
+                        if server_archived:
+                            if jid not in self._archived_chats:
+                                self._archived_chats.add(jid)
+                                archive_changed = True
+                        elif jid in self._archived_chats:
+                            self._archived_chats.discard(jid)
+                            archive_changed = True
 
                     # Check if the JID starts with "0@" (official WhatsApp/system account)
                     is_system = jid.startswith("0@")
@@ -4294,6 +4623,8 @@ class MainWindow(wx.Frame):
                 if db_changed and hasattr(self, "db") and self.db is not None:
                     self.db.set_metadata_json("muted_chats", self._muted_chats)
                     self.db.set_metadata_json("pinned_chats", list(self._pinned_chats))
+                if archive_changed and hasattr(self, "db") and self.db is not None:
+                    self.db.set_metadata_json("archived_chats", list(self._archived_chats))
 
                 # Retroactively prune 1:1 phantom chats that slipped into the
                 # local cache before this filter existed: no local messages,
@@ -4312,6 +4643,12 @@ class MainWindow(wx.Frame):
                         if stale_jid not in response_jids:
                             continue
                         if stale_jid in self._pinned_chats or stale_jid in self._muted_chats:
+                            continue
+                        if stale_jid in cleared:
+                            # A conversation the user cleared legitimately has
+                            # no messages and no last message — pruning it here
+                            # is what made "clear chat" behave like "delete
+                            # chat" and drop the conversation off the list.
                             continue
                         stale_chat = chats[stale_jid]
                         has_messages = bool(
@@ -4362,16 +4699,19 @@ class MainWindow(wx.Frame):
                 continue
             if chat.get("unreadCount") is None:
                 chat["unreadCount"] = 0
-            is_arch = (
-                chat.get("archived") is True 
-                or chat.get("archive") is True
-                or str(chat.get("archived")).lower() == "true"
-                or str(chat.get("archive")).lower() == "true"
-            )
-            if is_arch:
+            raw_arch = chat.get("archive")
+            if raw_arch is None:
+                raw_arch = chat.get("archived")
+            is_arch = _parse_bool_flag(raw_arch)
+            if is_arch is True:
                 if key not in self._archived_chats:
                     self._archived_chats.add(key)
                     db_changed = True
+            elif is_arch is False and key in self._archived_chats:
+                # Explicitly not archived — drop the stale membership instead of
+                # keeping the conversation stuck in the Archived tab forever.
+                self._archived_chats.discard(key)
+                db_changed = True
             normalized[key] = chat
         if db_changed and hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("archived_chats", list(self._archived_chats))
@@ -4914,20 +5254,35 @@ class MainWindow(wx.Frame):
             return
         self._contacts_sync_thread_started = True
 
+        # Chat state (unread badges, pin, archive, mute) is polled far more
+        # often than the contact list: WPPConnect Server never relays a
+        # "chats-update" socket event for changes made on the phone or another
+        # linked device, so this poll is the *only* way those reach WinZapp —
+        # at the old 5-minute cadence a conversation could sit there looking
+        # read for minutes after the phone said otherwise.  Contacts change
+        # rarely and the fetch is heavy, so it stays on the 5-minute schedule.
+        _CHAT_POLL_SECONDS    = 60
+        _CONTACT_POLL_SECONDS = 300
+
         def _loop():
+            elapsed = 0
             while True:
-                time.sleep(300)
+                time.sleep(_CHAT_POLL_SECONDS)
+                elapsed += _CHAT_POLL_SECONDS
                 try:
-                    if getattr(self, "_wa_connected", False):
+                    if not getattr(self, "_wa_connected", False):
+                        continue
+                    if getattr(self, "_initial_sync_running", False):
+                        # Don't fight the initial sync for the same dict.
+                        continue
+                    if elapsed >= _CONTACT_POLL_SECONDS:
+                        elapsed = 0
                         self.get_remote_contacts()
-                        # WPPConnect Server never relays a "chats-update" socket event
-                        # for chat-level state changes made on other linked devices
-                        # (pin/archive/mute), so pin state can only be picked up by
-                        # periodically re-polling list-chats — do that here too.
-                        result = self.get_remote_chats(dict(self.chats), persist_full=False)
-                        if result is not None:
-                            self.chats = result
-                        wx.CallAfter(self._schedule_set_chats)
+                    result = self.get_remote_chats(dict(self.chats), persist_full=False,
+                                                   notify_errors=False)
+                    if result is not None:
+                        self.chats = result
+                    wx.CallAfter(self._schedule_set_chats)
                 except Exception as e:
                     print(f"[periodic_contacts_sync] error: {e}")
 
@@ -5034,7 +5389,10 @@ class MainWindow(wx.Frame):
             # We do NOT skip based on missing messages alone: during and just
             # after sync many valid chats have empty records but still carry a
             # name/pushName from the WPPConnect list-chats response.
-            has_content  = bool(records or last_msg or unread > 0 or is_pinned)
+            # A cleared conversation is *supposed* to be empty: it must stay in
+            # the list (with no preview) instead of vanishing as if deleted.
+            is_cleared   = jid in self.settings.get("cleared_chats", {})
+            has_content  = bool(records or last_msg or unread > 0 or is_pinned or is_cleared)
             name_hint    = (chat.get("name") or chat.get("pushName") or
                             chat.get("subject") or "").strip()
             has_identity = bool(name_hint and not name_hint.isdigit() and len(name_hint) > 1)
@@ -5129,13 +5487,13 @@ class MainWindow(wx.Frame):
                 )
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
-            is_archived = (
-                jid in archived 
-                or chat.get("archived") is True 
-                or chat.get("archive") is True
-                or str(chat.get("archived")).lower() == "true"
-                or str(chat.get("archive")).lower() == "true"
-            )
+            raw_arch = chat.get("archive")
+            if raw_arch is None:
+                raw_arch = chat.get("archived")
+            arch_flag = _parse_bool_flag(raw_arch)
+            # An explicit flag on the chat record (server truth) wins over the
+            # persisted set; the set only decides when the record says nothing.
+            is_archived = arch_flag if arch_flag is not None else (jid in archived)
             if is_archived:
                 arch_chats.append(chat)
                 arch_names.append(name)
@@ -5987,6 +6345,17 @@ class MainWindow(wx.Frame):
         else:
             logging.info(f"[sync_chat_messages] Session disconnected, using cached messages for {remote_jid}")
 
+        # NOTE on "conversation cleared from the phone": there is deliberately
+        # no automatic mirroring here.  The only local evidence would be
+        # get-messages answering 200 with an empty list, and that is
+        # indistinguishable from "WhatsApp Web has not loaded this chat's
+        # history into its store yet" — which is routine right after pairing or
+        # a reconnect.  Acting on it would silently destroy the user's local
+        # history.  (list-chats cannot help either: WPPConnect serialises the
+        # raw ChatModel with msgs:null, so it carries no last-message data at
+        # all.)  A clear made on the phone therefore only reaches WinZapp when
+        # the user clears the conversation here as well.
+
         # Drop messages the user cleared (older than the clear-chat cutoff) so a
         # cleared conversation does not silently repopulate on the next sync.
         if all_messages:
@@ -6214,18 +6583,67 @@ class MainWindow(wx.Frame):
         with open(media_path, "wb") as f:
             f.write(encrypted)
 
-    def _check_wa_connection_closed(self, response):
-        """If the WPPConnect returned a 'Connection Closed' error, mark the
-        WhatsApp connection as down so the MessageQueue pauses retrying until
-        Baileys reconnects and fires connection.update with state='open'."""
+    def _check_wa_connection_closed(self, response) -> bool:
+        """Detect a response that means "WhatsApp is not connected".
+
+        Two shapes matter:
+
+        * HTTP 404 with ``{"status": "Disconnected"}`` — WPPConnect's
+          statusConnection middleware answers this for *every* route (send,
+          list-chats, …) whenever ``isConnected()`` is false, i.e. whenever the
+          machine has no internet.  It is the single most reliable offline
+          signal the API gives us.
+        * a 'Connection Closed' error message from Baileys.
+
+        Marks the connection as down (which pauses the MessageQueue and turns
+        on automatic offline mode) and returns True when either is seen.
+        """
+        disconnected = False
         try:
             body = response.json()
-            messages = body.get("response", {}).get("message", [])
-            if any("Connection Closed" in str(m) for m in messages):
-                print("[send] WhatsApp Connection Closed — pausing queue until reconnect")
-                self._wa_connected = False
+        except Exception:
+            body = {}
+        try:
+            if response.status_code == 404 and isinstance(body, dict):
+                if str(body.get("status", "")).lower() == "disconnected":
+                    disconnected = True
+            if isinstance(body, dict):
+                messages = body.get("response", {})
+                messages = messages.get("message", []) if isinstance(messages, dict) else []
+                if any("Connection Closed" in str(m) for m in messages):
+                    disconnected = True
         except Exception:
             pass
+        if disconnected:
+            logging.warning("[send] WhatsApp reported Disconnected — pausing queue until reconnect")
+            self._set_wa_connected(False, "API answered Disconnected")
+        return disconnected
+
+    def _classify_send_exception(self, exc, where: str) -> dict:
+        """Turn a transport-level send failure into a queue instruction.
+
+        A read timeout or a dropped connection is **not** evidence that the
+        message was not sent: WPPConnect drives WhatsApp Web, which accepts an
+        outgoing message into its own outbox and flushes it as soon as the
+        phone/network is back.  Retrying such a send is what produced the
+        reported "30 copies of the same message arrive when the internet comes
+        back" — every retry queued another genuine copy inside WhatsApp Web.
+
+        So these are reported as *ambiguous*: the queue drops the message
+        instead of resending it, and the WebSocket echo of the real send (which
+        is matched against the pending virtual message) resolves the UI if and
+        when WhatsApp actually delivers it.
+        """
+        err = str(exc)[:200]
+        ambiguous = isinstance(exc, (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ))
+        logging.error("[%s] request exception (ambiguous=%s): %s", where, ambiguous, err)
+        if ambiguous:
+            return {"ok": False, "error": err, "retry": False, "ambiguous": True}
+        return {"ok": False, "error": err, "retry": True}
 
     def _serialize_quoted_id(self, quoted: dict, fallback_jid: str = None) -> str:
         """Serialize a quoted message key into the format expected by WPPConnect.
@@ -6426,13 +6844,17 @@ class MainWindow(wx.Frame):
                 if response.status_code not in (200, 201):
                     err = f"HTTP {response.status_code}: {response.text[:300]}"
                     logging.error("[send_text_message] All send attempts failed: %s for %s", err, remote_jid)
-                    self._check_wa_connection_closed(response)
+                    if self._check_wa_connection_closed(response):
+                        # WhatsApp is down: the message was definitely NOT sent,
+                        # so it stays queued — but never retried in a loop while
+                        # the connection is out (see MessageQueue).
+                        return {"ok": False, "error": err, "retry": False, "disconnected": True}
                     # If it's a transient error, mark retryable
                     is_retryable = response.status_code in (408, 429, 500, 502, 503, 504)
                     return {"ok": False, "error": err, "retry": is_retryable}
 
 
-            self._wa_connected = True
+            self._set_wa_connected(True, "send succeeded")
             try:
                 body = response.json()
                 # WPPConnect retorna a resposta dentro de 'response'
@@ -6450,9 +6872,7 @@ class MainWindow(wx.Frame):
             except Exception:
                 return True
         except Exception as exc:
-            err = str(exc)[:200]
-            logging.error("[send_text_message] exception for %s: %s", remote_jid, err)
-            return {"ok": False, "error": err, "retry": True}
+            return self._classify_send_exception(exc, "send_text_message")
 
     @staticmethod
     def _find_api_ffmpeg() -> str:
@@ -6611,16 +7031,17 @@ class MainWindow(wx.Frame):
                         else:
                             err = f"HTTP {response.status_code}: {response.text[:300]}"
                             logging.error("[send_audio_message] Retry also failed: %s", err)
-                            self._check_wa_connection_closed(response)
+                            if self._check_wa_connection_closed(response):
+                                return {"ok": False, "error": err, "retry": False, "disconnected": True}
                             return {"ok": False, "error": err, "retry": True}
                     else:
-                        self._check_wa_connection_closed(response)
-                        return {"ok": False, "error": err, "retry": False}
+                        disc = self._check_wa_connection_closed(response)
+                        return {"ok": False, "error": err, "retry": False, "disconnected": disc}
                 else:
-                    self._check_wa_connection_closed(response)
-                    return {"ok": False, "error": err, "retry": False}
+                    disc = self._check_wa_connection_closed(response)
+                    return {"ok": False, "error": err, "retry": False, "disconnected": disc}
 
-            self._wa_connected = True
+            self._set_wa_connected(True, "audio send succeeded")
             try:
                 body = response.json()
                 resp = body.get("response", {})
@@ -6637,9 +7058,7 @@ class MainWindow(wx.Frame):
             except Exception:
                 return True
         except Exception as e:
-            err = str(e)[:200]
-            logging.error("[send_audio_message] exception for %s: %s", remote_jid, err)
-            return {"ok": False, "error": err, "retry": True}
+            return self._classify_send_exception(e, "send_audio_message")
 
 
     def _serialize_msg_id(self, remote_jid: str, msg_key: dict) -> str:
@@ -6777,6 +7196,19 @@ class MainWindow(wx.Frame):
 
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
+
+    def _on_message_unconfirmed(self, local_id: str):
+        """Called when a send timed out and its outcome cannot be determined.
+
+        The message is left in its "sending" state in the UI on purpose: it was
+        NOT retried (that is what used to flood conversations with duplicates),
+        and WhatsApp Web may still deliver it on reconnect — in which case the
+        echo arriving over the WebSocket resolves this very bubble.  Just tell
+        the user the delivery is unconfirmed so silence is never mistaken for
+        success.
+        """
+        if not self.background_mode:
+            self.output(self.i18n.t("message_send_unconfirmed"), interrupt=False)
 
     def _on_message_failed(self, local_id: str, error: str = "", show_dialog: bool = False):
         """
@@ -7258,17 +7690,7 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(normalized)
         if chat is None:
             return
-        chat["archived"] = archived
-        chat["archive"] = archived
-        
-        # Keep local DB synchronized
-        if archived:
-            self._archived_chats.add(normalized)
-        else:
-            self._archived_chats.discard(normalized)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
-        self._schedule_set_chats()
+        self._set_archived_state(normalized, archived)
 
     def on_chat_pin_update(self, jid: str, is_pinned: bool):
         """Handle pin/unpin status change from chats.update."""
@@ -7383,7 +7805,7 @@ class MainWindow(wx.Frame):
                         "[get_base64_from_media] session not active for %s, retrying in 3s (attempt %d/%d)",
                         msg_id, attempt + 1, max_attempts
                     )
-                    self._wa_connected = False
+                    self._set_wa_connected(False, "media fetch: session not active", announce=False)
                     if attempt < max_attempts - 1:
                         time.sleep(3)
                         continue
@@ -7408,7 +7830,7 @@ class MainWindow(wx.Frame):
                                 "[get_base64_from_media] session not active for %s (stream), retrying in 3s (attempt %d/%d)",
                                 msg_id, attempt + 1, max_attempts
                             )
-                            self._wa_connected = False
+                            self._set_wa_connected(False, "media fetch: session not active", announce=False)
                             if attempt < max_attempts - 1:
                                 time.sleep(3)
                                 continue
@@ -8342,27 +8764,45 @@ class MainWindow(wx.Frame):
 
     def is_chat_archived(self, jid: str) -> bool:
         chat = self.chats.get(jid, {})
-        return (jid in self._archived_chats 
-                or chat.get("archived") is True 
-                or chat.get("archive") is True
-                or str(chat.get("archived")).lower() == "true"
-                or str(chat.get("archive")).lower() == "true")
+        raw = chat.get("archive")
+        if raw is None:
+            raw = chat.get("archived")
+        flag = _parse_bool_flag(raw)
+        if flag is not None:
+            return flag
+        return jid in self._archived_chats
 
 
-    def archive_chat(self, jid: str):
-        if jid not in self._archived_chats:
+    def _set_archived_state(self, jid: str, archived: bool):
+        """Apply an archive decision to both the chat record and the metadata set.
+
+        Both have to move together: the chat record is what the list builder
+        and is_chat_archived() consult first (it carries the server's truth),
+        while the set is what survives a restart.
+        """
+        if archived:
             self._archived_chats.add(jid)
+        else:
+            self._archived_chats.discard(jid)
+        chat = self.chats.get(jid)
+        if chat is not None:
+            chat["archive"] = archived
+            chat["archived"] = archived
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("archived_chats", list(self._archived_chats))
+            try:
+                if chat is not None:
+                    self.db.upsert_chat(jid, chat)
+            except Exception as exc:
+                logging.warning("[_set_archived_state] DB update failed for %s: %s", jid, exc)
         self._schedule_set_chats()
+
+    def archive_chat(self, jid: str):
+        self._set_archived_state(jid, True)
         self._api_archive_chat(jid, archive=True)
 
     def unarchive_chat(self, jid: str):
-        if jid in self._archived_chats:
-            self._archived_chats.remove(jid)
-        if hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("archived_chats", list(self._archived_chats))
-        self._schedule_set_chats()
+        self._set_archived_state(jid, False)
         self._api_archive_chat(jid, archive=False)
 
     def _api_archive_chat(self, jid: str, archive: bool):
@@ -8407,28 +8847,61 @@ class MainWindow(wx.Frame):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
             if phone_jid and phone_jid not in self._deleted_chats:
                 self._deleted_chats.add(phone_jid)
+        self.chats.pop(jid, None)
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("deleted_chats", list(self._deleted_chats))
-        self.chats.pop(jid, None)
+            # Drop the row as well, not just the "deleted" marker.  Leaving it
+            # in the database meant the conversation was reloaded into
+            # self.chats on the next start and only hidden by the marker — so
+            # anything that lost or bypassed the marker (as get_remote_chats
+            # did, reading it from the wrong place) brought the chat back.
+            try:
+                self.db.delete_chat(jid)
+            except Exception as exc:
+                logging.warning("[delete_chat_local] DB delete failed for %s: %s", jid, exc)
         self._schedule_save()
         self._schedule_set_chats()
 
-    def clear_chat_messages_local(self, jid: str):
+    def clear_chat_messages_local(self, jid: str, record_cutoff: bool = True):
+        """Empty a conversation locally, keeping it in the chat list.
+
+        Clearing removes the messages and the last-message preview — it must
+        NOT remove the conversation itself; that is what "delete chat" does.
+        `record_cutoff` is False when we are only mirroring a clear that already
+        happened on the phone (no new cutoff to remember, the server is the
+        source of truth).
+        """
         chat = self.chats.get(jid)
-        if chat:
-            chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
-            # Also drop the last-message preview and unread badge so the now-empty
-            # conversation is filtered out of the list immediately (otherwise a
-            # stale lastMessage kept it visible).
-            chat["lastMessage"] = None
-            chat["unreadCount"] = 0
+        if not chat:
+            return
+        chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
+        chat["lastMessage"] = None
+        chat["unreadCount"] = 0
+        if record_cutoff:
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
-            self._schedule_save(dirty_jid=jid)
             self.save_settings()
+        self._schedule_save(dirty_jid=jid)
+        if hasattr(self, "db") and self.db is not None:
+            try:
+                self.db.delete_chat_messages(jid)
+                self.db.upsert_chat(jid, chat)
+            except Exception as exc:
+                logging.warning("[clear_chat_messages_local] DB clear failed for %s: %s", jid, exc)
 
     def delete_chat(self, jid: str):
         """Delete chat locally and sync to WPPConnect API."""
         self.delete_chat_local(jid)
+        if jid.endswith("@g.us"):
+            # NEVER send delete-chat for a group.  WhatsApp has no concept of
+            # "delete this group conversation but stay in it": its internal
+            # sendDelete on a group you are still a member of exits the group
+            # first — which is how users who only meant to tidy up their chat
+            # list found themselves removed from groups.  Deleting a group is
+            # therefore local-only here; leaving is a separate, explicit action
+            # (leave_group / the "Sair do grupo" menu item).
+            logging.info("[delete_chat] %s is a group — deleting locally only "
+                         "(a server-side delete would leave the group).", jid)
+            return
         def _api():
             phone = jid.replace("@s.whatsapp.net", "@c.us")
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/delete-chat"
@@ -8774,12 +9247,12 @@ class MainWindow(wx.Frame):
             # 5xx responses are transient server/puppeteer hiccups — notably the
             # WPPConnect "ProtocolError: Promise was collected" that strikes large
             # uploads under load. Retry those; treat 4xx as permanent.
+            if self._check_wa_connection_closed(r):
+                return {"ok": False, "error": err, "retry": False, "disconnected": True}
             retryable = r.status_code >= 500
             return {"ok": False, "error": err, "retry": retryable}
         except Exception as exc:
-            # Timeouts and connection errors are transient — let the queue retry.
-            logging.error("[send_media] request exception for %s (%s): %s", remote_jid, filename, exc)
-            return {"ok": False, "error": str(exc)[:200], "retry": True}
+            return self._classify_send_exception(exc, "send_media")
 
     def save_contact_to_phone(self, phone: str, name: str,
                               surname: str = "", sync: bool = True) -> bool:

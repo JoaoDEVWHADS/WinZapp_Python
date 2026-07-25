@@ -283,6 +283,31 @@ def format_number(string_number):
     # Generic international
     return f"+{cc} {local}" if local else f"+{cc}"
 
+def parse_bool_flag(value):
+    """Interpret a WPPConnect boolean-ish field, or None when it says nothing.
+
+    Chat flags (``archive``, ``pin``) come back as real booleans, as the
+    strings "true"/"false", as 0/1, or missing entirely depending on the
+    endpoint and API version.  A plain ``bool(value)`` is wrong for the string
+    form — ``bool("false")`` is True — and that is exactly how conversations
+    the user never archived ended up in the Archived tab.  Returning None for
+    "not stated" lets callers leave the local state untouched.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes"):
+            return True
+        if v in ("false", "0", "no", "", "none", "null"):
+            return False
+    return None
+
+
 def check_internet_connection(test_url="https://www.google.com", timeout=10):
     try:
         response = requests.get(test_url, timeout=timeout)

@@ -4,7 +4,7 @@ import socketio
 import wx
 import requests
 from core.i18n import I18n
-from core.utils import looks_like_binary_blob, _slim_quoted_message
+from core.utils import looks_like_binary_blob, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
@@ -80,8 +80,14 @@ class WebSocketClient:
 
     def on_disconnect(self):
         print("WebSocket disconnected.")
-        # Pause the message queue until the socket (and WhatsApp) reconnect.
-        wx.CallAfter(setattr, self.main_window, "_wa_connected", False)
+        # Pause the message queue until the socket (and WhatsApp) reconnect,
+        # and switch to offline mode so the UI says so instead of silently
+        # dropping everything the user does into a queue.
+        # Silent: a Socket.IO blip against the *local* server reconnects on its
+        # own within seconds, and announcing "offline" every time would be
+        # constant chatter for a screen-reader user. The 30-second health check
+        # announces it if the connection really is gone.
+        wx.CallAfter(self.main_window._set_wa_connected, False, "socket disconnected", False)
 
     def on_connection_update(self, info):
         print(info)
@@ -95,18 +101,13 @@ class WebSocketClient:
             if wuid:
                 self.main_window.my_jid = wuid
                 self.main_window.resolve_self_lid()
-            # Mark WhatsApp as connected so the MessageQueue resumes sending.
-            self.main_window._wa_connected = True
-            # Clear any "disconnected" status shown in the title bar / tray.
-            if self.main_window._tray_status == self.i18n.t("tray_wa_disconnected"):
-                self.main_window._set_status("")
+            # Mark WhatsApp as connected: this leaves automatic offline mode,
+            # resumes the MessageQueue, clears the status text and retriggers a
+            # sync that was skipped while the connection was down.
+            self.main_window._set_wa_connected(True, "session-logged")
             if hasattr(self.main_window, "message_queue"):
                 self.main_window.message_queue.flush()
-            
-            # Trigger sync if it was previously incomplete/skipped due to connection delay
-            if hasattr(self.main_window, "trigger_sync_if_needed"):
-                self.main_window.trigger_sync_if_needed()
-            
+
             # Save the paired status so next startup knows pairing was fully completed.
             pi = self.main_window.settings.setdefault("privateinfo", {})
             if not pi.get("paired"):
@@ -116,7 +117,7 @@ class WebSocketClient:
             self.on_pairing_complete()
         elif connection_state == "close":
             was_connected = self.main_window._wa_connected
-            self.main_window._wa_connected = False
+            self.main_window._set_wa_connected(False, "session closed")
 
             # Detect permanent WhatsApp logout (status 401 = loggedOut).
             status_code  = (
@@ -139,7 +140,7 @@ class WebSocketClient:
                 # dialog would freeze the UI and prevent that recovery.
                 def _notify_disconnection():
                     mw = self.main_window
-                    mw._wa_connected = False
+                    mw._set_wa_connected(False, "temporary disconnection")
                     mw.error_sound.play()
                     mw.output(self.i18n.t("wa_disconnected_temp"), interrupt=False)
                     mw._set_status(self.i18n.t("tray_wa_disconnected"))
@@ -381,7 +382,13 @@ class WebSocketClient:
                 
                 archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
                 if archive is not None:
-                    wx.CallAfter(self.main_window.on_chat_archive_update, jid, bool(archive))
+                    # bool("false") is True — parsing this the naive way is how
+                    # conversations that were never archived on WhatsApp kept
+                    # jumping into the Archived tab. Only act on a value we can
+                    # actually interpret.
+                    archived_flag = _parse_bool_flag(archive)
+                    if archived_flag is not None:
+                        wx.CallAfter(self.main_window.on_chat_archive_update, jid, archived_flag)
 
                 # Handle pin/unpin updates in real-time
                 pin = chat_update.get("pin")
@@ -1030,11 +1037,18 @@ class WebSocketClient:
             clean_recipients = [
                 self._clean_jid(r) for r in raw_recipients if self._clean_jid(r)
             ]
+            # "body" carries the payload of the change — the new group name for
+            # a subject change, the new description for a description change,
+            # or the on/off value for a settings change. Dropping it (as this
+            # did) is why those events could only be rendered as a vague
+            # "group update" with no indication of what was actually changed.
             message_content = {
                 "groupNotification": {
                     "subtype": wpp_msg.get("subtype", ""),
                     "recipients": clean_recipients,
                     "author": self._clean_jid(author_raw) if author_raw else "",
+                    "body": wpp_msg.get("body") or wpp_msg.get("subject") or "",
+                    "value": wpp_msg.get("value"),
                 }
             }
 
