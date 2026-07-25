@@ -16,16 +16,25 @@
 
 static BOOL get_install_dir(wchar_t *out, DWORD char_count)
 {
-    HKEY hkey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, REGKEY_UNINSTALL, 0,
-                      KEY_READ, &hkey) != ERROR_SUCCESS)
-        return FALSE;
-    DWORD type  = REG_SZ;
-    DWORD bytes = char_count * sizeof(wchar_t);
-    LONG  r = RegQueryValueExW(hkey, L"InstallLocation", NULL, &type,
-                               (BYTE *)out, &bytes);
-    RegCloseKey(hkey);
-    return r == ERROR_SUCCESS;
+    /* The installer registers under HKEY_LOCAL_MACHINE when it can (running
+     * elevated) and falls back to HKEY_CURRENT_USER otherwise (the default,
+     * non-admin install path) — check both, machine-wide first, so this
+     * finds the entry regardless of which one the install actually used. */
+    const HKEY hives[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+    for (int i = 0; i < 2; i++) {
+        HKEY hkey;
+        if (RegOpenKeyExW(hives[i], REGKEY_UNINSTALL, 0,
+                          KEY_READ, &hkey) != ERROR_SUCCESS)
+            continue;
+        DWORD type  = REG_SZ;
+        DWORD bytes = char_count * sizeof(wchar_t);
+        LONG  r = RegQueryValueExW(hkey, L"InstallLocation", NULL, &type,
+                                   (BYTE *)out, &bytes);
+        RegCloseKey(hkey);
+        if (r == ERROR_SUCCESS)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 /* ── Delete files listed in installed_files.dat ──────────────────────── */
@@ -104,7 +113,10 @@ static void remove_shortcuts(void)
 
 static void remove_registry_entry(void)
 {
+    /* Remove from both hives — harmless no-op on whichever one the install
+     * didn't use (see get_install_dir()). */
     RegDeleteKeyW(HKEY_LOCAL_MACHINE, REGKEY_UNINSTALL);
+    RegDeleteKeyW(HKEY_CURRENT_USER, REGKEY_UNINSTALL);
 }
 
 /* ── Schedule self-delete via temp batch file ─────────────────────────── */

@@ -50,6 +50,7 @@
     "instance_state_changed": "Ocurrió un evento inesperado. El estado de la instancia cambió o parece estar desconectado. Por favor, intenta emparejar de nuevo.",
     "wa_disconnected_temp": "La conexión con WhatsApp fue interrumpida. Esperando reconexión automática...",
     "tray_wa_disconnected": "WhatsApp desconectado",
+    "tray_connecting": "conectando...",
     "media_send_failed": "No se pudo enviar el archivo. Error: {error}",
     "media_too_large": "El archivo supera el tamaño máximo permitido de {max_mb} MB y no puede enviarse.",
     "remove_mention": "Eliminar mención a @{name}",

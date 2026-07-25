@@ -96,6 +96,22 @@ class TestChats:
         msgs = await in_memory_db.get_messages("jid@w")
         assert msgs == []
 
+    async def test_get_chats_default_limit_does_not_truncate_unread(self, in_memory_db):
+        """Regression test: get_chats() used to default limit=5, so every
+        unread badge/tray tooltip (which derive from len(records)) showed at
+        most 5 even when the real unread count was higher."""
+        await in_memory_db.upsert_chat("jid@w", {"remoteJid": "jid@w", "unreadCount": 12})
+        for i in range(12):
+            await in_memory_db.insert_message(
+                "jid@w",
+                {
+                    "key": {"remoteJid": "jid@w", "id": f"m{i}"},
+                    "messageTimestamp": i,
+                },
+            )
+        chats = await in_memory_db.get_chats()
+        assert len(chats["jid@w"]["messages"]["messages"]["records"]) == 12
+
 
 # =============================================================================
 #  Messages
@@ -251,6 +267,43 @@ class TestMessages:
         msgs = await in_memory_db.get_messages("nonexistent@w")
         assert msgs == []
 
+    async def test_insert_message_with_empty_id_is_dropped_not_overwritten(self, in_memory_db):
+        """Two different id-less messages used to collide under the same
+        (message_id='', remote_jid) primary key and silently overwrite each
+        other via INSERT OR REPLACE — neither should ever be stored."""
+        await in_memory_db.insert_message("jid@w", {
+            "key": {"remoteJid": "jid@w", "id": ""},
+            "messageTimestamp": 1,
+            "message": {"conversation": "first, id-less"},
+        })
+        await in_memory_db.insert_message("jid@w", {
+            "key": {"remoteJid": "jid@w", "id": ""},
+            "messageTimestamp": 2,
+            "message": {"conversation": "second, id-less"},
+        })
+        msgs = await in_memory_db.get_messages("jid@w")
+        assert msgs == []
+
+    async def test_insert_message_missing_key_id_is_dropped(self, in_memory_db):
+        await in_memory_db.insert_message("jid@w", {
+            "key": {"remoteJid": "jid@w"},
+            "messageTimestamp": 1,
+        })
+        count = await in_memory_db.get_message_count("jid@w")
+        assert count == 0
+
+    async def test_insert_messages_batch_skips_id_less_without_dropping_rest(self, in_memory_db):
+        msgs = [
+            {"key": {"remoteJid": "jid@w", "id": "keep1"}, "messageTimestamp": 1},
+            {"key": {"remoteJid": "jid@w", "id": ""}, "messageTimestamp": 2},
+            {"key": {"remoteJid": "jid@w", "id": "keep2"}, "messageTimestamp": 3},
+            {"key": {"remoteJid": "jid@w", "id": ""}, "messageTimestamp": 4},
+        ]
+        await in_memory_db.insert_messages_batch("jid@w", msgs)
+        remaining = await in_memory_db.get_messages_asc("jid@w")
+        ids = [m["key"]["id"] for m in remaining]
+        assert ids == ["keep1", "keep2"]
+
     async def test_encrypted_message_json(self, in_memory_db, fernet_key):
         """Verify that message content is encrypted at rest."""
         msg = {
@@ -270,6 +323,84 @@ class TestMessages:
         raw = row["message_json"]
         assert "sensitive data" not in raw
         assert raw.startswith("gAAAAA")  # Fernet base64 token prefix
+
+
+# =============================================================================
+#  merge_or_rename_chat — used to dedupe a chat that exists under both an
+#  @lid and a resolved phone JID into one.
+# =============================================================================
+
+
+class TestMergeOrRenameChat:
+    async def test_rename_when_new_jid_does_not_exist(self, in_memory_db):
+        await in_memory_db.upsert_chat("old@lid", {"remoteJid": "old@lid"})
+        await in_memory_db.insert_message("old@lid", {
+            "key": {"remoteJid": "old@lid", "id": "m1"},
+            "messageTimestamp": 1,
+        })
+        await in_memory_db.merge_or_rename_chat("old@lid", "new@w")
+
+        chats = await in_memory_db.get_chats()
+        assert "old@lid" not in chats
+        assert "new@w" in chats
+        msgs = await in_memory_db.get_messages("new@w")
+        assert [m["key"]["id"] for m in msgs] == ["m1"]
+
+    async def test_merge_moves_non_colliding_messages(self, in_memory_db):
+        """A message under old_jid whose id does not already exist under
+        new_jid must survive the merge, not just the colliding ones."""
+        await in_memory_db.upsert_chat("old@lid", {"remoteJid": "old@lid"})
+        await in_memory_db.upsert_chat("new@w", {"remoteJid": "new@w"})
+        await in_memory_db.insert_message("old@lid", {
+            "key": {"remoteJid": "old@lid", "id": "only_in_old"},
+            "messageTimestamp": 1,
+        })
+        await in_memory_db.insert_message("new@w", {
+            "key": {"remoteJid": "new@w", "id": "only_in_new"},
+            "messageTimestamp": 2,
+        })
+
+        await in_memory_db.merge_or_rename_chat("old@lid", "new@w")
+
+        msgs = await in_memory_db.get_messages_asc("new@w")
+        ids = {m["key"]["id"] for m in msgs}
+        assert ids == {"only_in_old", "only_in_new"}
+        old_msgs = await in_memory_db.get_messages("old@lid")
+        assert old_msgs == []
+
+    async def test_merge_with_colliding_message_id_keeps_new_jid_copy(self, in_memory_db):
+        """Same message_id under both JIDs (the same real WhatsApp message,
+        filed under its @lid form and its resolved phone form before the
+        chats were merged) must not be lost — one copy survives under
+        new_jid, and old_jid ends up with nothing left under that id."""
+        await in_memory_db.upsert_chat("old@lid", {"remoteJid": "old@lid"})
+        await in_memory_db.upsert_chat("new@w", {"remoteJid": "new@w"})
+        await in_memory_db.insert_message("old@lid", {
+            "key": {"remoteJid": "old@lid", "id": "shared"},
+            "messageTimestamp": 1,
+            "message": {"conversation": "from old"},
+        })
+        await in_memory_db.insert_message("new@w", {
+            "key": {"remoteJid": "new@w", "id": "shared"},
+            "messageTimestamp": 2,
+            "message": {"conversation": "from new"},
+        })
+
+        await in_memory_db.merge_or_rename_chat("old@lid", "new@w")
+
+        msgs = await in_memory_db.get_messages("new@w")
+        assert len(msgs) == 1
+        assert msgs[0]["key"]["id"] == "shared"
+        old_msgs = await in_memory_db.get_messages("old@lid")
+        assert old_msgs == []
+
+    async def test_merge_deletes_old_chat_row_when_new_exists(self, in_memory_db):
+        await in_memory_db.upsert_chat("old@lid", {"remoteJid": "old@lid"})
+        await in_memory_db.upsert_chat("new@w", {"remoteJid": "new@w", "pushName": "Kept"})
+        await in_memory_db.merge_or_rename_chat("old@lid", "new@w")
+        chats = await in_memory_db.get_chats()
+        assert "old@lid" not in chats
+        assert chats["new@w"]["pushName"] == "Kept"
 
 
 # =============================================================================
@@ -440,6 +571,35 @@ class TestStatusUpdates:
         updates = await in_memory_db.get_status_updates()
         assert set(updates.keys()) == {"a@w", "b@w"}
 
+    async def test_delete_expired_status_updates_removes_only_old(self, in_memory_db):
+        """Stories never expired before — this is the fix for the database
+        growing forever, one row per status ever seen, for months of use."""
+        await in_memory_db.upsert_status_update("old@w", {
+            "key": {"id": "old1", "participant": "old@w"},
+            "messageTimestamp": 1000,
+            "messageType": "conversation",
+        })
+        await in_memory_db.upsert_status_update("new@w", {
+            "key": {"id": "new1", "participant": "new@w"},
+            "messageTimestamp": 500_000,
+            "messageType": "conversation",
+        })
+        deleted = await in_memory_db.delete_expired_status_updates(cutoff_ts=100_000)
+        assert deleted == 1
+        updates = await in_memory_db.get_status_updates()
+        assert set(updates.keys()) == {"new@w"}
+
+    async def test_delete_expired_status_updates_none_expired(self, in_memory_db):
+        await in_memory_db.upsert_status_update("a@w", {
+            "key": {"id": "a1", "participant": "a@w"},
+            "messageTimestamp": 500_000,
+            "messageType": "conversation",
+        })
+        deleted = await in_memory_db.delete_expired_status_updates(cutoff_ts=100)
+        assert deleted == 0
+        updates = await in_memory_db.get_status_updates()
+        assert "a@w" in updates
+
 
 # =============================================================================
 #  Bulk Import / Export (Migration)
@@ -576,3 +736,34 @@ class TestStructuredConcurrency:
                 tg.start_soon(writer)
 
         assert not errors, f"Errors during concurrent access: {errors}"
+
+
+# =============================================================================
+#  Maintenance (vacuum, schema migration safety)
+# =============================================================================
+
+
+class TestMaintenance:
+    async def test_vacuum_does_not_raise(self, in_memory_db):
+        """vacuum() used to have no _write_lock, which raises 'cannot VACUUM
+        from within a transaction' if it ever ran concurrently with a write.
+        Plain smoke test that it runs cleanly on its own."""
+        await in_memory_db.upsert_chat("jid@w", {"remoteJid": "jid@w"})
+        await in_memory_db.vacuum()
+        chats = await in_memory_db.get_chats()
+        assert "jid@w" in chats
+
+    async def test_connect_twice_on_same_file_does_not_raise(self, tmp_path, fernet_key):
+        """connect() runs 'ALTER TABLE chats ADD COLUMN t' every time, which
+        only succeeds on a database that doesn't have the column yet. Every
+        connection after the first must see 'duplicate column' and swallow
+        only that — not raise, and not swallow some other real error."""
+        from core.database import DatabaseManager
+
+        db_path = str(tmp_path / "test.db")
+        async with DatabaseManager(db_path, fernet_key) as db1:
+            await db1.upsert_chat("jid@w", {"remoteJid": "jid@w"})
+
+        async with DatabaseManager(db_path, fernet_key) as db2:
+            chats = await db2.get_chats()
+            assert "jid@w" in chats

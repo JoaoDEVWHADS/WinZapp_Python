@@ -155,6 +155,24 @@ def step(msg):
     print(f"  {msg}")
     print('-'*60)
 
+def read_client_version() -> str:
+    """Read __version__ out of client/version.py without importing it.
+
+    Used to embed the real app version into the compiled installer stub
+    (Add/Remove Programs' DisplayVersion), which used to be hardcoded to a
+    permanent placeholder no build ever updated.
+    """
+    version_path = os.path.join(CLIENT_DIR, "version.py")
+    with open(version_path, "r", encoding="utf-8") as f:
+        contents = f.read()
+    import re
+    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', contents)
+    if not m:
+        print(f"[WARN] Could not find __version__ in {version_path}; "
+              f"installer will report version 0.0.0")
+        return "0.0.0"
+    return m.group(1)
+
 def run(cmd, cwd=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd)
@@ -493,6 +511,7 @@ def create_payload_zip():
 
 def compile_installer_stub():
     step("6/8  Compiling installer stub")
+    version = read_client_version()
     run([
         WINDRES_CMD, "--codepage", "65001",
         os.path.join(INSTALLER_DIR, "installer.rc"),
@@ -501,12 +520,13 @@ def compile_installer_stub():
     ])
     run([
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
+        f'-DWINZAPP_VERSION=L"{version}"',
         os.path.join(INSTALLER_DIR, "installer.c"),
         INSTALLER_RES, "-o", INSTALLER_STUB, "-mwindows",
         "-I", INSTALLER_DIR,
         "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32", "-luuid",
     ])
-    print(f"  -> {INSTALLER_STUB}")
+    print(f"  -> {INSTALLER_STUB}  (DisplayVersion={version})")
 
 def append_zip_to_stub():
     step("7/8  Appending payload to installer stub")

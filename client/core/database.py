@@ -215,8 +215,17 @@ class DatabaseManager:
         await self._conn.executescript(_SCHEMA_SQL)
         try:
             await self._conn.execute("ALTER TABLE chats ADD COLUMN t INTEGER DEFAULT 0")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Only "duplicate column" (the column already exists, from a prior
+            # run) is expected here. Anything else (disk I/O error, corrupted
+            # schema, permission issue) used to be swallowed silently, which
+            # meant the app would carry on as if the `t` column existed, then
+            # fail much later — in whichever unrelated method next tried to
+            # read/write `chats.t` — with an error that gave no hint the real
+            # cause was this ALTER TABLE never having succeeded.
+            if "duplicate column" not in str(exc).lower():
+                log.error("[connect] ALTER TABLE chats ADD COLUMN t failed: %s", exc)
+                raise
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -313,13 +322,21 @@ class DatabaseManager:
 
     # ── Chats ───────────────────────────────────────────────────────────────
 
-    async def get_chats(self, limit: int = 5) -> dict[str, dict]:
+    async def get_chats(self, limit: int = _CHAT_PAGE_SIZE) -> dict[str, dict]:
         """Return all chats as ``{jid: chat_dict}``, compatible with main.py.
 
         Each chat dict includes a ``messages`` wrapper with the first
         ``_CHAT_PAGE_SIZE`` records so callers that iterate ``records``
         continue to work.  The full message set can be fetched via
         ``get_messages()``.
+
+        ``limit`` used to silently default to 5 here — every unread-count
+        badge, tray tooltip and title-bar counter derives from
+        ``len(records)`` (see ``effective_unread_count()``), so any chat with
+        more than 5 unread messages showed "5" until a full sync happened to
+        overwrite it with the real (larger) record set. Defaulting to the
+        same page size used everywhere else in the app removes that whole
+        class of wrong-at-a-glance counts.
         """
         conn = await self._ensure_conn()
         cursor = await conn.execute(
@@ -468,20 +485,55 @@ class DatabaseManager:
             await conn.commit()
 
     async def merge_or_rename_chat(self, old_jid: str, new_jid: str) -> None:
-        """Merge or rename a chat and its messages in the database."""
+        """Merge or rename a chat and its messages in the database.
+
+        Used to dedupe a chat that exists under two JID forms (typically
+        ``@lid`` vs the resolved phone JID) into one.  A message under
+        ``old_jid`` whose ``message_id`` already exists under ``new_jid`` is,
+        in every real call site, the *same* WhatsApp message filed under both
+        keys before the merge — WhatsApp's own message IDs are effectively
+        globally unique, so an ID collision here isn't two different messages
+        clashing.  Even so, this moves every message it safely can before
+        deleting anything, and only ever deletes an ``old_jid`` row once it
+        has confirmed an equivalent row survives under ``new_jid`` — a blind
+        "UPDATE OR IGNORE then DELETE everything left" could not tell "this
+        was a duplicate" apart from "this update silently failed for some
+        other reason", and would drop the row either way.
+        """
         async with self._write_lock:
             conn = await self._ensure_conn()
-            # 1. Merge messages (ignoring duplicates and then deleting the old JID entries)
-            await conn.execute(
-                "UPDATE OR IGNORE messages SET remote_jid=? WHERE remote_jid=?",
-                (new_jid, old_jid)
+            # 1. Move every old_jid message whose ID does NOT already exist
+            #    under new_jid — these are the ones a blind UPDATE could lose.
+            cursor = await conn.execute(
+                """SELECT message_id FROM messages
+                   WHERE remote_jid=? AND message_id NOT IN (
+                       SELECT message_id FROM messages WHERE remote_jid=?
+                   )""",
+                (old_jid, new_jid),
             )
-            await conn.execute(
-                "DELETE FROM messages WHERE remote_jid=?",
-                (old_jid,)
-            )
+            movable_ids = [r["message_id"] for r in await cursor.fetchall()]
+            for mid in movable_ids:
+                await conn.execute(
+                    "UPDATE messages SET remote_jid=? WHERE remote_jid=? AND message_id=?",
+                    (new_jid, old_jid, mid),
+                )
 
-            # 2. Merge/rename chats table
+            # 2. Anything still under old_jid at this point has a confirmed
+            #    surviving twin under new_jid — safe to drop.
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS cnt FROM messages WHERE remote_jid=?", (old_jid,)
+            )
+            row = await cursor.fetchone()
+            remaining = row["cnt"] if row else 0
+            if remaining:
+                log.info(
+                    "[merge_or_rename_chat] %s -> %s: moved %d message(s), "
+                    "dropped %d duplicate(s) already present under %s",
+                    old_jid, new_jid, len(movable_ids), remaining, new_jid,
+                )
+            await conn.execute("DELETE FROM messages WHERE remote_jid=?", (old_jid,))
+
+            # 3. Merge/rename chats table
             cursor = await conn.execute("SELECT 1 FROM chats WHERE jid=? LIMIT 1", (new_jid,))
             exists = await cursor.fetchone()
 
@@ -577,10 +629,23 @@ class DatabaseManager:
 
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
         """Insert a single message record."""
+        key = msg.get("key", {})
+        mid = _msg_id(key)
+        if not mid:
+            # An empty message_id is not "no ID yet" — it IS a value, and the
+            # (message_id, remote_jid) primary key means every id-less message
+            # in the same chat would silently overwrite the previous one via
+            # INSERT OR REPLACE. That has already happened in the wild with
+            # malformed/edge-case payloads; skip instead of quietly losing
+            # messages against each other.
+            log.warning(
+                "[insert_message] dropping message with empty key.id for %s "
+                "(would collide with any other id-less message in this chat)",
+                remote_jid,
+            )
+            return
         async with self._write_lock:
             conn = await self._ensure_conn()
-            key = msg.get("key", {})
-            mid = _msg_id(key)
             from_me = 1 if key.get("fromMe") else 0
             participant = key.get("participant", "")
             mtype = _message_type(msg)
@@ -603,6 +668,7 @@ class DatabaseManager:
         """Insert many messages in a single transaction."""
         if not msgs:
             return
+        skipped = 0
         async with self._write_lock:
             conn = await self._ensure_conn()
             try:
@@ -610,6 +676,12 @@ class DatabaseManager:
                 for msg in msgs:
                     key = msg.get("key", {})
                     mid = _msg_id(key)
+                    if not mid:
+                        # See insert_message() — an empty id-less message would
+                        # silently overwrite another id-less message in the
+                        # same batch/chat instead of being rejected.
+                        skipped += 1
+                        continue
                     from_me = 1 if key.get("fromMe") else 0
                     participant = key.get("participant", "")
                     mtype = _message_type(msg)
@@ -627,6 +699,11 @@ class DatabaseManager:
             except Exception:
                 await conn.rollback()
                 raise
+        if skipped:
+            log.warning(
+                "[insert_messages_batch] dropped %d message(s) with empty "
+                "key.id for %s", skipped, remote_jid,
+            )
 
     async def update_message_id(
         self, remote_jid: str, old_id: str, new_id: str
@@ -834,6 +911,23 @@ class DatabaseManager:
                 result.setdefault(p, []).append(msg)
         return result
 
+    async def delete_expired_status_updates(self, cutoff_ts: int) -> int:
+        """Delete status/story updates older than *cutoff_ts* (unix seconds).
+
+        WhatsApp stories expire after 24h; nothing ever pruned this table on
+        the WinZapp side, so it grew forever — every status ever received or
+        viewed stayed in the database (payload included) indefinitely. This
+        is one of the main contributors to "the database got huge" over
+        months of use. Returns the number of rows deleted.
+        """
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            cursor = await conn.execute(
+                "DELETE FROM status_updates WHERE timestamp < ?", (cutoff_ts,)
+            )
+            await conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+
     async def upsert_status_update(self, participant: str, msg: dict) -> None:
         """Insert or replace a status update message."""
         async with self._write_lock:
@@ -935,6 +1029,11 @@ class DatabaseManager:
                     for msg in records:
                         key   = msg.get("key", {})
                         mid   = _msg_id(key)
+                        if not mid:
+                            # See insert_message(): an id-less message would
+                            # silently overwrite any other id-less message in
+                            # the same chat under INSERT OR REPLACE.
+                            continue
                         fm    = 1 if key.get("fromMe") else 0
                         part  = key.get("participant", "") or ""
                         mtype = _message_type(msg)
@@ -1047,6 +1146,13 @@ class DatabaseManager:
                 raise
 
     async def vacuum(self) -> None:
-        """Recover disk space.  Call during idle periods."""
-        conn = await self._ensure_conn()
-        await conn.execute("VACUUM")
+        """Recover disk space.  Call during idle periods.
+
+        Holds ``_write_lock`` for the duration: SQLite raises
+        ``cannot VACUUM from within a transaction`` if this runs while another
+        coroutine has a write in flight, which — before this lock was added
+        here — was only avoided by nothing ever calling this method at all.
+        """
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute("VACUUM")

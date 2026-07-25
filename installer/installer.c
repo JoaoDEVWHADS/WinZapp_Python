@@ -347,14 +347,38 @@ static void create_shortcut(const wchar_t *target, const wchar_t *link_path,
 
 /* ── Registry ─────────────────────────────────────────────────────────── */
 
+/* Version string embedded by build.py at compile time from
+ * client/version.py's __version__ (-DWINZAPP_VERSION=L"..."), so
+ * "Add or Remove Programs" shows the version that was actually installed
+ * instead of a permanently-stale placeholder. */
+#ifndef WINZAPP_VERSION
+#define WINZAPP_VERSION L"0.0.0"
+#endif
+
 static void register_uninstall(const wchar_t *install_dir,
                                 const wchar_t *uninstall_exe)
 {
     HKEY hkey;
     const wchar_t *key_path =
         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WinZapp";
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path, 0, NULL,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS)
+
+    /* The default install location (%LOCALAPPDATA%\WinZapp) needs no
+     * elevation, so this process is usually NOT admin — writing straight to
+     * HKEY_LOCAL_MACHINE then fails with ERROR_ACCESS_DENIED and silently
+     * skips the whole uninstall registration, leaving the app installed with
+     * no entry in "Add or Remove Programs" and no way for uninstall.exe to
+     * find itself later. Try the machine-wide hive first (works when the
+     * install dir did require elevation, e.g. Program Files), and fall back
+     * to the per-user hive — which every installer process can always write
+     * to, elevated or not, and which Windows reads "Add or Remove Programs"
+     * entries from exactly the same way. */
+    LSTATUS status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path, 0, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL);
+    if (status != ERROR_SUCCESS) {
+        status = RegCreateKeyExW(HKEY_CURRENT_USER, key_path, 0, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL);
+    }
+    if (status != ERROR_SUCCESS)
         return;
 
     RegSetValueExW(hkey, L"DisplayName", 0, REG_SZ,
@@ -366,7 +390,7 @@ static void register_uninstall(const wchar_t *install_dir,
                    (BYTE *)install_dir,
                    (DWORD)((wcslen(install_dir) + 1) * sizeof(wchar_t)));
     RegSetValueExW(hkey, L"DisplayVersion", 0, REG_SZ,
-                   (BYTE *)L"1.0.0", sizeof(L"1.0.0"));
+                   (BYTE *)WINZAPP_VERSION, (DWORD)sizeof(WINZAPP_VERSION));
     RegSetValueExW(hkey, L"Publisher", 0, REG_SZ,
                    (BYTE *)L"WinZapp", sizeof(L"WinZapp"));
     DWORD one = 1;

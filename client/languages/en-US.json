@@ -50,6 +50,7 @@
     "instance_state_changed": "An unexpected event occurred. The instance status changed or appears to be disconnected. Please try pairing again.",
     "wa_disconnected_temp": "The WhatsApp connection was interrupted. Waiting for automatic reconnection...",
     "tray_wa_disconnected": "WhatsApp disconnected",
+    "tray_connecting": "connecting...",
     "media_send_failed": "Could not send the file. Error: {error}",
     "media_too_large": "The file exceeds the maximum allowed size of {max_mb} MB and cannot be sent.",
     "remove_mention": "Remove mention to @{name}",

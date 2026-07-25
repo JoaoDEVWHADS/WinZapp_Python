@@ -12,7 +12,7 @@ DatabaseManager call is dispatched to that loop via
 thread.  This gives us:
 
 - A single serialised SQLite connection (no thread-safety hacks).
-- Clean async code inside DatabaseManager / MigrationEngine.
+- Clean async code inside DatabaseManager.
 - Transparent sync wrappers for existing wxPython code.
 
 Usage
@@ -34,12 +34,36 @@ from pathlib import Path
 from typing import Any
 
 from core.database import DatabaseManager
-from core.migration import MigrationEngine
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_DAT_PATH = "messages.dat"
 _DEFAULT_DB_PATH = "messages.db"
+
+# Every synchronous DB call from wx (frequently the UI thread itself) blocks on
+# this for as long as the coroutine takes.  Without a bound, a stuck coroutine
+# (event-loop thread died, a write wedged behind SQLite's busy_timeout, a
+# close() racing an in-flight call — see below) froze the whole app forever,
+# with no way to recover short of killing the process. This is the single
+# most commonly reported "WinZapp parou de responder" symptom. A bounded wait
+# turns that into a logged, recoverable error instead.
+_DEFAULT_CALL_TIMEOUT = 20.0
+# Bulk operations (a full save_full_state/import over a large account) can
+# legitimately take longer than a single read/write; give them more rope
+# before giving up.
+_BULK_CALL_TIMEOUT = 120.0
+
+
+class DatabaseBridgeClosed(RuntimeError):
+    """Raised when a call is made after close() has started."""
+
+
+class DatabaseBridgeTimeout(RuntimeError):
+    """Raised when a database call does not complete within its timeout.
+
+    This does NOT mean the underlying operation failed or was rolled back —
+    only that the calling thread stopped waiting for it. The operation may
+    still complete on the event-loop thread afterwards.
+    """
 
 
 class DatabaseBridge:
@@ -51,20 +75,20 @@ class DatabaseBridge:
         Path to the SQLite database file.
     key : bytes
         Fernet symmetric key.
-    dat_path : str | None
-        Path to the legacy ``messages.dat`` (for migration).  Defaults to
-        the same directory as *db_path* with extension ``.dat``.
     """
 
-    def __init__(
-        self,
-        db_path: str,
-        key: bytes,
-        dat_path: str | None = None,
-    ):
+    def __init__(self, db_path: str, key: bytes):
         self._db_path = Path(db_path)
-        self._dat_path = Path(dat_path) if dat_path else self._db_path.with_suffix(".dat")
         self._key = key
+        self._closing = False
+        self._close_lock = threading.Lock()
+        # Tracks calls currently waiting on the event loop, so close() can
+        # give them a moment to finish instead of yanking the loop out from
+        # under them (which would otherwise strand their future forever).
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        self._inflight_drained = threading.Event()
+        self._inflight_drained.set()
 
         # Start background event loop
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
@@ -75,7 +99,7 @@ class DatabaseBridge:
 
         # Create DatabaseManager on the event loop thread
         self._db: DatabaseManager = self._call(
-            self._create_db()
+            self._create_db(), timeout=_DEFAULT_CALL_TIMEOUT
         )
 
     # ── Loop management ──────────────────────────────────────────────────────
@@ -85,13 +109,53 @@ class DatabaseBridge:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _call(self, coro) -> Any:
-        """Schedule *coro* on the event loop and block until done.
+    def _call(self, coro, timeout: float = _DEFAULT_CALL_TIMEOUT) -> Any:
+        """Schedule *coro* on the event loop and block until done, or timeout.
 
-        Re-raises any exception the coroutine raised.
+        Re-raises any exception the coroutine raised. Raises
+        ``DatabaseBridgeClosed`` immediately if ``close()`` has already been
+        called, and ``DatabaseBridgeTimeout`` if the loop does not answer
+        within *timeout* seconds — either of which the caller can catch,
+        instead of the whole app (often the wx UI thread) hanging forever.
         """
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
+        if self._closing:
+            coro.close()  # avoid a "coroutine was never awaited" warning
+            raise DatabaseBridgeClosed("DatabaseBridge is closing")
+        return self._call_unchecked(coro, timeout)
+
+    def _call_unchecked(self, coro, timeout: float = _DEFAULT_CALL_TIMEOUT) -> Any:
+        """Like ``_call`` but skips the ``_closing`` gate.
+
+        Used only by ``close()`` itself, whose own DB-close call must run even
+        though it has already flipped ``_closing`` to True.
+        """
+        if not self._thread.is_alive():
+            coro.close()
+            raise DatabaseBridgeTimeout(
+                "db-asyncio thread is not running; cannot execute query"
+            )
+
+        with self._inflight_lock:
+            self._inflight += 1
+            self._inflight_drained.clear()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            try:
+                return future.result(timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                log.error(
+                    "[DatabaseBridge] Call timed out after %.0fs (coroutine may "
+                    "still complete in the background): %s",
+                    timeout, coro,
+                )
+                raise DatabaseBridgeTimeout(
+                    f"Database call timed out after {timeout:.0f}s"
+                ) from exc
+        finally:
+            with self._inflight_lock:
+                self._inflight -= 1
+                if self._inflight <= 0:
+                    self._inflight_drained.set()
 
     async def _create_db(self) -> DatabaseManager:
         """Factory: connect a new DatabaseManager on the event loop."""
@@ -100,9 +164,28 @@ class DatabaseBridge:
         return db
 
     def close(self) -> None:
-        """Shut down the event loop and release the database."""
+        """Shut down the event loop and release the database.
+
+        Rejects any new call the moment this starts (``_closing`` is checked
+        before ``_call`` ever touches the loop), then waits briefly for calls
+        already in flight to finish on their own before stopping the loop —
+        stopping it out from under a pending call would otherwise leave that
+        caller's ``future.result()`` blocked forever with nothing left to ever
+        resolve it.
+        """
+        with self._close_lock:
+            if self._closing:
+                return
+            self._closing = True
+
+        # Give in-flight calls a chance to finish normally.
+        self._inflight_drained.wait(timeout=5)
+
         try:
-            self._call(self._db.close())
+            # Bypasses the _closing gate in _call() — that gate exists to
+            # reject callers *other than* close() itself, which must still be
+            # able to run this one shutdown call after setting it.
+            self._call_unchecked(self._db.close(), timeout=5)
         except Exception:
             pass
         try:
@@ -116,40 +199,24 @@ class DatabaseBridge:
     def save_full_state(self, data: dict[str, Any], clear_first: bool = True) -> None:
         """Replace all data in the database with the given dict.
 
-        This is the SQLite equivalent of the old ``save_data()`` which
-        writes the entire ``messages.dat`` blob.  It clears all tables
-        then re-imports everything within a single transaction.
+        This is the SQLite equivalent of the old full-state rewrite: it
+        clears all tables then re-imports everything within a single
+        transaction. Uses the longer bulk timeout — a large account's full
+        chat/message set can legitimately take longer than a routine call.
         """
-        self._call(self._db.import_from_dict(data, clear_first=clear_first))
+        self._call(
+            self._db.import_from_dict(data, clear_first=clear_first),
+            timeout=_BULK_CALL_TIMEOUT,
+        )
 
     def clear_all(self) -> None:
         """Delete all records from every table."""
-        self._call(self._db.clear_all())
-
-    # ── Migration ─────────────────────────────────────────────────────────────
-
-    def run_migration(self) -> bool:
-        """Run migration from messages.dat → SQLite if needed.
-
-        Returns ``True`` if a migration was performed, ``False`` otherwise.
-        """
-        return self._call(self._run_migration_async())
-
-    async def _run_migration_async(self) -> bool:
-        engine = MigrationEngine(
-            str(self._dat_path), str(self._db_path), self._key
-        )
-        if not await engine.needs_migration():
-            return False
-        count = await engine.migrate()
-        migrated = count > 0
-        log.info("Migration: %d records imported", count)
-        return migrated
+        self._call(self._db.clear_all(), timeout=_BULK_CALL_TIMEOUT)
 
     # ── Delegated read methods ────────────────────────────────────────────────
 
-    def get_chats(self, limit: int = 5) -> dict[str, dict]:
-        return self._call(self._db.get_chats(limit))
+    def get_chats(self, limit: int = 200) -> dict[str, dict]:
+        return self._call(self._db.get_chats(limit), timeout=_BULK_CALL_TIMEOUT)
 
     def get_chat_jids(self) -> list[str]:
         return self._call(self._db.get_chat_jids())
@@ -190,7 +257,7 @@ class DatabaseBridge:
         return self._call(self._db.upsert_chat(jid, data))
 
     def upsert_chats_batch(self, chats: dict[str, dict]) -> None:
-        return self._call(self._db.upsert_chats_batch(chats))
+        return self._call(self._db.upsert_chats_batch(chats), timeout=_BULK_CALL_TIMEOUT)
 
     def insert_message(self, remote_jid: str, msg: dict) -> None:
         return self._call(self._db.insert_message(remote_jid, msg))
@@ -199,7 +266,8 @@ class DatabaseBridge:
         self, remote_jid: str, msgs: list[dict]
     ) -> None:
         return self._call(
-            self._db.insert_messages_batch(remote_jid, msgs)
+            self._db.insert_messages_batch(remote_jid, msgs),
+            timeout=_BULK_CALL_TIMEOUT,
         )
 
     def update_message_status(
@@ -255,6 +323,14 @@ class DatabaseBridge:
         return self._call(
             self._db.upsert_status_update(participant, msg)
         )
+
+    def delete_expired_status_updates(self, cutoff_ts: int) -> int:
+        return self._call(self._db.delete_expired_status_updates(cutoff_ts))
+
+    def vacuum(self) -> None:
+        """Reclaim disk space freed by deletes. Slow on a large DB — call
+        rarely, from a background thread, never from the wx UI thread."""
+        self._call(self._db.vacuum(), timeout=_BULK_CALL_TIMEOUT)
 
     # ── Metadata ──────────────────────────────────────────────────────────────
 

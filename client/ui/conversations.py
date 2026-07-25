@@ -2919,6 +2919,22 @@ class ConversationsPanel(wx.Panel):
                 else:
                     self._hide_audio_controls()
 
+        # Lazy-loading: whenever focus lands on the very first row, pull in
+        # the previous page. This used to be handled only in the raw
+        # WXK_UP/PAGEUP/HOME key-down handler below, which only fires when the
+        # user presses Up again while *already* sitting on row 0 — pressing
+        # Home/PageUp/Ctrl+Home from further down jumps straight to row 0
+        # without ever going through that handler, and so did a mouse click or
+        # a screen reader's object-navigation landing there. Hooking the focus
+        # event instead catches every way of reaching the first message, not
+        # just one specific key combo pressed twice.
+        if (idx == 0 and not self._is_loading_more and self._sorted_messages
+                and not getattr(self, "_populating_messages", False)):
+            if self._messages_offset > 0:
+                self._load_more_messages()
+            else:
+                self._load_older_messages()
+
         self._update_read_more_button(idx)
         event.Skip()
 
@@ -3696,6 +3712,20 @@ class ConversationsPanel(wx.Panel):
     def _play_audio(self, msg_id, duration_seconds, file_path, audio_ext=".ogg"):
         if not os.path.isfile(file_path):
             return
+
+        # This can be reached two ways: synchronously from _toggle_playback
+        # (file already local), or via wx.CallAfter from a background download
+        # thread once a fetch finishes. The two can interleave — the user
+        # taps audio A (triggers a download), then before it finishes taps
+        # already-local audio B, which plays immediately; A's download then
+        # completes and lands here. Without stopping whatever is currently
+        # playing first, this unconditionally overwrote _audio_stream/
+        # _audio_temp_file with A's — leaking B's still-running BASS channel
+        # (its reference was just overwritten, so _stop_audio() could never
+        # reach it again) and its decrypted temp file (never unlinked) every
+        # single time this race happened.
+        if self._audio_stream is not None and self._current_audio_id != msg_id:
+            self._stop_audio()
 
         # ── Decrypt and write to a temp file ────────────────────────────────
         try:
@@ -5492,6 +5522,23 @@ class ConversationsPanel(wx.Panel):
         # Always delete locally
         self._sorted_messages.pop(index)
         self.messages_list.DeleteItem(index)
+        # Keep the unread-separator index and the full (unpaginated) message
+        # list in sync with the row that just disappeared. Without this, every
+        # later consumer of _unread_sep_idx (focus handling, the dismiss
+        # timer, on_incoming_message's separator relocation) kept operating on
+        # the pre-delete row — off by one for every message deleted above the
+        # separator — and _load_more_messages()/_load_older_messages() could
+        # re-introduce the just-deleted message from the still-stale
+        # _all_sorted_messages the next time the user scrolled to the top.
+        if self._unread_sep_idx >= 0 and index < self._unread_sep_idx:
+            self._unread_sep_idx -= 1
+        if msg_id:
+            for i, m in enumerate(self._all_sorted_messages):
+                if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id:
+                    self._all_sorted_messages.pop(i)
+                    if i < self._messages_offset:
+                        self._messages_offset -= 1
+                    break
         if self.conversation:
             records = (
                 self.conversation.get("messages", {})
@@ -6684,6 +6731,9 @@ class ConversationsPanel(wx.Panel):
 
     # ── Populate ─────────────────────────────────────────────────────────────
 
+    def _clear_populating_messages_flag(self):
+        self._populating_messages = False
+
     def populate_messages(self, preserve_focus: bool = False):
         """Rebuild the messages list from self.conversation.
 
@@ -6693,6 +6743,18 @@ class ConversationsPanel(wx.Panel):
         navigate_to_conversation) so they don't silently yank focus away
         from the user a few seconds after a conversation was opened.
         """
+        # Guards the lazy-load-on-focus-0 hook in _on_message_focused: this
+        # method's own Focus(0) calls below (a short conversation whose last
+        # message or unread separator sits at index 0) fire EVT_LIST_ITEM_FOCUSED
+        # synchronously, and re-entering _load_older_messages()/
+        # _load_more_messages() — which themselves call DeleteAllItems()/Append()
+        # on this same list — while this rebuild is still in progress would
+        # corrupt the list. Cleared via CallAfter so it stays set for every
+        # nested/synchronous focus event this call produces, and only turns
+        # off once control actually returns to the event loop.
+        self._populating_messages = True
+        wx.CallAfter(self._clear_populating_messages_flag)
+
         _preserved_msg_id = self._focused_msg_id() if preserve_focus else None
         _had_focus = (wx.Window.FindFocus() is self.messages_list)
 
@@ -6988,13 +7050,19 @@ class ArchivedConversationsPanel(wx.Panel):
 
     def _on_delete(self, jid: str):
         i18n = self.main_window.i18n
+        # Mirrors ConversationsPanel._on_menu_delete_chat: delete_chat() (not
+        # delete_chat_local()) is what actually sends the delete to the
+        # WPPConnect API for a non-group chat. Using the local-only variant
+        # here meant a deleted archived 1:1 conversation reappeared on the
+        # next full sync, since the server was never told about it.
+        confirm_key = "delete_group_confirm_msg" if jid.endswith("@g.us") else "delete_confirm_msg"
         if wx.MessageBox(
-            i18n.t("delete_confirm_msg"),
+            i18n.t(confirm_key),
             i18n.t("delete_chat"),
             wx.YES_NO | wx.ICON_QUESTION,
             self,
         ) == wx.YES:
-            self.main_window.delete_chat_local(jid)
+            self.main_window.delete_chat(jid)
 
     def refresh_labels(self):
         i18n = self.main_window.i18n

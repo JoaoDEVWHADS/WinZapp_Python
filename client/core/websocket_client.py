@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 import socketio
@@ -95,6 +96,11 @@ class WebSocketClient:
         data             = info.get("data", {})
         connection_state = data.get("state", "")
         if connection_state == "open":
+            # A confirmed live connection means any earlier logout is done
+            # and re-pairing succeeded — clear the _handle_logout guard so a
+            # genuinely new future logout is handled again instead of being
+            # silently ignored as a stale duplicate.
+            self._logout_handled = False
             # Store the user's own JID so self-chat detection and group-admin
             # checks have access to it throughout the session.
             wuid = data.get("wuid", "")
@@ -152,7 +158,20 @@ class WebSocketClient:
         Runs on the wx main thread (via wx.CallAfter).  Shows an informative
         dialog, wipes the now-invalid credentials from settings, disconnects
         the socket, and opens the connection dialog so the user can re-pair.
+
+        Two independent event paths can both decide a real logout happened
+        for the same disconnect (on_connection_update's 401/loggedOut check
+        and on_wpp_status_find's notLogged/disconnectedMobile check) and both
+        schedule this via wx.CallAfter before either has run. Since CallAfter
+        callbacks are dispatched one at a time on this same thread, a simple
+        flag checked at entry is enough to make the second call a no-op —
+        without it the logout dialog appeared twice, credentials were wiped
+        twice, and two pairing dialogs could end up stacked on screen.
         """
+        if getattr(self, "_logout_handled", False):
+            return
+        self._logout_handled = True
+
         mw = self.main_window
         mw._wa_connected = False
         mw.error_sound.play()
@@ -739,8 +758,12 @@ class WebSocketClient:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
             self.on_messages_upsert({"data": normalized})
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_message_received error: {e}")
+        except Exception:
+            # A message is dropped entirely if this raises — log the full
+            # traceback (not just str(e)) so a future normalization bug is
+            # diagnosable from the logs instead of a message just vanishing
+            # with no trace of why.
+            logging.exception("[WebSocketClient] on_wpp_message_received error")
 
     def on_wpp_reaction(self, data):
         """Handle the 'onreactionmessage' Socket.IO event.
@@ -989,6 +1012,21 @@ class WebSocketClient:
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
+        elif msg_type in ("location", "liveLocation"):
+            # main.py/conversations.py both already handle locationMessage /
+            # liveLocationMessage (rendered as a static "📍 Localização" bubble
+            # today, coordinates kept here for when that changes) — this type
+            # had no branch here at all, so a shared live location silently
+            # fell through with no message_content and no matching entry in
+            # type_mapping below, meaning it rendered as nothing.
+            loc_key = "liveLocationMessage" if msg_type == "liveLocation" else "locationMessage"
+            message_content = {
+                loc_key: {
+                    "degreesLatitude": wpp_msg.get("lat"),
+                    "degreesLongitude": wpp_msg.get("lng"),
+                    "name": wpp_msg.get("loc") or wpp_msg.get("body") or "",
+                }
+            }
         elif msg_type == "vcard":
             message_content = {
                 "contactMessage": {
@@ -1073,6 +1111,8 @@ class WebSocketClient:
             "revoked": "protocolMessage",
             "extendedText": "extendedTextMessage",
             "gp2": "groupNotification",
+            "location": "locationMessage",
+            "liveLocation": "liveLocationMessage",
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
 
@@ -1180,7 +1220,15 @@ class WebSocketClient:
             if not participant_jid:
                 author = quoted_msg.get("author") or (quoted_msg.get("sender") or {}).get("id") or ""
                 if author:
-                    participant_jid = author.replace("@c.us", "@s.whatsapp.net")
+                    # author (and .sender.id) can be a raw WPPConnect Wid
+                    # object ({"server":..., "user":..., "_serialized":...})
+                    # rather than a plain string — the sibling quotedMsgObj
+                    # branch below already accounts for this via _clean_jid();
+                    # calling .replace() directly here raised AttributeError,
+                    # which _normalize_wpp_message's only caller swallows with
+                    # a bare `except Exception: print(...)` — silently
+                    # dropping the entire live message, not just its quote.
+                    participant_jid = self._clean_jid(author)
 
         elif isinstance(quoted_msg, str) and quoted_msg:
             has_quote = True

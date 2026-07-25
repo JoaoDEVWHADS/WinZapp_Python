@@ -557,9 +557,22 @@ class MainWindow(wx.Frame):
         self._own_sent_ids_lock = threading.Lock()
         # Consecutive failed network probes (see check_whatsapp_reachable).
         self._offline_probe_strikes = 0
+        # Consecutive not-yet-connected results from _set_wa_connected() this
+        # session, and when the session started — together these give the
+        # first connection attempt a grace period before the UI is allowed to
+        # say "offline". Without it, the very first status-session check
+        # (fired seconds into startup, often before the local WPPConnect/
+        # Chrome process has even finished booting) looked identical to a real
+        # outage and immediately flipped the title/tray to "desconectado" —
+        # scaring the user over something that resolves itself in a few
+        # seconds.
+        self._wa_offline_strikes = 0
+        self._wa_startup_time = time.time()
         # (Locks initialized early at the top of __init__)
-        # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
-        self._tray_status = ""
+        # Status text shown in the title bar and tray tooltip (e.g. "sincronizando").
+        # Starts as "connecting" rather than blank/offline — the connection
+        # state genuinely isn't known yet at this point in startup.
+        self._tray_status = self.i18n.t("tray_connecting")
 
         #Play startup sound (skipped in background mode)
         if not self.background_mode:
@@ -1042,7 +1055,18 @@ class MainWindow(wx.Frame):
         else:
             wx.CallAfter(_ui)
 
-    def _set_wa_connected(self, connected: bool, reason: str = "", announce: bool = True):
+    # How long, and how many consecutive not-yet-connected results, the very
+    # first connection attempt of a session gets before the UI is allowed to
+    # declare "offline". WPPConnect/Chrome routinely take several seconds to
+    # finish booting, during which every status probe looks identical to a
+    # real outage (connection refused, CLOSED/INITIALIZING status, etc.) —
+    # without this grace window the app announced itself offline within the
+    # first second or two of every single launch.
+    _WA_STARTUP_GRACE_SECONDS = 45
+    _WA_STARTUP_GRACE_STRIKES = 6
+
+    def _set_wa_connected(self, connected: bool, reason: str = "", announce: bool = True,
+                           confirmed: bool = False):
         """Single entry point for every WhatsApp connection-state transition.
 
         Keeps three things in lockstep that used to drift apart: the
@@ -1050,6 +1074,13 @@ class MainWindow(wx.Frame):
         automatic offline mode, and the "connected" sound/announcement — which
         previously fired on startup just because the *local* WPPConnect API had
         answered, even with no internet at all.
+
+        ``confirmed`` marks a *definite* negative signal (WhatsApp itself says
+        the device is logged out / needs pairing) — those skip the startup
+        grace window below and go straight to the offline UI, same as before.
+        Everything else (network hiccups, the local API not answering yet,
+        WPPConnect still initializing) is ambiguous during the first
+        connection attempt of a session and gets the grace window instead.
         """
         connected = bool(connected)
         was = bool(getattr(self, "_wa_connected", False))
@@ -1060,6 +1091,7 @@ class MainWindow(wx.Frame):
             return
 
         if connected:
+            self._wa_offline_strikes = 0
             self._auto_offline = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
@@ -1069,21 +1101,40 @@ class MainWindow(wx.Frame):
                     self.connected_sound.play()
             elif announce and not self.background_mode:
                 self.output(self.i18n.t("connection_restored"), interrupt=False)
-            # Clear only the "disconnected" text — a sync running in parallel
-            # owns the status line otherwise ("sincronizando", "baixando mídias").
-            if self._tray_status == self.i18n.t("tray_wa_disconnected"):
+            # Clear only the transient "connecting"/"disconnected" text — a
+            # sync running in parallel owns the status line otherwise
+            # ("sincronizando", "baixando mídias").
+            if self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
                 wx.CallAfter(self._set_status, "")
             # A sync that never ran (or stopped half-way) because there was no
             # connection gets picked up here, the moment the connection is back.
             self._sync_retry_count = 0
             self.trigger_sync_if_needed()
-        else:
-            self._auto_offline = True
-            self._apply_offline_state()
-            logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
-            wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
-            if announce and was and not self.background_mode:
-                self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=False)
+            return
+
+        self._wa_offline_strikes += 1
+        if not confirmed:
+            never_connected_yet = not self._wa_connect_announced
+            within_grace = (
+                never_connected_yet
+                and (time.time() - self._wa_startup_time) < self._WA_STARTUP_GRACE_SECONDS
+                and self._wa_offline_strikes <= self._WA_STARTUP_GRACE_STRIKES
+            )
+            if within_grace:
+                logging.info(
+                    "[connection] Not connected yet during startup grace "
+                    "(%s, strike %d) — showing 'connecting' instead of 'offline'.",
+                    reason or "checked", self._wa_offline_strikes,
+                )
+                wx.CallAfter(self._set_status, self.i18n.t("tray_connecting"))
+                return
+
+        self._auto_offline = True
+        self._apply_offline_state()
+        logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
+        wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
+        if announce and was and not self.background_mode:
+            self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=False)
 
     def _on_menu_toggle_offline(self, event=None):
         """Sincronização menu / Ctrl+Alt+Shift+O: toggle offline mode."""
@@ -3510,16 +3561,22 @@ class MainWindow(wx.Frame):
             
         if settings_dirty:
             self.save_settings()
-        # Run migration from messages.dat → SQLite if needed
-        try:
-            if self.db.run_migration():
-                logging.info("[startup] Migration from messages.dat to SQLite completed")
-        except Exception as exc:
-            logging.error("[startup] Migration failed: %s", exc)
 
         #Get Local Chats
         self.chats = self.get_chats()
         self._load_local_lid_cache()
+
+        def _db_maintenance():
+            self._prune_expired_status_updates()
+            # Deliberately delayed and sequenced after pruning: VACUUM
+            # rewrites the whole database file, so it must never race the
+            # startup sync for the single SQLite connection, and the
+            # 7-day throttle inside _maybe_vacuum_database() means it is a
+            # no-op on most launches anyway.
+            time.sleep(120)
+            self._maybe_vacuum_database()
+        threading.Thread(target=_db_maintenance, daemon=True).start()
+
         # Build cache first so deduplicate_chats() can use it as a fallback
         # for @lid chats whose messages carry no remoteJidAlt bridge field.
         self._build_lid_to_phone_cache()
@@ -3527,13 +3584,13 @@ class MainWindow(wx.Frame):
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
         self._clean_contacts_cached()
-        # One-time migration: slim bloated quoted-message payloads already stored
-        # in messages.dat by older versions (full thumbnails / mediaKeys / URLs),
-        # which made conversations with many replies slow to open. Runs now that
-        # chats, contacts and the LID caches are all loaded, so the debounced
-        # save persists the complete record set.
+        # One-time cleanup: slim bloated quoted-message payloads left behind by
+        # older versions (full thumbnails / mediaKeys / URLs), which made
+        # conversations with many replies slow to open. Runs now that chats,
+        # contacts and the LID caches are all loaded, so the debounced save
+        # persists the complete record set.
         if prune_chats_messages(self.chats):
-            logging.info("[startup] pruned bloated quoted-message data from messages.dat")
+            logging.info("[startup] pruned bloated quoted-message data")
             self._schedule_save()
         self.scan_all_cached_messages_for_mentions()
         # NOTE: the "connected" sound is deliberately NOT played here. Reaching
@@ -3545,9 +3602,12 @@ class MainWindow(wx.Frame):
         # sync.  Without this, _sync_completed stays True from the previous
         # session and messages.set never triggers start_sync() again.
         self._sync_completed = False
-        # In-memory store for status/story updates received via WebSocket.
-        # Keys are sender JIDs; values are lists of normalized message dicts.
-        self._status_updates: dict = {}
+        # NOTE: self._status_updates is NOT reset here. It was already loaded
+        # from the database by _load_local_lid_cache() a few lines above
+        # (keys are sender JIDs, values are lists of normalized message
+        # dicts) — resetting it to {} at this point used to silently discard
+        # every locally-cached story on every single restart, so the Status
+        # tab always came up empty until new stories arrived over the socket.
         # Reset so the 60-s fallback and on_messages_set() can fire.
         # The flag persisted as True across restarts, blocking re-sync on
         # reconnection when the WPPConnect doesn't re-send messages.set.
@@ -3742,7 +3802,15 @@ class MainWindow(wx.Frame):
                     # We should NOT call start-session to avoid launching duplicate Puppeteer tabs.
                     # None of these states can carry WhatsApp traffic, so the
                     # app must consider itself offline while they last.
-                    self._set_wa_connected(False, f"status-session {status}")
+                    # notLogged/QRCODE are a definite, explained signal (the
+                    # dialog below tells the user pairing is needed) — skip the
+                    # startup grace for those. Anything else here (inChat,
+                    # INITIALIZING, PAIRED, ...) is exactly the kind of normal
+                    # mid-boot status that must NOT flip the UI to "offline".
+                    self._set_wa_connected(
+                        False, f"status-session {status}",
+                        confirmed=status in ("notLogged", "QRCODE"),
+                    )
                     logging.info(
                         "[check_wa_connection_http] Session is in active state '%s' — skipping /start-session to avoid browser conflict.",
                         status,
@@ -4289,7 +4357,7 @@ class MainWindow(wx.Frame):
             return self.chats.get(alt_jid)
         return None
 
-    def get_chats(self, limit: int = 5):
+    def get_chats(self, limit: int = 200):
         try:
             return self.db.get_chats(limit=limit)
         except Exception as e:
@@ -5183,6 +5251,74 @@ class MainWindow(wx.Frame):
             t.daemon = True
             self._save_timer = t
             t.start()
+
+    # Stories/status updates are only ever valid for 24h on WhatsApp's own
+    # side; nothing pruned this table before, so it grew forever — every
+    # status ever received or viewed (payload included) stayed in the
+    # database indefinitely. The extra 2h beyond the real 24h lifetime is
+    # just slack for clock skew / late delivery, not a feature.
+    _STATUS_UPDATE_MAX_AGE_SECONDS = 26 * 3600
+    # How often vacuum() is allowed to run at most. VACUUM rewrites the whole
+    # file, so it belongs nowhere near "every startup" — this is purely to
+    # reclaim space after large deletes (clearing chats, the status pruning
+    # above) accumulate over time.
+    _VACUUM_MIN_INTERVAL_SECONDS = 7 * 24 * 3600
+
+    def _prune_expired_status_updates(self):
+        """Delete stories older than 24h from the DB and the in-memory cache.
+
+        Runs on a background thread — called once at startup, well after the
+        cutoff for it to block anything the user is waiting on.
+        """
+        try:
+            cutoff = int(time.time()) - self._STATUS_UPDATE_MAX_AGE_SECONDS
+            deleted = self.db.delete_expired_status_updates(cutoff)
+            if deleted:
+                logging.info("[status_updates] pruned %d expired stories from the database", deleted)
+            pruned_memory = 0
+            for participant in list(self._status_updates.keys()):
+                bucket = self._status_updates.get(participant) or []
+                kept = []
+                for m in bucket:
+                    ts = int(m.get("messageTimestamp", 0) or m.get("timestamp", 0) or 0)
+                    if ts > 1_000_000_000_000:
+                        ts //= 1000
+                    if ts and ts < cutoff:
+                        pruned_memory += 1
+                    else:
+                        kept.append(m)
+                if kept:
+                    self._status_updates[participant] = kept
+                else:
+                    self._status_updates.pop(participant, None)
+            if pruned_memory and hasattr(self, "navigation_panel"):
+                sp = getattr(self.navigation_panel, "status_panel", None)
+                if sp and sp.IsShown():
+                    wx.CallAfter(lambda: threading.Thread(target=sp._load_statuses, daemon=True).start())
+        except Exception as exc:
+            logging.warning("[status_updates] failed to prune expired stories: %s", exc)
+
+    def _maybe_vacuum_database(self):
+        """Reclaim disk space, throttled to at most once every 7 days.
+
+        Runs on a background thread, well after startup — VACUUM rewrites the
+        entire database file, so it must never compete with the app's own
+        startup reads/writes for the single SQLite connection.
+        """
+        try:
+            last_run = int(self.db.get_metadata("last_vacuum_ts", "0") or "0")
+        except (TypeError, ValueError):
+            last_run = 0
+        now = int(time.time())
+        if now - last_run < self._VACUUM_MIN_INTERVAL_SECONDS:
+            return
+        try:
+            logging.info("[maintenance] Running database VACUUM...")
+            self.db.vacuum()
+            self.db.set_metadata("last_vacuum_ts", str(now))
+            logging.info("[maintenance] Database VACUUM complete.")
+        except Exception as exc:
+            logging.warning("[maintenance] VACUUM failed: %s", exc)
 
     def _load_local_lid_cache(self):
         try:

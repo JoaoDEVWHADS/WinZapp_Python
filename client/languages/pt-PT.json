@@ -50,6 +50,7 @@
     "instance_state_changed": "Ocorreu um evento inesperado. O estado da instância alterou-se ou parece estar desligado. Por favor, tente emparelhar novamente.",
     "wa_disconnected_temp": "A ligação com o WhatsApp foi interrompida. A aguardar reconexão automática...",
     "tray_wa_disconnected": "WhatsApp desligado",
+    "tray_connecting": "a ligar...",
     "media_send_failed": "Não foi possível enviar o ficheiro. Erro: {error}",
     "media_too_large": "O ficheiro excede o tamanho máximo permitido de {max_mb} MB e não pode ser enviado.",
     "remove_mention": "Remover menção a @{name}",
