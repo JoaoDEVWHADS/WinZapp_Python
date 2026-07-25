@@ -1551,15 +1551,8 @@ class MainWindow(wx.Frame):
             remote_jid = my_jid
 
         # Learn/update presence pushName map from incoming message
-        if not from_me:
-            sender_jid = key.get("participant") or key.get("remoteJid", "")
-            push = msg.get("pushName", "")
-            if sender_jid and push and not is_phone_like(push):
-                sender_jid = self._normalize_jid(sender_jid)
-                ppm = getattr(self, "_presence_pushname_map", {})
-                if ppm.get(sender_jid) != push:
-                    ppm[sender_jid] = push
-                    self._schedule_save(contacts_dirty=True)
+        if not from_me and self._learn_sender_name(msg):
+            self._schedule_save(contacts_dirty=True)
 
         # Extract mapping and mentions from incoming messages
         self._extract_lid_mapping(msg)
@@ -1897,6 +1890,90 @@ class MainWindow(wx.Frame):
         if hasattr(self, "notification_manager"):
             self.notification_manager.send(title, body, remote_jid)
 
+    def _learn_sender_name(self, msg: dict) -> bool:
+        """Remember the pushName a message carries for its sender JID.
+
+        In a group, ``key.participant`` is very often a bare ``@lid`` that maps
+        to no phone number we know: the participant is not in the address book,
+        and group messages carry no ``remoteJidAlt`` bridge field the way 1:1
+        chats do.  When that happens every name lookup fails and the sender
+        shows up as "Participante sem nome".
+
+        The message itself is the one place the name *is* available — WhatsApp
+        ships the sender's pushName on it.  Recording it against the JID makes
+        that name available to every later lookup (chat-list previews,
+        notifications, the message list), including for messages of types that
+        arrive with no pushName of their own.
+
+        Returns True when something new was learned, so callers can persist.
+        """
+        key = msg.get("key") or {}
+        if key.get("fromMe"):
+            return False
+        sender_jid = key.get("participant") or msg.get("participant") or key.get("remoteJid", "")
+        push = (msg.get("pushName") or "").strip()
+        if not sender_jid or not push:
+            return False
+        if push.isdigit() or is_phone_like(push):
+            return False
+        sender_jid = self._normalize_jid(sender_jid)
+        # Never attribute a name to the group itself.
+        if not sender_jid or sender_jid.endswith(("@g.us", "@broadcast", "@newsletter")):
+            return False
+
+        ppm = self._presence_pushname_map
+        changed = False
+        targets = [sender_jid]
+        # Index both JID forms when the bridge is known, so a lookup by either
+        # one finds the name.
+        if sender_jid.endswith("@lid"):
+            phone = getattr(self, "_lid_to_phone", {}).get(sender_jid, "")
+            if phone:
+                targets.append(phone)
+        else:
+            lid = getattr(self, "_phone_to_lid", {}).get(sender_jid, "")
+            if lid:
+                targets.append(lid)
+        for target in targets:
+            if ppm.get(target) != push:
+                ppm[target] = push
+                changed = True
+        return changed
+
+    def _needs_sender_resolution(self, jid: str) -> bool:
+        """True when `jid` is an @lid we still have no display name for.
+
+        Used to feed resolve_lid_jids_via_api() with group participants. A JID
+        already bridged to a phone number, present in contacts, or covered by a
+        learned pushName resolves fine without an API round-trip.
+        """
+        if not isinstance(jid, str) or not jid.endswith("@lid"):
+            return False
+        if jid in getattr(self, "_lid_to_phone", {}):
+            return False
+        if jid in getattr(self, "_unresolvable_lids", set()):
+            return False
+        contact = self.contacts.get(jid) or {}
+        if (contact.get("name") or contact.get("pushName") or "").strip():
+            return False
+        if (self._presence_pushname_map.get(jid) or "").strip():
+            return False
+        return True
+
+    def _learn_sender_names_bulk(self, messages) -> bool:
+        """Run _learn_sender_name over a batch of freshly-synced messages.
+
+        The live WebSocket path already learned names message by message, but
+        everything fetched through get-messages during a sync bypassed it — so
+        after a fresh pairing whole group histories had no resolvable sender
+        until each participant happened to send a new message.
+        """
+        changed = False
+        for m in messages or ():
+            if isinstance(m, dict) and self._learn_sender_name(m):
+                changed = True
+        return changed
+
     def on_historical_message(self, msg: dict):
         """
         Processes historical/sync messages (isMdHistoryMsg=True) received via WebSocket.
@@ -1919,6 +1996,11 @@ class MainWindow(wx.Frame):
         alt_jid = self._normalize_jid(key.get("remoteJidAlt", ""))
         if alt_jid:
             self._extract_lid_mapping(msg)
+
+        # History messages carry the sender's pushName too — the only source of
+        # a display name for group participants we cannot resolve otherwise.
+        if self._learn_sender_name(msg):
+            self._schedule_save(contacts_dirty=True)
 
         # Retrieve/create local chat object
         chat = self.chats.get(remote_jid)
@@ -5773,9 +5855,17 @@ class MainWindow(wx.Frame):
             or ext.get("contextInfo", {}).get("mentionedJid")
             or []
         )
+        lids_to_resolve = []
+        phone_jids_to_resolve = []
+
+        # The sender of a group message needs resolving just as much as anyone
+        # it mentions: its @lid rarely comes with a bridge to a phone number,
+        # and until it is resolved the participant has no name to show.
+        sender_jid = (msg.get("key") or {}).get("participant") or msg.get("participant") or ""
+        if not (msg.get("key") or {}).get("fromMe") and self._needs_sender_resolution(sender_jid):
+            lids_to_resolve.append(sender_jid)
+
         if isinstance(mentioned, list):
-            lids_to_resolve = []
-            phone_jids_to_resolve = []
             for jid in mentioned:
                 if not isinstance(jid, str):
                     continue
@@ -5791,46 +5881,45 @@ class MainWindow(wx.Frame):
                     if not name or name == "Contato sem nome" or is_phone_like(name):
                         phone_jids_to_resolve.append(jid)
 
-            if lids_to_resolve:
-                logging.info(f"[LID Mapping] Found unresolved mentioned LIDs in message: {lids_to_resolve}")
-                def resolve_in_bg():
-                    self.resolve_lid_jids_via_api(lids_to_resolve)
-                threading.Thread(target=resolve_in_bg, daemon=True).start()
+        # Outside the `mentioned` branch on purpose: the sender collected above
+        # must still be resolved for a message that mentions nobody.
+        if lids_to_resolve:
+            logging.info(f"[LID Mapping] Found unresolved LIDs in message: {lids_to_resolve}")
+            def resolve_in_bg():
+                self.resolve_lid_jids_via_api(lids_to_resolve)
+            threading.Thread(target=resolve_in_bg, daemon=True).start()
 
-            if phone_jids_to_resolve:
-                logging.info(f"[Contact Resolution] Found unresolved mentioned phone JIDs in message: {phone_jids_to_resolve}")
-                def resolve_phones_in_bg():
-                    updated_contacts = {}
-                    for p_jid in phone_jids_to_resolve:
-                        try:
-                            res = self.get_contact_profile(p_jid)
-                            if res:
-                                res_data = res.get("response", {})
-                                if isinstance(res_data, dict):
-                                    name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
-                                    if name and name != "Contato sem nome" and not is_phone_like(name):
-                                        normalized = self._normalize_jid(p_jid)
-                                        if normalized not in self.contacts:
-                                            self.contacts[normalized] = {}
-                                        self.contacts[normalized]["name"] = name
-                                        self.contacts[normalized]["pushName"] = name
- 
-                                        if not hasattr(self, "_presence_pushname_map"):
-                                            self._presence_pushname_map = {}
-                                        self._presence_pushname_map[normalized] = name
-                                        updated_contacts[normalized] = self.contacts[normalized]
-                        except Exception as e:
-                            logging.error(f"[Contact Resolution] Error resolving {p_jid}: {e}")
-                    if updated_contacts:
-                        try:
-                            self.db.upsert_contacts_batch(updated_contacts)
-                        except Exception as e:
-                            logging.error(f"[Contact Resolution] Error saving contacts incrementally: {e}")
-                            self.save_data(self.chats, self.contacts)
-                        wx.CallAfter(self._schedule_set_chats)
-                        if hasattr(self, "conversations_panel"):
-                            wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
-                threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
+        if phone_jids_to_resolve:
+            logging.info(f"[Contact Resolution] Found unresolved mentioned phone JIDs in message: {phone_jids_to_resolve}")
+            def resolve_phones_in_bg():
+                updated_contacts = {}
+                for p_jid in phone_jids_to_resolve:
+                    try:
+                        res = self.get_contact_profile(p_jid)
+                        if res:
+                            res_data = res.get("response", {})
+                            if isinstance(res_data, dict):
+                                name = res_data.get("name") or res_data.get("pushname") or res_data.get("pushName") or res_data.get("displayName")
+                                if name and name != "Contato sem nome" and not is_phone_like(name):
+                                    normalized = self._normalize_jid(p_jid)
+                                    if normalized not in self.contacts:
+                                        self.contacts[normalized] = {}
+                                    self.contacts[normalized]["name"] = name
+                                    self.contacts[normalized]["pushName"] = name
+                                    self._presence_pushname_map[normalized] = name
+                                    updated_contacts[normalized] = self.contacts[normalized]
+                    except Exception as e:
+                        logging.error(f"[Contact Resolution] Error resolving {p_jid}: {e}")
+                if updated_contacts:
+                    try:
+                        self.db.upsert_contacts_batch(updated_contacts)
+                    except Exception as e:
+                        logging.error(f"[Contact Resolution] Error saving contacts incrementally: {e}")
+                        self.save_data(self.chats, self.contacts)
+                    wx.CallAfter(self._schedule_set_chats)
+                    if hasattr(self, "conversations_panel"):
+                        wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+            threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
 
     def scan_all_cached_messages_for_mentions(self):
         """Scan all cached messages in self.chats, find all unresolved LIDs/phones, and resolve them."""
@@ -5840,11 +5929,23 @@ class MainWindow(wx.Frame):
             
             lids_to_resolve = set()
             phones_to_resolve = set()
-            
+            # Senders are collected separately and capped: a busy account can
+            # hold thousands of distinct group participants, and every one of
+            # them would otherwise become an API round-trip through the single
+            # Puppeteer session at startup, starving sends and media downloads.
+            # Most participants never need this anyway — _learn_sender_name()
+            # resolves them for free from the pushName on their messages.
+            sender_lids = set()
+            _MAX_SENDER_LOOKUPS = 150
+
             # 1. Collect JID mappings and mentions
             chats_snapshot = list(self.chats.values())
             for chat in chats_snapshot:
                 records = chat.get("messages", {}).get("messages", {}).get("records", [])
+                # Learn every sender name the stored history already carries.
+                # This is local and cheap, and it is what keeps the API lookups
+                # below down to the handful that genuinely need them.
+                self._learn_sender_names_bulk(records)
                 for msg in list(records):
                     if not isinstance(msg, dict):
                         continue
@@ -5853,13 +5954,21 @@ class MainWindow(wx.Frame):
                     remote = key.get("remoteJid", "")
                     alt = key.get("remoteJidAlt", "")
                     participant = key.get("participant", "")
-                    
+
                     if alt and alt.endswith("@s.whatsapp.net"):
                         if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
                             self.register_jid_mapping(remote, alt)
                     elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
                         if self._lid_to_phone.get(alt) != remote:
                             self.register_jid_mapping(alt, remote)
+
+                    # Sender of a group message. Only mentioned JIDs used to be
+                    # collected here, so a participant whose @lid we cannot
+                    # bridge — the common case in groups, since group messages
+                    # carry no remoteJidAlt — was never sent to the resolver and
+                    # stayed "Participante sem nome" for the life of the chat.
+                    if self._needs_sender_resolution(participant):
+                        sender_lids.add(participant)
 
                     # Now collect mentions
                     msg_obj = msg.get("message") or {}
@@ -5886,9 +5995,20 @@ class MainWindow(wx.Frame):
                                 if not name or name == "Contato sem nome" or is_phone_like(name):
                                     phones_to_resolve.add(jid)
                                     
+            # Add the group senders that the pushName pass above could not
+            # name, up to the cap, so mentions never lose their slot to them.
+            sender_lids = {j for j in sender_lids if self._needs_sender_resolution(j)}
+            if sender_lids:
+                capped = sorted(sender_lids)[:_MAX_SENDER_LOOKUPS]
+                logging.info(
+                    "[Mentions Scan] %d group senders still unnamed; queueing %d for resolution.",
+                    len(sender_lids), len(capped),
+                )
+                lids_to_resolve.update(capped)
+
             # 2. Resolve in controlled batches
             if lids_to_resolve:
-                logging.info(f"[Mentions Scan] Found {len(lids_to_resolve)} unresolved mentioned LIDs.")
+                logging.info(f"[Mentions Scan] Found {len(lids_to_resolve)} unresolved LIDs.")
                 self.resolve_lid_jids_via_api(list(lids_to_resolve))
                 
             if phones_to_resolve:
@@ -6365,6 +6485,12 @@ class MainWindow(wx.Frame):
         # After fetching, update chat messages
         for msg in all_messages:
             self._extract_lid_mapping(msg)
+        # Learn sender names from the synced history as well.  Without this,
+        # every group message fetched by the initial sync had no resolvable
+        # sender (its participant is usually a bare @lid), and only messages
+        # arriving live afterwards ever got a name.
+        if self._learn_sender_names_bulk(all_messages):
+            self._schedule_save(contacts_dirty=True)
         # Preserve any messages received via WebSocket during this sync that
         # the API hasn't indexed yet (they arrived after the API snapshot).
         local_chat    = self.chats.get(remote_jid, {})
