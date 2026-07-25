@@ -422,7 +422,18 @@ class ApiSetupDialog(wx.Dialog):
                     return
 
                 # Stash WinZapp's own patches before they get wiped below —
-                # see _CUSTOM_SRC_FILES for why this is needed.
+                # see _CUSTOM_SRC_FILES for why this is needed. This is only
+                # a FALLBACK source (used below if api_patches/ — the
+                # pristine reference copy build.py ships alongside api/,
+                # never touched by this dialog — is missing, e.g. an old
+                # portable build made before api_patches/ existed). Stashing
+                # from api_dir itself is not enough on its own: if a *prior*
+                # reinstall already left api_dir with an outdated/broken
+                # patch (as happened before this stash/restore existed at
+                # all), re-stashing that same broken copy on every future
+                # reinstall would preserve the breakage forever, with no way
+                # for a newer WinZapp release's improved patches to ever
+                # reach an existing install.
                 custom_contents = {}
                 for rel_path in _CUSTOM_SRC_FILES:
                     full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
@@ -459,14 +470,37 @@ class ApiSetupDialog(wx.Dialog):
                     return
 
                 # Restore WinZapp's patches over the freshly-extracted
-                # vanilla upstream files.
-                for rel_path, content in custom_contents.items():
+                # vanilla upstream files. Prefer the pristine reference copy
+                # bundled at api_patches/ (always matches whatever WinZapp
+                # version is currently running) over the pre-wipe stash from
+                # api_dir (which may itself be an outdated/broken copy left
+                # by an older install) — see the comment above custom_contents.
+                patches_dir = resource_path("api_patches")
+                for rel_path in _CUSTOM_SRC_FILES:
+                    pristine_path = os.path.join(patches_dir, rel_path.replace("/", os.sep))
+                    if os.path.isfile(pristine_path):
+                        try:
+                            with open(pristine_path, "rb") as fh:
+                                content = fh.read()
+                            source = "api_patches/ (current WinZapp build)"
+                        except Exception as exc:
+                            logging.warning(
+                                "[api_setup] Failed to read pristine patch %s: %s",
+                                rel_path, exc,
+                            )
+                            content = custom_contents.get(rel_path)
+                            source = "pre-wipe stash (pristine read failed)"
+                    else:
+                        content = custom_contents.get(rel_path)
+                        source = "pre-wipe stash (no api_patches/ shipped)"
+                    if content is None:
+                        continue
                     full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
                     try:
                         os.makedirs(os.path.dirname(full_path), exist_ok=True)
                         with open(full_path, "wb") as fh:
                             fh.write(content)
-                        logging.info("[api_setup] Restored custom file: %s", rel_path)
+                        logging.info("[api_setup] Restored custom file: %s (source: %s)", rel_path, source)
                     except Exception as exc:
                         logging.warning(
                             "[api_setup] Failed to restore custom file %s: %s",

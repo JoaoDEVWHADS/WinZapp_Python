@@ -468,6 +468,29 @@ def assemble_staging():
         custom_src_count += 1
     print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
 
+    # Second, untouched copy of the same patch files under api_patches/ — a
+    # pristine reference ApiSetupDialog restores from after every WPPConnect
+    # (re)install/update. api/ itself gets wiped and re-extracted from a
+    # fresh upstream ZIP on every one of those runs, so restoring from
+    # whatever happened to already be sitting in api/ before the wipe just
+    # perpetuates whatever patch snapshot the user's install last happened to
+    # have — including a stale/broken one from an older WinZapp version, with
+    # no way for a newer WinZapp release's improved patches to ever reach an
+    # existing install. api_patches/ is never modified after staging, so it
+    # always reflects exactly what *this* WinZapp build shipped with.
+    patches_dst = os.path.join(STAGING_DIR, "api_patches")
+    os.makedirs(patches_dst)
+    patches_count = 0
+    for rel_path in API_CUSTOM_SRC_FILES:
+        src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
+        if not os.path.isfile(src_path):
+            continue
+        dst = os.path.join(patches_dst, rel_path.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src_path, dst)
+        patches_count += 1
+    print(f"  -> api_patches/  ({patches_count} reference patch files)")
+
 # -- Step 4-7: Installer (onedir only) -------------------------------------
 
 def compile_uninstaller():

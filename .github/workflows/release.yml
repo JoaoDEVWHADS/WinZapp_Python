@@ -138,6 +138,14 @@ jobs:
             $hasNodeExe  = ($entries | Where-Object { $_ -eq   "WinZapp/node/node.exe" }).Count -gt 0
             $hasServerJs = ($entries | Where-Object { $_ -eq   "WinZapp/api/dist/server.js" }).Count -gt 0
             $hasFfmpeg   = ($entries | Where-Object { $_ -eq   "WinZapp/lib/ffmpeg.exe" }).Count -gt 0
+            # api_patches/ is the pristine reference copy of WinZapp's custom
+            # wppconnect-server patches that ApiSetupDialog restores from on
+            # every WPPConnect (re)install/update — without it, a reinstall
+            # falls back to whatever patch snapshot the user's install
+            # already happened to have (possibly outdated or broken), so a
+            # release that failed to bundle it would silently stop shipping
+            # patch fixes to existing installs without any error anywhere.
+            $hasApiPatches = ($entries | Where-Object { $_ -eq "WinZapp/api_patches/src/controller/messageController.ts" }).Count -gt 0
             Write-Host "WinZapp.exe        : $hasExe"
             Write-Host "sounds/*           : $hasSounds"
             Write-Host "lib/bass.dll       : $hasLib"
@@ -145,7 +153,8 @@ jobs:
             Write-Host "node/node.exe      : $hasNodeExe"
             Write-Host "api/dist/server.js : $hasServerJs"
             Write-Host "ffmpeg             : $hasFfmpeg"
-            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe -and $hasNodeExe -and $hasServerJs -and $hasFfmpeg)) {
+            Write-Host "api_patches/       : $hasApiPatches"
+            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe -and $hasNodeExe -and $hasServerJs -and $hasFfmpeg -and $hasApiPatches)) {
               Write-Error "dist/WinZapp.zip is missing required entries — build failed."
               exit 1
             }
