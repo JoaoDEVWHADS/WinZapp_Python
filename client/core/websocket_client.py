@@ -54,7 +54,7 @@ class WebSocketClient:
         return jid_val.replace("@c.us", "@s.whatsapp.net")
 
     def on_connect(self):
-        print("WebSocket connected.")
+        logging.info("[WebSocketClient] WebSocket connected.")
         # Record when we connected so on_messages_upsert can use a stable
         # cutoff time rather than the ever-advancing time.time().
         self._connect_time = time.time()
@@ -74,13 +74,30 @@ class WebSocketClient:
             if getattr(self.main_window, "_wa_connected", False):
                 if hasattr(self.main_window, "message_queue"):
                     self.main_window.message_queue.flush()
+                # Every Socket.IO (re)connect — not only the ones where
+                # check_wa_connection_http() above also flips _wa_connected
+                # from False to True — gets a catch-up sync opportunity.
+                # WPPConnect's HTTP status can stay "CONNECTED" throughout a
+                # purely transport-level Socket.IO drop (a brief network
+                # blip too short for the 30s health check to ever see it as
+                # down), so live messages.upsert events emitted during that
+                # gap are simply gone — nothing else re-delivers them. This
+                # is the client-side half of the "connection looks perfectly
+                # stable yet a message silently never arrives, and F5 fixes
+                # it" reports: was a live delivery gap, not a bug in how an
+                # arrived message got processed. _sync_completed is reset so
+                # trigger_sync_if_needed() is willing to run again; the
+                # existing cooldown/backoff in that method still protects
+                # against a flaky connection reconnecting every few seconds
+                # turning this into a sync storm.
+                self.main_window._sync_completed = False
                 if hasattr(self.main_window, "trigger_sync_if_needed"):
                     self.main_window.trigger_sync_if_needed()
-        except Exception as e:
-            print(f"[WebSocketClient] _recheck_connection_after_connect error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] _recheck_connection_after_connect error")
 
     def on_disconnect(self):
-        print("WebSocket disconnected.")
+        logging.info("[WebSocketClient] WebSocket disconnected.")
         # Pause the message queue until the socket (and WhatsApp) reconnect,
         # and switch to offline mode so the UI says so instead of silently
         # dropping everything the user does into a queue.
@@ -91,7 +108,7 @@ class WebSocketClient:
         wx.CallAfter(self.main_window._set_wa_connected, False, "socket disconnected", False)
 
     def on_connection_update(self, info):
-        print(info)
+        logging.debug(f"[WebSocketClient] event payload: {info}")
         #Checks the new connection state
         data             = info.get("data", {})
         connection_state = data.get("state", "")
@@ -235,7 +252,7 @@ class WebSocketClient:
 
 
     def on_qrcode_update(self, info):
-        print(info)
+        logging.debug(f"[WebSocketClient] event payload: {info}")
         # Check if this is QR-CODE mode (base64) or pairing code mode
         qr_data = info.get("data", {}).get("qrcode", {})
         pairing_code = qr_data.get("pairingCode")
@@ -348,8 +365,8 @@ class WebSocketClient:
                 # Otherwise: sent from another device — fall through to on_new_message
             wx.CallAfter(self.main_window.on_new_message, msg)
 
-        except Exception as e:
-            print(f"[WebSocketClient] on_messages_upsert error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_messages_upsert error")
 
     def on_messages_update(self, info):
         """
@@ -372,8 +389,8 @@ class WebSocketClient:
                 if not update.get("key", {}).get("fromMe"):
                     continue
                 wx.CallAfter(self.main_window.on_message_status_update, update)
-        except Exception as e:
-            print(f"[WebSocketClient] on_messages_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_messages_update error")
 
     def on_chats_update(self, info):
         """
@@ -424,8 +441,8 @@ class WebSocketClient:
                     elif isinstance(pin, (int, float)):
                         is_pinned = pin > 0
                     wx.CallAfter(self.main_window.on_chat_pin_update, jid, is_pinned)
-        except Exception as e:
-            print(f"[WebSocketClient] on_chats_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_chats_update error")
 
     def on_presence_update(self, info):
         """
@@ -444,8 +461,8 @@ class WebSocketClient:
             if not jid or not isinstance(presences, dict):
                 return
             wx.CallAfter(self.main_window.on_presence_update, jid, presences)
-        except Exception as e:
-            print(f"[WebSocketClient] on_presence_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_presence_update error")
 
     def on_wpp_presence_changed(self, info):
         """
@@ -494,7 +511,7 @@ class WebSocketClient:
                     # Unknown/unexpected chat-state value — log it so a real-world
                     # mismatch (e.g. a different literal used for audio recording)
                     # can be diagnosed from the logs instead of failing silently.
-                    print(f"[WebSocketClient] Unrecognized presence state: {s!r} (raw info: {info})")
+                    logging.warning(f"[WebSocketClient] Unrecognized presence state: {s!r} (raw info: {info})")
                 return s
 
             timestamp = info.get("t")
@@ -527,8 +544,8 @@ class WebSocketClient:
                 import logging
                 logging.info(f"[WebSocketClient] on_wpp_presence_changed JID: {chat_jid}, presences: {presences}")
                 wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_presence_changed error")
 
     def on_contacts_update(self, info):
         """
@@ -599,8 +616,8 @@ class WebSocketClient:
                 # Refresh conversation names shown in the UI (debounced —
                 # contacts.update can fire in bursts for many contacts at once)
                 wx.CallAfter(self.main_window._schedule_set_chats)
-        except Exception as e:
-            print(f"[WebSocketClient] on_contacts_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_contacts_update error")
 
     # ── WPPConnect Event Handlers ─────────────────────────────────────────────
 
@@ -618,8 +635,8 @@ class WebSocketClient:
                         }
                     }
                 })
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_qrcode error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_qrcode error")
 
     def on_wpp_session_logged(self, data):
         try:
@@ -647,8 +664,8 @@ class WebSocketClient:
                 # WPPConnect does not emit messages.set; trigger sync here instead,
                 # using the same guards as on_messages_set to prevent double-sync.
                 self.on_messages_set({})
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_session_logged error")
 
     def _fetch_host_device_jid(self):
         try:
@@ -673,8 +690,8 @@ class WebSocketClient:
                 if wuid:
                     self.main_window.my_jid = wuid
                     wx.CallAfter(self.main_window.resolve_self_lid)
-        except Exception as ex:
-            print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
+        except Exception:
+            logging.exception("[WebSocketClient] Failed to fetch host device JID")
 
     def _set_wpp_limits(self):
         """Push raised file-size limits into WhatsApp Web via the setLimit API.
@@ -710,7 +727,7 @@ class WebSocketClient:
                 return
             status = data.get("status")
             session = data.get("session")
-            print(f"[WebSocketClient] Received status-find: {status}, session: {session}")
+            logging.info(f"[WebSocketClient] Received status-find: {status}, session: {session}")
             
             # If session is provided in the payload, ignore it if it is not ours
             if session and session != self.instance_name:
@@ -721,8 +738,8 @@ class WebSocketClient:
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):
                     wx.CallAfter(self._handle_logout)
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_status_find error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_status_find error")
 
     def on_wpp_phone_code(self, data):
         """Handle the 'phoneCode' Socket.IO event emitted by WPPConnect Server.
@@ -745,8 +762,8 @@ class WebSocketClient:
                 # code.
                 if self.connect:
                     wx.CallAfter(self.connect.update_pairing_code, str(code))
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_phone_code error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
 
     def on_wpp_message_received(self, data):
@@ -835,8 +852,8 @@ class WebSocketClient:
             if reactor_participant:
                 normalized["key"]["participant"] = reactor_participant
             wx.CallAfter(self.main_window.on_new_message, normalized)
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_reaction error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_reaction error")
 
     def on_wpp_ack(self, data):
         try:
@@ -868,8 +885,8 @@ class WebSocketClient:
                     }
                 }
             })
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_ack error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_ack error")
 
     def _normalize_wpp_message(self, wpp_msg):
         msg_id = wpp_msg.get("id")

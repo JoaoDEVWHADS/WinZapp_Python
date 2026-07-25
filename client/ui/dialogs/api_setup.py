@@ -30,6 +30,7 @@ Modal result:
 
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -51,6 +52,35 @@ _REPO_ZIP_TAG  = (
     "https://github.com/wppconnect-team/wppconnect-server"
     "/archive/refs/tags/{tag}.zip"
 )
+WPP_GITHUB_API_LATEST_RELEASE = (
+    "https://api.github.com/repos/wppconnect-team/wppconnect-server/releases/latest"
+)
+
+
+def fetch_latest_wpp_tag(timeout: float = 15) -> str:
+    """Return the tag name of the latest wppconnect-server GitHub release, or "".
+
+    Used so a fresh install (and the update flows) always land on whatever is
+    actually the newest tagged release instead of a version number baked into
+    WinZapp's own .env at build time — a WPPCONNECT_TAG_VERSION pin only ever
+    gets updated when WinZapp itself ships a new build, so a version fixed
+    that way is stale from the day it's set. Returns "" on any failure so
+    callers can fall back to the previous fixed-tag/main-branch behaviour
+    instead of failing setup outright over a GitHub API hiccup.
+    """
+    try:
+        resp = requests.get(
+            WPP_GITHUB_API_LATEST_RELEASE,
+            headers={"User-Agent": "WinZapp"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        tag = (data.get("tag_name") or "").strip()
+        return tag
+    except Exception as exc:
+        logging.warning("[api_setup] Failed to fetch latest wppconnect-server release tag: %s", exc)
+        return ""
 
 # Root-level files whose pre-included content always takes precedence.
 _PRESERVE = {"start.js", ".env", "config.json"}
@@ -325,7 +355,22 @@ class ApiSetupDialog(wx.Dialog):
             "PATH": path_env,
             "PUPPETEER_CACHE_DIR": puppeteer_cache
         }
-        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
+        tag = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
+        if not tag:
+            # No explicit tag was requested and .env doesn't pin one — resolve
+            # the actual latest GitHub release instead of defaulting straight
+            # to the main branch head. A fixed WPPCONNECT_TAG_VERSION only
+            # ever changes when WinZapp itself ships a new build, so it is
+            # stale from the moment it's set; a brand-new install deserves
+            # whatever is genuinely newest today, not a version already
+            # behind by the time the user installs it. Falls through to the
+            # main branch (the previous behaviour) if the API is unreachable.
+            self._set_status("Verificando a versão mais recente do WPPConnect Server...")
+            tag = fetch_latest_wpp_tag()
+            if tag:
+                logging.info("[api_setup] Using latest released wppconnect-server tag: %s", tag)
+            else:
+                logging.warning("[api_setup] Could not resolve latest release tag — falling back to main branch")
 
         try:
             # ── Step 1: download source ZIP ───────────────────────────────

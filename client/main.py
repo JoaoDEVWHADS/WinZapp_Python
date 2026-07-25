@@ -439,6 +439,14 @@ class MainWindow(wx.Frame):
         # is initialized) so it can run even if modal dialogs block __init__.
         if not self.background_mode:
             wx.CallLater(2000, self._start_update_checker)
+            # Separate, independent check for the WPPConnect Server itself —
+            # it breaks between WinZapp releases too, and until now the only
+            # fix was a user manually wiping client/api/ and node_modules.
+            # Given a much longer delay: unlike the WinZapp checker (which
+            # only shows a dialog), accepting this one stops and restarts the
+            # live API session, so it must never fire while pairing/the
+            # initial sync is still settling in.
+            wx.CallLater(90000, self._start_wpp_update_checker)
 
         # Terms of service – show once before anything else happens
         if not self.background_mode:
@@ -708,6 +716,7 @@ class MainWindow(wx.Frame):
 
         # ── Menu bar ──────────────────────────────────────────────────────────
         self._update_checker = None
+        self._wpp_update_checker = None
         self._build_menubar()
 
         # ── Online presence (sendPresence) ────────────────────────────────────
@@ -766,6 +775,7 @@ class MainWindow(wx.Frame):
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
         self._ID_FORCE_REINSTALL_ZIP = wx.NewIdRef()
+        self._ID_FORCE_REINSTALL_WPP = wx.NewIdRef()
         self._ID_ABOUT         = wx.NewIdRef()
 
         menubar = wx.MenuBar()
@@ -815,6 +825,7 @@ class MainWindow(wx.Frame):
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_FORCE_UPDATE, self.i18n.t("menu_force_update"))
         help_menu.Append(self._ID_FORCE_REINSTALL_ZIP, self.i18n.t("menu_force_reinstall_zip"))
+        help_menu.Append(self._ID_FORCE_REINSTALL_WPP, self.i18n.t("menu_force_reinstall_wpp"))
         help_menu.AppendSeparator()
         help_menu.Append(self._ID_ABOUT, self.i18n.t("menu_about"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
@@ -829,6 +840,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
+        self.Bind(wx.EVT_MENU, self._on_force_reinstall_wpp, id=self._ID_FORCE_REINSTALL_WPP)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _refresh_menubar(self):
@@ -866,6 +878,9 @@ class MainWindow(wx.Frame):
         )
         mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
             self.i18n.t("menu_force_reinstall_zip")
+        )
+        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
+            self.i18n.t("menu_force_reinstall_wpp")
         )
         mb.GetMenu(2).FindItemById(self._ID_ABOUT).SetItemLabel(
             self.i18n.t("menu_about")
@@ -1095,6 +1110,12 @@ class MainWindow(wx.Frame):
             return
 
         if connected:
+            # True exactly when the connection just came back from being down
+            # (auto-offline or the app never having connected this session) —
+            # NOT when this call merely re-confirms an already-known-good
+            # connection (health check ticks fire this constantly while
+            # online; only a real transition should force anything below).
+            was_offline = not was
             self._wa_offline_strikes = 0
             self._auto_offline = False
             self._apply_offline_state()
@@ -1110,9 +1131,30 @@ class MainWindow(wx.Frame):
             # ("sincronizando", "baixando mídias").
             if self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
                 wx.CallAfter(self._set_status, "")
-            # A sync that never ran (or stopped half-way) because there was no
-            # connection gets picked up here, the moment the connection is back.
             self._sync_retry_count = 0
+            if was_offline:
+                # Every offline→online transition forces a fresh sync, not
+                # just the first one. trigger_sync_if_needed() alone only
+                # acts while _sync_completed is False — once a session has
+                # synced successfully and then loses connectivity for a
+                # while, that flag stays True, so reconnecting silently did
+                # nothing: messages.upsert events that WhatsApp never had a
+                # live channel to deliver over were never picked up any other
+                # way, and the conversation just quietly stayed stale until
+                # the user noticed and pressed F5.
+                self._sync_completed = False
+                # Also clear the retry cooldown timestamp — without this, a
+                # sync attempt made shortly before the connection dropped
+                # could still be inside its own backoff window and silently
+                # swallow this forced resync for up to another 10 minutes.
+                self._last_sync_attempt_ts = 0
+                # The WebSocket client auto-reconnects on its own (unlimited
+                # retries), but its backoff can be up to 60s between
+                # attempts — after a longer outage that means "online" could
+                # sit for the better part of a minute with the live message
+                # channel still down. Nudge it explicitly instead of waiting.
+                if self.ws is not None and not getattr(self.ws.sio, "connected", False):
+                    threading.Thread(target=self._reconnect_websocket_now, daemon=True).start()
             self.trigger_sync_if_needed()
             return
 
@@ -1137,7 +1179,19 @@ class MainWindow(wx.Frame):
         self._apply_offline_state()
         logging.warning("[connection] WhatsApp connection is down (%s)", reason or "checked")
         wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
-        if announce and was and not self.background_mode:
+        # Sound + speech on every genuine transition INTO offline — including
+        # the very first one, e.g. starting the app with no internet at all.
+        # This used to require `was` (a prior *confirmed* online connection)
+        # before announcing anything, so the common "opened with no internet"
+        # case went auto-offline in total silence: no sound, no speech in any
+        # of the four languages, nothing telling the user why. The early-return
+        # guard above (`connected == was and _auto_offline == (not connected)`)
+        # already keeps this from repeating on every failed health-check retry
+        # — it only reaches here on an actual state change — so this is safe
+        # to fire unconditionally, matching the manual toggle's own behaviour
+        # (offline_mode_sound + speech) exactly.
+        if announce and not self.background_mode:
+            self.offline_mode_sound.play()
             self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=False)
 
     def _on_menu_toggle_offline(self, event=None):
@@ -1243,6 +1297,85 @@ class MainWindow(wx.Frame):
             self._update_checker.force_check()
         else:
             self._update_checker.start()
+
+    # ── WPPConnect Server updater ───────────────────────────────────────────────
+    # Independent of WinZapp's own auto-updater above: the WPPConnect Server
+    # WinZapp bundles breaks upstream between WinZapp releases too, and the
+    # only fix used to be a user manually deleting client/api/ and node_modules
+    # and letting WinZapp reinstall from scratch. This checks the actual
+    # wppconnect-team/wppconnect-server GitHub releases directly.
+
+    def _start_wpp_update_checker(self, force: bool = False):
+        if self.background_mode:
+            return
+        updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
+        if not updates_enabled and not force:
+            return
+        from updater import WppUpdateChecker
+        self._wpp_update_checker = WppUpdateChecker(self)
+        if force:
+            self._wpp_update_checker.force_check()
+        else:
+            self._wpp_update_checker.start()
+
+    def _on_force_reinstall_wpp(self, event):
+        """
+        Ajuda > Forçar reinstalação da WPPConnect: always fetches whatever is
+        currently the latest wppconnect-server release and replaces the
+        installed one with it, regardless of version — the same
+        stop → reinstall → restart flow the periodic checker uses, just
+        without the "is it actually newer" comparison first. Meant to recover
+        a broken/corrupted API install without waiting for a real version
+        bump upstream.
+        """
+        if self._wpp_update_checker is None:
+            from updater import WppUpdateChecker
+            self._wpp_update_checker = WppUpdateChecker(self)
+        self._wpp_update_checker.force_reinstall()
+
+    def _update_wpp_server(self, target_tag: str):
+        """
+        Stop the running WPPConnect Server, reinstall it at *target_tag* and
+        restart it. Must run on the wx main thread (creates modal dialogs);
+        both WppUpdateChecker call sites already dispatch here via
+        wx.CallAfter, so this can call ShowModal() directly.
+        """
+        logging.info("[wpp_update] Stopping WPPConnect Server before update to %s...", target_tag)
+        if not self.background_mode:
+            self.output(self.i18n.t("wpp_update_in_progress"), interrupt=True)
+        self._stop_wpp_server()
+        self.wpp_process = None
+
+        from ui.dialogs.api_setup import ApiSetupDialog
+        dlg = ApiSetupDialog(
+            self,
+            title_override=self.i18n.t("api_update_dialog_title"),
+            forced_tag=target_tag,
+        )
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result != wx.ID_OK:
+            logging.warning("[wpp_update] Update to %s was cancelled or failed.", target_tag)
+            self.error_sound.play()
+            wx.MessageBox(
+                self.i18n.t("wpp_update_failed_msg"),
+                self.i18n.t("update_error_title"),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            # Whatever is left on disk (the previous install if the failure
+            # happened before ApiSetupDialog's cleanup step, nothing at all if
+            # it happened after) — ensure_wpp_running() already knows how to
+            # handle both: start what's there, or silently do nothing if the
+            # required files are missing.
+            self.ensure_wpp_running()
+            return
+
+        logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
+        self.ensure_wpp_running()
+        if not self.background_mode:
+            self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
 
     # ── Tray / window lifecycle ───────────────────────────────────────────────
 
@@ -1400,6 +1533,8 @@ class MainWindow(wx.Frame):
             self.message_queue.stop()
         if self._update_checker is not None:
             self._update_checker.stop()
+        if self._wpp_update_checker is not None:
+            self._wpp_update_checker.stop()
         self._stop_wpp_server()
         if hasattr(self, "db") and self.db is not None:
             try:
@@ -2267,6 +2402,27 @@ class MainWindow(wx.Frame):
                 if attempt < max_attempts:
                     time.sleep(delay)
         raise last_exc
+
+    def _reconnect_websocket_now(self):
+        """Force the Socket.IO client to reconnect right away.
+
+        python-socketio already retries forever on its own (reconnection=True,
+        reconnection_attempts=0), but its backoff grows up to 60s between
+        tries — after an outage long enough to trip auto-offline, "online"
+        could otherwise sit for the better part of a minute with the live
+        message channel still down. Called on a background thread (blocks on
+        the actual handshake) whenever an offline→online transition finds the
+        socket not connected.
+        """
+        try:
+            if self.ws is None:
+                return
+            if getattr(self.ws.sio, "connected", False):
+                return
+            logging.info("[connection] Forcing WebSocket reconnect after coming back online...")
+            self.connect_websocket()
+        except Exception as exc:
+            logging.warning("[connection] Forced WebSocket reconnect failed (will keep retrying on its own): %s", exc)
 
     # ── First-run module installation ──────────────────────────────────────
 
