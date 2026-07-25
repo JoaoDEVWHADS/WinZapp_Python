@@ -7061,6 +7061,16 @@ class MainWindow(wx.Frame):
         media_path = data_path("media", f"{msg_id}.wzmedia")
         if os.path.isfile(media_path):
             return
+        if not getattr(self, "_wa_connected", False):
+            # Covers both "confirmed offline" and "still connecting at
+            # startup" (_wa_connected only flips True once the connection is
+            # actually verified — see _set_wa_connected) — attempting the
+            # HTTP call in either case just burns the request timeout against
+            # an API that cannot possibly answer yet, and previously surfaced
+            # as a generic "could not download this media file" instead of
+            # something that tells the user to wait for the connection.
+            logging.info("[handle_media_message] Skipping download for %s — not connected.", msg_id)
+            return
         b64 = self.get_base64_from_media(msg, progress_callback=progress_callback,
                                          timeout=timeout)
         if not b64:
@@ -8196,6 +8206,10 @@ class MainWindow(wx.Frame):
             msg_id = parts[2] if len(parts) > 2 else parts[-1]
         audio_file_path = os.path.join(voice_messages_dir, f"{msg_id}.msv")
         if os.path.isfile(audio_file_path):
+            return
+        if not getattr(self, "_wa_connected", False):
+            # See handle_media_message() — same reasoning applies to audio.
+            logging.info("[handle_audio_message] Skipping download for %s — not connected.", msg_id)
             return
         base64_audio = self.get_base64_from_media(msg, timeout=timeout)
         if not base64_audio:

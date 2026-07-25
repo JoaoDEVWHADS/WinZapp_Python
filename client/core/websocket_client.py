@@ -53,6 +53,9 @@ class WebSocketClient:
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
 
+        # Debounce timer for on_disconnect() — see that method.
+        self._disconnect_timer = None
+
     def _clean_jid(self, jid_val):
         if not jid_val:
             return ""
@@ -64,6 +67,12 @@ class WebSocketClient:
 
     def on_connect(self):
         logging.info("[WebSocketClient] WebSocket connected.")
+        # Cancel any pending "confirm still disconnected" check from
+        # on_disconnect() — we just reconnected, so that transient blip
+        # never needs to be declared offline at all.
+        if self._disconnect_timer is not None:
+            self._disconnect_timer.cancel()
+            self._disconnect_timer = None
         # Record when we connected so on_messages_upsert can use a stable
         # cutoff time rather than the ever-advancing time.time().
         self._connect_time = time.time()
@@ -107,14 +116,30 @@ class WebSocketClient:
 
     def on_disconnect(self):
         logging.info("[WebSocketClient] WebSocket disconnected.")
-        # Pause the message queue until the socket (and WhatsApp) reconnect,
-        # and switch to offline mode so the UI says so instead of silently
-        # dropping everything the user does into a queue.
-        # Silent: a Socket.IO blip against the *local* server reconnects on its
-        # own within seconds, and announcing "offline" every time would be
-        # constant chatter for a screen-reader user. The 30-second health check
-        # announces it if the connection really is gone.
-        wx.CallAfter(self.main_window._set_wa_connected, False, "socket disconnected", False)
+        # Debounced: python-socketio auto-reconnects on its own within a few
+        # seconds for an ordinary transient blip (Wi-Fi/NAT power-save churn,
+        # a brief hiccup against the local WPPConnect server) — declaring the
+        # app offline immediately for every one of those used to flicker the
+        # title/tray between connected/disconnected and, once
+        # _recheck_connection_after_connect() saw the reconnect, force a full
+        # resync every time — even though WhatsApp itself never actually went
+        # down and outgoing sends (which go over the REST API, not this
+        # socket) were never actually blocked. Wait a few seconds and only
+        # declare it if the socket is STILL down by then; a genuine outage is
+        # still caught either by this (a little later) or by the 30-second
+        # health check regardless.
+        if self._disconnect_timer is not None:
+            self._disconnect_timer.cancel()
+
+        def _confirm_still_disconnected():
+            if not self.sio.connected:
+                self.main_window._set_wa_connected(False, "socket disconnected", False)
+
+        self._disconnect_timer = threading.Timer(
+            5.0, lambda: wx.CallAfter(_confirm_still_disconnected)
+        )
+        self._disconnect_timer.daemon = True
+        self._disconnect_timer.start()
 
     def on_connection_update(self, info):
         logging.debug(f"[WebSocketClient] event payload: {info}")

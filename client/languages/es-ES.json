@@ -88,6 +88,7 @@
     "download": "Descargar",
     "downloading": "descargando...",
     "media_download_failed": "No se pudo descargar este archivo multimedia. Es posible que el enlace haya caducado o que WPPConnect no esté disponible.",
+    "media_download_offline": "No se pueden descargar archivos multimedia mientras WhatsApp esté desconectado o conectando. Espera a que se restablezca la conexión e inténtalo de nuevo.",
     "reply_quote_lost": "No se pudo citar el mensaje original; se enviará como un mensaje normal.",
     "decimal_separator": ",",
     "audio_progress_label": "Progreso del audio",

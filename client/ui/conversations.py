@@ -3534,6 +3534,12 @@ class ConversationsPanel(wx.Panel):
 
         def _run():
             if not os.path.isfile(media_path):
+                if not getattr(self.main_window, "_wa_connected", False):
+                    wx.CallAfter(
+                        self.main_window.output,
+                        self.main_window.i18n.t("media_download_offline"),
+                    )
+                    return
                 wx.CallAfter(
                     self.main_window.output, self.main_window.i18n.t("downloading")
                 )
@@ -3587,6 +3593,10 @@ class ConversationsPanel(wx.Panel):
         mw       = self.main_window
         i18n     = mw.i18n
         media_path = data_path("media", f"{msg_id}.wzmedia")
+
+        if not getattr(mw, "_wa_connected", False):
+            mw.output(i18n.t("media_download_offline"))
+            return
 
         mw.output(i18n.t("downloading"))
         self._action_download_btn.Disable()
@@ -3659,9 +3669,17 @@ class ConversationsPanel(wx.Panel):
         if os.path.isfile(file_path):
             self._play_audio(msg_id, duration_seconds, file_path, audio_ext)
         else:
+            if not getattr(self.main_window, "_wa_connected", False):
+                # Attempting the HTTP call while disconnected/still-connecting
+                # just burns the request timeout for a guaranteed failure —
+                # refuse up front with a message that tells the user why,
+                # instead of "baixando..." followed by a generic failure a
+                # minute later.
+                self.main_window.output(self.main_window.i18n.t("media_download_offline"))
+                return
             if not hasattr(self, "_downloading_audio_ids"):
                 self._downloading_audio_ids = set()
-            
+
             if msg_id in self._downloading_audio_ids:
                 self.main_window.output(self.main_window.i18n.t("downloading"))
                 return

@@ -88,6 +88,7 @@
     "download": "Descarregar",
     "downloading": "a descarregar...",
     "media_download_failed": "Não foi possível descarregar este ficheiro de multimédia. A ligação pode ter expirado ou o WPPConnect está indisponível.",
+    "media_download_offline": "Não é possível descarregar ficheiros de multimédia enquanto o WhatsApp estiver desligado ou a ligar. Aguarde que a ligação seja restabelecida e tente novamente.",
     "reply_quote_lost": "Não foi possível citar a mensagem original; a enviar como mensagem normal.",
     "decimal_separator": ".",
     "audio_progress_label": "Progresso do áudio",
