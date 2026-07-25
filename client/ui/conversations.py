@@ -477,6 +477,12 @@ class ConversationsPanel(wx.Panel):
         self._mention_panel.Hide()
         conv_sizer.Add(self._mention_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
+        # ── Reactions list button (focused message only, when it has any) ───
+        self._reactions_btn = wx.Button(self.conversation_panel, label=i18n.t("reactions_label"))
+        self._reactions_btn.Bind(wx.EVT_BUTTON, self._on_show_reactions)
+        conv_sizer.Add(self._reactions_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._reactions_btn.Hide()
+
         # ── Message input ───────────────────────────────────────────────────
         self.message_label = wx.StaticText(
             self.conversation_panel, label=i18n.t("type_message")
@@ -2949,7 +2955,51 @@ class ConversationsPanel(wx.Panel):
                 self._load_older_messages()
 
         self._update_read_more_button(idx)
+        self._update_reactions_button(idx)
         event.Skip()
+
+    def _update_reactions_button(self, idx: int):
+        """Show/hide the reactions-list button for the focused message row.
+
+        Only visible when the focused message actually has reactions —
+        label states the emoji breakdown so a screen-reader user knows what
+        the button does and what they'll find without opening it, e.g.
+        "Reações 👍, 1 no total. 😂, 2 no total.".
+        """
+        msg_id = ""
+        counts = {}
+        if 0 <= idx < len(self._sorted_messages):
+            msg = self._sorted_messages[idx]
+            if not self._is_separator(msg):
+                msg_id = msg.get("key", {}).get("id", "")
+                if msg_id:
+                    counts = self._reaction_counts(msg_id)
+        if counts:
+            i18n = self.main_window.i18n
+            parts = [
+                f"{emoji}, {count} {i18n.t('total_label')}"
+                for emoji, count in counts.items()
+            ]
+            self._reactions_btn.SetLabel(f"{i18n.t('reactions_label')} {'. '.join(parts)}.")
+            self._reactions_btn.Show()
+            self._reactions_focused_msg_id = msg_id
+        else:
+            self._reactions_btn.Hide()
+            self._reactions_focused_msg_id = ""
+        self.conversation_panel.Layout()
+
+    def _on_show_reactions(self, event):
+        """Open the reactions-list dialog for the currently focused message."""
+        msg_id = getattr(self, "_reactions_focused_msg_id", "")
+        if not msg_id:
+            return
+        per_msg = self._reaction_map.get(msg_id) or {}
+        if not per_msg:
+            return
+        from ui.dialogs.reactions_dialog import ReactionsDialog
+        dlg = ReactionsDialog(self.main_window, self, per_msg)
+        dlg.ShowModal()
+        dlg.Destroy()
 
     def _update_read_more_button(self, idx: int):
         """Show/hide the "Ler mais" button for a truncated text message row.
@@ -6234,6 +6284,11 @@ class ConversationsPanel(wx.Panel):
         cancel_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.EndModal(wx.ID_CANCEL))
         dlg.Bind(wx.EVT_CHAR_HOOK, lambda e: dlg.EndModal(wx.ID_CANCEL) if e.GetKeyCode() == wx.WXK_ESCAPE else e.Skip())
 
+        # A pre-populated list must never leave focus/selection pointing at
+        # nothing — mirrors the conversation list's own convention.
+        if emoji_list.GetItemCount() > 0:
+            emoji_list.Focus(0)
+            emoji_list.Select(0)
         emoji_list.SetFocus()
         dlg.CentreOnParent()
         result = dlg.ShowModal()

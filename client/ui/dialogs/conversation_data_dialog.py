@@ -504,6 +504,13 @@ class ConversationDataDialog(wx.Dialog):
             self._add_members_btn.Enable()
             self._add_members_btn_overview.Enable()
 
+        # A pre-populated list must never leave focus/selection pointing at
+        # nothing — mirrors the conversation list's own convention (see
+        # conversations.py's Focus(0)/Select(0) usage).
+        if self._part_list.GetItemCount() > 0:
+            self._part_list.Focus(0)
+            self._part_list.Select(0)
+
         # ── Media ─────────────────────────────────────────────────────────────
         media_dir  = data_path("media")
         jid_prefix = self._jid.split("@")[0]

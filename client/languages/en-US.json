@@ -311,6 +311,8 @@
     "remove_quote": "Remove quoted message",
     "reaction_preview_them": "{name} reacted with {emoji} to:",
     "reaction_preview_you": "you reacted with {emoji} to:",
+    "reactions_dialog_title": "Reactions list",
+    "reacted_with_emoji": "{name}, reacted with {emoji}.",
     "show_msg_text": "Show message text in PopUp",
     "terms_title": "WinZapp | Important notice",
     "terms_message": "Warning: this application is not officially developed, supported, or endorsed by Meta. WinZapp is an open-source WhatsApp client focused primarily on accessibility for blind users. By continuing, you agree that this application is not official from Meta and that Blind Center is not responsible for any consequences of its use.",
