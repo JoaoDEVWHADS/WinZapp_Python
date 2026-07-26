@@ -65,8 +65,9 @@ DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets
-NODE_DIR      = os.path.join(CLIENT_DIR, "node")
-API_DIR       = os.path.join(CLIENT_DIR, "api")
+NODE_DIR         = os.path.join(CLIENT_DIR, "node")
+API_DIR          = os.path.join(CLIENT_DIR, "api")
+API_PATCHES_DIR  = os.path.join(CLIENT_DIR, "api_patches")
 
 PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
 PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
@@ -305,6 +306,7 @@ def pyinstaller_compile():
         add_data_pairs = [
             (NODE_DIR, "node"),
             (API_DIR, "api"),
+            (API_PATCHES_DIR, "api_patches"),
             (SOUND_LIB_X64, "lib"),
             (AO2_LIB, "lib"),
             (os.path.join(CLIENT_DIR, "sounds"), "sounds"),
@@ -489,17 +491,32 @@ def assemble_staging():
     # no way for a newer WinZapp release's improved patches to ever reach an
     # existing install. api_patches/ is never modified after staging, so it
     # always reflects exactly what *this* WinZapp build shipped with.
+    #
+    # Copied directly from client/api_patches/ — a permanent, always-git-
+    # tracked copy of these same files (never inside client/api/, so it
+    # survives even a full `rm -rf client/api/`) — rather than pulled from
+    # client/api/src/ at build time. A user deleting client/api/ before
+    # reinstalling used to leave setup_api.py / ApiSetupDialog nothing
+    # reliable to restore from (both only ever stashed whatever happened to
+    # still be on disk right before the wipe); client/api_patches/ is the
+    # single source of truth for what "correctly patched" looks like,
+    # independent of whatever state client/api/ itself is in.
     patches_dst = os.path.join(STAGING_DIR, "api_patches")
-    os.makedirs(patches_dst)
-    patches_count = 0
-    for rel_path in API_CUSTOM_SRC_FILES:
-        src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
-        if not os.path.isfile(src_path):
-            continue
-        dst = os.path.join(patches_dst, rel_path.replace("/", os.sep))
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src_path, dst)
-        patches_count += 1
+    if os.path.isdir(API_PATCHES_DIR):
+        shutil.copytree(API_PATCHES_DIR, patches_dst)
+        patches_count = sum(len(fs) for _, _, fs in os.walk(patches_dst))
+    else:
+        print(f"  [WARN] client/api_patches/ not found — falling back to client/api/src/")
+        os.makedirs(patches_dst)
+        patches_count = 0
+        for rel_path in API_CUSTOM_SRC_FILES:
+            src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
+            if not os.path.isfile(src_path):
+                continue
+            dst = os.path.join(patches_dst, rel_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src_path, dst)
+            patches_count += 1
     print(f"  -> api_patches/  ({patches_count} reference patch files)")
 
 # -- Step 4-7: Installer (onedir only) -------------------------------------

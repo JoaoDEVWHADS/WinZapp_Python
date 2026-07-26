@@ -20,9 +20,34 @@ import sys
 
 # ---------------------------------------------------------------------------
 
-ROOT_DIR       = os.path.dirname(os.path.abspath(__file__))
-CLIENT_API_DIR = os.path.join(ROOT_DIR, "client", "api")
-WPPCONNECT_REPO = "https://github.com/wppconnect-team/wppconnect-server.git"
+ROOT_DIR         = os.path.dirname(os.path.abspath(__file__))
+CLIENT_API_DIR   = os.path.join(ROOT_DIR, "client", "api")
+API_PATCHES_DIR  = os.path.join(ROOT_DIR, "client", "api_patches")
+WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
+
+# Files WinZapp patches on top of upstream wppconnect-server. client/api_patches/
+# is the permanent, always-git-tracked source of truth for all of these —
+# preferred below over whatever (if anything) happens to still be sitting in
+# client/api/ right before it gets wiped. That "stash what's currently there"
+# fallback used to be the ONLY restore path, and is worthless the moment
+# client/api/ is already gone (e.g. a user deletes it before reinstalling,
+# reported live as every patch silently regressing to whatever old snapshot
+# happened to get stashed months earlier) — client/api_patches/ never has
+# that problem since it's never inside the folder that gets deleted.
+CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+CUSTOM_SRC_FILES = [
+    "src/config.ts",
+    "src/index.ts",
+    "src/util/createSessionUtil.ts",
+    "src/util/sessionUtil.ts",
+    "src/util/functions.ts",
+    "src/middleware/statusConnection.ts",
+    "src/controller/deviceController.ts",
+    "src/controller/messageController.ts",
+    "src/controller/sessionController.ts",
+    "src/routes/index.ts",
+    "decrypt.js",
+]
 
 
 def _load_env() -> dict:
@@ -74,51 +99,23 @@ def main():
                 print(f"[WARNING] Failed to move node_modules: {e}")
                 has_node_modules = False
 
-        # Backup our custom start.js, package.json and config.json if they exist
-        start_js_src = os.path.join(CLIENT_API_DIR, "start.js")
-        package_json_src = os.path.join(CLIENT_API_DIR, "package.json")
-        config_json_src = os.path.join(CLIENT_API_DIR, "config.json")
-        has_start_js = os.path.isfile(start_js_src)
-        has_package_json = os.path.isfile(package_json_src)
-        has_config_json = os.path.isfile(config_json_src)
-        
-        # Additional custom files to backup and restore
-        custom_files = [
-            "src/config.ts",
-            "src/index.ts",
-            "src/util/createSessionUtil.ts",
-            "src/util/sessionUtil.ts",
-            "src/util/functions.ts",
-            "src/middleware/statusConnection.ts",
-            "src/controller/deviceController.ts",
-            "src/controller/messageController.ts",
-            "src/controller/sessionController.ts",
-            "src/routes/index.ts",
-            "decrypt.js"
-        ]
+        # Gather the content to restore for every patched file, preferring
+        # client/api_patches/ (permanent, always-tracked) over whatever
+        # happens to still be sitting in client/api/ right now — the latter
+        # is worthless as a source the moment client/api/ has already been
+        # deleted, which is exactly when this restore matters most.
         custom_contents = {}
-        for rel_path in custom_files:
-            full_path = os.path.join(CLIENT_API_DIR, rel_path)
-            if os.path.isfile(full_path):
-                with open(full_path, "rb") as f:
+        for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
+            patches_path = os.path.join(API_PATCHES_DIR, rel_path)
+            stash_path = os.path.join(CLIENT_API_DIR, rel_path)
+            if os.path.isfile(patches_path):
+                with open(patches_path, "rb") as f:
                     custom_contents[rel_path] = f.read()
-                print(f"[INFO] Stashed custom file: {rel_path}")
-        
-        start_js_content = None
-        package_json_content = None
-        config_json_content = None
-        if has_start_js:
-            with open(start_js_src, "rb") as f:
-                start_js_content = f.read()
-            print("[INFO] Stashed start.js contents.")
-        if has_package_json:
-            with open(package_json_src, "rb") as f:
-                package_json_content = f.read()
-            print("[INFO] Stashed package.json contents.")
-        if has_config_json:
-            with open(config_json_src, "rb") as f:
-                config_json_content = f.read()
-            print("[INFO] Stashed config.json contents.")
+                print(f"[INFO] Loaded {rel_path} from client/api_patches/")
+            elif os.path.isfile(stash_path):
+                with open(stash_path, "rb") as f:
+                    custom_contents[rel_path] = f.read()
+                print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
 
         if os.path.isdir(CLIENT_API_DIR):
             try:
@@ -135,21 +132,7 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-        # Restore start.js, package.json and config.json after cloning
-        if start_js_content is not None:
-            with open(os.path.join(CLIENT_API_DIR, "start.js"), "wb") as f:
-                f.write(start_js_content)
-            print("[INFO] Restored custom start.js.")
-        if package_json_content is not None:
-            with open(os.path.join(CLIENT_API_DIR, "package.json"), "wb") as f:
-                f.write(package_json_content)
-            print("[INFO] Restored custom package.json.")
-        if config_json_content is not None:
-            with open(os.path.join(CLIENT_API_DIR, "config.json"), "wb") as f:
-                f.write(config_json_content)
-            print("[INFO] Restored custom config.json.")
-            
-        # Restore other custom files
+        # Restore every patched file after cloning
         for rel_path, content in custom_contents.items():
             dest_path = os.path.join(CLIENT_API_DIR, rel_path)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -160,17 +143,8 @@ def main():
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
         _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
-        
+
         # Re-restore after checkout just in case git checkout overwrites files
-        if start_js_content is not None:
-            with open(os.path.join(CLIENT_API_DIR, "start.js"), "wb") as f:
-                f.write(start_js_content)
-        if package_json_content is not None:
-            with open(os.path.join(CLIENT_API_DIR, "package.json"), "wb") as f:
-                f.write(package_json_content)
-        if config_json_content is not None:
-            with open(os.path.join(CLIENT_API_DIR, "config.json"), "wb") as f:
-                f.write(config_json_content)
         for rel_path, content in custom_contents.items():
             dest_path = os.path.join(CLIENT_API_DIR, rel_path)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
