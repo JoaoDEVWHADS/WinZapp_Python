@@ -449,6 +449,16 @@ class ApiSetupDialog(wx.Dialog):
 
                 # ── Step 2: clean previous partial setup ──────────────────
                 self._set_status("Preparando pasta da API...")
+                # api_dir won't exist at all if the user (or a broken
+                # install) deleted the whole api/ folder — os.listdir() on a
+                # missing directory raises FileNotFoundError ([WinError 3] on
+                # Windows), which crashed this dialog with no useful recovery
+                # even though this is exactly the "nothing installed yet"
+                # case this dialog exists to handle. Reported live: deleting
+                # api/ entirely and reopening WinZapp failed setup with
+                # "[WinError 3] O sistema não pode encontrar o caminho
+                # especificado: '...\\api'".
+                os.makedirs(api_dir, exist_ok=True)
                 for item in os.listdir(api_dir):
                     if item in _PRESERVE or item in _KEEP_RUNTIME:
                         continue
