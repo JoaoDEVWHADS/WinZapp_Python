@@ -126,10 +126,31 @@ class _HotkeyManager:
 
     A background thread owns the Win32 message loop (GetMessageW) so WM_HOTKEY
     is received even when WinZapp is minimised or in the background.
+
+    RegisterHotKey ties the registration to the CALLING THREAD's message
+    queue, not to the process — reported live by multiple users as "the
+    hotkey just stops working out of nowhere, with the key combo passing
+    straight through to whatever window is active, and the app never
+    notices". Two real gaps made that possible and invisible:
+      1. RegisterHotKey failing (e.g. another app transiently holds the same
+         combo right at boot) was only ever tried once, and logged via a
+         bare print() — which goes to stdout, not stderr, so it never even
+         reached log.log in a windowed/frozen build (setup_logging() only
+         redirects stderr). Retried below, and now logged with logging.error.
+      2. Nothing ever re-affirmed the registration was still alive after
+         that. A periodic refresh (unregister + re-register every few
+         minutes) below is a low-cost way to self-heal from a registration
+         silently dropped by Windows (e.g. around a display/power state
+         change) without waiting for the user to notice and restart the app.
     """
 
     _WM_HOTKEY = 0x0312
     _HOTKEY_ID = 1
+    # How often to unregister + re-register as a self-healing refresh, and
+    # the retry cadence used only while the very first registration attempt
+    # is still failing (e.g. another app transiently holds the combo).
+    _REFRESH_INTERVAL_SECONDS = 5 * 60
+    _RETRY_INTERVAL_SECONDS = 15
 
     def __init__(self, vk: int, mod: int, callback):
         self._vk       = vk
@@ -138,6 +159,17 @@ class _HotkeyManager:
         self._stop     = threading.Event()
         self._thread   = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _register(self) -> bool:
+        user32 = ctypes.windll.user32
+        # MOD_NOREPEAT (0x4000) suppresses the flood of WM_HOTKEY messages that
+        # holding the key down would otherwise generate.
+        _MOD_NOREPEAT = 0x4000
+        if user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod | _MOD_NOREPEAT, self._vk):
+            return True
+        # Some keyboard layouts / older Windows builds reject MOD_NOREPEAT;
+        # fall back to a plain registration so the hotkey still works.
+        return bool(user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk))
 
     def _run(self):
         user32   = ctypes.windll.user32
@@ -156,31 +188,63 @@ class _HotkeyManager:
                 ("pt",      _POINT),
             ]
 
-        # MOD_NOREPEAT (0x4000) suppresses the flood of WM_HOTKEY messages that
-        # holding the key down would otherwise generate.
-        _MOD_NOREPEAT = 0x4000
-        if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod | _MOD_NOREPEAT, self._vk):
-            # Some keyboard layouts / older Windows builds reject MOD_NOREPEAT;
-            # fall back to a plain registration so the hotkey still works.
-            if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk):
-                print(f"[HotkeyManager] RegisterHotKey failed: {kernel32.GetLastError()}")
-                return
+        registered = self._register()
+        if not registered:
+            logging.error(
+                "[HotkeyManager] RegisterHotKey failed (error=%s) — will keep "
+                "retrying every %ds instead of giving up silently.",
+                kernel32.GetLastError(), self._RETRY_INTERVAL_SECONDS,
+            )
 
         msg = _MSG()
+        last_refresh = time.time()
+        last_retry = time.time()
         while not self._stop.is_set():
             # MsgWaitForMultipleObjects with a 200 ms timeout so we can check _stop.
             # 0x0088 = QS_HOTKEY | QS_POSTMESSAGE — wake up immediately when a
             # WM_HOTKEY (posted message) arrives instead of waiting for the timeout.
-            result = ctypes.windll.user32.MsgWaitForMultipleObjects(
-                0, None, False, 200, 0x0088  # QS_HOTKEY | QS_POSTMESSAGE
-            )
-            if self._stop.is_set():
-                break
-            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
-                if msg.message == self._WM_HOTKEY:
-                    wx.CallAfter(self._callback)
+            try:
+                ctypes.windll.user32.MsgWaitForMultipleObjects(
+                    0, None, False, 200, 0x0088  # QS_HOTKEY | QS_POSTMESSAGE
+                )
+                if self._stop.is_set():
+                    break
+                while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
+                    if msg.message == self._WM_HOTKEY:
+                        wx.CallAfter(self._callback)
+            except Exception:
+                # Never let a single bad iteration silently kill this thread —
+                # that used to mean the hotkey stopped working forever with no
+                # trace anywhere, since Windows auto-unregisters a hotkey tied
+                # to a thread that's gone.
+                logging.exception("[HotkeyManager] Error in hotkey message loop")
 
-        user32.UnregisterHotKey(None, self._HOTKEY_ID)
+            now = time.time()
+            if not registered and now - last_retry >= self._RETRY_INTERVAL_SECONDS:
+                last_retry = now
+                registered = self._register()
+                if registered:
+                    logging.info("[HotkeyManager] RegisterHotKey succeeded on retry.")
+                    last_refresh = now
+            elif registered and now - last_refresh >= self._REFRESH_INTERVAL_SECONDS:
+                # Self-healing refresh: re-affirm the registration is still
+                # alive even though nothing told us it wasn't. Cheap, and the
+                # only way to recover from a silent drop without a restart.
+                last_refresh = now
+                try:
+                    user32.UnregisterHotKey(None, self._HOTKEY_ID)
+                except Exception:
+                    pass
+                if not self._register():
+                    registered = False
+                    logging.warning(
+                        "[HotkeyManager] Periodic refresh failed to re-register "
+                        "the hotkey (error=%s) — will keep retrying.",
+                        kernel32.GetLastError(),
+                    )
+
+        if registered:
+            user32.UnregisterHotKey(None, self._HOTKEY_ID)
 
     def stop(self):
         self._stop.set()
