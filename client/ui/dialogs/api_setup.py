@@ -172,7 +172,8 @@ class ApiSetupDialog(wx.Dialog):
 
     def __init__(self, parent, title_override=None, forced_tag=None):
         title = (title_override
-                 or "WinZapp | Instalando e configurando os módulos necessários para o funcionamento do programa")
+                 or "Instalando os módulos necessários para o funcionamento do programa. "
+                    "Isso pode levar alguns minutos.")
         style = wx.DEFAULT_DIALOG_STYLE & ~wx.CLOSE_BOX
         super().__init__(parent, title=title, style=style)
 
