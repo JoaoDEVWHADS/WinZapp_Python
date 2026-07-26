@@ -2557,16 +2557,27 @@ class MainWindow(wx.Frame):
 
         Depending on what is present inside api/:
 
-          dist/main.js absent  →  API not yet cloned/compiled.
-                                   Show ApiSetupDialog (git clone + npm install
-                                   + npm run build).  This is the expected state
-                                   for a fresh install or first developer run.
+          dist/server.js absent →  API not yet cloned/compiled (or the whole
+                                    api/ folder was deleted). Show
+                                    ApiSetupDialog, which clones + npm installs
+                                    + builds. Expected state for a fresh
+                                    install or first developer run.
 
-          dist/main.js present
-          node_modules absent  →  API compiled but modules were removed.
-                                   Show ModuleInstallDialog (npm install only).
+          dist/server.js present
+          node_modules absent   →  API already cloned/built, just node_modules
+                                    is missing — the normal state of every
+                                    fresh WinZapp.zip extract, since
+                                    node_modules isn't bundled. Still shows
+                                    ApiSetupDialog (the ONE setup dialog this
+                                    app has — used to be a second, separately
+                                    titled ModuleInstallDialog doing
+                                    practically the same thing, which was
+                                    confusing and had its own bugs), which
+                                    detects dist/server.js already exists and
+                                    runs only the npm-install portion of its
+                                    flow internally.
 
-          Both present         →  Nothing to do.
+          Both present          →  Nothing to do.
 
         In background mode dialogs are never shown; if the setup is incomplete
         the process exits silently.
@@ -2584,6 +2595,31 @@ class MainWindow(wx.Frame):
 
         dist_server  = resource_path("api",  "dist", "server.js")
         node_modules = resource_path("api",  "node_modules")
+
+        # .env and start.js ship bundled with WinZapp itself — they are NOT
+        # fetched from WPPConnect's own repo by either install flow below.
+        # Their absence means this WinZapp installation itself is incomplete
+        # or corrupted (e.g. a partial/interrupted ZIP extraction), not just
+        # "WPPConnect hasn't been cloned yet" — attempting either install
+        # flow would not fix it (ApiSetupDialog only ever downloads
+        # WPPConnect's own source) and would just fail confusingly deep
+        # inside npm/WPPConnect startup instead. Fail fast with a clear,
+        # actionable message instead of trying anything.
+        env_file = resource_path("api", ".env")
+        start_js = resource_path("api", "start.js")
+        if not os.path.isfile(env_file) or not os.path.isfile(start_js):
+            logging.error(
+                "[ensure_api_modules_installed] Missing required WinZapp files in api/ "
+                "(.env present=%s, start.js present=%s) — installation appears incomplete.",
+                os.path.isfile(env_file), os.path.isfile(start_js),
+            )
+            if not self.background_mode:
+                wx.MessageBox(
+                    self.i18n.t("api_files_missing_error"),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+            sys.exit(1)
 
         # Node.js is mandatory — auto-download portable version if missing.
         if not os.path.isfile(node_exe):
@@ -2690,18 +2726,13 @@ class MainWindow(wx.Frame):
         if self.background_mode:
             sys.exit(0)
 
-        if not os.path.isfile(dist_server):
-            # API not cloned/built yet → full setup (clone + install + build)
-            from ui.dialogs.api_setup import ApiSetupDialog
-            dlg    = ApiSetupDialog(self)
-            result = dlg.ShowModal()
-            dlg.Destroy()
-        else:
-            # API built but node_modules missing → npm install only
-            from ui.dialogs.module_install import ModuleInstallDialog
-            dlg    = ModuleInstallDialog(self)
-            result = dlg.ShowModal()
-            dlg.Destroy()
+        # One dialog for both cases — it detects internally whether
+        # dist/server.js already exists and runs only the npm-install portion
+        # of its flow when so, instead of a second dialog for that case.
+        from ui.dialogs.api_setup import ApiSetupDialog
+        dlg    = ApiSetupDialog(self)
+        result = dlg.ShowModal()
+        dlg.Destroy()
 
         if result != wx.ID_OK:
             sys.exit(0)
