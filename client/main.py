@@ -4972,10 +4972,10 @@ class MainWindow(wx.Frame):
                             chat["messages"] = {"messages": {"records": []}}
                         chat["remoteJid"] = jid
                         if jid.endswith("@g.us"):
-                            name = chat.get("name") or chat.get("subject") or ""
-                            if not name or name.strip() == "":
+                            name = self._group_name_from_chat_dict(chat)
+                            if not name:
                                 name = getattr(self, "_group_name_cache", {}).get(jid, "")
-                                if not name or name.strip() == "":
+                                if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
                         chats[jid] = chat
@@ -4986,7 +4986,7 @@ class MainWindow(wx.Frame):
                             if k == "pushName" and jid.endswith("@g.us"):
                                 continue
                             if k == "name" and jid.endswith("@g.us") and not v:
-                                v = chat.get("subject", "")
+                                v = self._group_name_from_chat_dict(chat)
                             # Don't let the server overwrite a positive local
                             # unreadCount with zero — the local counter may have
                             # incremented since the server snapshot was taken.
@@ -5002,10 +5002,15 @@ class MainWindow(wx.Frame):
                                 if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
                                     continue
                             chats[jid][k] = v
-                        # WPPConnect may return the group name only in "subject".
-                        # If the existing entry still has no name, pull it from subject.
+                        # The incoming chat dict may carry the group's real
+                        # name only under groupMetadata.subject (see
+                        # _group_name_from_chat_dict) and may not even have a
+                        # "name" key at all, in which case the loop above
+                        # never touched chats[jid]["name"] — re-derive from
+                        # the raw incoming `chat` (not chats[jid]) so this
+                        # still catches it.
                         if jid.endswith("@g.us") and not chats[jid].get("name"):
-                            subj = chats[jid].get("subject", "")
+                            subj = self._group_name_from_chat_dict(chat)
                             if subj:
                                 chats[jid]["name"] = subj
                                 self._group_name_cache = getattr(self, "_group_name_cache", {})
@@ -5431,6 +5436,40 @@ class MainWindow(wx.Frame):
 
         return chats
 
+    @staticmethod
+    def _group_name_from_chat_dict(chat: dict) -> str:
+        """Best-effort group display name from a *raw* WPPConnect chat
+        object (list-chats / chats-update shape) — NOT the already-flat
+        /group-info response, which puts "subject"/"name" at the top level
+        itself and doesn't need this.
+
+        WPPConnect's chat serializer (WAPI._serializeChatObj, confirmed by
+        reading the vendored wppconnect library and the group-info
+        controller's own `chat?.groupMetadata?.subject` access) nests a
+        group's real name under groupMetadata.subject — there is no flat
+        "subject" key on a raw chat object. Every call site here that
+        checked chat.get("subject") directly was reading a field that
+        essentially never exists on this data source, so a group whose name
+        hadn't propagated into WhatsApp Web's own metadata cache yet
+        (routine right after a fresh pairing, before it finishes lazily
+        hydrating group metadata for every group — WhatsApp Web's own
+        internal timing, outside this app's control) never picked itself
+        back up on a later periodic refresh even once WhatsApp Web did
+        catch up, because the fallback was looking in the wrong place.
+        """
+        name = (chat.get("name") or "").strip()
+        if name:
+            return name
+        subject = (chat.get("subject") or "").strip()
+        if subject:
+            return subject
+        group_meta = chat.get("groupMetadata")
+        if isinstance(group_meta, dict):
+            gm_subject = (group_meta.get("subject") or "").strip()
+            if gm_subject:
+                return gm_subject
+        return ""
+
     def _fill_group_name(self, jid: str) -> str:
         """Fetch group info from API and cache the name.
 
@@ -5465,7 +5504,7 @@ class MainWindow(wx.Frame):
             if not name:
                 return
             chat = self.chats.get(jid)
-            if chat is None or (chat.get("name") or chat.get("subject") or "").strip():
+            if chat is None or self._group_name_from_chat_dict(chat):
                 return
             chat["name"] = name
             self._schedule_save(dirty_jid=jid)
@@ -5481,7 +5520,7 @@ class MainWindow(wx.Frame):
         """
         unresolved = [
             jid for jid, chat in list(self.chats.items())
-            if jid.endswith("@g.us") and not (chat.get("name") or chat.get("subject") or "").strip()
+            if jid.endswith("@g.us") and not self._group_name_from_chat_dict(chat)
         ]
         if not unresolved:
             return
@@ -6004,7 +6043,7 @@ class MainWindow(wx.Frame):
             is_cleared   = jid in self.settings.get("cleared_chats", {})
             has_content  = bool(records or last_msg or unread > 0 or is_pinned or is_cleared)
             name_hint    = (chat.get("name") or chat.get("pushName") or
-                            chat.get("subject") or "").strip()
+                            self._group_name_from_chat_dict(chat)).strip()
             has_identity = bool(name_hint and not name_hint.isdigit() and len(name_hint) > 1)
             if not has_content and not has_identity:
                 continue
@@ -6022,9 +6061,9 @@ class MainWindow(wx.Frame):
             msg_push = ""
         
             if is_group:
-                # Check both "name" and "subject" — WPPConnect uses either field
-                # depending on API version; prefer "name", fall back to "subject".
-                name = get_valid_name(chat.get("name", "") or chat.get("subject", ""))
+                # A group's real name may only be under groupMetadata.subject
+                # in the raw chat dict — see _group_name_from_chat_dict().
+                name = get_valid_name(self._group_name_from_chat_dict(chat))
                 if not name:
                     cached = getattr(self, "_group_name_cache", {}).get(jid, "")
                     if cached:
