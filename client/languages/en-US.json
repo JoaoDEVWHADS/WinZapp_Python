@@ -98,7 +98,7 @@
     "api_startup_title": "WinZapp | Starting WPPConnect, please wait...",
     "api_startup_text": "Starting the WinZapp API. On the first run this process may take up to 3 minutes while the database is being prepared. Please wait...",
     "api_startup_warning": "WinZapp API failed to start in time. The program will now close.",
-    "api_files_missing_error": "Essential files from the \"api\" folder (.env, start.js) were not found. Extract the WinZapp ZIP file again or reinstall the program. The program will now close.",
+    "api_files_missing_error": "The essential file \"start.js\" from the \"api\" folder was not found. Extract the WinZapp ZIP file again or reinstall the program. The program will now close.",
     "cancel": "&Cancel",
     "settings": "Settings",
     "settings_shortcut": "ctrl+comma",

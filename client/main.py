@@ -2732,22 +2732,28 @@ class MainWindow(wx.Frame):
         dist_server  = resource_path("api",  "dist", "server.js")
         node_modules = resource_path("api",  "node_modules")
 
-        # .env and start.js ship bundled with WinZapp itself — they are NOT
-        # fetched from WPPConnect's own repo by either install flow below.
-        # Their absence means this WinZapp installation itself is incomplete
-        # or corrupted (e.g. a partial/interrupted ZIP extraction), not just
-        # "WPPConnect hasn't been cloned yet" — attempting either install
-        # flow would not fix it (ApiSetupDialog only ever downloads
-        # WPPConnect's own source) and would just fail confusingly deep
-        # inside npm/WPPConnect startup instead. Fail fast with a clear,
-        # actionable message instead of trying anything.
-        env_file = resource_path("api", ".env")
+        # start.js ships bundled with WinZapp itself — it is NOT fetched from
+        # WPPConnect's own repo by either install flow below. Its absence
+        # means this WinZapp installation itself is incomplete or corrupted
+        # (e.g. a partial/interrupted ZIP extraction), not just "WPPConnect
+        # hasn't been cloned yet" — attempting either install flow would not
+        # fix it (ApiSetupDialog only ever downloads WPPConnect's own source)
+        # and would just fail confusingly deep inside npm/WPPConnect startup
+        # instead. Fail fast with a clear, actionable message instead of
+        # trying anything.
+        #
+        # api/.env is deliberately NOT checked here: nothing reads it. The
+        # WPPConnect side has its dotenv load commented out (api/src/index.ts),
+        # start.js takes its settings from config.json plus the environment
+        # variables _start_wpp_background() injects (AUTHENTICATION_API_KEY,
+        # PORT, ...), and api/.gitignore excludes it so it never shipped in
+        # the ZIP either. Requiring it only ever aborted startup on a
+        # perfectly good install.
         start_js = resource_path("api", "start.js")
-        if not os.path.isfile(env_file) or not os.path.isfile(start_js):
+        if not os.path.isfile(start_js):
             logging.error(
-                "[ensure_api_modules_installed] Missing required WinZapp files in api/ "
-                "(.env present=%s, start.js present=%s) — installation appears incomplete.",
-                os.path.isfile(env_file), os.path.isfile(start_js),
+                "[ensure_api_modules_installed] Missing required WinZapp file "
+                "api/start.js — installation appears incomplete.",
             )
             if not self.background_mode:
                 wx.MessageBox(

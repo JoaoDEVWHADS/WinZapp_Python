@@ -18,7 +18,10 @@ client/logs/
 
 /client/api/*
 !/client/api/start.js
-!/client/api/.env
+# (no !/client/api/.env here: client/api/.gitignore, which comes from the
+#  upstream wppconnect-server clone, has "/.env" and — being the deeper
+#  .gitignore — wins, so that re-include never took effect. Nothing reads
+#  api/.env anyway; see ensure_api_modules_installed() in client/main.py.)
 !/client/api/package.json
 !/client/api/config.json
 !/client/api/decrypt.js
