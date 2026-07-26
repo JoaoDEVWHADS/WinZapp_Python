@@ -144,6 +144,32 @@ class ApiSetupDialog(wx.Dialog):
 
     _PULSE_MS = 80
 
+    # Percentage ranges assigned to each named stage, so the progress bar
+    # moves through the install with a rough sense of "how far along", not
+    # just an indeterminate bounce — users reported a multi-minute npm
+    # install (routinely the longest single step) looking identical to a
+    # frozen/broken install with nothing to tell them otherwise. Real
+    # byte-level progress is only available for the ZIP download (it has a
+    # content-length header); every other step "trickles" toward its
+    # range's end while it runs (see _on_pulse) since neither npm install's
+    # nor npm run build's output is a reliable, version-stable source of
+    # real completion percentage to parse.
+    _STAGES_FULL = {
+        "resolve_tag": (0, 2),
+        "download":    (2, 25),
+        "clean":       (25, 28),
+        "extract":     (28, 35),
+        "npm_install": (35, 70),
+        "chrome":      (70, 82),
+        "db_generate": (82, 90),
+        "build":       (90, 99),
+    }
+    _STAGES_MODULES_ONLY = {
+        "npm_install": (0, 55),
+        "chrome":      (55, 80),
+        "db_generate": (80, 99),
+    }
+
     def __init__(self, parent, title_override=None, forced_tag=None):
         title = (title_override
                  or "WinZapp | Instalando e configurando os módulos necessários para o funcionamento do programa")
@@ -153,6 +179,11 @@ class ApiSetupDialog(wx.Dialog):
         self._proc        = None   # active npm subprocess (for kill on cancel)
         self._cancelled   = False
         self._forced_tag  = forced_tag   # overrides .env WPPCONNECT_TAG_VERSION
+
+        # Progress-bar state — see _STAGES_FULL/_STAGES_MODULES_ONLY and
+        # _set_stage()/_on_pulse().
+        self._stage_end_pct = 0
+        self._trickling      = False
 
         self._build_ui()
 
@@ -173,7 +204,7 @@ class ApiSetupDialog(wx.Dialog):
         self._gauge = wx.Gauge(self, range=100,
                                style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
 
-        cancel_btn = wx.Button(self, wx.ID_CANCEL, label="Cancelar")
+        cancel_btn = wx.Button(self, wx.ID_CANCEL, label="&Cancelar")
         cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -192,8 +223,32 @@ class ApiSetupDialog(wx.Dialog):
 
     # ── Timer / gauge ─────────────────────────────────────────────────────────
 
+    def _set_stage(self, text: str, start_pct: int, end_pct: int, trickle: bool = True):
+        """Enter a new named stage: update the status text, jump the gauge to
+        start_pct, and — unless the caller has real progress data to report
+        itself (see _download_zip) — let _on_pulse() creep it the rest of the
+        way toward end_pct while the stage's subprocess/step runs."""
+        self._set_status(text)
+        self._stage_end_pct = end_pct
+        self._trickling = trickle
+        wx.CallAfter(self._gauge.SetValue, start_pct)
+
     def _on_pulse(self, _event):
-        self._gauge.Pulse()
+        if not self._trickling:
+            return
+        try:
+            current = self._gauge.GetValue()
+        except RuntimeError:
+            return
+        # Never let the trickle reach the stage's own ceiling — that's
+        # reserved for the moment the stage actually completes and the next
+        # _set_stage()/_finish_success() call moves the gauge itself.
+        ceiling = max(current, self._stage_end_pct - 1)
+        if current >= ceiling:
+            return
+        remaining = ceiling - current
+        step = max(1, remaining // 40)
+        self._gauge.SetValue(min(ceiling, current + step))
 
     # ── .env reader ───────────────────────────────────────────────────────────
 
@@ -220,12 +275,18 @@ class ApiSetupDialog(wx.Dialog):
 
     # ── Download helper ───────────────────────────────────────────────────────
 
-    def _download_zip(self, url: str, dest_path: str) -> bool:
+    def _download_zip(self, url: str, dest_path: str, start_pct: int = 2, end_pct: int = 25) -> bool:
         """
         Stream-download the ZIP at *url* to *dest_path*.
         Updates the status label with download progress.
+        The response carries a real content-length, so this reports genuine
+        byte-level progress mapped into [start_pct, end_pct] instead of
+        trickling — the timer-driven trickle is switched off for the
+        duration of the call so it can't fight with real numbers.
         Returns True on success, False on failure/cancel.
         """
+        self._trickling = False
+        wx.CallAfter(self._gauge.SetValue, start_pct)
         try:
             response = requests.get(url, stream=True, timeout=(30, 300))
             response.raise_for_status()
@@ -253,6 +314,8 @@ class ApiSetupDialog(wx.Dialog):
                     mb_down = downloaded / (1024 * 1024)
                     if total:
                         mb_total = total / (1024 * 1024)
+                        pct = start_pct + (end_pct - start_pct) * (downloaded / total)
+                        wx.CallAfter(self._gauge.SetValue, int(min(end_pct, pct)))
                         self._set_status(
                             f"Baixando WPPConnect Server... "
                             f"{mb_down:.1f} MB / {mb_total:.1f} MB"
@@ -410,9 +473,11 @@ class ApiSetupDialog(wx.Dialog):
         # nothing to download/extract/rebuild, just dependencies to install.
         dist_server   = os.path.join(api_dir, "dist", "server.js")
         modules_only  = os.path.isfile(dist_server)
+        stages        = self._STAGES_MODULES_ONLY if modules_only else self._STAGES_FULL
 
         try:
             if not modules_only:
+                self._set_stage("Verificando a versão mais recente do WPPConnect Server...", *stages["resolve_tag"])
                 tag = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
                 if not tag:
                     # No explicit tag was requested and .env doesn't pin one — resolve
@@ -423,7 +488,6 @@ class ApiSetupDialog(wx.Dialog):
                     # whatever is genuinely newest today, not a version already
                     # behind by the time the user installs it. Falls through to the
                     # main branch (the previous behaviour) if the API is unreachable.
-                    self._set_status("Verificando a versão mais recente do WPPConnect Server...")
                     tag = fetch_latest_wpp_tag()
                     if tag:
                         logging.info("[api_setup] Using latest released wppconnect-server tag: %s", tag)
@@ -438,7 +502,7 @@ class ApiSetupDialog(wx.Dialog):
 
                 tmp_zip = tempfile.mktemp(suffix=".zip", prefix="winzapp_api_")
                 try:
-                    ok = self._download_zip(url, tmp_zip)
+                    ok = self._download_zip(url, tmp_zip, *stages["download"])
                     if not ok:
                         return  # error already reported or cancelled
 
@@ -472,7 +536,7 @@ class ApiSetupDialog(wx.Dialog):
                                 )
 
                     # ── Step 2: clean previous partial setup ──────────────────
-                    self._set_status("Preparando pasta da API...")
+                    self._set_stage("Preparando pasta da API...", *stages["clean"])
                     # api_dir won't exist at all if the user (or a broken
                     # install) deleted the whole api/ folder — os.listdir() on a
                     # missing directory raises FileNotFoundError ([WinError 3] on
@@ -499,6 +563,7 @@ class ApiSetupDialog(wx.Dialog):
                         return
 
                     # ── Step 3: extract ZIP into client/api/ ──────────────────
+                    self._set_stage("Extraindo arquivos da API...", *stages["extract"])
                     ok = self._extract_zip(tmp_zip, api_dir)
                     if not ok:
                         return
@@ -551,7 +616,7 @@ class ApiSetupDialog(wx.Dialog):
                     return
 
             # ── Step 4: npm install ───────────────────────────────────────
-            self._set_status("Instalando dependências (npm install)...")
+            self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])
             ok, err = self._run_subprocess(
                 npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
@@ -567,7 +632,7 @@ class ApiSetupDialog(wx.Dialog):
                 return
 
             # ── Step 4.5: download chrome if using modern puppeteer ───────
-            self._set_status("Baixando executável do Chrome (puppeteer)...")
+            self._set_stage("Baixando executável do Chrome (puppeteer)...", *stages["chrome"])
             ok, err = self._run_subprocess(
                 npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
                 cwd=api_dir,
@@ -595,7 +660,7 @@ class ApiSetupDialog(wx.Dialog):
                 pass
 
             if has_db_generate:
-                self._set_status("Gerando cliente do banco de dados (npm run db:generate)...")
+                self._set_stage("Gerando cliente do banco de dados (npm run db:generate)...", *stages["db_generate"])
                 db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
                 ok, err = self._run_subprocess(
                     npm_cmd + ["run", "db:generate"],
@@ -613,9 +678,10 @@ class ApiSetupDialog(wx.Dialog):
 
             if not modules_only:
                 # ── Step 5: npm run build ─────────────────────────────────────
-                self._set_status(
+                self._set_stage(
                     "Compilando o WPPConnect Server (npm run build) — "
-                    "isso pode levar alguns minutos..."
+                    "isso pode levar alguns minutos...",
+                    *stages["build"]
                 )
                 ok, err = self._run_subprocess(
                     npm_cmd + ["run", "build"],
@@ -669,6 +735,8 @@ class ApiSetupDialog(wx.Dialog):
 
     def _finish_success(self):
         self._timer.Stop()
+        self._trickling = False
+        self._gauge.SetValue(100)
         wx.MessageBox(
             "O WPPConnect Server foi configurado com sucesso!\n\n"
             "O WinZapp irá agora iniciar a API.",
