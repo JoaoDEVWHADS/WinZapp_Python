@@ -446,6 +446,8 @@ class MainWindow(wx.Frame):
         self._save_lock = threading.Lock()
         self._save_timer = None
         self._save_timer_lock = threading.Lock()
+        # Guards self.sync_thread creation — see _try_start_sync_thread().
+        self._sync_start_lock = threading.Lock()
         self._unresolvable_lids = set()
         self._unresolvable_names = set()
         self._resolving_lids = set()
@@ -1445,8 +1447,9 @@ class MainWindow(wx.Frame):
             # Resync from scratch, exactly like a fresh pairing. start_sync()
             # takes over _initial_sync_running from here (it sets it True
             # again itself and clears it in its own finally on any exit path).
-            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-            self.sync_thread.start()
+            # _sync_completed was just reset to False above, so the shared
+            # guard in _try_start_sync_thread() won't treat this as a no-op.
+            self._try_start_sync_thread()
         except Exception:
             # Something above raised before start_sync() could take over
             # ownership of _initial_sync_running — clear it ourselves so a
@@ -4263,6 +4266,41 @@ class MainWindow(wx.Frame):
     # turn that into a request storm against the Puppeteer session.
     _SYNC_RETRY_COOLDOWN = 120
 
+    # Minimum gap between two "failed to save data" error dialogs (see
+    # save_data()) — a sustained DB failure used to pop one per call with no
+    # limit at all, often one per incoming message during a sync.
+    _SAVE_ERROR_DIALOG_COOLDOWN = 30
+
+    def _try_start_sync_thread(self) -> bool:
+        """Atomically start self.sync_thread unless one is already running or
+        a sync already completed this session. Returns True if a sync thread
+        is now running — either just started by this call, or already
+        running/completed from before.
+
+        Every caller that wants to kick off a sync used to do its own
+        check-then-create-then-start of self.sync_thread with no lock
+        between the check and the start. Several independent triggers can
+        fire within milliseconds of each other right after pairing — the
+        session-logged WebSocket event (WebSocketClient.on_messages_set)
+        and wait_messages_set()'s HTTP-probe fallback (main.py) in
+        particular — and each one's plain "existing.is_alive()" check could
+        see "not running yet" at the same instant, so both created and
+        started their own thread. Reported live: "sincronizando conversas"
+        announced to NVDA twice in a row, and — far worse — two sync
+        threads hammering the single DatabaseBridge connection with
+        concurrent writes hard enough that save_data() started genuinely
+        failing, flooding the screen with a error dialog per failure.
+        """
+        with self._sync_start_lock:
+            if getattr(self, "_sync_completed", False):
+                return True
+            existing = getattr(self, "sync_thread", None)
+            if existing is not None and existing.is_alive():
+                return True
+            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+            self.sync_thread.start()
+            return True
+
     def trigger_sync_if_needed(self):
         # Trigger sync only if it hasn't completed, isn't already running, and we are connected.
         if not getattr(self, "_wa_connected", False):
@@ -4283,8 +4321,7 @@ class MainWindow(wx.Frame):
         if since < cooldown:
             return
         logging.info("[trigger_sync_if_needed] WhatsApp connected and sync is incomplete. Triggering sync thread...")
-        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-        self.sync_thread.start()
+        self._try_start_sync_thread()
 
     def start_sync(self):
         # Block until init_UI() completes.  This prevents wx.CallAfter calls
@@ -4646,10 +4683,7 @@ class MainWindow(wx.Frame):
                     r = requests.post(url, headers=headers, timeout=5)
                     if r.ok and isinstance(r.json(), list):
                         self.messages_set_completed = True
-                        self.sync_thread = threading.Thread(
-                            target=self.start_sync, daemon=True
-                        )
-                        self.sync_thread.start()
+                        self._try_start_sync_thread()
                         return True
                 except Exception:
                     pass
@@ -4667,12 +4701,8 @@ class MainWindow(wx.Frame):
 
             # 60 s elapsed and sync still hasn't started — start it unconditionally
             # so the program never stays stuck on "preparando para sincronizar".
-            if not _already_syncing():
-                self.messages_set_completed = True
-                self.sync_thread = threading.Thread(
-                    target=self.start_sync, daemon=True
-                )
-                self.sync_thread.start()
+            self.messages_set_completed = True
+            self._try_start_sync_thread()
         threading.Thread(target=_fallback, daemon=True).start()
 
     def _store_status_update(self, msg: dict):
@@ -5656,13 +5686,25 @@ class MainWindow(wx.Frame):
                     }
                 }, clear_first=False)
             except Exception:
+                logging.exception("[save_data] Failed to save chat/contact data")
                 self.error_sound.play()
-                wx.CallAfter(
-                    wx.MessageBox,
-                    f"{self.i18n.t('data_save_failed')} {format_exc()}",
-                    self.i18n.t("error").format(app_name=self.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                )
+                # save_data() is called from many places, often once per
+                # incoming message during a sync — a genuinely failing DB
+                # (e.g. sustained write contention) used to pop one blocking
+                # MessageBox per call with no limit, flooding the screen and
+                # making the whole PC sluggish while they piled up. Report it
+                # at most once per cooldown window; every failure is still
+                # logged above regardless.
+                now = time.time()
+                last = getattr(self, "_last_save_error_dialog_ts", 0)
+                if now - last >= self._SAVE_ERROR_DIALOG_COOLDOWN:
+                    self._last_save_error_dialog_ts = now
+                    wx.CallAfter(
+                        wx.MessageBox,
+                        f"{self.i18n.t('data_save_failed')} {format_exc()}",
+                        self.i18n.t("error").format(app_name=self.app_name),
+                        wx.OK | wx.ICON_ERROR,
+                    )
 
     def _do_save(self):
         """Timer callback: incrementally persist dirty chats and contacts.

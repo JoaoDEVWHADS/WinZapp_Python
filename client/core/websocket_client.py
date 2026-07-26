@@ -449,18 +449,19 @@ class WebSocketClient:
         # as a failed pairing by on_connection_update if the socket later
         # drops for an ordinary/unrelated reason.
         self.main_window._pairing_in_progress = False
-        # Guard 1: don't start a second sync while one is already running.
-        existing = getattr(self.main_window, "sync_thread", None)
-        if existing and existing.is_alive():
-            return
-        # Guard 2: don't restart sync after it already completed this session.
+        # _try_start_sync_thread() atomically checks "already running or
+        # already completed" and starts self.sync_thread under a lock —
         # WPPConnect sends messages.set in multiple batches during initial
-        # WhatsApp sync; without this guard the second batch would trigger a
-        # full re-sync immediately after the first one finished.
-        if getattr(self.main_window, "_sync_completed", False):
-            return
-        self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
-        self.main_window.sync_thread.start()
+        # sync, and this same method also gets called directly (not via a
+        # real messages.set event) elsewhere, so more than one caller can
+        # race to start a sync within milliseconds of each other. A plain
+        # is_alive() check here (the old code) has a gap between checking
+        # and starting that another thread's own check can land in — two
+        # sync threads running at once was reported live as "sincronizando
+        # conversas" announced twice and, worse, concurrent writes to the
+        # single DatabaseBridge connection failing outright and flooding the
+        # screen with error dialogs.
+        self.main_window._try_start_sync_thread()
 
     def on_messages_upsert(self, info):
         """
