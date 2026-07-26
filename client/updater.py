@@ -23,7 +23,7 @@ import subprocess
 import requests
 import wx
 
-from app_paths import _outer_exe_dir, _is_frozen
+from app_paths import _outer_exe_dir, _is_frozen, resource_path
 from config import GITHUB_API_LATEST_RELEASE
 from version import __version__
 
@@ -122,6 +122,79 @@ def get_changelog_for_update(changelog_text: str, current: str, new: str) -> str
                 result_parts.append(f"V{ver_str}\n{body}")
 
     return "\n\n".join(result_parts)
+
+
+def _read_changelog_file(lang_code: str) -> str:
+    """Return the raw text of changelog_<lang_code>.txt shipped next to the
+    app, or "" if it doesn't exist / can't be read."""
+    path = resource_path(f"changelog_{lang_code}.txt")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        logging.warning("Auto-updater: Failed to read changelog file %s", path, exc_info=True)
+        return ""
+
+
+def load_changelog_text(lang_code: str) -> str:
+    """
+    Resolve the changelog text to show in "What's new".
+
+    Looks for changelog_<lang_code>.txt next to the app first (kept current
+    without a WinZapp rebuild, just like language_map.json is for language
+    names), falls back to changelog_en-US.txt if the user's configured
+    language has none, and returns "" if neither exists so the caller can
+    fall back to the GitHub release notes as a last resort.
+    """
+    text = _read_changelog_file(lang_code)
+    if text:
+        return text
+    if lang_code != "en-US":
+        text = _read_changelog_file("en-US")
+        if text:
+            return text
+    return ""
+
+
+def resolve_changelog(local_version: str, remote_version: str, lang_code: str, release_body: str = "") -> str:
+    """
+    Resolve the text to show in the "What's new" dialog for an update from
+    *local_version* to *remote_version*.
+
+    Preference order:
+      1. changelog_<lang_code>.txt (or changelog_en-US.txt as fallback),
+         filtered down to just the entries between local_version (exclusive)
+         and remote_version (inclusive) via get_changelog_for_update(). If a
+         file was found but has no version-tagged entries in that range
+         (e.g. it predates the "V1.2.3.4" header convention), its raw
+         content is shown as-is rather than being silently discarded.
+      2. The raw GitHub release body — used only when neither changelog
+         file exists at all, since it's written per-release rather than
+         per-version and isn't guaranteed to describe every version in the
+         jump when several were skipped between checks.
+    """
+    raw = load_changelog_text(lang_code)
+    if raw:
+        filtered = get_changelog_for_update(raw, local_version, remote_version)
+        return filtered if filtered else raw.strip()
+    return (release_body or "").strip()
+
+
+def _wrap_changelog_text(text: str, width: int = 100) -> str:
+    """Word-wrap *text* to *width* columns per line for display in the
+    What's New TextCtrl, never breaking a word mid-way. Blank lines
+    (paragraph/section breaks) are preserved as-is."""
+    import textwrap
+    out_lines = []
+    for line in text.splitlines():
+        if not line.strip():
+            out_lines.append("")
+            continue
+        wrapped = textwrap.wrap(line, width=width, break_long_words=False, break_on_hyphens=False)
+        out_lines.extend(wrapped if wrapped else [""])
+    return "\n".join(out_lines)
 
 
 # ── Install helpers ───────────────────────────────────────────────────────────
@@ -255,7 +328,7 @@ class WhatsNewDialog(wx.Dialog):
 
         text_ctrl = wx.TextCtrl(
             self,
-            value=changelog,
+            value=_wrap_changelog_text(changelog),
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)
@@ -565,8 +638,10 @@ class UpdateChecker:
         logging.info("Auto-updater: Newer version %s is available!", remote_version)
         self._force = False
 
-        # Use the GitHub release body (notes written at release creation time)
-        changelog = data.get("body", "").strip()
+        # Prefer a local, per-version changelog file (see resolve_changelog())
+        # over the GitHub release body — only used as a last resort.
+        lang_code = self._mw.i18n.get_language() if hasattr(self._mw, "i18n") else "pt-BR"
+        changelog = resolve_changelog(local_version, remote_version, lang_code, data.get("body", ""))
 
         wx.CallAfter(self._show_update_dialog, remote_version, changelog, zip_url)
 

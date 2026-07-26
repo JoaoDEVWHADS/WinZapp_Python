@@ -51,6 +51,7 @@ import subprocess
 import zipfile
 import argparse
 import io
+import glob
 import tarfile
 import urllib.request
 
@@ -314,6 +315,8 @@ def pyinstaller_compile():
             add_data_pairs.append(
                 (os.path.join(CLIENT_DIR, ".env"), ".env")
             )
+        for changelog_src in glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt")):
+            add_data_pairs.append((changelog_src, os.path.basename(changelog_src)))
 
         for src, dst in add_data_pairs:
             if os.path.exists(src):
@@ -436,6 +439,14 @@ def assemble_staging():
         print(f"  -> .env")
     else:
         print(f"  [WARN] client/.env not found — skipping")
+
+    # changelog_<lang>.txt files — read directly from the exe's own folder
+    # (see updater.py's resolve_changelog()), so a new/updated changelog can
+    # be dropped in without a WinZapp rebuild, same as languages/.
+    changelog_files = glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt"))
+    for src in changelog_files:
+        shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
+    print(f"  -> changelog_*.txt  ({len(changelog_files)} files)")
 
     node_dst = os.path.join(STAGING_DIR, "node")
     shutil.copytree(NODE_DIR, node_dst,

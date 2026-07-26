@@ -1,14 +1,35 @@
 import json
+import logging
 from app_paths import resource_path
 
-# Human-readable display names for each supported locale.
-# The dict order determines the order shown in the Settings combobox.
-LANGUAGE_NAMES = {
+# Fallback used only if languages/language_map.json is missing or unreadable
+# — should never happen in a normal install, but adding a language must not
+# require a rebuild, so the real source of truth is that JSON file.
+_FALLBACK_LANGUAGE_NAMES = {
     "pt-BR": "Português (Brasil)",
-    "pt-PT": "Português (Portugal)",
     "en-US": "English (United States)",
-    "es-ES": "Español (España)",
 }
+
+
+def _load_language_names() -> dict:
+    """Load { lang_code: display_name } from languages/language_map.json.
+
+    Dict order (== file order, preserved by json.load) determines the order
+    shown in the Settings combobox. Adding a new locale only requires
+    dropping languages/<code>.json + a new entry here — no rebuild.
+    """
+    try:
+        with open(resource_path("languages", "language_map.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data:
+            return data
+    except Exception:
+        logging.warning("Failed to load languages/language_map.json — using fallback list", exc_info=True)
+    return dict(_FALLBACK_LANGUAGE_NAMES)
+
+
+# Human-readable display names for each supported locale.
+LANGUAGE_NAMES = _load_language_names()
 
 # Module-level translation cache: { lang_code: { key: value } }
 _TRANSLATIONS_CACHE: dict = {}
