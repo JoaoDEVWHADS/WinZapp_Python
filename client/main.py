@@ -4703,7 +4703,17 @@ class MainWindow(wx.Frame):
                         "Authorization": f"Bearer {self.token}",
                         "Content-Type": "application/json",
                     }
-                    r = requests.post(url, headers=headers, timeout=5)
+                    # Same reason as in get_remote_chats(): without this flag the
+                    # probe kicks off WPP.chat.list()'s serial per-group metadata
+                    # fetch inside the page.  Our 5 s timeout doesn't cancel it,
+                    # so a probe that "failed" still leaves that loop running and
+                    # competing with the real chat-list fetch that follows.
+                    r = requests.post(
+                        url,
+                        json={"ignoreGroupMetadata": True},
+                        headers=headers,
+                        timeout=5,
+                    )
                     if r.ok and isinstance(r.json(), list):
                         self.messages_set_completed = True
                         self._try_start_sync_thread()
@@ -4884,12 +4894,32 @@ class MainWindow(wx.Frame):
         # Use the modern `list-chats` endpoint (WPP.chat.list) instead of the
         # deprecated `all-chats` (legacy WAPI.getAllChats). The legacy call omits
         # some chats — notably muted or pinned groups — so those never got
-        # collected on pairing. An empty POST body returns every chat.
+        # collected on pairing. A body with no filters returns every chat.
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/list-chats"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+        # `ignoreGroupMetadata` is not a filter — it only skips the group-metadata
+        # prefetch WPP.chat.list() does at the end of every call: a *serial*
+        # `await GroupMetadataStore.find(id)` per group chat, one network
+        # round-trip each.  Right after pairing, while WhatsApp Web is still
+        # running its initial sync, that loop routinely runs longer than
+        # Puppeteer's protocolTimeout, so list-chats never answers at all and
+        # every attempt here dies with "Read timed out" — leaving the user with
+        # an empty chat list.  Worse, an HTTP timeout on our side does not
+        # cancel the evaluate inside the page, so each retry stacks *another*
+        # metadata loop onto the same JS thread and the call gets slower, not
+        # faster.
+        #
+        # Skipping the prefetch means a group whose metadata WhatsApp Web hasn't
+        # cached yet arrives without groupMetadata.subject, i.e. unnamed.  That
+        # case is already handled — and handled better — downstream:
+        # _resolve_missing_group_names() re-fetches exactly those groups through
+        # /group-info, six at a time and with a 10 s timeout each, instead of
+        # one at a time with no timeout at all.  A named group is unaffected
+        # either way: its subject is already in the store and still serialises.
+        payload = {"ignoreGroupMetadata": True}
 
         # Escalating per-request timeouts instead of a flat 120 s × 3.
         #
@@ -4913,7 +4943,7 @@ class MainWindow(wx.Frame):
         self._last_chat_fetch_disconnected = False
         for attempt, _timeout in enumerate(_TIMEOUTS):
             try:
-                response = requests.post(url, json={}, headers=headers, timeout=_timeout)
+                response = requests.post(url, json=payload, headers=headers, timeout=_timeout)
                 if response.status_code not in (200, 201):
                     logging.error(
                         "[get_remote_chats] API error %s (attempt %d/%d): %s",

@@ -29,6 +29,80 @@ function forceKillByUserDataDir(userDataDir: string) {
   exec(`pkill -9 -f "${userDataDir}"`, () => {});
 }
 
+/**
+ * Restore `MsgKey.prototype._serialized` inside the WhatsApp Web page.
+ *
+ * WhatsApp Web's minified build renamed the `_serialized` getter on MsgKey to
+ * `$1` (the Wid class, used for chat/contact ids, was NOT affected — only
+ * MsgKey). WPPConnect's serializer is hardcoded against the old name:
+ *
+ *     WAPI._serializeMessageObj = e => Object.assign(
+ *       WAPI._serializeRawObj(e), { id: e.id._serialized, ... })
+ *
+ * so `id` became `undefined` and JSON.stringify dropped the property outright.
+ * Every message returned by get-messages arrived with no id at all, WinZapp
+ * normalized it to `key.id = ""`, and DatabaseManager dropped 100% of them as
+ * id-less (a chat list with unread counts over a database with zero messages).
+ * `quotedMsgId` and `quotedParticipant` were silently lost the same way.
+ *
+ * The getter below reads `$1` when present and otherwise rebuilds the id from
+ * the MsgKey's own fields, which is exactly the format WhatsApp itself uses
+ * (`false_120363127023984493@g.us_AC9249DF…`). That second path is what keeps
+ * this working if a future build renames `$1` again.
+ */
+async function restoreMsgKeySerialized(
+  page: any,
+  logger: any,
+  session: string
+) {
+  if (!page) return;
+  try {
+    const result = await page.evaluate(() => {
+      const install = () => {
+        const MK = (window as any).WPP?.whatsapp?.MsgKey;
+        // wa-js is injected asynchronously after each navigation, so on the
+        // page-reload path MsgKey usually does not exist yet on the first try.
+        if (!MK || !MK.prototype) return false;
+        // `in` walks the prototype chain — an unaffected build already has it.
+        if ('_serialized' in MK.prototype) return true;
+        Object.defineProperty(MK.prototype, '_serialized', {
+          configurable: true,
+          get() {
+            if (typeof this.$1 === 'string' && this.$1) return this.$1;
+            const jid = (w: any) =>
+              typeof w === 'string' ? w : w?._serialized ?? w?.$1 ?? '';
+            const remote = jid(this.remote);
+            if (!remote || !this.id) return '';
+            const participant = jid(this.participant);
+            return (
+              `${!!this.fromMe}_${remote}_${this.id}` +
+              (participant ? `_${participant}` : '')
+            );
+          },
+        });
+        return true;
+      };
+      if (install()) return 'installed';
+      // Retry in the background rather than awaiting here: blocking the
+      // evaluate would stall session startup for as long as wa-js takes.
+      let tries = 0;
+      const timer = setInterval(() => {
+        if (install() || ++tries > 60) clearInterval(timer);
+      }, 500);
+      return 'scheduled (wa-js not ready yet)';
+    });
+    logger.info(`[${session}] MsgKey._serialized shim: ${result}`);
+  } catch (e: any) {
+    // Never fatal: without the shim messages lose their ids, but the session
+    // itself is still perfectly usable.
+    logger.error(
+      `[${session}] Failed to install MsgKey._serialized shim: ${
+        e?.message || e
+      }`
+    );
+  }
+}
+
 export default class CreateSessionUtil {
   forceKillSession(session: string) {
     forceKillByUserDataDir(`userDataDir/${session}`);
@@ -200,6 +274,14 @@ export default class CreateSessionUtil {
             req.logger.info(text);
           }
         });
+        // The shim lives on a prototype inside the page, so it dies with every
+        // WhatsApp Web reload (and wa-js is re-injected fresh each time).
+        // Re-install on load as well as right now, or the first reload
+        // silently brings the id-less messages back.
+        client.page.on('load', () => {
+          restoreMsgKeySerialized(client.page, req.logger, session);
+        });
+        await restoreMsgKeySerialized(client.page, req.logger, session);
       }
       await this.start(req, client);
 
