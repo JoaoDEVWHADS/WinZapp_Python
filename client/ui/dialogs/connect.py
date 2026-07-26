@@ -38,6 +38,13 @@ class Connect:
         self._current_dial_code: str = "55"   # Brazil default
         self._phone_updating:    bool = False  # reentrancy guard for EVT_TEXT
 
+        # Incremented on every new pairing attempt and every cancel/close, so
+        # a _bg_pairing_flow() background thread from an attempt the user
+        # already abandoned (Cancel, then "try again") can tell it's stale
+        # and stop touching shared main_window.ws/token state or popping up
+        # dialogs — see on_continue()'s docstring for why this exists.
+        self._pairing_attempt_id: int = 0
+
     # ── Helpers ────────────────────────────────────────────────────────────
 
     def _wpp_headers(self, use_global_key=False):
@@ -627,12 +634,27 @@ class Connect:
             wx.MessageBox(f"{self.i18n.t('websocket_init_failed')} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
     def on_continue(self, event):
-        """Phone-number pairing flow (asynchronous to prevent GUI freeze)."""
+        """Phone-number pairing flow (asynchronous to prevent GUI freeze).
+
+        _bg_pairing_flow() below waits up to 90s for a phoneCode. If the user
+        cancels (or closes the dialog) while that wait is still in progress
+        and starts a new attempt, the old thread kept running to completion
+        with no way to know it had been abandoned — it would still go on to
+        touch main_window.ws/token and could pop up a pairing_dial *after*
+        the user had already moved on, racing the new attempt's own
+        WebSocketClient/session and effectively running two pairing flows
+        (and two WPPConnect sessions, each independently rotating its own
+        code) at once. my_attempt/self._pairing_attempt_id lets the thread
+        recognize it's been superseded and bail out silently instead.
+        """
         self.phone_number = "".join(
             c for c in self.phone_field.GetValue() if c.isdigit()
         )
         if not self.phone_number:
             return
+
+        self._pairing_attempt_id += 1
+        my_attempt = self._pairing_attempt_id
 
         # Disable continue button and show connecting status to user
         self.continue_btn.Disable()
@@ -715,6 +737,14 @@ class Connect:
                 # and unlock userDataDir before we call /start-session.
                 close_done.wait(timeout=3)
 
+                if my_attempt != self._pairing_attempt_id:
+                    # Superseded — the user cancelled and/or started a newer
+                    # attempt while this one was waiting. Stop here instead
+                    # of creating a WebSocketClient/session for an attempt
+                    # nobody is looking at anymore.
+                    logging.info("[_bg_pairing_flow] Attempt %d superseded before start-session — aborting.", my_attempt)
+                    return
+
                 # Set up the websocket client (but do not connect yet)
                 if hasattr(self.main_window, 'ws') and self.main_window.ws:
                     try:
@@ -759,6 +789,13 @@ class Connect:
                 # Wait up to 90 s for WPPConnect to emit the phoneCode via Socket.IO.
                 got_code = self.main_window.ws._phone_code_event.wait(timeout=90)
                 pairing_code = self.main_window.ws._phone_code_value if got_code else ""
+
+                if my_attempt != self._pairing_attempt_id:
+                    # Superseded while waiting for the code — don't persist
+                    # this attempt's token/settings or pop up pairing_dial
+                    # behind whatever the user is now looking at.
+                    logging.info("[_bg_pairing_flow] Attempt %d superseded after phoneCode wait — discarding result.", my_attempt)
+                    return
 
                 if pairing_code:
                     # Only now persist the token — pairing has actually started.
@@ -1020,6 +1057,13 @@ class Connect:
         )
 
     def on_cancel_pairing(self, event):
+        # Invalidate any in-flight _bg_pairing_flow() — see on_continue()'s
+        # docstring. This dialog only appears after a phoneCode was already
+        # received, so the thread's own check has already passed by the time
+        # this button exists, but bumping it here still stops it from acting
+        # on a stale attempt if the user cancels and retries fast enough to
+        # overlap with the tail of the current one (e.g. persisting settings).
+        self._pairing_attempt_id += 1
         try:
             if hasattr(self, "pairing_dial") and self.pairing_dial:
                 self.pairing_dial.EndModal(wx.ID_CANCEL)
@@ -1057,6 +1101,8 @@ class Connect:
 
     def on_dialog_close(self, event):
         logging.info("[on_dialog_close] Dialog close event triggered.")
+        # Invalidate any in-flight _bg_pairing_flow() — see on_continue().
+        self._pairing_attempt_id += 1
         # Disconnect WebSocket if connected
         if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:
