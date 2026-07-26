@@ -172,6 +172,23 @@ class WebSocketClient:
                 self.main_window.save_settings()
 
             self.on_pairing_complete()
+
+            # A pairing in progress that reaches "open" isn't necessarily
+            # safe yet — WPPConnect's own Puppeteer/Chrome session can crash
+            # moments later (confirmed live via wppconnect.log: a
+            # "browserClose" event followed by taskkill errors for Chrome's
+            # already-dead child processes) without Node.js itself going
+            # down and, critically, without ever telling WinZapp anything
+            # went wrong: the Socket.IO connection to the still-alive
+            # WPPConnect Server process never drops, so on_connection_update
+            # never gets a "close" to react to and the app just sits there
+            # believing it's connected forever, with no window ever shown
+            # and no error. This watchdog is the only check independent of
+            # WPPConnect telling us anything: if this attempt hasn't
+            # received real chat data by the time it fires, it treats the
+            # pairing as failed on its own.
+            if getattr(self.main_window, "_pairing_in_progress", False):
+                self._start_pairing_watchdog()
         elif connection_state == "close":
             was_connected = self.main_window._wa_connected
             self.main_window._set_wa_connected(False, "session closed")
@@ -225,6 +242,39 @@ class WebSocketClient:
                     mw.output(self.i18n.t("wa_disconnected_temp"), interrupt=False)
                     mw._set_status(self.i18n.t("tray_wa_disconnected"))
                 wx.CallAfter(_notify_disconnection)
+
+    def _start_pairing_watchdog(self, timeout: float = 45.0):
+        """
+        Safety net for a pairing that reached "open" and is then never heard
+        from again — no further Socket.IO event at all, not even a "close".
+
+        Runs on a plain threading.Timer, independent of both the wx main
+        thread and the Socket.IO background thread, specifically so it still
+        fires even if one of those is stuck: the failure mode this exists
+        for (WPPConnect's own Puppeteer/Chrome session crashing right after
+        briefly reporting "open", confirmed live via wppconnect.log showing
+        a "browserClose" event) leaves Node.js itself running and the
+        Socket.IO connection to it intact, so nothing ever tells
+        on_connection_update's "close" branch to react — the ordinary
+        recovery path never gets a chance to run at all.
+        """
+        my_attempt = self.connect._pairing_attempt_id
+
+        def _check():
+            if self.connect._pairing_attempt_id != my_attempt:
+                return  # superseded — cancelled, or a newer attempt started
+            if not getattr(self.main_window, "_pairing_in_progress", False):
+                return  # already resolved: synced, cancelled, or already recovered
+            logging.warning(
+                "[WebSocketClient] Pairing attempt still hadn't received real "
+                "chat data %.0fs after appearing to open — treating as a "
+                "failed pairing (watchdog).", timeout,
+            )
+            wx.CallAfter(self._handle_pairing_failed)
+
+        t = threading.Timer(timeout, _check)
+        t.daemon = True
+        t.start()
 
     def _handle_logout(self):
         """Handle a permanent WhatsApp logout (device removed from account)."""
