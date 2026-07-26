@@ -824,6 +824,20 @@ class WebSocketClient:
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
+                # Diagnostic: WPPConnect only emits this event when WhatsApp
+                # Web itself fires its internal conn.auth_code_change (see
+                # host.layer.js) — there's no client-side timer forcing this.
+                # Logged with the previous value + a timestamp so a real
+                # pairing session's log file can show definitively whether
+                # consecutive events really carry different codes (WhatsApp
+                # genuinely rotating it) or the same one repeated (which
+                # would point to a bug — none found by reading the code, but
+                # worth being able to confirm from a real run instead of
+                # just trusting that reading).
+                logging.info(
+                    "[WebSocketClient] phoneCode event: new=%s previous=%s at %s",
+                    code, self._phone_code_value, time.strftime("%H:%M:%S"),
+                )
                 self._phone_code_value = str(code)
                 self._phone_code_event.set()
                 # WPPConnect requests a fresh pairing code whenever WhatsApp
