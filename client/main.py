@@ -744,6 +744,7 @@ class MainWindow(wx.Frame):
 
 
     def init_UI(self):
+        logging.info("[init_UI] start")
         self.SetMinSize((400, 300))
         self.main_panel = wx.Panel(self)
 
@@ -776,6 +777,7 @@ class MainWindow(wx.Frame):
         self.SetSizer(frame_sizer)
 
         self.create_accelerator_table()
+        logging.info("[init_UI] panels built — building menu bar")
 
         # ── Menu bar ──────────────────────────────────────────────────────────
         self._update_checker = None
@@ -794,7 +796,9 @@ class MainWindow(wx.Frame):
         # cleared in restore_window).  Used to suppress tray-tooltip redraws
         # while the window is visible — prevents NVDA focus disruption.
         self._window_hidden = self.background_mode
+        logging.info("[init_UI] menu bar built — initializing tray icon")
         self._init_tray()
+        logging.info("[init_UI] tray icon initialized")
 
         # ── Notification manager ──────────────────────────────────────────────
         from core.notification_manager import NotificationManager
@@ -803,6 +807,7 @@ class MainWindow(wx.Frame):
         # ── Global hotkey ─────────────────────────────────────────────────────
         self._hotkey_manager = None
         self._apply_global_hotkey()
+        logging.info("[init_UI] global hotkey applied — showing window")
 
         # Intercept window-close: hide to tray instead of quitting (when tray active)
         self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -811,8 +816,10 @@ class MainWindow(wx.Frame):
         # restored later by a second instance or a future tray-icon action.
         if not self.background_mode:
             self.Show()
+        logging.info("[init_UI] window shown — populating chat list")
         #Set offline chats for the first time
         self.set_chats()
+        logging.info("[init_UI] chat list populated — entering MainLoop")
         # All widgets exist and the initial chat list is painted — unblock any
         # sync thread that was waiting for the UI to be ready.
         self._ui_ready_event.set()
@@ -3806,15 +3813,30 @@ class MainWindow(wx.Frame):
         self.token = token.replace("/", "_").replace("+", "-")
 
     def prepare_sync(self):
+        # Diagnostic breadcrumbs: prepare_sync() runs synchronously on the
+        # main thread before init_UI()/self.Show()/app.MainLoop() — a hang
+        # anywhere in here (or between here and init_UI()) leaves no window,
+        # no tray icon, and no way for any wx.CallAfter-based error recovery
+        # to ever run, since no event loop exists yet to process it. Reported
+        # live as "connected sound plays, then nothing — no window, no
+        # error, forever" with no exception ever reaching the crash-log
+        # handler either, which rules out a raised-and-caught error and
+        # points at a genuine block. These log lines (flushed to disk
+        # immediately by the logging handler, unlike anything that needs a
+        # window to be shown) exist so the LAST one printed pinpoints exactly
+        # which line is stuck, next time this happens.
+        logging.info("[prepare_sync] start")
         os.makedirs(data_path(), exist_ok=True)
         self._media_failed_lock = threading.Lock()
         self._media_failed_ids  = self._load_media_failed_ids()
         self.generate_secret_key()
         self.key = self.retrieve_secret_key()
         self.create_basic_files()
+        logging.info("[prepare_sync] basic files ready — opening DatabaseBridge")
 
         # Initialise DatabaseBridge (async→sync bridge)
         self.db = DatabaseBridge(data_path("messages.db"), self.key)
+        logging.info("[prepare_sync] DatabaseBridge open — loading metadata")
         # Load persistent metadata from database with fallback/bootstrap from settings.json
         settings_dirty = False
         
@@ -3865,8 +3887,10 @@ class MainWindow(wx.Frame):
         if settings_dirty:
             self.save_settings()
 
+        logging.info("[prepare_sync] metadata loaded — loading local chats (bulk DB call, up to 120s)")
         #Get Local Chats
         self.chats = self.get_chats()
+        logging.info("[prepare_sync] local chats loaded (%d) — loading LID cache", len(self.chats))
         self._load_local_lid_cache()
 
         def _db_maintenance():
@@ -3917,6 +3941,7 @@ class MainWindow(wx.Frame):
         self.messages_set_completed = False
         self.wait_messages_set()
         self.start_connection_health_checker()
+        logging.info("[prepare_sync] done")
 
     def start_connection_health_checker(self):
         """Periodically verify session health and auto-restart Puppeteer if closed."""

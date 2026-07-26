@@ -2446,7 +2446,17 @@ class ConversationsPanel(wx.Panel):
     # ── @mention helpers ─────────────────────────────────────────────────────
 
     def _extract_mentions(self, msg: dict) -> list:
-        """Return list of (display_name, jid) for @mentioned JIDs in msg."""
+        """Return list of (display_name, jid) for @mentioned JIDs in msg.
+
+        Returns [] when the mentioned set covers essentially every
+        participant in the group — WhatsApp expands an @Todos/@everyone
+        mention into the full participant JID list with no marker
+        distinguishing it from mentioning each person individually, and a
+        hyperlink per participant (routinely dozens in a large group) is
+        just UI noise for something that always means "everyone", not
+        something a per-person link helps with. Individual mentions of
+        specific people still show their links as before.
+        """
         msg_obj = msg.get("message") or {}
         ext     = (msg_obj.get("extendedTextMessage") or {}) if isinstance(msg_obj, dict) else {}
         mentioned = (
@@ -2457,6 +2467,21 @@ class ConversationsPanel(wx.Panel):
         )
         if not mentioned:
             return []
+
+        participants = getattr(self, "_group_participants_cache", None)
+        if participants:
+            participant_jids = {
+                self.main_window._normalize_jid(jid) for _, jid in participants
+            }
+            if len(participant_jids) > 2:
+                mentioned_norm = {
+                    self.main_window._normalize_jid(jid) for jid in mentioned if jid
+                }
+                # Allow for the sender themselves not appearing in their own
+                # mention list.
+                if len(mentioned_norm & participant_jids) >= len(participant_jids) - 1:
+                    return []
+
         out = []
         seen = set()
         for jid in mentioned:
