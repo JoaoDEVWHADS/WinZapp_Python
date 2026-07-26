@@ -1836,6 +1836,23 @@ class MainWindow(wx.Frame):
         Adds the message to local storage, updates the UI, and sends a
         notification if appropriate.
         """
+        # A real-time messages.upsert event can be dispatched via
+        # wx.CallAfter — and actually processed, since CallAfter delivery
+        # doesn't require app.MainLoop() to already be running, only some
+        # active wx event-processing context, which the pairing dialogs'
+        # own modal loops already provide — before MainWindow.__init__ has
+        # finished creating self.db / self.message_queue / self._msg_bg_executor.
+        # WPPConnect starts pushing live messages the instant a pairing
+        # succeeds, and reusing the already-connected socket right after
+        # (see reuse_existing_ws in __init__) means that can happen before
+        # prepare_sync() ever runs. Reported live as a flood of
+        # "'MainWindow' object has no attribute 'db'" / "'_msg_bg_executor'"
+        # unhandled exceptions immediately after a fresh pairing. Safe to
+        # drop here: the initial full sync that's about to run fetches the
+        # complete current chat/message state regardless, so nothing
+        # arriving this early is ever actually lost.
+        if not self._ui_ready_event.is_set():
+            return
         key        = msg.get("key", {})
         from_me    = key.get("fromMe", False)
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
