@@ -37,7 +37,6 @@ export const chromiumArgs = [
   '--ignore-certificate-errors', // Ignores certificate errors
   '--ignore-ssl-errors', // Ignores SSL errors
   '--ignore-certificate-errors-spki-list', // Ignores certificate errors in SPKI list
-  '--js-flags="--max-old-space-size=350"',
   '--disable-3d-apis',
   '--disable-webgl',
   '--disable-notifications',
@@ -49,7 +48,6 @@ export const chromiumArgs = [
   '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
   '--disable-software-rasterizer',
   '--disable-ipc-flooding-protection',
-  '--disable-breakpad',
   '--password-store=basic',
   '--use-mock-keychain',
   '--no-pings',
