@@ -1028,12 +1028,24 @@ class Connect:
         self.cancel_btn.Bind(wx.EVT_BUTTON, self.on_cancel_pairing)
 
         self.main_window.waiting_pairing_sound.play()
-        self.pairing_dial.ShowModal()
+        result = self.pairing_dial.ShowModal()
         try:
             self.pairing_dial.Destroy()
         except Exception:
             pass
-        self.cleanup_pairing_session()
+        # ROOT CAUSE of "connected sound plays, then nothing — no window, no
+        # tray icon, no error, forever" (confirmed live via log.log):
+        # ShowModal()'s return value used to be discarded, so this ran
+        # cleanup_pairing_session() — which disconnects the socket AND calls
+        # /close-session, i.e. tells WPPConnect to close the WhatsApp Web
+        # session it had JUST finished linking — unconditionally, even when
+        # the dialog closed because pairing *succeeded*
+        # (WebSocketClient.on_pairing_complete() ends this modal with
+        # wx.ID_OK). Only clean up when it closed for any other reason
+        # (Cancel, window close) — a session that just succeeded must be
+        # left alone.
+        if result != wx.ID_OK:
+            self.cleanup_pairing_session()
 
     def update_pairing_code(self, code):
         """Refresh the pairing dialog when WPPConnect emits a new phoneCode.
