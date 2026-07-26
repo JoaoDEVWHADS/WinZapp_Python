@@ -635,10 +635,11 @@ class MainWindow(wx.Frame):
                 if not self.connect.check_connection_status():
                     logging.info("Connection dialog closed without pairing. Exiting application.")
                     sys.exit()
-                if self.ws:
-                    self.ws.sio.disconnect()
+                # Do NOT disconnect self.ws here — see the "Initialize
+                # websocket" block below for why this used to cause the
+                # pairing session to crash.
                 self._just_paired = True
-        
+
         logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
         if not self.token:
@@ -646,13 +647,34 @@ class MainWindow(wx.Frame):
             sys.exit()
         #Initialize websocket
         logging.info("MainWindow: Initializing WebSocketClient...")
-        if hasattr(self, 'ws') and self.ws:
-            try:
-                self.ws.sio.disconnect()
-            except Exception:
-                pass
-            self.ws = None
-        self.ws = WebSocketClient(self, self.connect, self.token)
+        # A pairing that just succeeded (_just_paired) already leaves self.ws
+        # connected and authenticated — Connect._bg_pairing_flow() created it
+        # and used it to receive the phoneCode/session-logged events that
+        # just completed pairing. Disconnecting it here (unconditionally,
+        # until this fix) and reconnecting from scratch a moment later raced
+        # WPPConnect's own session lifecycle: reported live, disconnecting
+        # the socket mere milliseconds after WPPConnect logged the session as
+        # "Started" reliably closed the WhatsApp Web page/browser
+        # server-side (wppconnect.log showed the socket's "saiu" entry
+        # immediately followed by "Page Closed" / "browserClose") — leaving
+        # WinZapp connected to a server with a dead WhatsApp session inside
+        # it, forever, with no window ever shown, no sync, and no further
+        # event arriving to explain why. Reuse the live connection instead.
+        reuse_existing_ws = (
+            self._just_paired
+            and getattr(self, "ws", None) is not None
+            and getattr(self.ws.sio, "connected", False)
+        )
+        if reuse_existing_ws:
+            logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
+        else:
+            if hasattr(self, 'ws') and self.ws:
+                try:
+                    self.ws.sio.disconnect()
+                except Exception:
+                    pass
+                self.ws = None
+            self.ws = WebSocketClient(self, self.connect, self.token)
 
         logging.info("MainWindow: Preparing sync...")
         self.prepare_sync()
@@ -676,6 +698,14 @@ class MainWindow(wx.Frame):
         def _connect_bg():
             # Ensure session is active on WPPConnect Server before connecting WebSocket
             self.check_wa_connection_http()
+            if reuse_existing_ws:
+                # self.ws is already the live connection from pairing —
+                # connect_websocket() itself unconditionally disconnects
+                # before reconnecting, which is exactly the premature
+                # disconnect this whole path exists to avoid (see the
+                # "Initialize websocket" comment above). Nothing else to do.
+                logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
+                return
             try:
                 logging.info("MainWindow: Connecting WebSocket...")
                 self.connect_websocket()
