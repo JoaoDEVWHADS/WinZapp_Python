@@ -479,6 +479,7 @@
     "unknown_group": "Grupo sin nombre",
     "unnamed_participant": "Participante sin nombre",
     "device_logged_out": "Tu dispositivo ha sido desconectado de la cuenta de WhatsApp. Por favor, conéctate de nuevo.",
+    "pairing_failed_msg": "No fue posible completar el emparejamiento con WhatsApp. Intenta conectar de nuevo.",
     "mentions_section_label": "Menciones en este mensaje",
     "add_contact": "Agregar &contacto",
     "mention_suggestions_label": "Sugerencias de mención",

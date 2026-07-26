@@ -655,6 +655,12 @@ class Connect:
 
         self._pairing_attempt_id += 1
         my_attempt = self._pairing_attempt_id
+        # Narrow "a pairing is actively in flight" window used by
+        # WebSocketClient.on_connection_update to tell a failed pairing
+        # (connection opens then closes again before real data ever arrives)
+        # apart from an ordinary reconnect hiccup on an already-paired
+        # account — see main.py's _pairing_in_progress for the full story.
+        self.main_window._pairing_in_progress = True
 
         # Disable continue button and show connecting status to user
         self.continue_btn.Disable()
@@ -1064,6 +1070,7 @@ class Connect:
         # on a stale attempt if the user cancels and retries fast enough to
         # overlap with the tail of the current one (e.g. persisting settings).
         self._pairing_attempt_id += 1
+        self.main_window._pairing_in_progress = False
         try:
             if hasattr(self, "pairing_dial") and self.pairing_dial:
                 self.pairing_dial.EndModal(wx.ID_CANCEL)
@@ -1103,6 +1110,7 @@ class Connect:
         logging.info("[on_dialog_close] Dialog close event triggered.")
         # Invalidate any in-flight _bg_pairing_flow() — see on_continue().
         self._pairing_attempt_id += 1
+        self.main_window._pairing_in_progress = False
         # Disconnect WebSocket if connected
         if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:

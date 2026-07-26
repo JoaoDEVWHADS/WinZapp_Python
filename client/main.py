@@ -611,6 +611,21 @@ class MainWindow(wx.Frame):
         # Track whether the user went through the pairing flow this session
         self._just_paired = False
 
+        # True from the moment a pairing attempt starts (Connect.on_continue)
+        # until WPPConnect actually delivers real chat data (messages.set) —
+        # much narrower than _just_paired, and also covers re-pairing after a
+        # mid-session logout, which _just_paired never does. Used by
+        # WebSocketClient.on_connection_update to tell "WhatsApp opened the
+        # connection then closed it again before pairing genuinely finished"
+        # (reported live: WinZapp played the connected sound and then just
+        # sat there forever with no window, no error, no way back to
+        # pairing, while the phone eventually showed "could not connect the
+        # device") apart from an ordinary transient drop on an
+        # already-established, already-synced account — which must NOT be
+        # treated as a failed pairing and log the user out over a network
+        # blip.
+        self._pairing_in_progress = False
+
         #Check for what window should be shown (skipped in background mode)
         if not self.background_mode:
             logging.info("MainWindow: Checking WhatsApp connection status...")
@@ -3595,7 +3610,13 @@ class MainWindow(wx.Frame):
             os.replace(tmp, target)
         except Exception:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
+            # save_settings() is called from many places, including several
+            # background threads (e.g. WebSocketClient event handlers) — a
+            # raw wx.MessageBox() call off the main thread is a real crash
+            # risk on Windows, so always marshal it through CallAfter.
+            msg   = f"{self.i18n.t('settings_save_failed')} {format_exc()}"
+            title = self.i18n.t("error").format(app_name=self.app_name)
+            wx.CallAfter(wx.MessageBox, msg, title, wx.OK | wx.ICON_ERROR)
 
     def _schedule_save_settings(self):
         """Debounce save_settings: coalesce rapid calls into one write after 2 s.

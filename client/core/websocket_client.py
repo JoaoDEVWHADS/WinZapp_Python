@@ -186,9 +186,32 @@ class WebSocketClient:
                 data.get("loggedOut", False)
                 or status_code == 401
             )
-            if is_logout:
-                # Permanent logout: clear credentials and redirect to pairing.
-                wx.CallAfter(self._handle_logout)
+            # A connection that closes again — for ANY reason, not just an
+            # explicit 401/loggedOut — while a pairing attempt is still in
+            # progress and before WPPConnect ever delivered real chat data
+            # means WhatsApp never actually finished linking the device, even
+            # though it may have briefly reported "open" and made WinZapp
+            # announce itself as connected. _pairing_in_progress is a narrow
+            # window (set when Connect.on_continue() starts, cleared once
+            # messages.set arrives) specifically so this never fires for an
+            # ordinary reconnect hiccup on an already-established, already-
+            # synced account — only for a pairing that never truly completed.
+            pairing_failed = (
+                not is_logout
+                and getattr(self.main_window, "_pairing_in_progress", False)
+                and not getattr(self.main_window, "messages_set_completed", False)
+            )
+            if is_logout or pairing_failed:
+                if pairing_failed:
+                    logging.warning(
+                        "[WebSocketClient] Connection closed during an active pairing "
+                        "before the initial sync ever started (statusCode=%s) — "
+                        "treating as a failed pairing.", status_code,
+                    )
+                    wx.CallAfter(self._handle_pairing_failed)
+                else:
+                    # Permanent logout: clear credentials and redirect to pairing.
+                    wx.CallAfter(self._handle_logout)
             else:
                 # Temporary disconnection (network glitch, WhatsApp session interrupted).
                 # Mark WA as disconnected so the MessageQueue stops trying to send.
@@ -204,20 +227,44 @@ class WebSocketClient:
                 wx.CallAfter(_notify_disconnection)
 
     def _handle_logout(self):
-        """Handle a permanent WhatsApp logout (device removed from account).
+        """Handle a permanent WhatsApp logout (device removed from account)."""
+        self._reset_credentials_and_show_pairing("device_logged_out")
+
+    def _handle_pairing_failed(self):
+        """
+        A pairing attempt appeared to succeed — WPPConnect briefly reported
+        the connection as "open" and WinZapp announced it as connected — but
+        it closed again before the initial sync ever started, meaning
+        WhatsApp itself never actually finished linking the device (a
+        rejected/timed-out pairing, reported live as the phone showing "Não
+        foi possível conectar o dispositivo" seconds after WinZapp had
+        already played the connected sound).
+
+        Recovers exactly like a permanent logout: without this, the "close"
+        branch of on_connection_update only recognizes explicit 401/loggedOut
+        signals as a reason to reset and re-show the pairing dialog, so this
+        kind of failure — which carries neither — left the app sitting
+        indefinitely on a half-finished pairing with no error, no window,
+        and no way back to the connection dialog.
+        """
+        self._reset_credentials_and_show_pairing("pairing_failed_msg")
+
+    def _reset_credentials_and_show_pairing(self, message_key: str):
+        """Shared recovery for _handle_logout()/_handle_pairing_failed().
 
         Runs on the wx main thread (via wx.CallAfter).  Shows an informative
         dialog, wipes the now-invalid credentials from settings, disconnects
         the socket, and opens the connection dialog so the user can re-pair.
 
-        Two independent event paths can both decide a real logout happened
-        for the same disconnect (on_connection_update's 401/loggedOut check
-        and on_wpp_status_find's notLogged/disconnectedMobile check) and both
-        schedule this via wx.CallAfter before either has run. Since CallAfter
-        callbacks are dispatched one at a time on this same thread, a simple
-        flag checked at entry is enough to make the second call a no-op —
-        without it the logout dialog appeared twice, credentials were wiped
-        twice, and two pairing dialogs could end up stacked on screen.
+        Multiple independent event paths can decide the same underlying
+        problem happened (on_connection_update's 401/loggedOut check, its new
+        failed-pairing check, and on_wpp_status_find's notLogged/
+        disconnectedMobile check) and all schedule one of the two methods
+        above via wx.CallAfter before any has run. Since CallAfter callbacks
+        are dispatched one at a time on this same thread, a simple flag
+        checked at entry is enough to make every call after the first a
+        no-op — without it the error dialog appeared twice, credentials were
+        wiped twice, and two pairing dialogs could end up stacked on screen.
         """
         if getattr(self, "_logout_handled", False):
             return
@@ -225,10 +272,11 @@ class WebSocketClient:
 
         mw = self.main_window
         mw._wa_connected = False
+        mw._pairing_in_progress = False
         mw.error_sound.play()
 
         wx.MessageBox(
-            self.i18n.t("device_logged_out"),
+            self.i18n.t(message_key),
             self.i18n.t("error").format(app_name=mw.app_name),
             wx.OK | wx.ICON_ERROR,
         )
@@ -241,7 +289,7 @@ class WebSocketClient:
         mw.messages_set_completed = False
         mw.token = ""
         mw.save_settings()
-        
+
         # Wipe all cached chats/contacts/media to avoid cross-account data leakage
         mw.clear_local_data()
 
@@ -346,6 +394,11 @@ class WebSocketClient:
 
     def on_messages_set(self, info):
         self.main_window.messages_set_completed = True
+        # Real chat data has arrived — this pairing (if one was in progress)
+        # has genuinely succeeded, so it's no longer at risk of being treated
+        # as a failed pairing by on_connection_update if the socket later
+        # drops for an ordinary/unrelated reason.
+        self.main_window._pairing_in_progress = False
         # Guard 1: don't start a second sync while one is already running.
         existing = getattr(self.main_window, "sync_thread", None)
         if existing and existing.is_alive():
