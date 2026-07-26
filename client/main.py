@@ -4014,8 +4014,31 @@ class MainWindow(wx.Frame):
         # First strike: give it one more cycle before going offline.
         return bool(getattr(self, "_wa_connected", False))
 
+    def _is_pairing_dialog_active(self) -> bool:
+        """True while the connection/pairing dialog is on screen — i.e. the
+        user has never actually paired yet (or is re-pairing) and is looking
+        straight at it."""
+        dial = getattr(self.connect, "connection_dial", None)
+        return bool(dial) and dial.IsShown()
+
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
+        if self._is_pairing_dialog_active():
+            # Nothing below is meaningful yet: WPPConnect reporting
+            # CLOSED/QRCODE/notLogged while the user is actively looking at
+            # the pairing dialog is completely normal — that IS what
+            # "not paired yet" looks like, not an outage. Every branch
+            # below unconditionally called _set_wa_connected(False, ...)
+            # (only the *auto-start-session* side effect was gated on the
+            # dialog being open), so this ran every 30s during pairing and
+            # announced "sem conexão com o WhatsApp. Modo offline ativado
+            # automaticamente" — sound and speech — while the user hadn't
+            # even finished scanning the QR code, let alone ever connected.
+            # This whole HTTP poll exists to detect/recover from outages
+            # *after* pairing; pairing's own completion is already driven by
+            # WebSocket events (on_connection_update/session-logged), so
+            # skipping it entirely here loses nothing.
+            return
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -4090,7 +4113,9 @@ class MainWindow(wx.Frame):
                     # Status is CLOSED or unknown: safe to start a new session.
                     # But skip if the connection dialog is currently open (pairing in progress)
                     # to avoid spawning a duplicate Chrome alongside the one the pairing flow manages.
-                    if getattr(self.connect, 'connection_dial', None) and self.connect.connection_dial.IsShown() if hasattr(self.connect, 'connection_dial') and self.connect.connection_dial else False:
+                    # (Unreachable in practice now that this whole method returns early
+                    # while the dialog is active — kept as a defensive fallback.)
+                    if self._is_pairing_dialog_active():
                         logging.info("[check_wa_connection_http] Skipping auto-start — pairing dialog is active.")
                     else:
                         try:
