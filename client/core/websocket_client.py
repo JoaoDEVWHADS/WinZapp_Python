@@ -373,8 +373,9 @@ class WebSocketClient:
         )
 
         # Wipe the invalidated credentials so next startup goes to pairing.
+        old_token = mw._get_wa_token()
         pi = mw.settings.setdefault("privateinfo", {})
-        old_token = pi.pop("WA_token", "")
+        mw._set_wa_token("")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
         mw.messages_set_completed = False

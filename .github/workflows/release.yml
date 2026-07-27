@@ -60,10 +60,27 @@ jobs:
       # build.py expects client/node/node.exe — download the same portable ZIP
       # version that developers use and place it at the right path.
       - name: Download portable Node.js v${{ env.NODE_VERSION }}
+        shell: pwsh
         run: |
           $version = "${{ env.NODE_VERSION }}"
           $zip = "node-v${version}-win-x64.zip"
           Invoke-WebRequest "https://nodejs.org/dist/v${version}/${zip}" -OutFile $zip -UseBasicParsing
+          # nodejs.org publishes a signed checksum manifest for every release —
+          # verify the download against it before ever extracting/using it,
+          # same as client/ui/dialogs/node_download.py does for the identical
+          # download performed on a user's machine during first-run setup.
+          Invoke-WebRequest "https://nodejs.org/dist/v${version}/SHASUMS256.txt" -OutFile "SHASUMS256.txt" -UseBasicParsing
+          $expected = (Select-String -Path "SHASUMS256.txt" -Pattern "  $zip$").Line.Split(" ")[0]
+          if (-not $expected) {
+            Write-Error "Could not find a checksum for $zip in SHASUMS256.txt"
+            exit 1
+          }
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            Write-Error "Node.js download checksum mismatch: expected $expected, got $actual"
+            exit 1
+          }
+          Write-Output "[INFO] Node.js download checksum verified: $actual"
           Expand-Archive $zip -DestinationPath . -Force
           Move-Item "node-v${version}-win-x64" "client\node"
 
@@ -175,9 +192,28 @@ jobs:
           commit_user_name: github-actions[bot]
           commit_user_email: github-actions[bot]@users.noreply.github.com
 
+      # Published alongside the release so updater.py (client/updater.py) can
+      # verify a downloaded ZIP's integrity before extracting it and handing
+      # it elevated write access to the install directory — without this,
+      # nothing checks that a release asset wasn't tampered with in transit
+      # or via a compromised/hijacked GitHub release edit.
+      - name: Generate SHA256SUMS.txt for release assets
+        shell: pwsh
+        run: |
+          $lines = @()
+          foreach ($f in @("dist/WinZappInstaller.exe", "dist/WinZapp.zip")) {
+            $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            $name = Split-Path $f -Leaf
+            $lines += "$hash  $name"
+          }
+          $lines | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding ascii
+          Write-Output "[INFO] dist/SHA256SUMS.txt:"
+          Get-Content "dist/SHA256SUMS.txt"
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
+            dist/SHA256SUMS.txt

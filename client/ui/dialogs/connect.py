@@ -160,7 +160,7 @@ class Connect:
         the connection dialog is never shown and the user is stuck with a broken state.
         """
         private_info = self.main_window.settings.get("privateinfo", {})
-        token = private_info.get("WA_token", "").strip()
+        token = self.main_window._get_wa_token()
 
         # Legacy fallback: token.tk file means old-format paired session.
         if not token:
@@ -188,7 +188,7 @@ class Connect:
                         self.i18n.t("error").format(app_name=self.main_window.app_name),
                         wx.OK | wx.ICON_ERROR,
                     )
-                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
                 self.main_window.save_settings()
@@ -219,7 +219,7 @@ class Connect:
                         "[check_connection_status] check-connection-session returned false and paired=False. "
                         "Session is unlinked or incomplete. Clearing WA_token and wiping local data."
                     )
-                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                    self.main_window._set_wa_token("")
                     self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                     self.main_window.save_settings()
                     # Clear all cached chats/contacts/media to avoid cross-account data leakage
@@ -255,7 +255,7 @@ class Connect:
                         self.i18n.t("error").format(app_name=self.main_window.app_name),
                         wx.OK | wx.ICON_ERROR,
                     )
-                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
                 self.main_window.save_settings()
@@ -291,7 +291,7 @@ class Connect:
                     status,
                     is_paired,
                 )
-                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
                 if is_paired:
@@ -323,7 +323,7 @@ class Connect:
             logging.warning(
                 "[check_connection_status] API unreachable and paired=False — clearing stale token and showing connection dialog."
             )
-            self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+            self.main_window._set_wa_token("")
             self.main_window.save_settings()
             return False
 
@@ -435,10 +435,9 @@ class Connect:
                     self.main_window.token = ""
             
             # Clear from settings as well to prevent stale reuse on switch
-            if self.main_window.settings.get("privateinfo", {}).get("WA_token", "").startswith(session_name):
+            if self.main_window._get_wa_token().startswith(session_name):
                 logging.info("[_close_active_session] Clearing WA_token in settings")
-                self.main_window.settings["privateinfo"]["WA_token"] = ""
-                self.main_window.save_settings()
+                self.main_window._set_wa_token("")
             
             def _close_api_session():
                 try:
@@ -494,7 +493,7 @@ class Connect:
             # Determine whether a token has been saved from a previous session.
             # We still always call _create_instance to (re)start the WPPConnect
             # session in case the API was restarted since the last connection.
-            existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+            existing_token = self.main_window._get_wa_token()
             _instance_exists = bool(existing_token)
 
             server_base = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}"
@@ -534,9 +533,7 @@ class Connect:
                 # Raise on failure so the outer except shows a meaningful message
                 # instead of an opaque 401 from _create_instance.
                 self.main_window.token = _generate_hash(raw_token)
-                if "privateinfo" not in self.main_window.settings:
-                    self.main_window.settings["privateinfo"] = {}
-                self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
+                self.main_window._set_wa_token(self.main_window.token)
 
             # Close any previous session that may still be alive on the server
             # (different token from the one we're about to start). This prevents
@@ -691,7 +688,7 @@ class Connect:
                     if c.isdigit()
                 )
                 # Check if the user has already paired with this number.
-                existing_token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+                existing_token = self.main_window._get_wa_token()
                 _instance_exists = bool(stored_raw == self.phone_number and existing_token)
                 if not _instance_exists:
                     # New pairing: reset sync flag so we wait for messages.set
@@ -814,19 +811,18 @@ class Connect:
                     if "privateinfo" not in self.main_window.settings:
                         self.main_window.settings["privateinfo"] = {}
                     self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
-                    self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
-                    self.main_window.save_settings()
+                    self.main_window._set_wa_token(self.main_window.token)
                     wx.CallAfter(self._on_pairing_code_success, pairing_code)
                 else:
                     # No code received — clear any partially-saved token so next
                     # launch shows the connection dialog instead of acting connected.
-                    self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                    self.main_window._set_wa_token("")
                     self.main_window.save_settings()
                     wx.CallAfter(self._on_pairing_code_error)
 
             except Exception as exc:
                 # On any unexpected error, clear the token so next launch works correctly.
-                self.main_window.settings.setdefault("privateinfo", {})["WA_token"] = ""
+                self.main_window._set_wa_token("")
                 self.main_window.save_settings()
                 wx.CallAfter(self._on_pairing_code_exception, str(exc))
 

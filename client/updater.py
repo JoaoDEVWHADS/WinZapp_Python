@@ -10,6 +10,7 @@ Flow:
   6. After install: batch script waits for our PID, copies files, restarts.
 """
 
+import hashlib
 import os
 import re
 import sys
@@ -26,6 +27,67 @@ import wx
 from app_paths import _outer_exe_dir, _is_frozen, resource_path
 from config import GITHUB_API_LATEST_RELEASE
 from version import __version__
+
+
+def _find_sha256sums_asset(assets: list) -> str:
+    """Return the browser_download_url of a SHA256SUMS.txt asset in a GitHub
+    release's asset list, or "" if the release predates this check (older
+    releases published before CI started generating one)."""
+    for asset in assets:
+        if (asset.get("name") or "").lower() == "sha256sums.txt":
+            return asset.get("browser_download_url", "")
+    return ""
+
+
+def _verify_sha256sums(file_path: str, filename: str, sha256sums_url: str) -> "tuple[bool, str]":
+    """Verify file_path's SHA256 against the checksum manifest published
+    alongside the GitHub release (see .github/workflows/release.yml's
+    "Generate SHA256SUMS.txt" step). Returns (ok, detail).
+
+    Fails OPEN (ok=True) only when sha256sums_url itself is empty — i.e. the
+    release predates this feature and never published a manifest at all;
+    there is nothing to compare against, so refusing to update forever on
+    every pre-existing release would be worse than the risk it closes going
+    forward. Any release that DOES publish a manifest is fully enforced:
+    a fetch failure, a missing entry for our filename, or an actual hash
+    mismatch all fail CLOSED and abort the install.
+    """
+    if not sha256sums_url:
+        logging.warning(
+            "Auto-updater: Release has no SHA256SUMS.txt asset (older release) — "
+            "skipping checksum verification for %s.", filename,
+        )
+        return True, ""
+    try:
+        resp = requests.get(sha256sums_url, timeout=15)
+        resp.raise_for_status()
+    except Exception as exc:
+        return False, f"Failed to download SHA256SUMS.txt: {exc}"
+
+    expected = ""
+    for line in resp.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip().lstrip("*") == filename:
+            expected = parts[0].strip().lower()
+            break
+
+    if not expected:
+        return False, f"No checksum entry for {filename} in SHA256SUMS.txt"
+
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha256.update(chunk)
+    actual = sha256.hexdigest().lower()
+
+    if actual != expected:
+        return False, f"Checksum mismatch for {filename}: expected {expected}, got {actual}"
+
+    logging.info("Auto-updater: Checksum verified for %s (%s).", filename, actual)
+    return True, ""
 
 
 def _safe_extract_zip(zf: zipfile.ZipFile, dest_dir: str) -> None:
@@ -348,19 +410,20 @@ class UpdateProgressDialog(wx.Dialog):
     Runs the download in a background thread, updates gauge via CallAfter.
     """
 
-    def __init__(self, parent, new_version: str, main_window, zip_url: str):
+    def __init__(self, parent, new_version: str, main_window, zip_url: str, sha256sums_url: str = ""):
         i18n = main_window.i18n
         super().__init__(
             parent,
             title=i18n.t("update_progress_title"),
             style=wx.DEFAULT_DIALOG_STYLE,
         )
-        self._main_window  = main_window
-        self._new_version  = new_version
-        self._zip_url      = zip_url
-        self._cancelled    = False
-        self._install_ok   = False
-        self._error_msg    = ""
+        self._main_window    = main_window
+        self._new_version    = new_version
+        self._zip_url        = zip_url
+        self._sha256sums_url = sha256sums_url
+        self._cancelled      = False
+        self._install_ok     = False
+        self._error_msg      = ""
         self._build(i18n)
         self.SetMinSize((400, -1))
         self.Fit()
@@ -420,6 +483,24 @@ class UpdateProgressDialog(wx.Dialog):
                 return
 
             logging.info("Auto-updater: Download completed successfully.")
+
+            # ── Verify integrity ─────────────────────────────────────────────────
+            # Before this ZIP is trusted with elevated write access to the
+            # install directory (below), confirm it's byte-for-byte what CI
+            # actually built — not a MITM'd download or a tampered/hijacked
+            # release edit. See _verify_sha256sums()'s docstring for the
+            # fail-open/fail-closed policy.
+            filename = os.path.basename(self._zip_url.split("?")[0])
+            ok, detail = _verify_sha256sums(zip_path, filename, self._sha256sums_url)
+            if not ok:
+                logging.error("Auto-updater: Checksum verification failed for %s: %s", filename, detail)
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    pass
+                self._error_msg = self._main_window.i18n.t("update_checksum_mismatch").format(detail=detail)
+                wx.CallAfter(self.EndModal, wx.ID_ABORT)
+                return
 
             # ── Extract ───────────────────────────────────────────────────────
             extract_dir = tempfile.mkdtemp(prefix="winzapp_ext_")
@@ -623,6 +704,8 @@ class UpdateChecker:
             self._schedule_retry()
             return
 
+        sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
+
         local_version = __version__
         logging.info("Auto-updater: Local version is %s", local_version)
 
@@ -643,7 +726,7 @@ class UpdateChecker:
         lang_code = self._mw.i18n.get_language() if hasattr(self._mw, "i18n") else "pt-BR"
         changelog = resolve_changelog(local_version, remote_version, lang_code, data.get("body", ""))
 
-        wx.CallAfter(self._show_update_dialog, remote_version, changelog, zip_url)
+        wx.CallAfter(self._show_update_dialog, remote_version, changelog, zip_url, sha256sums_url)
 
     def _show_no_update(self):
         i18n = self._mw.i18n
@@ -687,9 +770,11 @@ class UpdateChecker:
             wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
             return
 
-        wx.CallAfter(self._confirm_and_reinstall, remote_version, zip_url)
+        sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
 
-    def _confirm_and_reinstall(self, remote_version: str, zip_url: str):
+        wx.CallAfter(self._confirm_and_reinstall, remote_version, zip_url, sha256sums_url)
+
+    def _confirm_and_reinstall(self, remote_version: str, zip_url: str, sha256sums_url: str = ""):
         i18n = self._mw.i18n
         if wx.MessageBox(
             i18n.t("force_reinstall_confirm_msg").format(version=remote_version),
@@ -698,7 +783,7 @@ class UpdateChecker:
             self._mw,
         ) != wx.YES:
             return
-        self._do_install(remote_version, zip_url)
+        self._do_install(remote_version, zip_url, sha256sums_url)
 
     def _show_reinstall_error(self, error_msg: str):
         i18n = self._mw.i18n
@@ -709,20 +794,20 @@ class UpdateChecker:
             self._mw,
         )
 
-    def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str):
+    def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str, sha256sums_url: str = ""):
         dlg    = UpdateDialog(self._mw, remote_version, changelog)
         result = dlg.ShowModal()
         dlg.Destroy()
 
         if result == wx.ID_YES:
-            self._do_install(remote_version, zip_url)
+            self._do_install(remote_version, zip_url, sha256sums_url)
         else:
             # User said No — retry in 3 hours
             self._schedule_retry()
 
-    def _do_install(self, new_version: str, zip_url: str):
+    def _do_install(self, new_version: str, zip_url: str, sha256sums_url: str = ""):
         while True:
-            prog = UpdateProgressDialog(self._mw, new_version, self._mw, zip_url)
+            prog = UpdateProgressDialog(self._mw, new_version, self._mw, zip_url, sha256sums_url)
             result = prog.run()
             prog.Destroy()
 

@@ -45,6 +45,7 @@ from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, parse_bool_flag as _parse_bool_flag
 from core.database_bridge import DatabaseBridge
+from core import token_vault
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
 import wx
@@ -1098,8 +1099,9 @@ class MainWindow(wx.Frame):
 
     def _on_disconnect(self, event=None):
         """Disconnect from WhatsApp: wipe credentials, stop WebSocket and show pairing dialog."""
+        old_token = self._get_wa_token()
         pi = self.settings.setdefault("privateinfo", {})
-        old_token = pi.pop("WA_token", "")
+        self._set_wa_token("")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
         self.messages_set_completed = False
@@ -4010,18 +4012,65 @@ class MainWindow(wx.Frame):
             cache[path] = snd
         snd.play()
 
+    def _get_wa_token(self) -> str:
+        """Read the WPPConnect session token, transparently migrating a
+        legacy plaintext copy (settings["privateinfo"]["WA_token"]) to
+        DPAPI-protected storage (settings["privateinfo"]["WA_token_protected"],
+        see core/token_vault.py) the first time it's read.
+
+        A blob that fails to unprotect (corrupted, or DPAPI-protected under a
+        different Windows user/machine — e.g. settings.json copied elsewhere)
+        is treated exactly like "no token saved": retrieve_token() already
+        handles that by showing the pairing dialog again, never a crash.
+        """
+        pi = self.settings.get("privateinfo", {})
+        protected = pi.get("WA_token_protected", "")
+        if protected:
+            token = token_vault.unprotect_token(protected)
+            if token:
+                return token
+            # Falls through to the legacy field below only so a token that
+            # somehow still has a plaintext copy alongside a now-unreadable
+            # protected one isn't lost — normally these are mutually exclusive.
+        legacy = pi.get("WA_token", "").strip()
+        if legacy:
+            # One-time migration: re-save protected, remove the plaintext copy.
+            self._set_wa_token(legacy)
+        return legacy
+
+    def _set_wa_token(self, token: str):
+        """Write the WPPConnect session token, DPAPI-protected when
+        available (see core/token_vault.py). Falls back to plaintext only
+        when DPAPI genuinely isn't available (non-Windows, or pywin32's
+        win32crypt missing) — still functional, just not the hardened path.
+        token="" clears both the protected and legacy fields.
+        """
+        pi = self.settings.setdefault("privateinfo", {})
+        if not token:
+            pi.pop("WA_token_protected", None)
+            pi["WA_token"] = ""
+            self.save_settings()
+            return
+        if token_vault.is_available():
+            try:
+                pi["WA_token_protected"] = token_vault.protect_token(token)
+                pi.pop("WA_token", None)  # never leave a plaintext copy lying around
+                self.save_settings()
+                return
+            except Exception as e:
+                logging.warning("[_set_wa_token] DPAPI protection failed, falling back to plaintext: %s", e)
+        pi["WA_token"] = token
+        self.save_settings()
+
     def retrieve_token(self):
-        token = self.settings.get("privateinfo", {}).get("WA_token", "").strip()
+        token = self._get_wa_token()
         if not token:
             # Migration: read from legacy token.tk if WA_token not yet present
             try:
                 with open(data_path("token.tk"), "r") as f:
                     token = f.read().strip()
                 if token:
-                    if "privateinfo" not in self.settings:
-                        self.settings["privateinfo"] = {}
-                    self.settings["privateinfo"]["WA_token"] = token
-                    self.save_settings()
+                    self._set_wa_token(token)
             except Exception:
                 pass
         if token and ":" not in token:
@@ -4035,8 +4084,7 @@ class MainWindow(wx.Frame):
                     if hash_token:
                         hash_token = hash_token.replace("/", "_").replace("+", "-")
                         token = f"{token}:{hash_token}"
-                        self.settings["privateinfo"]["WA_token"] = token
-                        self.save_settings()
+                        self._set_wa_token(token)
             except Exception as e:
                 import logging
                 logging.error("[retrieve_token] Failed to migrate WPPConnect token: %s", e)
