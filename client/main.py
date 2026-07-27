@@ -2241,7 +2241,7 @@ class MainWindow(wx.Frame):
 
         from core.notification_manager import (
             format_notification_title, format_notification_body,
-            format_foreground_sender,
+            format_foreground_sender, format_toast_unread_suffix,
         )
 
         body  = format_notification_body(msg, self, self.i18n)
@@ -2294,7 +2294,8 @@ class MainWindow(wx.Frame):
             return
         title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
-            self.notification_manager.send(title, body, remote_jid)
+            toast_body = f"{body}\n{format_toast_unread_suffix(chat.get('unreadCount'), self.i18n)}"
+            self.notification_manager.send(title, toast_body, remote_jid)
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
@@ -2386,6 +2387,14 @@ class MainWindow(wx.Frame):
         Saves them to local storage, sorts records, and updates the lastMessage/t
         of the chat if the incoming message is newer. Does not trigger notifications or sounds.
         """
+        # Same race as on_new_message() (see its comment above): a reused
+        # pairing socket can deliver history-sync messages via wx.CallAfter
+        # before MainWindow.__init__ has finished creating self.db, which
+        # crashes deep inside _extract_lid_mapping()'s save_data() fallback
+        # with "'MainWindow' object has no attribute 'db'". Nothing is lost
+        # by dropping it here — the initial full sync re-fetches all history.
+        if not self._ui_ready_event.is_set():
+            return
         key        = msg.get("key", {})
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
