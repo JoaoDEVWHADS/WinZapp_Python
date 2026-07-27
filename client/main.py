@@ -5729,6 +5729,16 @@ class MainWindow(wx.Frame):
         same time.  Replaces the old messages.dat blob with a transactional
         full-state import.
         """
+        # Root-level safety net: save_data() is reachable from several
+        # background-thread call paths (see _extract_lid_mapping(),
+        # resolve_lid_jids_via_api()) that can fire before prepare_sync() has
+        # created self.db. Those paths now guard against firing this early,
+        # but this no-op keeps a stray/future call from popping the
+        # "data_save_failed" error dialog instead of just skipping the write
+        # — the next debounced/full save retries once self.db exists.
+        if not hasattr(self, "db") or self.db is None:
+            logging.warning("[save_data] Called before self.db exists — skipping.")
+            return
         with self._save_lock:
             try:
                 lid_to_phone = getattr(self, "_lid_to_phone", {})
@@ -6530,6 +6540,19 @@ class MainWindow(wx.Frame):
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
+        # WebSocketClient.on_messages_upsert() (core/websocket_client.py) calls
+        # this directly on the socket.io callback thread — not via
+        # wx.CallAfter like on_new_message()/on_historical_message() — so it
+        # is not protected by either of their _ui_ready_event guards. A
+        # reused pairing socket can start delivering messages.upsert events
+        # the instant pairing succeeds, before MainWindow.__init__ has
+        # finished creating self.db in prepare_sync(), which crashed here via
+        # the self.db.set_lid_mapping()/upsert_contacts_batch() calls below
+        # (and their save_data() fallback) with "'MainWindow' object has no
+        # attribute 'db'". Safe to drop: the initial full sync re-derives
+        # every LID mapping from scratch regardless.
+        if not self._ui_ready_event.is_set():
+            return
         if not isinstance(msg, dict):
             return
         key = msg.get("key")
@@ -9117,6 +9140,12 @@ class MainWindow(wx.Frame):
     def resolve_lid_jids_via_api(self, jids):
         """Resolve a list of @lid JIDs to phone JIDs using WPPConnect contact endpoint."""
         if not jids:
+            return
+        if not hasattr(self, "db") or self.db is None:
+            # Defense in depth: every known caller is now gated behind
+            # _ui_ready_event (see _extract_lid_mapping()), but this batch
+            # runs on its own background thread and can outlive that check —
+            # bail rather than crash self.db.upsert_contacts_batch() below.
             return
             
         updated_contacts = {}
