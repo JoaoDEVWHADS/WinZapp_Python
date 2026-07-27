@@ -5712,25 +5712,58 @@ class ConversationsPanel(wx.Panel):
             threading.Thread(target=_revoke, daemon=True).start()
 
         # Always delete locally
-        self._sorted_messages.pop(index)
-        self.messages_list.DeleteItem(index)
-        # Keep the unread-separator index and the full (unpaginated) message
-        # list in sync with the row that just disappeared. Without this, every
-        # later consumer of _unread_sep_idx (focus handling, the dismiss
-        # timer, on_incoming_message's separator relocation) kept operating on
-        # the pre-delete row — off by one for every message deleted above the
-        # separator — and _load_more_messages()/_load_older_messages() could
-        # re-introduce the just-deleted message from the still-stale
-        # _all_sorted_messages the next time the user scrolled to the top.
-        if self._unread_sep_idx >= 0 and index < self._unread_sep_idx:
-            self._unread_sep_idx -= 1
         if msg_id:
-            for i, m in enumerate(self._all_sorted_messages):
-                if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id:
-                    self._all_sorted_messages.pop(i)
-                    if i < self._messages_offset:
-                        self._messages_offset -= 1
-                    break
+            self.remove_messages_by_id({msg_id}, focus_previous=True)
+        else:
+            self._sorted_messages.pop(index)
+            self.messages_list.DeleteItem(index)
+
+    def remove_messages_by_id(self, msg_ids: set, focus_previous: bool = False):
+        """Remove every row whose key.id is in msg_ids from messages_list,
+        _sorted_messages, _all_sorted_messages and self.conversation's
+        records (plus the DB copy) — keeping the unread-separator index and
+        pagination offset in sync with whatever just disappeared.
+
+        Shared by _on_menu_delete_message() (single message, user-initiated)
+        and MainWindow._mirror_remote_deletions() (a batch mirrored in from
+        a phone-side deletion detected by the periodic poll).
+
+        focus_previous=True moves the list's internal focused/selected row
+        to just before the earliest removed one (or to row 0 if the removal
+        started at the top) once done — WITHOUT calling messages_list.
+        SetFocus(), so a background-triggered removal never steals keyboard
+        focus from wherever the user actually is right now. The caller is
+        already interacting with the list for the user-initiated path, so
+        not stealing focus there either is harmless.
+        """
+        if not msg_ids:
+            return
+        indices = sorted(
+            i for i, m in enumerate(self._sorted_messages)
+            if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids
+        )
+        if not indices:
+            return
+        earliest = indices[0]
+        # Keep the unread-separator index and the full (unpaginated) message
+        # list in sync with the rows that just disappeared. Without this,
+        # every later consumer of _unread_sep_idx (focus handling, the
+        # dismiss timer, on_incoming_message's separator relocation) kept
+        # operating on pre-delete rows — off by one for every message
+        # deleted above the separator — and _load_more_messages()/
+        # _load_older_messages() could re-introduce a just-deleted message
+        # from the still-stale _all_sorted_messages on the next scroll-to-top.
+        for idx in reversed(indices):
+            self._sorted_messages.pop(idx)
+            self.messages_list.DeleteItem(idx)
+            if self._unread_sep_idx >= 0 and idx < self._unread_sep_idx:
+                self._unread_sep_idx -= 1
+        for i in range(len(self._all_sorted_messages) - 1, -1, -1):
+            m = self._all_sorted_messages[i]
+            if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids:
+                self._all_sorted_messages.pop(i)
+                if i < self._messages_offset:
+                    self._messages_offset -= 1
         if self.conversation:
             records = (
                 self.conversation.get("messages", {})
@@ -5739,14 +5772,23 @@ class ConversationsPanel(wx.Panel):
             )
             self.conversation["messages"]["messages"]["records"] = [
                 m for m in records
-                if m.get("key", {}).get("id") != msg_id
+                if m.get("key", {}).get("id") not in msg_ids
             ]
-            try:
-                self.main_window.db.delete_message(
-                    self.conversation.get("remoteJid", ""), msg_id
-                )
-            except Exception:
-                logging.exception("[conversations] delete_message failed")
+            for mid in msg_ids:
+                try:
+                    self.main_window.db.delete_message(
+                        self.conversation.get("remoteJid", ""), mid
+                    )
+                except Exception:
+                    logging.exception("[conversations] delete_message failed for %s", mid)
+
+        if focus_previous:
+            count = self.messages_list.GetItemCount()
+            if count > 0:
+                new_focus = min(max(earliest - 1, 0), count - 1)
+                self.messages_list.Focus(new_focus)
+                self.messages_list.Select(new_focus, True)
+                self.messages_list.EnsureVisible(new_focus)
 
     def _on_accel_edit_message(self, event):
         """Alt+E: enter edit mode for the focused own text message."""

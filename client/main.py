@@ -5324,6 +5324,14 @@ class MainWindow(wx.Frame):
                                 # Keep the local count to prevent startup wipe of unread badges.
                                 if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
                                     continue
+                                # Never resurrect unread count for the conversation the
+                                # user has open right now — mark_conversation_as_read()
+                                # already set it to 0 locally, and this snapshot can be
+                                # a few seconds stale relative to that. Same guard as
+                                # on_chat_unread_update()'s live-event path.
+                                _cp = getattr(self, "conversations_panel", None)
+                                if jid == getattr(_cp, "_last_open_jid", ""):
+                                    v = 0
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see
@@ -6244,6 +6252,11 @@ class MainWindow(wx.Frame):
                     if result is not None:
                         self.chats = result
                     wx.CallAfter(self._schedule_set_chats)
+                    # Phone-side clears/deletions — active conversation only,
+                    # one extra cheap GET per cycle, nothing at all when no
+                    # conversation is open. See the method's own docstring
+                    # for why this stays scoped to just the open chat.
+                    self._reconcile_active_conversation_with_remote()
                 except Exception as e:
                     logging.warning(f"[periodic_contacts_sync] error: {e}")
 
@@ -7507,6 +7520,132 @@ class MainWindow(wx.Frame):
             logging.warning("[sync_chat_messages] incremental DB save failed for %s: %s",
                             remote_jid, exc)
 
+    # ── Phone-side deletions/clears — active conversation only ──────────────
+    # sync_chat_messages() above deliberately never removes anything: its
+    # "extra"/"late_extra" merges exist specifically to protect messages that
+    # arrived live but the API snapshot hasn't indexed yet, so reusing it here
+    # would silently undo real deletions. Detecting a message (or a whole
+    # conversation) that vanished from the phone needs its own comparison —
+    # kept scoped to the conversation the user has open right now: diffing
+    # every chat's messages against the server on every 60s poll would turn
+    # one cheap GET into dozens/hundreds against a local API that is already
+    # doing real work, for a benefit (a stale bubble the user probably
+    # wouldn't notice) that doesn't justify the cost. For the open
+    # conversation specifically, the cost is one extra GET per poll and the
+    # payoff (not staring at a message that no longer exists, or a "cleared"
+    # conversation that stays full until F5) is worth it.
+
+    def _fetch_remote_message_ids(self, remote_jid: str) -> "set[str] | None":
+        """Best-effort GET of the message IDs WPPConnect currently has for
+        remote_jid. Returns None on ANY failure/ambiguity — a failed fetch
+        must never be read as "the phone deleted everything". IDs are
+        extracted via the same _normalize_wpp_message() sync_chat_messages()
+        uses, so they compare equal to what's stored in key.id locally.
+        """
+        if not self.ws:
+            return None
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid:
+            phone = lid
+        elif remote_jid.endswith("@s.whatsapp.net"):
+            phone = remote_jid.split("@")[0] + "@c.us"
+        else:
+            phone = remote_jid
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code not in (200, 201):
+                return None
+            body = response.json()
+            wpp_messages = body.get("response", []) if isinstance(body, dict) else []
+            if not isinstance(wpp_messages, list):
+                return None
+            ids = set()
+            for wm in wpp_messages:
+                if not isinstance(wm, dict):
+                    continue
+                try:
+                    normalized = self.ws._normalize_wpp_message(wm)
+                except Exception:
+                    continue
+                mid = normalized.get("key", {}).get("id", "")
+                if mid:
+                    ids.add(mid)
+            return ids
+        except Exception as e:
+            logging.warning(f"[_fetch_remote_message_ids] failed for {remote_jid}: {e}")
+            return None
+
+    def _reconcile_active_conversation_with_remote(self):
+        """Detect a phone-side clear or individual message deletions in
+        whichever conversation is currently open, and mirror them locally.
+        Called once per periodic-poll cycle (start_periodic_contacts_sync);
+        a no-op — no HTTP call at all — whenever no conversation is open.
+        """
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        remote_jid = self._normalize_jid(cp.conversation.get("remoteJid", ""))
+        if not remote_jid or not getattr(self, "messages_set_completed", False):
+            return
+        chat = self.chats.get(remote_jid)
+        if not chat:
+            return
+        records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        local_ids = {
+            r.get("key", {}).get("id") for r in records
+            if isinstance(r, dict) and not r.get("_local_pending") and r.get("key", {}).get("id")
+        }
+        # Too little history for "the server has fewer messages" to mean
+        # anything other than "this is just a short conversation".
+        if len(local_ids) < 2:
+            return
+        remote_ids = self._fetch_remote_message_ids(remote_jid)
+        if remote_ids is None:
+            return
+        missing_ids = local_ids - remote_ids
+        if not missing_ids:
+            return
+        if missing_ids == local_ids:
+            # Every local message is gone server-side — a clear, not a
+            # handful of individually deleted messages.
+            wx.CallAfter(self._mirror_remote_clear, remote_jid)
+        else:
+            wx.CallAfter(self._mirror_remote_deletions, remote_jid, missing_ids)
+
+    def _mirror_remote_clear(self, remote_jid: str):
+        """Mirror a conversation cleared on the phone. Runs on the main thread."""
+        cp = getattr(self, "conversations_panel", None)
+        # Re-check the conversation is still the one open and still looks
+        # cleared — time passed between the background fetch and this
+        # CallAfter actually running (user could have switched away, or a
+        # new message could have arrived in the meantime).
+        if cp is None or cp.conversation is None:
+            return
+        if self._normalize_jid(cp.conversation.get("remoteJid", "")) != remote_jid:
+            return
+        logging.info("[_mirror_remote_clear] %s appears cleared on the phone — mirroring locally.", remote_jid)
+        # record_cutoff=False: this isn't a cutoff WE are choosing to
+        # remember, the server is already the source of truth going forward.
+        self.clear_chat_messages_local(remote_jid, record_cutoff=False)
+        cp.conversation = self.chats.get(remote_jid, cp.conversation)
+        cp.populate_messages()
+        self._schedule_set_chats()
+
+    def _mirror_remote_deletions(self, remote_jid: str, msg_ids: set):
+        """Mirror one or more messages deleted on the phone from the
+        currently open conversation. Runs on the main thread."""
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        if self._normalize_jid(cp.conversation.get("remoteJid", "")) != remote_jid:
+            return
+        logging.info("[_mirror_remote_deletions] %d message(s) in %s no longer on the phone — removing locally.",
+                     len(msg_ids), remote_jid)
+        cp.remove_messages_by_id(msg_ids, focus_previous=True)
+
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
     # to download older media causes the WPPConnect to enter a 5-second retry
     # loop for every expired URL, which starves the API thread pool and eventually
@@ -8766,7 +8905,12 @@ class MainWindow(wx.Frame):
         # Never resurrect unread count for a conversation the user already read
         # locally (mark_conversation_as_read set it to 0). The server may still
         # carry a stale unread count from before the read-ack arrived.
-        if normalized == getattr(self, "_last_open_jid", ""):
+        # NOTE: _last_open_jid lives on ConversationsPanel, not MainWindow —
+        # this used to read `self._last_open_jid` directly, which never
+        # existed on MainWindow and so always fell back to "", silently
+        # disabling this guard entirely.
+        cp = getattr(self, "conversations_panel", None)
+        if normalized == getattr(cp, "_last_open_jid", ""):
             unread_count = 0
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
