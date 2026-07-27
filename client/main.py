@@ -436,6 +436,25 @@ class MediaExpiredError(Exception):
 # disk in SQLite, just not resident).
 _MAX_RESIDENT_MESSAGES_PER_CHAT = 1000
 
+# Message types that are WhatsApp/WPPConnect system events, not something a
+# person actually sent — someone joining/leaving a group, a group name/photo/
+# settings change, a revoke, etc. These are still stored and shown as a
+# timeline entry when the conversation is opened (see
+# ConversationsPanel._is_displayable_message(), which allows them), but must
+# never be treated as "new mail": they used to bump an old, already-read
+# conversation back to the top of the list, inflate its unread badge, and
+# even fire a toast/sound notification, purely because a group's metadata
+# changed weeks after everyone stopped talking in it. is_countable_message()
+# gates every one of those: the chat-list sort timestamp, the unread counter
+# (and therefore the unread separator, which reads it), and notifications.
+_NON_COUNTABLE_MESSAGE_TYPES = frozenset({"groupNotification", "protocolMessage"})
+
+
+def is_countable_message(msg: dict) -> bool:
+    """True for a message type that should count as real conversation
+    activity (unread badge, chat-list sort order, notifications)."""
+    return isinstance(msg, dict) and msg.get("messageType") not in _NON_COUNTABLE_MESSAGE_TYPES
+
 
 class MainWindow(wx.Frame):
     def __init__(self):
@@ -2138,7 +2157,11 @@ class MainWindow(wx.Frame):
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
             msg_ts //= 1000
-        if msg_ts > int(chat.get("t", 0) or 0):
+        # System events (group join/leave, settings changes, revokes, ...)
+        # must not bump the chat's sort timestamp — see is_countable_message().
+        # Without this an old, already-read conversation jumped back to the
+        # top of the list purely because a group's metadata changed.
+        if is_countable_message(msg) and msg_ts > int(chat.get("t", 0) or 0):
             chat["t"] = msg_ts
 
         # ── Avoid duplicate insertions or resolve pending ones ────────────────
@@ -2250,7 +2273,8 @@ class MainWindow(wx.Frame):
         self._msg_bg_executor.submit(_bg_insert_msg)
 
         # ── Update unread count (only for messages we received) ───────────────
-        if not from_me:
+        # System events never count as unread — see is_countable_message().
+        if not from_me and is_countable_message(msg):
             # Don't increment unread for the conversation already open — it is
             # immediately visible to the user and will be marked as read.
             _cp   = getattr(self, "conversations_panel", None)
@@ -2285,6 +2309,10 @@ class MainWindow(wx.Frame):
 
         # ── Send notification ─────────────────────────────────────────────────
         if from_me:
+            return
+        # System events never trigger a sound/toast/AO2 announcement either —
+        # see is_countable_message().
+        if not is_countable_message(msg):
             return
 
         # Guard: do not play sound or show notification for messages older than 60 seconds
@@ -2533,13 +2561,16 @@ class MainWindow(wx.Frame):
         if len(records) > _MAX_RESIDENT_MESSAGES_PER_CHAT:
             del records[:len(records) - _MAX_RESIDENT_MESSAGES_PER_CHAT]
 
-        # Update lastMessage and 't' (timestamp) if this message is newer
+        # Update lastMessage and 't' (timestamp) if this message is newer.
+        # System events never count — see is_countable_message() — otherwise
+        # a group-metadata change arriving via history sync could still bump
+        # an old, already-read conversation back to the top of the list.
         msg_ts = int(msg.get("messageTimestamp") or msg.get("timestamp") or 0)
         current_lm = chat.get("lastMessage")
         lm_ts = 0
         if isinstance(current_lm, dict):
             lm_ts = int(current_lm.get("messageTimestamp") or current_lm.get("timestamp") or 0)
-        if msg_ts >= lm_ts:
+        if is_countable_message(msg) and msg_ts >= lm_ts:
             chat["lastMessage"] = msg
             chat["t"] = msg_ts
             # Save updated chat to DB
@@ -6454,21 +6485,29 @@ class MainWindow(wx.Frame):
 
         # Pinned chats float to the top; within each group sort by most-recent
         # message timestamp descending (newest first), then alphabetically.
+        #
+        # Only counts is_countable_message() records — a system event (group
+        # join/leave, settings change, revoke, ...) stored in this chat's
+        # records must never push it back to the top of the list just
+        # because its timestamp is the newest one on file. chat["t"]/
+        # lastMessage are already never set from a non-countable message
+        # (see on_new_message()/on_historical_message()), but this also
+        # scans every raw record directly, so it needs the same filter.
         def _chat_last_ts(c):
             # Fallback to chat's own last activity timestamp (t)
             chat_ts = int(c.get("t", 0) or 0)
             if chat_ts > 1_000_000_000_000:
                 chat_ts //= 1000
             ts = chat_ts
-            
+
             lm = c.get("lastMessage")
-            if isinstance(lm, dict):
+            if isinstance(lm, dict) and is_countable_message(lm):
                 lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
                 if lm_ts > 1_000_000_000_000:
                     lm_ts //= 1000
                 if lm_ts > ts:
                     ts = lm_ts
-                
+
             records_wrapper = c.get("messages") or {}
             if isinstance(records_wrapper, dict):
                 inner_wrapper = records_wrapper.get("messages") or {}
@@ -6476,13 +6515,13 @@ class MainWindow(wx.Frame):
                     records_copy = list(inner_wrapper.get("records") or [])
                     if records_copy:
                         for m in records_copy:
-                            if isinstance(m, dict):
+                            if isinstance(m, dict) and is_countable_message(m):
                                 t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
                                 if t > 1_000_000_000_000:
                                     t //= 1000
                                 if t > ts:
                                     ts = t
-                                    
+
             return ts if ts else 1
 
         def _sort_key(pair):
