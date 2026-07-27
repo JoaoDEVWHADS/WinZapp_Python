@@ -9971,6 +9971,9 @@ class MainWindow(wx.Frame):
         if not jid or jid.endswith("@newsletter"):
             return
         
+        if not hasattr(self, "_subscribed_presence_cache"):
+            self._subscribed_presence_cache = {}
+            
         jids_to_subscribe = [jid]
         phone_to_lid = getattr(self, "_phone_to_lid", {})
         lid_to_phone = getattr(self, "_lid_to_phone", {})
@@ -9980,9 +9983,20 @@ class MainWindow(wx.Frame):
         elif jid in lid_to_phone:
             jids_to_subscribe.append(lid_to_phone[jid])
             
+        now = time.time()
+        targets = []
+        for target_jid in set(jids_to_subscribe):
+            last_sub = self._subscribed_presence_cache.get(target_jid, 0)
+            if now - last_sub > 10.0:  # Throttle duplicate subscriptions within 10 seconds
+                self._subscribed_presence_cache[target_jid] = now
+                targets.append(target_jid)
+                
+        if not targets:
+            return
+            
         def _api():
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-            for target_jid in set(jids_to_subscribe):
+            for target_jid in targets:
                 is_group = target_jid.endswith("@g.us")
                 is_lid = target_jid.endswith("@lid")
                 phone = target_jid.replace("@s.whatsapp.net", "@c.us")
@@ -9994,6 +10008,7 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error("[subscribe_presence] Error subscribing to %s: %s", phone, e)
         threading.Thread(target=_api, daemon=True).start()
+
 
     def get_group_info(self, jid: str) -> dict:
         """Fetch group metadata via GET /api/{session}/group-info/{groupId}"""
