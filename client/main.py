@@ -1463,7 +1463,7 @@ class MainWindow(wx.Frame):
                     os.remove(media_failed_path)
             except Exception as exc:
                 logging.warning("[resync_all] failed to remove media_failed.json: %s", exc)
-            self._media_failed_ids = set()
+            self._media_failed_ids = {}
 
             # Resync from scratch, exactly like a fresh pairing. start_sync()
             # takes over _initial_sync_running from here (it sets it True
@@ -7722,20 +7722,44 @@ class MainWindow(wx.Frame):
                                               # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 60              # seconds per request during bulk sync
 
-    def _load_media_failed_ids(self) -> set:
-        """Load the set of message IDs whose media CDN URL has previously expired."""
+    def _load_media_failed_ids(self) -> dict:
+        """Load {message_id: failed_at_timestamp} for media whose CDN URL has
+        previously expired (403/410) — checked by sync_if_media() to skip a
+        pointless repeat download attempt.
+
+        This was a bare set with no eviction, growing forever and persisted
+        across every restart (data/media_failed.json) — for an account with
+        a lot of old/expired media, a genuine unbounded-growth source. Every
+        entry is provably dead weight once its message is older than
+        _MEDIA_MAX_AGE_SECONDS anyway: sync_if_media()'s own age check skips
+        it before ever consulting this set, so there is nothing lost by
+        pruning entries past that point — they can never be looked up again.
+        """
         try:
             with open(data_path("media_failed.json"), "r", encoding="utf-8") as f:
-                return set(json.load(f))
+                raw = json.load(f)
         except Exception:
-            return set()
+            return {}
+        now = time.time()
+        if isinstance(raw, dict):
+            return {
+                mid: ts for mid, ts in raw.items()
+                if isinstance(ts, (int, float)) and (now - ts) <= self._MEDIA_MAX_AGE_SECONDS
+            }
+        if isinstance(raw, list):
+            # Legacy format (plain list from before this became a dict) —
+            # no timestamp to judge age by, so treat every entry as freshly
+            # failed rather than either keeping stale ones forever or
+            # discarding real, still-useful skip-hints outright.
+            return {mid: now for mid in raw if isinstance(mid, str)}
+        return {}
 
     def _save_media_failed_ids(self):
-        """Persist the failed-media set so expired IDs are skipped on future launches."""
+        """Persist the failed-media map so expired IDs are skipped on future launches."""
         with self._media_failed_lock:
             try:
                 with open(data_path("media_failed.json"), "w", encoding="utf-8") as f:
-                    json.dump(list(self._media_failed_ids), f)
+                    json.dump(self._media_failed_ids, f)
             except Exception:
                 pass
 
@@ -7790,7 +7814,7 @@ class MainWindow(wx.Frame):
                     wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
         except MediaExpiredError:
             if msg_id:
-                self._media_failed_ids.add(msg_id)
+                self._media_failed_ids[msg_id] = time.time()
         except Exception:
             pass
 
