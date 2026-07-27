@@ -16,16 +16,44 @@
 
 static BOOL get_install_dir(wchar_t *out, DWORD char_count)
 {
-    HKEY hkey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, REGKEY_UNINSTALL, 0,
-                      KEY_READ, &hkey) != ERROR_SUCCESS)
-        return FALSE;
-    DWORD type  = REG_SZ;
-    DWORD bytes = char_count * sizeof(wchar_t);
-    LONG  r = RegQueryValueExW(hkey, L"InstallLocation", NULL, &type,
-                               (BYTE *)out, &bytes);
-    RegCloseKey(hkey);
-    return r == ERROR_SUCCESS;
+    /* The installer registers under HKEY_LOCAL_MACHINE when it can (running
+     * elevated) and falls back to HKEY_CURRENT_USER otherwise (the default,
+     * non-admin install path) — check both, machine-wide first, so this
+     * finds the entry regardless of which one the install actually used. */
+    const HKEY hives[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+    for (int i = 0; i < 2; i++) {
+        HKEY hkey;
+        if (RegOpenKeyExW(hives[i], REGKEY_UNINSTALL, 0,
+                          KEY_READ, &hkey) != ERROR_SUCCESS)
+            continue;
+        DWORD type  = REG_SZ;
+        DWORD bytes = char_count * sizeof(wchar_t);
+        LONG  r = RegQueryValueExW(hkey, L"InstallLocation", NULL, &type,
+                                   (BYTE *)out, &bytes);
+        RegCloseKey(hkey);
+        if (r == ERROR_SUCCESS)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Build an extended-length (\\?\) form of an absolute path so DeleteFileW is
+ * not limited to MAX_PATH — mirrors installer.c's to_extended_path(), needed
+ * because the installer can lay down files deeper than 260 chars under a
+ * long install path (deep node_modules/ trees). */
+static void to_extended_path(wchar_t *out, size_t out_cap, const wchar_t *in)
+{
+    if (in[0] == L'\\' && in[1] == L'\\' && in[2] == L'?' && in[3] == L'\\') {
+        wcsncpy(out, in, out_cap - 1);
+        out[out_cap - 1] = L'\0';
+        return;
+    }
+    if (((in[0] >= L'A' && in[0] <= L'Z') || (in[0] >= L'a' && in[0] <= L'z')) && in[1] == L':') {
+        swprintf(out, (int)out_cap, L"\\\\?\\%s", in);
+    } else {
+        wcsncpy(out, in, out_cap - 1);
+        out[out_cap - 1] = L'\0';
+    }
 }
 
 /* ── Delete files listed in installed_files.dat ──────────────────────── */
@@ -67,8 +95,10 @@ static void delete_installed_files(const wchar_t *install_dir)
         wchar_t save = *end;
         *end = L'\0';
         if (wcslen(p) > 0) {
-            SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL);
-            DeleteFileW(p);
+            wchar_t p_ext[32768];
+            to_extended_path(p_ext, 32768, p);
+            SetFileAttributesW(p_ext, FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(p_ext);
         }
         *end = save;
         while (*end == L'\r' || *end == L'\n') end++;
@@ -104,7 +134,10 @@ static void remove_shortcuts(void)
 
 static void remove_registry_entry(void)
 {
+    /* Remove from both hives — harmless no-op on whichever one the install
+     * didn't use (see get_install_dir()). */
     RegDeleteKeyW(HKEY_LOCAL_MACHINE, REGKEY_UNINSTALL);
+    RegDeleteKeyW(HKEY_CURRENT_USER, REGKEY_UNINSTALL);
 }
 
 /* ── Schedule self-delete via temp batch file ─────────────────────────── */

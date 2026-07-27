@@ -130,17 +130,6 @@ def tmp_dir() -> Path:
         yield Path(d)
 
 
-@pytest.fixture
-def temp_messages_dat(tmp_dir: Path, fernet_key: bytes, sample_data: dict) -> Path:
-    """Create a real encrypted messages.dat from sample_data and return its path."""
-    from core.utils import encrypt_json
-
-    path = tmp_dir / "messages.dat"
-    encrypted = encrypt_json(sample_data, fernet_key)
-    path.write_bytes(encrypted)
-    return path
-
-
 # ── Fixtures: Async DatabaseManager ───────────────────────────────────────────
 
 

@@ -1,6 +1,11 @@
 import ctypes
+import os
 import wx
 from core.i18n import LANGUAGE_NAMES
+from core.sound_system import (
+    SOUND_EVENTS, ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path,
+    DEFAULT_PACK_ID, import_soundpack, AlertPreviewController,
+)
 
 # Win32 modifier constants for RegisterHotKey
 _MOD_ALT     = 0x0001
@@ -125,6 +130,12 @@ class SettingsDialog(wx.Dialog):
         self.Fit()
         self.SetMinSize((360, -1))
         self.Centre()
+        # Enter on the sound events list must toggle the selected event, not
+        # trigger the dialog's default OK button — EVT_CHAR_HOOK fires before
+        # that default-button handling, so it's the only reliable place to
+        # intercept Enter (Space alone is caught fine by the list's own
+        # EVT_KEY_DOWN handler, since Space has no such competing default).
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_dialog_char_hook)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -154,11 +165,6 @@ class SettingsDialog(wx.Dialog):
             choices=list(LANGUAGE_NAMES.values()),
         )
         gen_sizer.Add(self._lang_combo, 0, wx.EXPAND | wx.ALL, 8)
-
-        self._sounds_check = wx.CheckBox(
-            self._general_page, label=i18n.t("sounds_label")
-        )
-        gen_sizer.Add(self._sounds_check, 0, wx.ALL, 8)
 
         self._noise_reduction_check = wx.CheckBox(
             self._general_page, label=i18n.t("noise_reduction_label")
@@ -361,6 +367,134 @@ class SettingsDialog(wx.Dialog):
 
         self._custom_api_check.Bind(wx.EVT_CHECKBOX, self._on_custom_api_toggle)
 
+        # ── Sound Events tab ─────────────────────────────────────────────────
+        self._sound_events_page = wx.Panel(self._notebook)
+        se_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._sound_pack_label = wx.StaticText(
+            self._sound_events_page, label=i18n.t("sound_pack_label")
+        )
+        se_sizer.Add(self._sound_pack_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._sound_pack_combo = wx.ComboBox(self._sound_events_page, style=wx.CB_READONLY)
+        se_sizer.Add(self._sound_pack_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._import_sound_pack_btn = wx.Button(
+            self._sound_events_page, label=i18n.t("import_sound_pack_button")
+        )
+        se_sizer.Add(self._import_sound_pack_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self._sound_events_list_label = wx.StaticText(
+            self._sound_events_page, label=i18n.t("sound_events_list_label")
+        )
+        se_sizer.Add(self._sound_events_list_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        # A plain wx.ListBox, not wx.CheckListBox: NVDA does not reliably
+        # expose CheckListBox items' checked state or checkbox role on
+        # Windows, so each item's on/off state is spelled out in its own
+        # label instead (", Ativado"/", Desativado") — Enter/Space toggles
+        # it. See _sound_event_label()/_toggle_current_sound_event().
+        self._sound_events_list = wx.ListBox(self._sound_events_page)
+        se_sizer.Add(self._sound_events_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        self._sound_event_path_label = wx.StaticText(
+            self._sound_events_page, label=i18n.t("sound_event_path_label")
+        )
+        se_sizer.Add(self._sound_event_path_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._sound_event_path_field = wx.TextCtrl(self._sound_events_page, style=wx.TE_DONTWRAP)
+        se_sizer.Add(self._sound_event_path_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        se_btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self._activate_all_btn = wx.Button(
+            self._sound_events_page, label=i18n.t("activate_all_sounds")
+        )
+        self._deactivate_all_btn = wx.Button(
+            self._sound_events_page, label=i18n.t("deactivate_all_sounds")
+        )
+        se_btn_row.Add(self._activate_all_btn, 0, wx.RIGHT, 6)
+        se_btn_row.Add(self._deactivate_all_btn, 0)
+        se_sizer.Add(se_btn_row, 0, wx.ALL, 8)
+
+        self._sound_events_page.SetSizer(se_sizer)
+        self._notebook.AddPage(self._sound_events_page, i18n.t("tab_sound_events"))
+
+        self._sound_pack_combo.Bind(wx.EVT_COMBOBOX, self._on_sound_pack_selected)
+        self._import_sound_pack_btn.Bind(wx.EVT_BUTTON, self._on_import_sound_pack)
+        self._sound_events_list.Bind(wx.EVT_LISTBOX, self._on_sound_event_selected)
+        self._sound_events_list.Bind(wx.EVT_KEY_DOWN, self._on_sound_event_list_key_down)
+        self._sound_event_path_field.Bind(wx.EVT_TEXT, self._on_sound_event_path_changed)
+        self._activate_all_btn.Bind(wx.EVT_BUTTON, lambda e: self._set_all_sound_events(True))
+        self._deactivate_all_btn.Bind(wx.EVT_BUTTON, lambda e: self._set_all_sound_events(False))
+
+        # ── Alert Tones tab ──────────────────────────────────────────────────
+        self._alert_page = wx.Panel(self._notebook)
+        alert_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._alert_choice_keys = alert_tone_choice_keys()
+        alert_choice_labels = [i18n.t("alert_tone_default")] + [
+            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
+        ] + [i18n.t("alert_tone_custom")]
+
+        self._alert_private_label = wx.StaticText(
+            self._alert_page, label=i18n.t("alert_tone_private_label")
+        )
+        alert_sizer.Add(self._alert_private_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._alert_private_combo = wx.ComboBox(
+            self._alert_page, style=wx.CB_READONLY, choices=alert_choice_labels
+        )
+        alert_sizer.Add(self._alert_private_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._alert_private_preview_btn = wx.Button(
+            self._alert_page, label=i18n.t("preview_sound_play")
+        )
+        alert_sizer.Add(self._alert_private_preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self._alert_private_custom_label = wx.StaticText(
+            self._alert_page, label=i18n.t("alert_tone_custom_path_label")
+        )
+        alert_sizer.Add(self._alert_private_custom_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._alert_private_custom_field = wx.TextCtrl(self._alert_page, style=wx.TE_DONTWRAP)
+        alert_sizer.Add(self._alert_private_custom_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._alert_group_label = wx.StaticText(
+            self._alert_page, label=i18n.t("alert_tone_group_label")
+        )
+        alert_sizer.Add(self._alert_group_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._alert_group_combo = wx.ComboBox(
+            self._alert_page, style=wx.CB_READONLY, choices=alert_choice_labels
+        )
+        alert_sizer.Add(self._alert_group_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._alert_group_preview_btn = wx.Button(
+            self._alert_page, label=i18n.t("preview_sound_play")
+        )
+        alert_sizer.Add(self._alert_group_preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self._alert_group_custom_label = wx.StaticText(
+            self._alert_page, label=i18n.t("alert_tone_custom_path_label")
+        )
+        alert_sizer.Add(self._alert_group_custom_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._alert_group_custom_field = wx.TextCtrl(self._alert_page, style=wx.TE_DONTWRAP)
+        alert_sizer.Add(self._alert_group_custom_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._alert_page.SetSizer(alert_sizer)
+        self._notebook.AddPage(self._alert_page, i18n.t("tab_alert_tones"))
+
+        self._alert_private_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
+        self._alert_group_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
+
+        # Preview buttons — sharing a group so starting one stops the other.
+        _alert_preview_group = []
+        self._alert_private_preview = AlertPreviewController(
+            self.main_window, self._alert_private_preview_btn,
+            lambda: self._resolve_alert_preview_path("private"),
+            group=_alert_preview_group,
+        )
+        self._alert_group_preview = AlertPreviewController(
+            self.main_window, self._alert_group_preview_btn,
+            lambda: self._resolve_alert_preview_path("group"),
+            group=_alert_preview_group,
+        )
+
         # ── Audio playback tab ───────────────────────────────────────────────
         self._audio_page = wx.Panel(self._notebook)
         audio_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -408,9 +542,6 @@ class SettingsDialog(wx.Dialog):
             self._lang_combo.SetSelection(self._lang_codes.index(lang_code))
         else:
             self._lang_combo.SetSelection(0)
-
-        sounds = self.main_window.settings.get("general", {}).get("sounds_enabled", True)
-        self._sounds_check.SetValue(sounds)
 
         noise_red = self.main_window.settings.get("general", {}).get("noise_reduction_enabled", False)
         self._noise_reduction_check.SetValue(noise_red)
@@ -503,6 +634,152 @@ class SettingsDialog(wx.Dialog):
 
         self._update_fields_state()
 
+        # Sound events / packs
+        self.main_window.refresh_sound_packs()
+        self._pack_event_settings = {}
+        self._reload_sound_pack_choices()
+
+        # Alert tones
+        tones = self.main_window.settings.get("alert_tones", {})
+        self._set_alert_combo(self._alert_private_combo, tones.get("private", "default"))
+        self._alert_private_custom_field.SetValue(tones.get("private_custom_path", ""))
+        self._set_alert_combo(self._alert_group_combo, tones.get("group", "default"))
+        self._alert_group_custom_field.SetValue(tones.get("group_custom_path", ""))
+        self._update_alert_custom_field_state()
+
+    def _set_alert_combo(self, combo, choice_key: str):
+        try:
+            idx = self._alert_choice_keys.index(choice_key)
+        except ValueError:
+            idx = 0
+        combo.SetSelection(idx)
+
+    # ── Soundpacks (Sound Events tab) ────────────────────────────────────────
+
+    def _reload_sound_pack_choices(self, select_pack_id: "str | None" = None):
+        """(Re)populate the pack combobox from main_window._sound_packs and
+        show the given pack's (or the currently-active, or default) settings.
+        Called on initial load and again after a successful pack import.
+        """
+        i18n = self.main_window.i18n
+        packs = self.main_window._sound_packs
+        self._sound_pack_ids = sorted(
+            packs.keys(), key=lambda pid: (pid != DEFAULT_PACK_ID, packs[pid]["name"].lower())
+        )
+        pack_labels = [
+            i18n.t("sound_pack_default_label") if pid == DEFAULT_PACK_ID else packs[pid]["name"]
+            for pid in self._sound_pack_ids
+        ]
+        self._sound_pack_combo.Set(pack_labels)
+
+        if select_pack_id and select_pack_id in self._sound_pack_ids:
+            target = select_pack_id
+        else:
+            target = self.main_window.settings.get("active_sound_pack", DEFAULT_PACK_ID)
+            if target not in self._sound_pack_ids:
+                target = DEFAULT_PACK_ID if DEFAULT_PACK_ID in self._sound_pack_ids else (
+                    self._sound_pack_ids[0] if self._sound_pack_ids else None
+                )
+        if not target:
+            return
+
+        # Seed working (in-memory, editable) settings for any pack not
+        # already tracked this dialog session, from what's actually stored.
+        stored = self.main_window.settings.get("sound_events", {})
+        for pid in self._sound_pack_ids:
+            if pid in self._pack_event_settings:
+                continue
+            pack_stored = stored.get(pid, {})
+            self._pack_event_settings[pid] = {}
+            for key, _default_filename in SOUND_EVENTS:
+                cfg = pack_stored.get(key) or {}
+                self._pack_event_settings[pid][key] = {
+                    "enabled": cfg.get("enabled", True),
+                    "path": cfg.get("path", ""),
+                }
+
+        self._current_pack_id = target
+        self._sound_pack_combo.SetSelection(self._sound_pack_ids.index(target))
+        self._load_sound_events_display(target)
+
+    def _sound_event_label(self, key: str, enabled: bool) -> str:
+        """Item label spelling out the on/off state in text (', Ativado' /
+        ', Desativado') since NVDA can't reliably read a CheckListBox item's
+        checked state or checkbox role on Windows."""
+        i18n = self.main_window.i18n
+        state = i18n.t("sound_event_state_enabled") if enabled else i18n.t("sound_event_state_disabled")
+        return f"{i18n.t(f'sound_event_{key}')}, {state}"
+
+    def _load_sound_events_display(self, pack_id: str):
+        """Populate the list's item labels (name + on/off state) from working
+        settings for `pack_id`, and select/display the first event's path."""
+        settings_for_pack = self._pack_event_settings.get(pack_id, {})
+        labels = [
+            self._sound_event_label(key, (settings_for_pack.get(key) or {}).get("enabled", True))
+            for key, _default_filename in SOUND_EVENTS
+        ]
+        self._sound_events_list.Set(labels)
+        if self._sound_events_list.GetCount() > 0:
+            self._sound_events_list.SetSelection(0)
+        self._update_sound_event_path_display()
+
+    def _update_sound_event_path_display(self):
+        """Show the resolved path for the currently-selected event: the
+        user's own override for the current pack if they set one, else the
+        path that would actually be used at runtime (current pack's file,
+        falling back to the default pack's)."""
+        idx = self._sound_events_list.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(SOUND_EVENTS):
+            self._sound_event_path_field.ChangeValue("")
+            return
+        key = SOUND_EVENTS[idx][0]
+        cfg = self._pack_event_settings.get(self._current_pack_id, {}).get(key) or {}
+        override = cfg.get("path", "")
+        if override:
+            display_path = override
+        else:
+            from core.sound_system import resolve_sound_event_path
+            pack = self.main_window._sound_packs.get(self._current_pack_id)
+            default_pack = self.main_window._default_sound_pack
+            display_path = resolve_sound_event_path(pack, default_pack, key, "") or ""
+        self._sound_event_path_field.ChangeValue(display_path)
+
+    def _on_sound_pack_selected(self, event):
+        idx = self._sound_pack_combo.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self._sound_pack_ids):
+            return
+        self._current_pack_id = self._sound_pack_ids[idx]
+        self._load_sound_events_display(self._current_pack_id)
+
+    def _on_import_sound_pack(self, event):
+        i18n = self.main_window.i18n
+        with wx.DirDialog(
+            self, message=i18n.t("select_folder_dialog_title"),
+            style=wx.DD_DEFAULT_STYLE,
+        ) as dir_dlg:
+            if dir_dlg.ShowModal() != wx.ID_OK:
+                return
+            source_folder = dir_dlg.GetPath()
+
+        ok, err_key, new_pack_id = import_soundpack(
+            source_folder, self.main_window.sound_system.sound_dir
+        )
+        if not ok:
+            wx.MessageBox(
+                i18n.t(err_key),
+                i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR, self,
+            )
+            return
+
+        self.main_window.refresh_sound_packs()
+        self._reload_sound_pack_choices(select_pack_id=new_pack_id)
+        wx.MessageBox(
+            i18n.t("soundpack_import_success"),
+            i18n.t("settings_title"),
+            wx.OK | wx.ICON_INFORMATION, self,
+        )
+
     def _update_fields_state(self):
         is_custom = self._custom_api_check.GetValue()
         self._server_field.Enable(is_custom)
@@ -515,6 +792,88 @@ class SettingsDialog(wx.Dialog):
 
     def _on_self_reference_toggle(self, event):
         self._update_self_reference_field_state()
+
+    # ── Sound events tab ─────────────────────────────────────────────────────
+
+    def _on_dialog_char_hook(self, event):
+        if (event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
+                and wx.Window.FindFocus() is getattr(self, "_sound_events_list", None)):
+            self._toggle_current_sound_event()
+            return  # swallow — do NOT Skip, so it doesn't also fire the OK button
+        event.Skip()
+
+    def _on_sound_event_selected(self, event):
+        self._update_sound_event_path_display()
+
+    def _on_sound_event_list_key_down(self, event):
+        if event.GetKeyCode() in (wx.WXK_SPACE, wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            self._toggle_current_sound_event()
+        else:
+            event.Skip()
+
+    def _toggle_current_sound_event(self):
+        idx = self._sound_events_list.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(SOUND_EVENTS):
+            return
+        key = SOUND_EVENTS[idx][0]
+        settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
+        entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
+        entry["enabled"] = not entry.get("enabled", True)
+        self._sound_events_list.SetString(idx, self._sound_event_label(key, entry["enabled"]))
+        self._sound_events_list.SetSelection(idx)
+
+    def _on_sound_event_path_changed(self, event):
+        idx = self._sound_events_list.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(SOUND_EVENTS):
+            return
+        key = SOUND_EVENTS[idx][0]
+        settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
+        entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
+        entry["path"] = self._sound_event_path_field.GetValue()
+
+    def _set_all_sound_events(self, value: bool):
+        settings_for_pack = self._pack_event_settings.setdefault(self._current_pack_id, {})
+        for idx, (key, _default_filename) in enumerate(SOUND_EVENTS):
+            entry = settings_for_pack.setdefault(key, {"enabled": True, "path": ""})
+            entry["enabled"] = value
+            self._sound_events_list.SetString(idx, self._sound_event_label(key, value))
+
+    # ── Alert tones tab ──────────────────────────────────────────────────────
+
+    def _update_alert_custom_field_state(self):
+        is_custom_private = self._alert_private_combo.GetSelection() == len(self._alert_choice_keys) - 1
+        self._alert_private_custom_label.Show(is_custom_private)
+        self._alert_private_custom_field.Show(is_custom_private)
+
+        is_custom_group = self._alert_group_combo.GetSelection() == len(self._alert_choice_keys) - 1
+        self._alert_group_custom_label.Show(is_custom_group)
+        self._alert_group_custom_field.Show(is_custom_group)
+
+        self._alert_page.Layout()
+
+    def _on_alert_choice_changed(self, event):
+        self._update_alert_custom_field_state()
+        # Changing the selection invalidates whatever was previewing —
+        # stop it and reset that button back to "play" immediately.
+        if event.GetEventObject() is self._alert_private_combo:
+            self._alert_private_preview.stop()
+        else:
+            self._alert_group_preview.stop()
+
+    def _resolve_alert_preview_path(self, kind: str) -> str:
+        """Resolve whatever the private/group Alert Tones combo currently
+        has selected to an absolute path, for the preview buttons."""
+        if kind == "private":
+            combo, custom_field = self._alert_private_combo, self._alert_private_custom_field
+        else:
+            combo, custom_field = self._alert_group_combo, self._alert_group_custom_field
+        idx = combo.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self._alert_choice_keys):
+            return ""
+        choice = self._alert_choice_keys[idx]
+        active_pack = self.main_window.get_active_sound_pack()
+        default_pack = self.main_window._default_sound_pack
+        return resolve_alert_tone_path(active_pack, default_pack, choice, custom_field.GetValue().strip())
 
     def _on_custom_api_toggle(self, event):
         self._update_fields_state()
@@ -579,6 +938,60 @@ class SettingsDialog(wx.Dialog):
                 )
                 self._ws_server_field.SetFocus()
                 return False
+
+        # Sound events: an ENABLED event's override path, if the user set one,
+        # must point to a real file. An empty override is always fine — it
+        # just means "use the sound pack's own file for this event" (with a
+        # further fallback to the default pack), never an error. A disabled
+        # event's path is never used, so it's not worth blocking on either.
+        # (Enabled state is already live in _pack_event_settings — every
+        # toggle writes straight there, there's nothing left to flush.)
+        pack_settings = self._pack_event_settings.get(self._current_pack_id, {})
+        for idx, (key, _) in enumerate(SOUND_EVENTS):
+            cfg = pack_settings.get(key) or {}
+            if not cfg.get("enabled", True):
+                continue
+            override = (cfg.get("path") or "").strip()
+            if override and not os.path.isfile(override):
+                self._notebook.SetSelection(4)
+                self._sound_events_list.SetSelection(idx)
+                self._update_sound_event_path_display()
+                self._sound_event_path_field.SetFocus()
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_sound_path"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                return False
+
+        # Alert tones: a "Custom" choice must point to a real file.
+        last_idx = len(self._alert_choice_keys) - 1
+        if self._alert_private_combo.GetSelection() == last_idx:
+            path = self._alert_private_custom_field.GetValue().strip()
+            if not path or not os.path.isfile(path):
+                self._notebook.SetSelection(5)
+                self._alert_private_custom_field.SetFocus()
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_sound_path"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                return False
+        if self._alert_group_combo.GetSelection() == last_idx:
+            path = self._alert_group_custom_field.GetValue().strip()
+            if not path or not os.path.isfile(path):
+                self._notebook.SetSelection(5)
+                self._alert_group_custom_field.SetFocus()
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_sound_path"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                return False
+
         return True
 
     def _apply_values(self) -> bool:
@@ -678,11 +1091,6 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("connection", {})["wpp_api_key"] = api_key
         self.main_window.wpp_api_key = api_key
 
-        # Sounds
-        self.main_window.settings.setdefault("general", {})["sounds_enabled"] = (
-            self._sounds_check.GetValue()
-        )
-
         self.main_window.settings.setdefault("general", {})["noise_reduction_enabled"] = (
             self._noise_reduction_check.GetValue()
         )
@@ -746,8 +1154,30 @@ class SettingsDialog(wx.Dialog):
         # Global hotkey
         self.main_window.set_global_hotkey(self._hotkey_field._vk, self._hotkey_field._mod)
 
+        # Sound events / active pack — enabled/path edits are already live in
+        # _pack_event_settings (every toggle/keystroke writes straight there).
+        self.main_window.settings["sound_events"] = self._pack_event_settings
+        self.main_window.settings["active_sound_pack"] = self._current_pack_id
+
+        # Alert tones
+        private_choice = self._alert_choice_keys[self._alert_private_combo.GetSelection()]
+        group_choice = self._alert_choice_keys[self._alert_group_combo.GetSelection()]
+        self.main_window.settings["alert_tones"] = {
+            "private": private_choice,
+            "private_custom_path": self._alert_private_custom_field.GetValue().strip(),
+            "group": group_choice,
+            "group_custom_path": self._alert_group_custom_field.GetValue().strip(),
+        }
+        # Per-conversation overrides use resolved paths cached by object identity
+        # (see play_background_notification_sound) — a changed alert-tone
+        # default should not keep serving a stale cached Sound for "default".
+        self.main_window._notification_sound_cache.clear()
+
         # Persist and propagate
         self.main_window.save_settings()
+        # Reload sound objects so per-event enabled/path changes (and the new
+        # alert-tone defaults) take effect immediately, without a restart.
+        self.main_window.load_sounds()
 
         # Invalidate cache and re-read the new language
         from core.i18n import I18n
@@ -794,8 +1224,9 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(1, i18n.t("tab_ui"))
         self._notebook.SetPageText(2, i18n.t("tab_speech_content"))
         self._notebook.SetPageText(3, i18n.t("tab_connection"))
-        self._notebook.SetPageText(4, i18n.t("tab_audio_playback"))
-        self._sounds_check.SetLabel(i18n.t("sounds_label"))
+        self._notebook.SetPageText(4, i18n.t("tab_sound_events"))
+        self._notebook.SetPageText(5, i18n.t("tab_alert_tones"))
+        self._notebook.SetPageText(6, i18n.t("tab_audio_playback"))
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
@@ -829,6 +1260,47 @@ class SettingsDialog(wx.Dialog):
         self._ws_server_label.SetLabel(i18n.t("connection_ws_server_label"))
         self._port_label.SetLabel(i18n.t("wpp_port_label"))
         self._api_key_label.SetLabel(i18n.t("connection_api_key_label"))
+
+        # Sound events tab
+        self._sound_pack_label.SetLabel(i18n.t("sound_pack_label"))
+        self._import_sound_pack_btn.SetLabel(i18n.t("import_sound_pack_button"))
+        packs = self.main_window._sound_packs
+        pack_sel = self._sound_pack_combo.GetSelection()
+        self._sound_pack_combo.Set([
+            i18n.t("sound_pack_default_label") if pid == DEFAULT_PACK_ID else packs[pid]["name"]
+            for pid in self._sound_pack_ids
+        ])
+        self._sound_pack_combo.SetSelection(pack_sel if pack_sel != wx.NOT_FOUND else 0)
+        self._sound_events_list_label.SetLabel(i18n.t("sound_events_list_label"))
+        self._sound_event_path_label.SetLabel(i18n.t("sound_event_path_label"))
+        self._activate_all_btn.SetLabel(i18n.t("activate_all_sounds"))
+        self._deactivate_all_btn.SetLabel(i18n.t("deactivate_all_sounds"))
+        cur_event_sel = self._sound_events_list.GetSelection()
+        settings_for_pack = self._pack_event_settings.get(self._current_pack_id, {})
+        self._sound_events_list.Set([
+            self._sound_event_label(key, (settings_for_pack.get(key) or {}).get("enabled", True))
+            for key, _default_filename in SOUND_EVENTS
+        ])
+        if cur_event_sel != wx.NOT_FOUND:
+            self._sound_events_list.SetSelection(cur_event_sel)
+
+        # Alert tones tab
+        self._alert_private_label.SetLabel(i18n.t("alert_tone_private_label"))
+        self._alert_group_label.SetLabel(i18n.t("alert_tone_group_label"))
+        self._alert_private_custom_label.SetLabel(i18n.t("alert_tone_custom_path_label"))
+        self._alert_group_custom_label.SetLabel(i18n.t("alert_tone_custom_path_label"))
+        alert_choice_labels = [i18n.t("alert_tone_default")] + [
+            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
+        ] + [i18n.t("alert_tone_custom")]
+        priv_sel = self._alert_private_combo.GetSelection()
+        self._alert_private_combo.Set(alert_choice_labels)
+        self._alert_private_combo.SetSelection(priv_sel if priv_sel != wx.NOT_FOUND else 0)
+        grp_sel = self._alert_group_combo.GetSelection()
+        self._alert_group_combo.Set(alert_choice_labels)
+        self._alert_group_combo.SetSelection(grp_sel if grp_sel != wx.NOT_FOUND else 0)
+        self._alert_private_preview.refresh_label()
+        self._alert_group_preview.refresh_label()
+
         # Regenerate speed labels — decimal separator may have changed with language
         cur_sel = self._audio_speed_combo.GetSelection()
         self._audio_speed_combo.Clear()
@@ -838,12 +1310,18 @@ class SettingsDialog(wx.Dialog):
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
+    def _stop_alert_previews(self):
+        self._alert_private_preview.stop()
+        self._alert_group_preview.stop()
+
     def _on_ok(self, event):
         if self._apply_values():
+            self._stop_alert_previews()
             self._maybe_warn_restart_required()
             self.EndModal(wx.ID_OK)
 
     def _on_cancel(self, event):
+        self._stop_alert_previews()
         self.EndModal(wx.ID_CANCEL)
 
     def _on_apply(self, event):

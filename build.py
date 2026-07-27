@@ -51,6 +51,7 @@ import subprocess
 import zipfile
 import argparse
 import io
+import glob
 import tarfile
 import urllib.request
 
@@ -64,8 +65,9 @@ DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets
-NODE_DIR      = os.path.join(CLIENT_DIR, "node")
-API_DIR       = os.path.join(CLIENT_DIR, "api")
+NODE_DIR         = os.path.join(CLIENT_DIR, "node")
+API_DIR          = os.path.join(CLIENT_DIR, "api")
+API_PATCHES_DIR  = os.path.join(CLIENT_DIR, "api_patches")
 
 PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
 PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
@@ -98,7 +100,6 @@ SETTINGS_DEFAULT = os.path.join(CLIENT_DIR, "data", "settings_default.json")
 SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
-OPUS_DLL = None
 
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {
@@ -128,12 +129,16 @@ API_EXCLUDE_SUB_DIRS = {"tests", "types"}
 # visible/patchable directly from an extracted install, not just at dev time.
 API_CUSTOM_SRC_FILES = [
     "src/config.ts",
+    "src/index.ts",
     "src/util/createSessionUtil.ts",
+    "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/routes/index.ts",
+    "decrypt.js",
 ]
 
 # -- CLI --------------------------------------------------------------------
@@ -154,6 +159,24 @@ def step(msg):
     print(f"\n{'-'*60}")
     print(f"  {msg}")
     print('-'*60)
+
+def read_client_version() -> str:
+    """Read __version__ out of client/version.py without importing it.
+
+    Used to embed the real app version into the compiled installer stub
+    (Add/Remove Programs' DisplayVersion), which used to be hardcoded to a
+    permanent placeholder no build ever updated.
+    """
+    version_path = os.path.join(CLIENT_DIR, "version.py")
+    with open(version_path, "r", encoding="utf-8") as f:
+        contents = f.read()
+    import re
+    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', contents)
+    if not m:
+        print(f"[WARN] Could not find __version__ in {version_path}; "
+              f"installer will report version 0.0.0")
+        return "0.0.0"
+    return m.group(1)
 
 def run(cmd, cwd=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
@@ -217,15 +240,6 @@ def check_tools():
             "    2. Then inside client/api/ run:\n"
             "         npm install\n"
             "         npm run build"
-        )
-
-    if OPUS_DLL:
-        print(f"  [opus] libopus found: {OPUS_DLL}")
-    else:
-        print(
-            "  [WARN] libopus-0.dll not found — voice messages will fail in the built app.\n"
-            "         Install MSYS2 and run: pacman -S mingw-w64-ucrt-x86_64-opus\n"
-            "         Or copy libopus-0.dll to client/lib/"
         )
 
     if missing:
@@ -292,6 +306,7 @@ def pyinstaller_compile():
         add_data_pairs = [
             (NODE_DIR, "node"),
             (API_DIR, "api"),
+            (API_PATCHES_DIR, "api_patches"),
             (SOUND_LIB_X64, "lib"),
             (AO2_LIB, "lib"),
             (os.path.join(CLIENT_DIR, "sounds"), "sounds"),
@@ -302,14 +317,12 @@ def pyinstaller_compile():
             add_data_pairs.append(
                 (os.path.join(CLIENT_DIR, ".env"), ".env")
             )
+        for changelog_src in glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt")):
+            add_data_pairs.append((changelog_src, os.path.basename(changelog_src)))
 
         for src, dst in add_data_pairs:
             if os.path.exists(src):
                 cmd += ["--add-data", f"{src};{dst}"]
-
-        # libopus DLL must be bundled as a binary so ctypes can load it at runtime
-        if OPUS_DLL:
-            cmd += ["--add-binary", f"{OPUS_DLL};lib"]
 
     cmd.append(os.path.join(CLIENT_DIR, "main.py"))
 
@@ -429,6 +442,14 @@ def assemble_staging():
     else:
         print(f"  [WARN] client/.env not found — skipping")
 
+    # changelog_<lang>.txt files — read directly from the exe's own folder
+    # (see updater.py's resolve_changelog()), so a new/updated changelog can
+    # be dropped in without a WinZapp rebuild, same as languages/.
+    changelog_files = glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt"))
+    for src in changelog_files:
+        shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
+    print(f"  -> changelog_*.txt  ({len(changelog_files)} files)")
+
     node_dst = os.path.join(STAGING_DIR, "node")
     shutil.copytree(NODE_DIR, node_dst,
                     ignore=shutil.ignore_patterns("corepack"))
@@ -459,6 +480,44 @@ def assemble_staging():
         api_count += 1
         custom_src_count += 1
     print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
+
+    # Second, untouched copy of the same patch files under api_patches/ — a
+    # pristine reference ApiSetupDialog restores from after every WPPConnect
+    # (re)install/update. api/ itself gets wiped and re-extracted from a
+    # fresh upstream ZIP on every one of those runs, so restoring from
+    # whatever happened to already be sitting in api/ before the wipe just
+    # perpetuates whatever patch snapshot the user's install last happened to
+    # have — including a stale/broken one from an older WinZapp version, with
+    # no way for a newer WinZapp release's improved patches to ever reach an
+    # existing install. api_patches/ is never modified after staging, so it
+    # always reflects exactly what *this* WinZapp build shipped with.
+    #
+    # Copied directly from client/api_patches/ — a permanent, always-git-
+    # tracked copy of these same files (never inside client/api/, so it
+    # survives even a full `rm -rf client/api/`) — rather than pulled from
+    # client/api/src/ at build time. A user deleting client/api/ before
+    # reinstalling used to leave setup_api.py / ApiSetupDialog nothing
+    # reliable to restore from (both only ever stashed whatever happened to
+    # still be on disk right before the wipe); client/api_patches/ is the
+    # single source of truth for what "correctly patched" looks like,
+    # independent of whatever state client/api/ itself is in.
+    patches_dst = os.path.join(STAGING_DIR, "api_patches")
+    if os.path.isdir(API_PATCHES_DIR):
+        shutil.copytree(API_PATCHES_DIR, patches_dst)
+        patches_count = sum(len(fs) for _, _, fs in os.walk(patches_dst))
+    else:
+        print(f"  [WARN] client/api_patches/ not found — falling back to client/api/src/")
+        os.makedirs(patches_dst)
+        patches_count = 0
+        for rel_path in API_CUSTOM_SRC_FILES:
+            src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
+            if not os.path.isfile(src_path):
+                continue
+            dst = os.path.join(patches_dst, rel_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src_path, dst)
+            patches_count += 1
+    print(f"  -> api_patches/  ({patches_count} reference patch files)")
 
 # -- Step 4-7: Installer (onedir only) -------------------------------------
 
@@ -493,6 +552,7 @@ def create_payload_zip():
 
 def compile_installer_stub():
     step("6/8  Compiling installer stub")
+    version = read_client_version()
     run([
         WINDRES_CMD, "--codepage", "65001",
         os.path.join(INSTALLER_DIR, "installer.rc"),
@@ -501,12 +561,13 @@ def compile_installer_stub():
     ])
     run([
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
+        f'-DWINZAPP_VERSION=L"{version}"',
         os.path.join(INSTALLER_DIR, "installer.c"),
         INSTALLER_RES, "-o", INSTALLER_STUB, "-mwindows",
         "-I", INSTALLER_DIR,
         "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32", "-luuid",
     ])
-    print(f"  -> {INSTALLER_STUB}")
+    print(f"  -> {INSTALLER_STUB}  (DisplayVersion={version})")
 
 def append_zip_to_stub():
     step("7/8  Appending payload to installer stub")

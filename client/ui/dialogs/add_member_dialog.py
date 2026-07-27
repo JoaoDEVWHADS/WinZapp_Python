@@ -7,6 +7,7 @@ Lets the user select one or more contacts to add to a group.
 import threading
 import wx
 from core.utils import format_number
+from countries import COUNTRIES
 
 
 class AddMemberDialog(wx.Dialog):
@@ -38,6 +39,30 @@ class AddMemberDialog(wx.Dialog):
         label = wx.StaticText(self, label=i18n.t("add_member_title"))
         sizer.Add(label, 0, wx.ALL, 8)
 
+        # ── Custom phone number entry ───────────────────────────────────────
+        num_label = wx.StaticText(self, label=i18n.t("add_member_custom_number_label"))
+        sizer.Add(num_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        num_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self._country_combo = wx.ComboBox(
+            self, choices=[c[0] for c in COUNTRIES],
+            style=wx.CB_READONLY,
+        )
+        self._country_combo.SetSelection(0)  # Brazil (default)
+        num_sizer.Add(self._country_combo, 0, wx.RIGHT, 6)
+
+        self._phone_field = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
+        self._phone_field.SetHint(i18n.t("phone_label"))
+        self._phone_field.Bind(wx.EVT_CHAR, self._on_phone_char)
+        self._phone_field.Bind(wx.EVT_TEXT_ENTER, self._on_add_typed_number)
+        num_sizer.Add(self._phone_field, 1, wx.EXPAND | wx.RIGHT, 6)
+
+        add_number_btn = wx.Button(self, label=i18n.t("add_member_custom_number_button"))
+        add_number_btn.Bind(wx.EVT_BUTTON, self._on_add_typed_number)
+        num_sizer.Add(add_number_btn, 0)
+
+        sizer.Add(num_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
         self._list = wx.ListCtrl(
             self, style=wx.LC_REPORT | wx.LC_HRULES
         )
@@ -56,6 +81,63 @@ class AddMemberDialog(wx.Dialog):
         self.SetSizer(sizer)
         self._ok_btn.Bind(wx.EVT_BUTTON, self._on_add)
         cancel_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CANCEL))
+
+    def _on_phone_char(self, event):
+        """Only digits, navigation and Ctrl/Alt combos pass through — mirrors
+        the pairing dialog's phone field filter (connect.py)."""
+        key = event.GetKeyCode()
+        _NAV = {
+            wx.WXK_BACK, wx.WXK_DELETE,
+            wx.WXK_LEFT, wx.WXK_RIGHT, wx.WXK_HOME, wx.WXK_END,
+            wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER,
+            wx.WXK_TAB, wx.WXK_ESCAPE,
+        }
+        if key in _NAV or event.ControlDown() or event.AltDown() or event.CmdDown():
+            event.Skip()
+            return
+        if key in (wx.WXK_ALT, wx.WXK_CONTROL, wx.WXK_SHIFT) or wx.WXK_F1 <= key <= wx.WXK_F24:
+            event.Skip()
+            return
+        if ord("0") <= key <= ord("9") or wx.WXK_NUMPAD0 <= key <= wx.WXK_NUMPAD9:
+            event.Skip()
+            return
+        # Anything else (letters, +, spaces, punctuation…) is swallowed so the
+        # user can freely paste a formatted number ("+55 (11) 98765-4321")
+        # and only the digits matter for the API — but typing bare junk is
+        # rejected the same way the pairing dialog's field rejects it.
+
+    def _on_add_typed_number(self, event):
+        """Detect the format of what the user typed/pasted, strip everything
+        but digits, prefix with the selected country's dial code (unless the
+        user already typed the code themselves) and append it to the pickable
+        contact list — same conversion done for pairing in connect.py."""
+        i18n = self._i18n
+        raw = self._phone_field.GetValue()
+        digits = "".join(c for c in raw if c.isdigit())
+        if not digits:
+            return
+
+        idx = self._country_combo.GetSelection()
+        dial_code = COUNTRIES[idx][1] if 0 <= idx < len(COUNTRIES) else "55"
+
+        # If the number as typed doesn't already start with the selected
+        # country's dial code, assume it's a local number and prepend it.
+        if not digits.startswith(dial_code):
+            digits = dial_code + digits
+
+        jid = f"{digits}@c.us"
+        if jid in self._contact_jids:
+            self._phone_field.SetValue("")
+            return
+
+        name = format_number(jid)
+        idx_row = self._list.GetItemCount()
+        self._list.InsertItem(idx_row, name)
+        self._list.SetItem(idx_row, 1, name)
+        self._contact_jids.append(jid)
+        self._list.Select(idx_row)
+        self._list.EnsureVisible(idx_row)
+        self._phone_field.SetValue("")
 
     def _populate_contacts(self):
         """Fill the list with all available contacts."""

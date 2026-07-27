@@ -176,6 +176,7 @@ export async function listChats(req: Request, res: Response) {
               onlyUsers: { type: "boolean" },
               onlyWithUnreadMessage: { type: "boolean" },
               withLabels: { type: "array" },
+              ignoreGroupMetadata: { type: "boolean" },
             }
           },
           examples: {
@@ -187,7 +188,8 @@ export async function listChats(req: Request, res: Response) {
                 onlyGroups: false,
                 onlyUsers: false,
                 onlyWithUnreadMessage: false,
-                withLabels: []
+                withLabels: [],
+                ignoreGroupMetadata: true
               }
             },
             "All chats": {
@@ -225,6 +227,7 @@ export async function listChats(req: Request, res: Response) {
       onlyUsers,
       onlyWithUnreadMessage,
       withLabels,
+      ignoreGroupMetadata,
     } = req.body;
 
     const options: any = {};
@@ -235,6 +238,15 @@ export async function listChats(req: Request, res: Response) {
     if (onlyUsers !== undefined) options.onlyUsers = onlyUsers;
     if (onlyWithUnreadMessage !== undefined) options.onlyWithUnreadMessage = onlyWithUnreadMessage;
     if (withLabels !== undefined) options.withLabels = withLabels;
+    // WPP.chat.list() ends with a *serial* `await GroupMetadataStore.find(id)`
+    // over every group chat — one network round-trip each — unless
+    // ignoreGroupMetadata is set. Right after pairing, while WhatsApp Web is
+    // still running its initial sync, that loop routinely outlives Puppeteer's
+    // protocolTimeout, so list-chats never answers and the client gives up with
+    // "Read timed out". Forward the flag so callers that don't need group
+    // metadata (WinZapp fetches it separately) can skip the loop entirely.
+    if (ignoreGroupMetadata !== undefined)
+      options.ignoreGroupMetadata = ignoreGroupMetadata;
 
     const response = await req.client.listChats(options);
 

@@ -53,7 +53,13 @@ class MessageQueue:
     """Thread-safe outgoing-message queue with automatic retry."""
 
     _RETRY_INTERVAL = 3   # seconds between retry cycles
-    _MAX_RETRIES    = 20  # give up after this many consecutive failures per message
+    # Give up after this many consecutive failures per message.  Kept small on
+    # purpose: every retry of a send that WhatsApp Web may have silently
+    # accepted is a potential duplicate delivered to the recipient, so only
+    # genuinely-not-sent failures (explicit 5xx) are retried, and only a few
+    # times.  Connection losses and timeouts never reach this counter — they
+    # are handled as "queued" / "unknown outcome" above.
+    _MAX_RETRIES    = 4
 
     def __init__(self, main_window):
         self.main_window = main_window
@@ -132,13 +138,46 @@ class MessageQueue:
                             mentioned_jids=msg.mentioned_jids or None,
                         )
                     retryable_failure = False
+                    disconnected      = False
+                    ambiguous         = False
                     if isinstance(real_id, dict):
                         if real_id.get("ok"):
                             real_id = real_id.get("id") or True
                         else:
                             msg.last_error = real_id.get("error") or ""
                             retryable_failure = bool(real_id.get("retry", True))
+                            disconnected      = bool(real_id.get("disconnected"))
+                            ambiguous         = bool(real_id.get("ambiguous"))
                             real_id = False
+
+                    if not real_id and disconnected:
+                        # WhatsApp is down and told us so explicitly (HTTP 404
+                        # "Disconnected"): the message was definitely not sent,
+                        # so keep it queued — but stop the 3-second retry loop
+                        # right here. main_window._wa_connected was just set to
+                        # False by the send call, so the next loop iteration
+                        # parks the whole queue until the connection is back.
+                        logging.info(
+                            "[MessageQueue] %s stays queued — WhatsApp disconnected", msg.local_id
+                        )
+                        break
+
+                    if not real_id and ambiguous:
+                        # Timeout / dropped connection: we do NOT know whether
+                        # WhatsApp Web accepted the message into its outbox.
+                        # Resending would duplicate it (and did: users saw 30+
+                        # copies delivered at once when connectivity returned),
+                        # so hand it off and let the WebSocket echo resolve the
+                        # pending bubble if it does go out.
+                        logging.warning(
+                            "[MessageQueue] send outcome unknown for %s jid=%s (%s) — "
+                            "not retrying to avoid duplicate delivery",
+                            msg.local_id, msg.jid, msg.last_error,
+                        )
+                        with self._lock:
+                            self._pending.pop(msg.local_id, None)
+                        wx.CallAfter(self.main_window._on_message_unconfirmed, msg.local_id)
+                        continue
 
                     if real_id:
                         msg.fail_count = 0
@@ -180,6 +219,8 @@ class MessageQueue:
                                 bool(msg.media_path),  # show dialog for media failures
                             )
                 except Exception as exc:
+                    # Only unexpected programming errors reach here — transport
+                    # failures are classified inside the send_* methods.
                     msg.fail_count += 1
                     logging.error("[MessageQueue] exception for %s jid=%s attempt=%s/%s: %s",
                                   msg.local_id, msg.jid, msg.fail_count, self._MAX_RETRIES, exc)

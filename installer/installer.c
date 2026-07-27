@@ -205,18 +205,45 @@ static BOOL find_zip_start(HANDLE hf, ZipEOCD *out_eocd, uint64_t *out_zip_start
     return FALSE;
 }
 
+/* Long-path buffer size. Node's node_modules/ trees routinely nest deep
+ * enough that dest_dir + relative path exceeds the classic MAX_PATH (260)
+ * limit once the install dir itself is a few directories deep. */
+#define WZ_MAX_PATH 32768
+
+/* Build an extended-length (\\?\) form of an absolute path so
+ * CreateFileW/CreateDirectoryW are not limited to MAX_PATH. \\?\ paths must
+ * be absolute with backslash separators, which dest_dir/dest_path already
+ * are here, so a plain drive-letter check is enough to decide whether to
+ * prefix. */
+static void to_extended_path(wchar_t *out, size_t out_cap, const wchar_t *in)
+{
+    if (in[0] == L'\\' && in[1] == L'\\' && in[2] == L'?' && in[3] == L'\\') {
+        wcsncpy(out, in, out_cap - 1);
+        out[out_cap - 1] = L'\0';
+        return;
+    }
+    if (((in[0] >= L'A' && in[0] <= L'Z') || (in[0] >= L'a' && in[0] <= L'z')) && in[1] == L':') {
+        swprintf(out, (int)out_cap, L"\\\\?\\%s", in);
+    } else {
+        wcsncpy(out, in, out_cap - 1);
+        out[out_cap - 1] = L'\0';
+    }
+}
+
 /* Create all intermediate directories for a file path */
 static void ensure_dirs(const wchar_t *path)
 {
-    wchar_t tmp[MAX_PATH];
-    wcsncpy(tmp, path, MAX_PATH - 1);
-    tmp[MAX_PATH - 1] = L'\0';
+    wchar_t tmp[WZ_MAX_PATH];
+    wcsncpy(tmp, path, WZ_MAX_PATH - 1);
+    tmp[WZ_MAX_PATH - 1] = L'\0';
     wchar_t *p = tmp;
     if (p[1] == L':') p += 3;
     for (; *p; p++) {
         if (*p == L'\\' || *p == L'/') {
             *p = L'\0';
-            CreateDirectoryW(tmp, NULL);
+            wchar_t ext[WZ_MAX_PATH];
+            to_extended_path(ext, WZ_MAX_PATH, tmp);
+            CreateDirectoryW(ext, NULL);
             *p = L'\\';
         }
     }
@@ -243,6 +270,7 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
 
     wchar_t **files = (wchar_t **)malloc(total * sizeof(wchar_t *));
     int file_count = 0;
+    int failed_count = 0;
 
     for (int i = 0; i < total && !g_cancelled; i++) {
         ZipCentral cd = {0};
@@ -268,24 +296,32 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
         for (wchar_t *pw = fname_w; *pw; pw++)
             if (*pw == L'/') *pw = L'\\';
 
-        wchar_t dest_path[MAX_PATH];
-        swprintf(dest_path, MAX_PATH, L"%s\\%s", dest_dir, fname_w);
+        wchar_t dest_path[WZ_MAX_PATH];
+        swprintf(dest_path, WZ_MAX_PATH, L"%s\\%s", dest_dir, fname_w);
 
         ensure_dirs(dest_path);
 
         /* Read local file header to find data offset */
         ZipLocal local = {0};
         uint64_t local_off = zip_start + cd.local_off;
-        if (!read_at(hf, local_off, &local, sizeof(ZipLocal))) continue;
-        if (local.sig != ZIP_LOCAL_SIG) continue;
+        if (!read_at(hf, local_off, &local, sizeof(ZipLocal))) { failed_count++; continue; }
+        if (local.sig != ZIP_LOCAL_SIG) { failed_count++; continue; }
 
         uint64_t data_off = local_off + sizeof(ZipLocal)
                           + local.fname_len + local.extra_len;
 
-        /* Extract file */
-        HANDLE hout = CreateFileW(dest_path, GENERIC_WRITE, 0, NULL,
+        /* Extract file. A failure here (permission denied, disk full, path
+         * still rejected even in extended form, ...) used to be silently
+         * skipped via `continue` while the function still reported overall
+         * success — the installer would then claim "installed successfully"
+         * with files actually missing. Track it and fail the whole install
+         * instead, so the user gets the existing extract-failed error dialog
+         * rather than a broken, partially-installed app. */
+        wchar_t dest_path_ext[WZ_MAX_PATH];
+        to_extended_path(dest_path_ext, WZ_MAX_PATH, dest_path);
+        HANDLE hout = CreateFileW(dest_path_ext, GENERIC_WRITE, 0, NULL,
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hout == INVALID_HANDLE_VALUE) continue;
+        if (hout == INVALID_HANDLE_VALUE) { failed_count++; continue; }
 
         uint32_t remaining = cd.comp_size;
         uint8_t  chunk[65536];
@@ -302,6 +338,7 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
             remaining -= did_read;
         }
         CloseHandle(hout);
+        if (remaining > 0) failed_count++;  /* short read: file truncated */
 
         /* Add to file list */
         files[file_count] = (wchar_t *)malloc((wcslen(dest_path) + 1) * sizeof(wchar_t));
@@ -319,7 +356,7 @@ static BOOL extract_all(HWND hDlg, const wchar_t *dest_dir,
     CloseHandle(hf);
     *out_files  = files;
     *out_count  = file_count;
-    return !g_cancelled;
+    return !g_cancelled && failed_count == 0;
 }
 
 /* ── Shortcut creation ────────────────────────────────────────────────── */
@@ -347,14 +384,38 @@ static void create_shortcut(const wchar_t *target, const wchar_t *link_path,
 
 /* ── Registry ─────────────────────────────────────────────────────────── */
 
+/* Version string embedded by build.py at compile time from
+ * client/version.py's __version__ (-DWINZAPP_VERSION=L"..."), so
+ * "Add or Remove Programs" shows the version that was actually installed
+ * instead of a permanently-stale placeholder. */
+#ifndef WINZAPP_VERSION
+#define WINZAPP_VERSION L"0.0.0"
+#endif
+
 static void register_uninstall(const wchar_t *install_dir,
                                 const wchar_t *uninstall_exe)
 {
     HKEY hkey;
     const wchar_t *key_path =
         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WinZapp";
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path, 0, NULL,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS)
+
+    /* The default install location (%LOCALAPPDATA%\WinZapp) needs no
+     * elevation, so this process is usually NOT admin — writing straight to
+     * HKEY_LOCAL_MACHINE then fails with ERROR_ACCESS_DENIED and silently
+     * skips the whole uninstall registration, leaving the app installed with
+     * no entry in "Add or Remove Programs" and no way for uninstall.exe to
+     * find itself later. Try the machine-wide hive first (works when the
+     * install dir did require elevation, e.g. Program Files), and fall back
+     * to the per-user hive — which every installer process can always write
+     * to, elevated or not, and which Windows reads "Add or Remove Programs"
+     * entries from exactly the same way. */
+    LSTATUS status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path, 0, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL);
+    if (status != ERROR_SUCCESS) {
+        status = RegCreateKeyExW(HKEY_CURRENT_USER, key_path, 0, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL);
+    }
+    if (status != ERROR_SUCCESS)
         return;
 
     RegSetValueExW(hkey, L"DisplayName", 0, REG_SZ,
@@ -366,7 +427,7 @@ static void register_uninstall(const wchar_t *install_dir,
                    (BYTE *)install_dir,
                    (DWORD)((wcslen(install_dir) + 1) * sizeof(wchar_t)));
     RegSetValueExW(hkey, L"DisplayVersion", 0, REG_SZ,
-                   (BYTE *)L"1.0.0", sizeof(L"1.0.0"));
+                   (BYTE *)WINZAPP_VERSION, (DWORD)sizeof(WINZAPP_VERSION));
     RegSetValueExW(hkey, L"Publisher", 0, REG_SZ,
                    (BYTE *)L"WinZapp", sizeof(L"WinZapp"));
     DWORD one = 1;

@@ -1,7 +1,10 @@
 # ── WinZapp: project-specific ignores ────────────────────────────────────────
 
 # User data / secrets (generated at runtime, never committed)
+client/data/media_failed.json
 client/data/messages.db
+client/data/messages.db-shm
+client/data/messages.db-wal
 client/data/settings.json
 client/data/settings_default.json
 client/data/secret.key
@@ -18,7 +21,10 @@ client/logs/
 
 /client/api/*
 !/client/api/start.js
-!/client/api/.env
+# (no !/client/api/.env here: client/api/.gitignore, which comes from the
+#  upstream wppconnect-server clone, has "/.env" and — being the deeper
+#  .gitignore — wins, so that re-include never took effect. Nothing reads
+#  api/.env anyway; see ensure_api_modules_installed() in client/main.py.)
 !/client/api/package.json
 !/client/api/config.json
 !/client/api/decrypt.js
@@ -50,8 +56,17 @@ client/logs/
 /client/api/src/routes/*
 !/client/api/src/routes/index.ts
 
-
-# Build intermediates and distribution artefacts
+# Permanent, always-tracked mirror of the same custom patch files above —
+# the single source of truth setup_api.py / ApiSetupDialog restore from
+# after a clone/re-clone, independent of whatever (if anything) happens to
+# still be on disk in client/api/ at that moment. Before this existed, a
+# clean re-clone (or the user deleting client/api/ before reinstalling —
+# reported live as regressing to a version of these patches from months
+# earlier, silently, with no error) had nothing reliable to restore from:
+# the "stash whatever's currently in client/api/src/ before wiping it"
+# fallback is worthless when client/api/ was already gone. NEVER add a
+# pattern above that would catch this path — it must always be tracked.
+!/client/api_patches/
 /build/
 /dist/
 

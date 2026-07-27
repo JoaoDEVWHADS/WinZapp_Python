@@ -9,9 +9,14 @@ Design decisions:
     so the default Windows notification sound is suppressed.
   - Uses InteractableWindowsToaster so the quick-reply TextBox works and
     activations (click / reply) call back into the running Python process.
-  - Setting the same toast.tag replaces the previous notification on screen
-    while moving it to the Action Center, giving the natural '5-second then
-    to Action Center' behaviour even if multiple messages arrive quickly.
+  - Only ever ONE WinZapp toast exists at a time: every notification uses the
+    same tag/group and the previous one is explicitly removed before the new
+    one is shown.  Windows otherwise *queues* banners it could not display —
+    with the screen off or during Focus Assist they all pop in sequence the
+    moment the machine wakes, which is what users hit as "a pile of
+    notifications appears at once when I touch the keyboard".  The worker also
+    coalesces anything still waiting in its own queue, so a burst of messages
+    produces one current banner rather than a backlog to sit through.
   - SetCurrentProcessExplicitAppUserModelID("WinZapp") (called in main.py)
     ensures that Windows displays "WinZapp" — not the exe filename — as the
     sender inside the notification.
@@ -26,6 +31,7 @@ import queue
 import re as _re
 import sys
 import threading
+import time
 import uuid
 import wx
 from app_paths import _is_frozen
@@ -273,7 +279,17 @@ def _resolve_participant_name(p_jid: str, push_name: str, main_window) -> str:
             candidates.append(local + "@s.whatsapp.net")
 
         for cjid in candidates:
-            p_chat = main_window.chats.get(cjid) or main_window.contacts.get(cjid) or {"remoteJid": cjid}
+            p_chat = (
+                main_window.chats.get(cjid)
+                or main_window.contacts.get(cjid)
+                # Falls back to the Brazilian 8/9-digit interchangeable form
+                # (e.g. a contact saved as 551199999999 while the message
+                # arrives as 5511999999999) — a plain dict lookup above
+                # misses that and used to show the raw number instead of the
+                # saved contact name for these participants.
+                or main_window._get_contact_tolerant(cjid)
+                or {"remoteJid": cjid}
+            )
             saved = main_window._resolve_contact_name(p_chat)
             if saved:
                 return saved
@@ -320,6 +336,19 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
         or _resolve_participant_name(remote_jid, push_name, main_window)
         or format_number(remote_jid)
     )
+
+
+def format_toast_unread_suffix(unread_count: int, i18n) -> str:
+    """Return the '✉️ N mensagens não lidas' line WhatsApp appends to the end
+    of its own toast notifications, for the conversation the message arrived
+    in. Toast-only — never shown in the foreground sound/AO2 announcements.
+    """
+    count = int(unread_count or 0)
+    if count <= 1:
+        text = i18n.t("unread_sep_singular")
+    else:
+        text = i18n.t("unread_sep_plural").format(count=count)
+    return f"✉️ {text}"
 
 
 def format_notification_title(msg: dict, main_window, i18n) -> str:
@@ -376,6 +405,10 @@ class NotificationManager:
     APP_ID    = "WinZapp"
     TOAST_TAG = "winzapp_active"
     TOAST_GRP = "winzapp_msgs"
+    # ToastDuration.Short keeps a banner on screen for ~5s. A little safety
+    # margin past that (Windows' own dismiss timing isn't perfectly exact)
+    # before we stop bothering to clear it first — see _last_shown_at.
+    _TOAST_LIKELY_GONE_SECONDS = 8
 
     def __init__(self, main_window):
         self.main_window = main_window
@@ -383,6 +416,19 @@ class NotificationManager:
         self.i18n.get_language()
         self._toaster      = None
         self._interactable = False
+        # Last toast handed to Windows, kept so it can be removed before the
+        # next one is shown (see _clear_active_toasts).  Touched only by the
+        # worker thread.
+        self._last_toast   = None
+        # monotonic() timestamp of the last show_toast() call, or None.  Lets
+        # _dispatch() skip _clear_active_toasts()'s blocking WinRT/COM
+        # round-trip when the previous toast has almost certainly already
+        # auto-dismissed on its own (see _TOAST_LIKELY_GONE_SECONDS) — that
+        # round-trip was sitting in front of every single show_toast() call
+        # even when there was nothing to clear, which is real, measurable
+        # latency between "message arrived" and the banner actually
+        # appearing on screen. Touched only by the worker thread.
+        self._last_shown_at = None
         # Register the AUMID on the main thread before starting the worker so
         # the registry key exists before any WinRT notifier is created.
         self._register_aumid_registry()
@@ -402,8 +448,37 @@ class NotificationManager:
             item = self._queue.get()
             if item is None:
                 break
+            item, dropped = self._coalesce_pending(item)
+            if item is None:
+                break
+            if dropped:
+                print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
             title, body, remote_jid = item
             self._dispatch(title, body, remote_jid)
+
+    def _coalesce_pending(self, item):
+        """Collapse everything already queued down to the newest notification.
+
+        If more notifications piled up while the toaster was busy (a reconnect
+        delivering a burst of messages, say), only the most recent one is worth
+        showing — the rest would queue up behind it and be displayed one after
+        another, which is the behaviour being fixed.  Anything dropped here is
+        still reflected in the app's unread state and chat list.
+
+        Returns ``(item, dropped_count)``; item is None when a shutdown signal
+        was found in the queue.
+        """
+        dropped = 0
+        while True:
+            try:
+                newer = self._queue.get_nowait()
+            except queue.Empty:
+                return item, dropped
+            if newer is None:
+                # Shutdown signal arrived mid-burst: honour it.
+                return None, dropped
+            item = newer
+            dropped += 1
 
     @staticmethod
     def _outer_exe_path() -> str:
@@ -480,6 +555,32 @@ class NotificationManager:
 
         print("[NotificationManager] toast system unavailable — all candidates failed")
 
+    def _clear_active_toasts(self):
+        """Remove any WinZapp toast currently displayed or pending.
+
+        Called from the worker thread only, right before showing a new toast,
+        so exactly one notification of ours exists at any moment.  Every step is
+        best-effort: the WinRT history calls raise when there is nothing to
+        remove (or when the notification platform is unavailable), and that must
+        never stop the new notification from being shown.
+        """
+        toaster = self._toaster
+        if toaster is None:
+            return
+        try:
+            toaster.remove_toast_group(self.TOAST_GRP)
+            return
+        except Exception:
+            pass
+        # Older/basic toasters may not expose group removal — fall back to
+        # removing the single tag we always reuse.
+        try:
+            last = self._last_toast
+            if last is not None:
+                toaster.remove_toast(last)
+        except Exception:
+            pass
+
     def _dispatch(self, title: str, body: str, remote_jid: str):
         if not self._toaster:
             return
@@ -488,6 +589,47 @@ class NotificationManager:
 
             self.i18n.get_language()
             reply_hint = self.i18n.t("notif_reply_hint")
+
+            # Fire the custom sound BEFORE any of the WinRT/COM work below
+            # (clearing the previous toast, show_toast() itself). Both of
+            # those are genuine round-trips into the Windows notification
+            # platform with their own, mostly-uncontrollable rendering
+            # latency (Action Center staging, banner animation) — queuing the
+            # sound after them used to add that latency on top of whatever
+            # the audio engine itself needs, widening the gap users noticed
+            # between hearing the notification and seeing the banner. Not
+            # perfect — Windows' own toast pipeline still isn't instant — but
+            # this removes the part of the delay that was our own doing.
+            wx.CallAfter(self._play_sound, remote_jid)
+
+            # Clear whatever WinZapp notification is currently on screen (or
+            # waiting to be shown) before posting the new one.  This is what
+            # makes a new message *replace* the current banner instead of
+            # lining up behind it: Windows holds undisplayed toasts and pops
+            # them in sequence once it can, so with the screen off a burst of
+            # messages turned into a burst of banners on wake.
+            #
+            # It also restores the fresh-banner behaviour that a shared tag
+            # alone does not give: reusing a tag while the toast is still
+            # visible makes Windows treat show_toast() as an in-place update,
+            # which neither resets the on-screen timer nor re-raises the
+            # banner.  Removing first, then showing, always pops.
+            #
+            # BUT: remove_toast_group() is a blocking WinRT/COM round-trip,
+            # and it used to run before EVERY show_toast() call regardless of
+            # whether anything was actually still showing — sitting directly
+            # in front of the call that puts the banner on screen, on every
+            # single notification, for no benefit the vast majority of the
+            # time (messages usually arrive more than 5s apart). Skip it once
+            # the previous toast has almost certainly auto-dismissed on its
+            # own; still run it for the case it actually exists to fix — a
+            # burst of messages arriving within the same few seconds.
+            since_last = (
+                None if self._last_shown_at is None
+                else time.monotonic() - self._last_shown_at
+            )
+            if since_last is None or since_last < self._TOAST_LIKELY_GONE_SECONDS:
+                self._clear_active_toasts()
 
             toast          = Toast()
             toast.tag      = self.TOAST_TAG
@@ -517,9 +659,8 @@ class NotificationManager:
                 toast.on_activated = on_activated
 
             self._toaster.show_toast(toast)
-
-            # Play custom OGG sound after the toast is sent
-            wx.CallAfter(self._play_sound)
+            self._last_toast    = toast
+            self._last_shown_at = time.monotonic()
 
         except Exception as e:
             print(f"[NotificationManager] send_worker error: {e}")
@@ -532,8 +673,10 @@ class NotificationManager:
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
-    def _play_sound(self):
-        if hasattr(self.main_window, "message_background_sound"):
+    def _play_sound(self, remote_jid: str = ""):
+        if hasattr(self.main_window, "play_background_notification_sound"):
+            self.main_window.play_background_notification_sound(remote_jid)
+        elif hasattr(self.main_window, "message_background_sound"):
             self.main_window.message_background_sound.play()
 
     def _do_reply(self, jid: str, text: str):

@@ -5,20 +5,39 @@ Shown on first launch, before any API module installation or initial setup.
 The user picks a language and clicks OK to proceed, or Cancel to exit.
 
 This dialog intentionally avoids using the I18n / settings infrastructure
-(which may not be initialised yet) and hard-codes English/Portuguese labels
-as a minimal bootstrap interface.
+(which may not be initialised yet) and hard-codes its own UI labels
+(title, OK/Cancel) as a minimal bootstrap interface. The list of languages
+itself, however, is read from languages/language_map.json — the same file
+core/i18n.py's LANGUAGE_NAMES loads from — so a new locale dropped in there
+shows up here too without a rebuild.
 """
 
+import json
 import wx
+
+from app_paths import resource_path
+
+# Fallback used only if languages/language_map.json is missing or unreadable.
+_FALLBACK_LANGUAGE_CHOICES = [
+    ("Português (Brasil)",      "pt-BR"),
+    ("English (United States)", "en-US"),
+]
+
+
+def _load_language_choices():
+    """Return [(display_name, lang_code), ...] from language_map.json."""
+    try:
+        with open(resource_path("languages", "language_map.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data:
+            return [(name, code) for code, name in data.items()]
+    except Exception:
+        pass
+    return list(_FALLBACK_LANGUAGE_CHOICES)
 
 
 # Maps human-readable name → language code (same order as LANGUAGE_NAMES in core/i18n.py)
-_LANGUAGE_CHOICES = [
-    ("Português (Brasil)",        "pt-BR"),
-    ("Português (Portugal)",      "pt-PT"),
-    ("English (United States)",   "en-US"),
-    ("Español (España)",          "es-ES"),
-]
+_LANGUAGE_CHOICES = _load_language_choices()
 
 
 class LanguageSelectionDialog(wx.Dialog):

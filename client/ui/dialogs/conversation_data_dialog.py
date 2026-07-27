@@ -15,6 +15,7 @@ Screen-reader accessibility is achieved through standard wxPython controls
 and proper label association — no visual-only information is presented.
 """
 
+import logging
 import os
 import threading
 from datetime import datetime
@@ -22,6 +23,9 @@ import wx
 import wx.adv
 from core.utils import format_number
 from app_paths import data_path
+from core.sound_system import (
+    ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path, AlertPreviewController,
+)
 
 
 def _fmt_ts(ts, i18n):
@@ -96,6 +100,16 @@ class ConversationDataDialog(wx.Dialog):
         # Fetch data in background after the dialog is shown.
         threading.Thread(target=self._fetch_data, daemon=True).start()
 
+    def _on_back_button(self, event):
+        if hasattr(self, "_sound_preview"):
+            self._sound_preview.stop()
+        event.Skip()
+
+    def _on_dialog_char_hook(self, event):
+        if event.GetKeyCode() == wx.WXK_ESCAPE and hasattr(self, "_sound_preview"):
+            self._sound_preview.stop()
+        event.Skip()
+
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -105,6 +119,11 @@ class ConversationDataDialog(wx.Dialog):
         # wx.ID_CANCEL makes Esc close the dialog via the standard wx mechanism.
         back_btn = wx.Button(panel, wx.ID_CANCEL, label=self._i18n.t("back_btn"))
         outer.Add(back_btn, 0, wx.ALL, 8)
+        # wx's built-in Esc-to-cancel calls EndModal directly — it never goes
+        # through this button's click event — so stop any playing sound
+        # preview via a char hook too, not just the button handler.
+        back_btn.Bind(wx.EVT_BUTTON, self._on_back_button)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_dialog_char_hook)
 
         if self._is_group:
             self._build_group_ui(panel, outer)
@@ -141,6 +160,105 @@ class ConversationDataDialog(wx.Dialog):
         add_to_group_btn.Bind(wx.EVT_BUTTON, self._on_add_to_group)
         outer.Add(add_to_group_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        self._build_sound_picker(panel, outer)
+
+    def _build_sound_picker(self, panel, sizer):
+        """Per-conversation notification sound override: a combobox (Default
+        + Alert 1..N + Custom) plus a custom-path field shown only when
+        "Custom" is selected. "Default" here means "use the private/group
+        default from Settings > Alert Tones", unlike the same word on that
+        settings tab (which means the bundled message_background.ogg).
+        """
+        i18n = self._i18n
+        self._sound_label = wx.StaticText(panel, label=i18n.t("conversation_sound_label"))
+        sizer.Add(self._sound_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        self._sound_choice_keys = alert_tone_choice_keys()
+        sound_choice_labels = [i18n.t("alert_tone_default")] + [
+            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
+        ] + [i18n.t("alert_tone_custom")]
+        self._sound_combo = wx.ComboBox(
+            panel, style=wx.CB_READONLY, choices=sound_choice_labels
+        )
+        sizer.Add(self._sound_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._sound_preview_btn = wx.Button(panel, label=i18n.t("preview_sound_play"))
+        sizer.Add(self._sound_preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._sound_preview = AlertPreviewController(
+            self._mw, self._sound_preview_btn, self._resolve_conv_sound_preview_path,
+        )
+
+        self._sound_custom_label = wx.StaticText(
+            panel, label=i18n.t("conversation_sound_custom_path_label")
+        )
+        sizer.Add(self._sound_custom_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._sound_custom_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
+        sizer.Add(self._sound_custom_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        conv_cfg = self._mw.settings.get("conversation_sounds", {}).get(self._jid) or {}
+        try:
+            idx = self._sound_choice_keys.index(conv_cfg.get("choice", "default"))
+        except ValueError:
+            idx = 0
+        self._sound_combo.SetSelection(idx)
+        self._sound_custom_field.SetValue(conv_cfg.get("custom_path", ""))
+        self._update_sound_custom_field_state()
+
+        self._sound_combo.Bind(wx.EVT_COMBOBOX, self._on_conv_sound_changed)
+        self._sound_custom_field.Bind(wx.EVT_TEXT, self._on_conv_sound_custom_path_changed)
+
+    def _resolve_conv_sound_preview_path(self) -> str:
+        """Resolve whatever the sound combo currently has selected to an
+        absolute path, for the preview button. "Padrão" resolves through the
+        private/group Alert Tones default — same as what would actually play
+        — not literally message_background.ogg."""
+        idx = self._sound_combo.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self._sound_choice_keys):
+            return ""
+        choice = self._sound_choice_keys[idx]
+        active_pack = self._mw.get_active_sound_pack()
+        default_pack = self._mw._default_sound_pack
+        if choice == "default":
+            is_group = self._jid.endswith("@g.us")
+            tones = self._mw.settings.get("alert_tones", {})
+            type_key = "group" if is_group else "private"
+            type_choice = tones.get(type_key, "default")
+            type_custom = tones.get(f"{type_key}_custom_path", "")
+            return resolve_alert_tone_path(active_pack, default_pack, type_choice, type_custom)
+        return resolve_alert_tone_path(active_pack, default_pack, choice, self._sound_custom_field.GetValue().strip())
+
+    def _update_sound_custom_field_state(self):
+        is_custom = self._sound_combo.GetSelection() == len(self._sound_choice_keys) - 1
+        self._sound_custom_label.Show(is_custom)
+        self._sound_custom_field.Show(is_custom)
+        self._sound_custom_label.GetParent().Layout()
+
+    def _save_conv_sound(self):
+        """Persist the per-conversation sound override immediately.
+
+        Unlike the Settings dialog, this never blocks or validates the
+        custom path — an invalid path just falls back to the type default
+        at playback time (see MainWindow._resolve_background_sound_path).
+        """
+        choice = self._sound_choice_keys[self._sound_combo.GetSelection()]
+        custom_path = self._sound_custom_field.GetValue().strip()
+        self._mw.settings.setdefault("conversation_sounds", {})[self._jid] = {
+            "choice": choice,
+            "custom_path": custom_path,
+        }
+        self._mw._notification_sound_cache.clear()
+
+    def _on_conv_sound_changed(self, event):
+        self._update_sound_custom_field_state()
+        self._save_conv_sound()
+        self._mw._schedule_save_settings()
+        # Changing the selection invalidates whatever was previewing.
+        self._sound_preview.stop()
+
+    def _on_conv_sound_custom_path_changed(self, event):
+        self._save_conv_sound()
+        self._mw._schedule_save_settings()
+
     def _build_group_ui(self, panel, outer):
         """wx.Notebook with three accessible tabs."""
         self._notebook = wx.Notebook(panel)
@@ -154,6 +272,11 @@ class ConversationDataDialog(wx.Dialog):
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         ov_sizer.Add(self._overview_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+        self._add_members_btn_overview = wx.Button(overview_page, label=self._i18n.t("add_member"))
+        self._add_members_btn_overview.Disable()   # enabled after we confirm user is admin
+        self._add_members_btn_overview.Bind(wx.EVT_BUTTON, self._on_add_members)
+        ov_sizer.Add(self._add_members_btn_overview, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._build_sound_picker(overview_page, ov_sizer)
         overview_page.SetSizer(ov_sizer)
         self._notebook.AddPage(overview_page, self._i18n.t("group_overview_tab"))
 
@@ -191,36 +314,56 @@ class ConversationDataDialog(wx.Dialog):
     # ── Data fetch (background thread) ───────────────────────────────────────
 
     def _fetch_data(self):
-        if self._is_group:
-            data = self._mw.get_group_info(self._jid)
-            participants = data.get("participants", [])
-            lid_jids_to_resolve = []
-            lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
-            for p in participants:
-                if not isinstance(p, dict):
-                    continue
-                p_jid = p.get("id", "")
-                if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
-                    lid_jids_to_resolve.append(p_jid)
-            if lid_jids_to_resolve:
-                try:
-                    self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
-                except Exception:
-                    pass
-            wx.CallAfter(self._populate_group, data)
-        else:
-            if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
-                try:
-                    self._mw.resolve_lid_jids_via_api([self._jid])
-                except Exception:
-                    pass
-            data = self._mw.get_contact_profile(self._jid)
-            wx.CallAfter(self._populate_personal, data)
+        # This runs on a background thread with no caller to report failures
+        # to — an uncaught exception here just kills the thread silently (in
+        # a compiled windowed build, its traceback goes nowhere), leaving the
+        # dialog showing "loading" forever with no way to know why. Wrap the
+        # whole thing so a real bug still logs a traceback and still clears
+        # the "loading" placeholders instead of leaving them stuck.
+        try:
+            if self._is_group:
+                data = self._mw.get_group_info(self._jid)
+                participants = data.get("participants", [])
+                lid_jids_to_resolve = []
+                lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+                for p in participants:
+                    if not isinstance(p, dict):
+                        continue
+                    p_jid = p.get("id", "")
+                    if p_jid and p_jid.endswith("@lid") and p_jid not in lid_to_phone:
+                        lid_jids_to_resolve.append(p_jid)
+                if lid_jids_to_resolve:
+                    try:
+                        self._mw.resolve_lid_jids_via_api(lid_jids_to_resolve)
+                    except Exception:
+                        pass
+                wx.CallAfter(self._populate_group, data)
+            else:
+                if self._jid.endswith("@lid") and self._jid not in getattr(self._mw, "_lid_to_phone", {}):
+                    try:
+                        self._mw.resolve_lid_jids_via_api([self._jid])
+                    except Exception:
+                        pass
+                data = self._mw.get_contact_profile(self._jid)
+                wx.CallAfter(self._populate_personal, data)
+        except Exception:
+            logging.exception("[ConversationDataDialog] _fetch_data failed for %s", self._jid)
+            if self._is_group:
+                wx.CallAfter(self._populate_group, {})
+            else:
+                wx.CallAfter(self._populate_personal, {})
 
     def _populate_personal(self, data: dict):
         """Fill the personal-chat TextCtrl (called on main thread)."""
         if not self or not self.IsShown():
             return
+        try:
+            self._populate_personal_unsafe(data)
+        except Exception:
+            # See _populate_group()'s equivalent guard.
+            logging.exception("[ConversationDataDialog] _populate_personal failed for %s", self._jid)
+
+    def _populate_personal_unsafe(self, data: dict):
         i18n  = self._i18n
         lines = []
         # The API wraps the contact under "response"; the top-level "status" is
@@ -273,14 +416,37 @@ class ConversationDataDialog(wx.Dialog):
         """Fill the group Notebook tabs (called on main thread)."""
         if not self or not self.IsShown():
             return
+        try:
+            self._populate_group_unsafe(data)
+        except Exception:
+            # See _fetch_data(): this runs from a wx.CallAfter callback, so an
+            # uncaught exception here is swallowed by wx's event loop with no
+            # visible trace — the three tabs simply stay on "loading" forever
+            # with no clue why. get_group_info()'s real response field names
+            # (description/createdAt/isAdmin, no top-level "size") didn't
+            # match what this method originally read (desc/creation/admin/
+            # size), so real data always kept the Overview tab wrong or
+            # (depending on exactly which field access failed) never reached
+            # SetValue() at all. Fixed those below, but keep this guard too:
+            # any other unexpected shape from the API should log instead of
+            # silently hanging the dialog.
+            logging.exception("[ConversationDataDialog] _populate_group failed for %s", self._jid)
 
+    def _populate_group_unsafe(self, data: dict):
         i18n = self._i18n
 
         # ── Overview ─────────────────────────────────────────────────────────
         subject  = data.get("subject") or self._name
-        desc     = data.get("desc") or ""
-        creation = _fmt_ts(data.get("creation"), i18n)
-        size     = data.get("size", 0)
+        # get_group_info() (main.py) returns the raw group-info response,
+        # whose real field names are "description" and "createdAt" — this
+        # used to read "desc"/"creation", which don't exist in that response,
+        # so the description and creation date silently never showed.
+        desc     = data.get("description") or data.get("desc") or ""
+        creation = _fmt_ts(data.get("createdAt") or data.get("creation"), i18n)
+        participants_list = data.get("participants") or []
+        # The API response has no top-level "size" field at all — it must be
+        # derived from the participants list.
+        size     = data.get("size") or len(participants_list)
 
         ov_lines = [
             f"{i18n.t('conversations')}: {subject}",
@@ -297,6 +463,8 @@ class ConversationDataDialog(wx.Dialog):
         self._participant_jids = []
         participants = data.get("participants", [])
         my_jid = getattr(self._mw, "my_jid", "") or ""
+        my_lid = getattr(self._mw, "my_lid", "") or ""
+        my_digits = {j.split("@")[0] for j in (my_jid, my_lid) if j}
         user_is_admin = False
         lid_to_phone  = getattr(self._mw, "_lid_to_phone", {})
         for p in participants:
@@ -317,8 +485,10 @@ class ConversationDataDialog(wx.Dialog):
             p_name = self._mw._resolve_jid_name(p_jid)
             if not p_name or p_name == p_phone or p_name.isdigit() or p_name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 p_name = p_phone
-            is_admin = "admin" if p.get("admin") else ""
-            if is_admin and my_jid and (p_jid == my_jid or p_jid.split("@")[0] == my_jid.split("@")[0]):
+            # get_group_info()'s real participant shape is {"id", "isAdmin"}
+            # — "admin" doesn't exist on it, so this always read False.
+            is_admin = "admin" if (p.get("isAdmin") or p.get("admin")) else ""
+            if is_admin and my_digits and p_jid.split("@")[0] in my_digits:
                 user_is_admin = True
             idx = self._part_list.GetItemCount()
             self._part_list.InsertItem(idx, p_name)
@@ -328,10 +498,18 @@ class ConversationDataDialog(wx.Dialog):
             resolved_jid = lid_to_phone.get(p_jid, p_jid) if p_jid.endswith("@lid") else p_jid
             self._participant_jids.append(resolved_jid)
 
-        # Enable "Add members" button only if current user is a group admin.
-        # If we cannot determine my_jid, enable it anyway (API will reject if not admin).
-        if user_is_admin or not my_jid:
+        # Enable "Add members" buttons only if current user is a group admin.
+        # If we cannot determine my_jid, enable them anyway (API will reject if not admin).
+        if user_is_admin or not my_digits:
             self._add_members_btn.Enable()
+            self._add_members_btn_overview.Enable()
+
+        # A pre-populated list must never leave focus/selection pointing at
+        # nothing — mirrors the conversation list's own convention (see
+        # conversations.py's Focus(0)/Select(0) usage).
+        if self._part_list.GetItemCount() > 0:
+            self._part_list.Focus(0)
+            self._part_list.Select(0)
 
         # ── Media ─────────────────────────────────────────────────────────────
         media_dir  = data_path("media")

@@ -8,7 +8,6 @@ WhatsApp JID via result_jid / result_name so the caller can navigate there.
 
 import logging
 import re
-import threading
 import wx
 
 
@@ -59,11 +58,6 @@ class NewContactDialog(wx.Dialog):
         self._phone_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
         sizer.Add(self._phone_field, 0,
                   wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
-
-        # Sync checkbox
-        self._sync_check = wx.CheckBox(panel, label=i18n.t("sync_contact_to_phone"))
-        self._sync_check.SetValue(True)
-        sizer.Add(self._sync_check, 0, wx.LEFT | wx.TOP, 10)
 
         # Buttons
         btn_sizer = wx.StdDialogButtonSizer()
@@ -121,15 +115,21 @@ class NewContactDialog(wx.Dialog):
         full_name = f"{first} {surname}".strip()
         jid       = phone + "@s.whatsapp.net"
 
-        # Store locally so future searches find this contact
+        # Store locally so future searches find this contact. This contact
+        # only ever lives inside WinZapp/WhatsApp's own contact list — there
+        # used to be a "sync to phone" checkbox here that called an
+        # add-new-contact API endpoint, but that endpoint never actually
+        # existed anywhere in the server (not in WinZapp's patches, not in
+        # the underlying wppconnect-server library), and WhatsApp Web itself
+        # has no capability to write to a phone's native address book (its
+        # own "save contact" feature just opens an external Google
+        # Contacts/OS link, not an API call) — so it silently did nothing.
         entry = {
             "remoteJid":  jid,
             "name":       full_name,
             "pushName":   full_name,
+            "isSaved":    True,
         }
-        sync_to_phone = self._sync_check.GetValue()
-        if sync_to_phone:
-            entry["isSaved"] = True
         self._mw.contacts[jid] = entry
 
         # Persist to SQLite so the contact survives restarts
@@ -137,26 +137,6 @@ class NewContactDialog(wx.Dialog):
             self._mw.db.upsert_contact(jid, entry)
         except Exception:
             logging.exception("[new_contact] Failed to persist contact")
-
-        # When requested, actually save the contact on WhatsApp / the device
-        # address book via the API (previously this only set a local flag, so
-        # nothing was ever synced to the phone). Done off the UI thread.
-        if sync_to_phone:
-            threading.Thread(
-                target=self._mw.save_contact_to_phone,
-                args=(phone, first, surname, True),
-                daemon=True,
-            ).start()
-
-        # When requested, actually save the contact on WhatsApp / the device
-        # address book via the API (previously this only set a local flag, so
-        # nothing was ever synced to the phone). Done off the UI thread.
-        if sync_to_phone:
-            threading.Thread(
-                target=self._mw.save_contact_to_phone,
-                args=(phone, first, surname, True),
-                daemon=True,
-            ).start()
 
         self.result_jid  = jid
         self.result_name = full_name

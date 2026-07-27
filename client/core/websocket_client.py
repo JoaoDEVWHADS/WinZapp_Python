@@ -1,10 +1,52 @@
+import logging
 import threading
 import time
 import socketio
 import wx
 import requests
 from core.i18n import I18n
-from core.utils import looks_like_binary_blob, _slim_quoted_message
+from core.utils import looks_like_binary_blob, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
+
+# ── Message delivery status ──────────────────────────────────────────────────
+# The app's own scale (Baileys-shaped, what messages.status stores and what
+# ui/conversations.py::_map_status renders): 2=sent, 3=delivered, 4=read,
+# 5=played.  Two extra values make the states WhatsApp reports but the app used
+# to swallow explicit:
+STATUS_FAILED  = -1   # WhatsApp Web gave up on the send
+STATUS_PENDING = 0    # created locally, not acked by the server yet
+
+# WhatsApp's own ACK scale is WPP.whatsapp.enums.ACK:
+#   -7 MD_DOWNGRADE, -6 INACTIVE, -5 CONTENT_UNUPLOADABLE, -4 CONTENT_TOO_BIG,
+#   -3 CONTENT_GONE, -2 EXPIRED, -1 FAILED, 0 CLOCK, 1 SENT, 2 RECEIVED,
+#   3 READ, 4 PLAYED, 5 PEER (acked by another of our own devices).
+_ACK_TO_STATUS = {
+    0: STATUS_PENDING,
+    1: 2,
+    2: 3,
+    3: 4,
+    4: 5,
+    5: 2,
+}
+
+
+def ack_to_status(wpp_ack):
+    """Translate a WhatsApp ACK into the app's status scale.
+
+    Returns None when the ack is not one we understand — the caller must then
+    leave the message's status alone. This used to be ``mapping.get(ack, 2)``,
+    which reported *every* unrecognised ack as "sent": a FAILED (-1) ack, i.e.
+    WhatsApp Web telling us the message will never leave the outbox, showed up
+    in the UI as "Enviada". Silence and failure both have to be distinguishable
+    from success here, since this is the app's only delivery feedback.
+    """
+    if not isinstance(wpp_ack, int) or isinstance(wpp_ack, bool):
+        return None
+    if wpp_ack < 0:
+        # -1 FAILED and every more specific failure below it (expired, content
+        # gone, too big, …) all mean the same thing to the user: not delivered.
+        return STATUS_FAILED
+    return _ACK_TO_STATUS.get(wpp_ack)
+
 
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
@@ -37,11 +79,23 @@ class WebSocketClient:
         self.sio.on("chats-update", self.on_chats_update)
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
+        # These two handlers existed but were never registered — contact
+        # name/photo updates and presence changes only ever reached the app
+        # through onpresencechanged and the 5-minute contacts poll, so a
+        # renamed contact or a fresh presence event could sit stale for
+        # minutes. Registering them is a no-op if WPPConnect never actually
+        # emits these two event names (both bodies are already wrapped in
+        # try/except), so there is nothing to lose by listening for them too.
+        self.sio.on("contacts.update", self.on_contacts_update)
+        self.sio.on("presence.update", self.on_presence_update)
 
         # threading.Event used by on_continue() to wait for the phoneCode that
         # WPPConnect emits asynchronously via Socket.IO after /start-session.
         self._phone_code_event = threading.Event()
         self._phone_code_value: str = ""
+
+        # Debounce timer for on_disconnect() — see that method.
+        self._disconnect_timer = None
 
     def _clean_jid(self, jid_val):
         if not jid_val:
@@ -53,7 +107,13 @@ class WebSocketClient:
         return jid_val.replace("@c.us", "@s.whatsapp.net")
 
     def on_connect(self):
-        print("WebSocket connected.")
+        logging.info("[WebSocketClient] WebSocket connected.")
+        # Cancel any pending "confirm still disconnected" check from
+        # on_disconnect() — we just reconnected, so that transient blip
+        # never needs to be declared offline at all.
+        if self._disconnect_timer is not None:
+            self._disconnect_timer.cancel()
+            self._disconnect_timer = None
         # Record when we connected so on_messages_upsert can use a stable
         # cutoff time rather than the ever-advancing time.time().
         self._connect_time = time.time()
@@ -73,40 +133,79 @@ class WebSocketClient:
             if getattr(self.main_window, "_wa_connected", False):
                 if hasattr(self.main_window, "message_queue"):
                     self.main_window.message_queue.flush()
+                # Every Socket.IO (re)connect — not only the ones where
+                # check_wa_connection_http() above also flips _wa_connected
+                # from False to True — gets a catch-up sync opportunity.
+                # WPPConnect's HTTP status can stay "CONNECTED" throughout a
+                # purely transport-level Socket.IO drop (a brief network
+                # blip too short for the 30s health check to ever see it as
+                # down), so live messages.upsert events emitted during that
+                # gap are simply gone — nothing else re-delivers them. This
+                # is the client-side half of the "connection looks perfectly
+                # stable yet a message silently never arrives, and F5 fixes
+                # it" reports: was a live delivery gap, not a bug in how an
+                # arrived message got processed. _sync_completed is reset so
+                # trigger_sync_if_needed() is willing to run again; the
+                # existing cooldown/backoff in that method still protects
+                # against a flaky connection reconnecting every few seconds
+                # turning this into a sync storm.
+                self.main_window._sync_completed = False
                 if hasattr(self.main_window, "trigger_sync_if_needed"):
                     self.main_window.trigger_sync_if_needed()
-        except Exception as e:
-            print(f"[WebSocketClient] _recheck_connection_after_connect error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] _recheck_connection_after_connect error")
 
     def on_disconnect(self):
-        print("WebSocket disconnected.")
-        # Pause the message queue until the socket (and WhatsApp) reconnect.
-        wx.CallAfter(setattr, self.main_window, "_wa_connected", False)
+        logging.info("[WebSocketClient] WebSocket disconnected.")
+        # Debounced: python-socketio auto-reconnects on its own within a few
+        # seconds for an ordinary transient blip (Wi-Fi/NAT power-save churn,
+        # a brief hiccup against the local WPPConnect server) — declaring the
+        # app offline immediately for every one of those used to flicker the
+        # title/tray between connected/disconnected and, once
+        # _recheck_connection_after_connect() saw the reconnect, force a full
+        # resync every time — even though WhatsApp itself never actually went
+        # down and outgoing sends (which go over the REST API, not this
+        # socket) were never actually blocked. Wait a few seconds and only
+        # declare it if the socket is STILL down by then; a genuine outage is
+        # still caught either by this (a little later) or by the 30-second
+        # health check regardless.
+        if self._disconnect_timer is not None:
+            self._disconnect_timer.cancel()
+
+        def _confirm_still_disconnected():
+            if not self.sio.connected:
+                self.main_window._set_wa_connected(False, "socket disconnected", False)
+
+        self._disconnect_timer = threading.Timer(
+            5.0, lambda: wx.CallAfter(_confirm_still_disconnected)
+        )
+        self._disconnect_timer.daemon = True
+        self._disconnect_timer.start()
 
     def on_connection_update(self, info):
-        print(info)
+        logging.debug(f"[WebSocketClient] event payload: {info}")
         #Checks the new connection state
         data             = info.get("data", {})
         connection_state = data.get("state", "")
         if connection_state == "open":
+            # A confirmed live connection means any earlier logout is done
+            # and re-pairing succeeded — clear the _handle_logout guard so a
+            # genuinely new future logout is handled again instead of being
+            # silently ignored as a stale duplicate.
+            self._logout_handled = False
             # Store the user's own JID so self-chat detection and group-admin
             # checks have access to it throughout the session.
             wuid = data.get("wuid", "")
             if wuid:
                 self.main_window.my_jid = wuid
                 self.main_window.resolve_self_lid()
-            # Mark WhatsApp as connected so the MessageQueue resumes sending.
-            self.main_window._wa_connected = True
-            # Clear any "disconnected" status shown in the title bar / tray.
-            if self.main_window._tray_status == self.i18n.t("tray_wa_disconnected"):
-                self.main_window._set_status("")
+            # Mark WhatsApp as connected: this leaves automatic offline mode,
+            # resumes the MessageQueue, clears the status text and retriggers a
+            # sync that was skipped while the connection was down.
+            self.main_window._set_wa_connected(True, "session-logged")
             if hasattr(self.main_window, "message_queue"):
                 self.main_window.message_queue.flush()
-            
-            # Trigger sync if it was previously incomplete/skipped due to connection delay
-            if hasattr(self.main_window, "trigger_sync_if_needed"):
-                self.main_window.trigger_sync_if_needed()
-            
+
             # Save the paired status so next startup knows pairing was fully completed.
             pi = self.main_window.settings.setdefault("privateinfo", {})
             if not pi.get("paired"):
@@ -114,9 +213,26 @@ class WebSocketClient:
                 self.main_window.save_settings()
 
             self.on_pairing_complete()
+
+            # A pairing in progress that reaches "open" isn't necessarily
+            # safe yet — WPPConnect's own Puppeteer/Chrome session can crash
+            # moments later (confirmed live via wppconnect.log: a
+            # "browserClose" event followed by taskkill errors for Chrome's
+            # already-dead child processes) without Node.js itself going
+            # down and, critically, without ever telling WinZapp anything
+            # went wrong: the Socket.IO connection to the still-alive
+            # WPPConnect Server process never drops, so on_connection_update
+            # never gets a "close" to react to and the app just sits there
+            # believing it's connected forever, with no window ever shown
+            # and no error. This watchdog is the only check independent of
+            # WPPConnect telling us anything: if this attempt hasn't
+            # received real chat data by the time it fires, it treats the
+            # pairing as failed on its own.
+            if getattr(self.main_window, "_pairing_in_progress", False):
+                self._start_pairing_watchdog()
         elif connection_state == "close":
             was_connected = self.main_window._wa_connected
-            self.main_window._wa_connected = False
+            self.main_window._set_wa_connected(False, "session closed")
 
             # Detect permanent WhatsApp logout (status 401 = loggedOut).
             status_code  = (
@@ -128,9 +244,32 @@ class WebSocketClient:
                 data.get("loggedOut", False)
                 or status_code == 401
             )
-            if is_logout:
-                # Permanent logout: clear credentials and redirect to pairing.
-                wx.CallAfter(self._handle_logout)
+            # A connection that closes again — for ANY reason, not just an
+            # explicit 401/loggedOut — while a pairing attempt is still in
+            # progress and before WPPConnect ever delivered real chat data
+            # means WhatsApp never actually finished linking the device, even
+            # though it may have briefly reported "open" and made WinZapp
+            # announce itself as connected. _pairing_in_progress is a narrow
+            # window (set when Connect.on_continue() starts, cleared once
+            # messages.set arrives) specifically so this never fires for an
+            # ordinary reconnect hiccup on an already-established, already-
+            # synced account — only for a pairing that never truly completed.
+            pairing_failed = (
+                not is_logout
+                and getattr(self.main_window, "_pairing_in_progress", False)
+                and not getattr(self.main_window, "messages_set_completed", False)
+            )
+            if is_logout or pairing_failed:
+                if pairing_failed:
+                    logging.warning(
+                        "[WebSocketClient] Connection closed during an active pairing "
+                        "before the initial sync ever started (statusCode=%s) — "
+                        "treating as a failed pairing.", status_code,
+                    )
+                    wx.CallAfter(self._handle_pairing_failed)
+                else:
+                    # Permanent logout: clear credentials and redirect to pairing.
+                    wx.CallAfter(self._handle_logout)
             else:
                 # Temporary disconnection (network glitch, WhatsApp session interrupted).
                 # Mark WA as disconnected so the MessageQueue stops trying to send.
@@ -139,38 +278,110 @@ class WebSocketClient:
                 # dialog would freeze the UI and prevent that recovery.
                 def _notify_disconnection():
                     mw = self.main_window
-                    mw._wa_connected = False
+                    mw._set_wa_connected(False, "temporary disconnection")
                     mw.error_sound.play()
                     mw.output(self.i18n.t("wa_disconnected_temp"), interrupt=False)
                     mw._set_status(self.i18n.t("tray_wa_disconnected"))
                 wx.CallAfter(_notify_disconnection)
 
+    def _start_pairing_watchdog(self, timeout: float = 45.0):
+        """
+        Safety net for a pairing that reached "open" and is then never heard
+        from again — no further Socket.IO event at all, not even a "close".
+
+        Runs on a plain threading.Timer, independent of both the wx main
+        thread and the Socket.IO background thread, specifically so it still
+        fires even if one of those is stuck: the failure mode this exists
+        for (WPPConnect's own Puppeteer/Chrome session crashing right after
+        briefly reporting "open", confirmed live via wppconnect.log showing
+        a "browserClose" event) leaves Node.js itself running and the
+        Socket.IO connection to it intact, so nothing ever tells
+        on_connection_update's "close" branch to react — the ordinary
+        recovery path never gets a chance to run at all.
+        """
+        my_attempt = self.connect._pairing_attempt_id
+
+        def _check():
+            if self.connect._pairing_attempt_id != my_attempt:
+                return  # superseded — cancelled, or a newer attempt started
+            if not getattr(self.main_window, "_pairing_in_progress", False):
+                return  # already resolved: synced, cancelled, or already recovered
+            logging.warning(
+                "[WebSocketClient] Pairing attempt still hadn't received real "
+                "chat data %.0fs after appearing to open — treating as a "
+                "failed pairing (watchdog).", timeout,
+            )
+            wx.CallAfter(self._handle_pairing_failed)
+
+        t = threading.Timer(timeout, _check)
+        t.daemon = True
+        t.start()
+
     def _handle_logout(self):
-        """Handle a permanent WhatsApp logout (device removed from account).
+        """Handle a permanent WhatsApp logout (device removed from account)."""
+        self._reset_credentials_and_show_pairing("device_logged_out")
+
+    def _handle_pairing_failed(self):
+        """
+        A pairing attempt appeared to succeed — WPPConnect briefly reported
+        the connection as "open" and WinZapp announced it as connected — but
+        it closed again before the initial sync ever started, meaning
+        WhatsApp itself never actually finished linking the device (a
+        rejected/timed-out pairing, reported live as the phone showing "Não
+        foi possível conectar o dispositivo" seconds after WinZapp had
+        already played the connected sound).
+
+        Recovers exactly like a permanent logout: without this, the "close"
+        branch of on_connection_update only recognizes explicit 401/loggedOut
+        signals as a reason to reset and re-show the pairing dialog, so this
+        kind of failure — which carries neither — left the app sitting
+        indefinitely on a half-finished pairing with no error, no window,
+        and no way back to the connection dialog.
+        """
+        self._reset_credentials_and_show_pairing("pairing_failed_msg")
+
+    def _reset_credentials_and_show_pairing(self, message_key: str):
+        """Shared recovery for _handle_logout()/_handle_pairing_failed().
 
         Runs on the wx main thread (via wx.CallAfter).  Shows an informative
         dialog, wipes the now-invalid credentials from settings, disconnects
         the socket, and opens the connection dialog so the user can re-pair.
+
+        Multiple independent event paths can decide the same underlying
+        problem happened (on_connection_update's 401/loggedOut check, its new
+        failed-pairing check, and on_wpp_status_find's notLogged/
+        disconnectedMobile check) and all schedule one of the two methods
+        above via wx.CallAfter before any has run. Since CallAfter callbacks
+        are dispatched one at a time on this same thread, a simple flag
+        checked at entry is enough to make every call after the first a
+        no-op — without it the error dialog appeared twice, credentials were
+        wiped twice, and two pairing dialogs could end up stacked on screen.
         """
+        if getattr(self, "_logout_handled", False):
+            return
+        self._logout_handled = True
+
         mw = self.main_window
         mw._wa_connected = False
+        mw._pairing_in_progress = False
         mw.error_sound.play()
 
         wx.MessageBox(
-            self.i18n.t("device_logged_out"),
+            self.i18n.t(message_key),
             self.i18n.t("error").format(app_name=mw.app_name),
             wx.OK | wx.ICON_ERROR,
         )
 
         # Wipe the invalidated credentials so next startup goes to pairing.
+        old_token = mw._get_wa_token()
         pi = mw.settings.setdefault("privateinfo", {})
-        old_token = pi.pop("WA_token", "")
+        mw._set_wa_token("")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
         mw.messages_set_completed = False
         mw.token = ""
         mw.save_settings()
-        
+
         # Wipe all cached chats/contacts/media to avoid cross-account data leakage
         mw.clear_local_data()
 
@@ -193,29 +404,100 @@ class WebSocketClient:
         except Exception:
             pass
 
+        # Reset connection state as if this were a fresh launch — see the
+        # matching comment in main.py's _on_disconnect() for why: without
+        # this, _set_wa_connected()'s startup grace window stays permanently
+        # disabled after re-pairing (it only applies while
+        # "never _wa_connect_announced"), so the first not-yet-settled check
+        # right after the new pairing completes gets mistaken for a real
+        # outage.
+        mw._wa_connected = False
+        mw._wa_connect_announced = False
+        mw._auto_offline = False
+        mw._wa_offline_strikes = 0
+        mw._wa_startup_time = time.time()
+
         # Redirect to pairing dialog.
         self.connect.show_connection_dial()
 
     def on_pairing_complete(self):
-        # Destroy dialogs on the main thread to avoid wx thread-safety issues.
-        # Guards against the case where the app is already paired (no dialogs open).
-        def _close_dialogs():
+        # End the dialogs' modal loops on the main thread to avoid wx
+        # thread-safety issues. Guards against the case where the app is
+        # already paired (no dialogs open).
+        #
+        # connection_dial (and pairing_dial, its child) are shown via
+        # ShowModal() — Destroy()ing a dialog directly while its modal loop
+        # is still running never signals that loop to unwind, so wx never
+        # re-enables the parent window ShowModal() disabled when it started.
+        # The dialog object goes away but the main window stays blocked for
+        # input — reported live as "reconnected successfully, but the main
+        # window was frozen/unusable and kept announcing 'connection
+        # restored' in the background".
+        #
+        # EndModal() ONLY here — never Destroy(). Both dialogs already
+        # Destroy() themselves right after their own ShowModal() call
+        # returns (show_pairing_dial() / show_connection_dial() in
+        # connect.py).
+        #
+        # Close ONLY the innermost modal here. pairing_dial is nested INSIDE
+        # connection_dial's own modal loop (on_continue() opens it from a
+        # button handler running inside connection_dial.ShowModal()), and wx
+        # only allows EndModal() on the loop that is actually running.
+        #
+        # EndModal() does NOT unwind its loop immediately — it merely signals
+        # it — and that still-running loop keeps dispatching pending events,
+        # including any wx.CallAfter queued from within it. So closing
+        # connection_dial from here was impossible: both inline and via a
+        # CallAfter chained off this same handler ran while pairing_dial's
+        # loop was still the running one, and wx rejected it with a hard
+        # assertion ("IsRunning()" failed ... "Use ScheduleExit() on not
+        # running loop"). log.log confirmed the ordering — the parent's close
+        # attempt logged BEFORE "pairing_dial modal loop returned".
+        #
+        # connection_dial is therefore closed by show_pairing_dial() itself,
+        # right after its own ShowModal() returns (see connect.py), which is
+        # the only point where control is provably back in the parent's loop.
+        def _end_innermost_dialog():
+            # Phone-pairing flow: pairing_dial is on top, and closing it lets
+            # show_pairing_dial() resume and close connection_dial in turn.
             if hasattr(self.connect, 'pairing_dial'):
                 try:
-                    self.connect.pairing_dial.Destroy()
+                    dlg = self.connect.pairing_dial
+                    # No module-level wx.IsDestroyed() exists in wxPython —
+                    # calling any method on an already-destroyed dialog
+                    # raises RuntimeError, which the except below catches;
+                    # IsModal() alone is enough to also skip non-modal state.
+                    if dlg.IsModal():
+                        logging.info("[on_pairing_complete] Ending pairing_dial modal loop.")
+                        dlg.EndModal(wx.ID_OK)
+                        return
+                    logging.info("[on_pairing_complete] pairing_dial not modal — falling through to connection_dial.")
                 except Exception:
-                    pass
+                    logging.exception("[on_pairing_complete] Failed to end pairing_dial.")
+                    return
+            else:
+                logging.info("[on_pairing_complete] No pairing_dial attribute — closing connection_dial directly.")
+            # QR-code flow (or pairing_dial already gone): connection_dial is
+            # itself the innermost running loop, so it can be ended here.
             if hasattr(self.connect, 'connection_dial'):
                 try:
-                    self.connect.connection_dial.Destroy()
+                    dlg = self.connect.connection_dial
+                    if dlg.IsModal():
+                        logging.info("[on_pairing_complete] Ending connection_dial modal loop.")
+                        dlg.EndModal(wx.ID_OK)
+                    else:
+                        logging.info("[on_pairing_complete] connection_dial not modal — nothing to end.")
                 except Exception:
-                    pass
+                    logging.exception("[on_pairing_complete] Failed to end connection_dial.")
+            else:
+                logging.info("[on_pairing_complete] No connection_dial attribute — nothing to close.")
 
-        wx.CallAfter(_close_dialogs)
+        logging.info("[on_pairing_complete] Scheduling dialog close via CallAfter.")
+        wx.CallAfter(_end_innermost_dialog)
 
 
     def on_qrcode_update(self, info):
-        print(info)
+        logging.debug(f"[WebSocketClient] event payload: {info}")
         # Check if this is QR-CODE mode (base64) or pairing code mode
         qr_data = info.get("data", {}).get("qrcode", {})
         pairing_code = qr_data.get("pairingCode")
@@ -245,18 +527,24 @@ class WebSocketClient:
 
     def on_messages_set(self, info):
         self.main_window.messages_set_completed = True
-        # Guard 1: don't start a second sync while one is already running.
-        existing = getattr(self.main_window, "sync_thread", None)
-        if existing and existing.is_alive():
-            return
-        # Guard 2: don't restart sync after it already completed this session.
+        # Real chat data has arrived — this pairing (if one was in progress)
+        # has genuinely succeeded, so it's no longer at risk of being treated
+        # as a failed pairing by on_connection_update if the socket later
+        # drops for an ordinary/unrelated reason.
+        self.main_window._pairing_in_progress = False
+        # _try_start_sync_thread() atomically checks "already running or
+        # already completed" and starts self.sync_thread under a lock —
         # WPPConnect sends messages.set in multiple batches during initial
-        # WhatsApp sync; without this guard the second batch would trigger a
-        # full re-sync immediately after the first one finished.
-        if getattr(self.main_window, "_sync_completed", False):
-            return
-        self.main_window.sync_thread = threading.Thread(target=self.main_window.start_sync, daemon=True)
-        self.main_window.sync_thread.start()
+        # sync, and this same method also gets called directly (not via a
+        # real messages.set event) elsewhere, so more than one caller can
+        # race to start a sync within milliseconds of each other. A plain
+        # is_alive() check here (the old code) has a gap between checking
+        # and starting that another thread's own check can land in — two
+        # sync threads running at once was reported live as "sincronizando
+        # conversas" announced twice and, worse, concurrent writes to the
+        # single DatabaseBridge connection failing outright and flooding the
+        # screen with error dialogs.
+        self.main_window._try_start_sync_thread()
 
     def on_messages_upsert(self, info):
         """
@@ -277,15 +565,29 @@ class WebSocketClient:
 
             # ── Skip history-sync echoes ───────────────────────────────────────
             # WPPConnect/Baileys fires messages.upsert for historical messages
-            # (isMdHistoryMsg=True) during its initial sync phase. These are the
-            # same records already fetched by sync_chat_messages via the REST API
-            # and placed in the correct chronological position. Treating them as
-            # live new messages appends them at the bottom of the conversation
-            # as if they had just been sent. Dispatch them to the historical handler
-            # to be saved silently in the DB and update internal state.
+            # (isMdHistoryMsg=True) during its initial sync phase. These are
+            # normally the same records already fetched by sync_chat_messages via
+            # the REST API and placed in the correct chronological position, so
+            # treating them as live new messages would append them at the bottom
+            # of the conversation as if they had just been sent — dispatch them
+            # to the historical handler to be saved silently instead.
+            #
+            # BUT: this assumption only holds for a chat that hasn't been synced
+            # yet (not present in self.chats). Once a chat is already in the
+            # list, WPPConnect can still tag a genuinely new, real-time message
+            # with isMdHistoryMsg=True (observed in practice) — silently routing
+            # it to on_historical_message would save it without a notification,
+            # sound, or unread-count bump, effectively "losing" it from the
+            # user's point of view. So: only take the silent path for chats not
+            # yet in the list; an already-listed chat always gets full live
+            # treatment regardless of the flag.
             if msg.get("isMdHistoryMsg"):
-                wx.CallAfter(self.main_window.on_historical_message, msg)
-                return
+                key = msg.get("key", {})
+                remote_jid = self.main_window._normalize_jid(key.get("remoteJid", ""))
+                if remote_jid not in self.main_window.chats:
+                    wx.CallAfter(self.main_window.on_historical_message, msg)
+                    return
+                # Chat already known/synced — fall through to live handling below.
 
             # Extract JID mapping from WebSocket message
             self.main_window._extract_lid_mapping(msg)
@@ -314,8 +616,8 @@ class WebSocketClient:
                 # Otherwise: sent from another device — fall through to on_new_message
             wx.CallAfter(self.main_window.on_new_message, msg)
 
-        except Exception as e:
-            print(f"[WebSocketClient] on_messages_upsert error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_messages_upsert error")
 
     def on_messages_update(self, info):
         """
@@ -338,8 +640,8 @@ class WebSocketClient:
                 if not update.get("key", {}).get("fromMe"):
                     continue
                 wx.CallAfter(self.main_window.on_message_status_update, update)
-        except Exception as e:
-            print(f"[WebSocketClient] on_messages_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_messages_update error")
 
     def on_chats_update(self, info):
         """
@@ -367,7 +669,13 @@ class WebSocketClient:
                 
                 archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
                 if archive is not None:
-                    wx.CallAfter(self.main_window.on_chat_archive_update, jid, bool(archive))
+                    # bool("false") is True — parsing this the naive way is how
+                    # conversations that were never archived on WhatsApp kept
+                    # jumping into the Archived tab. Only act on a value we can
+                    # actually interpret.
+                    archived_flag = _parse_bool_flag(archive)
+                    if archived_flag is not None:
+                        wx.CallAfter(self.main_window.on_chat_archive_update, jid, archived_flag)
 
                 # Handle pin/unpin updates in real-time
                 pin = chat_update.get("pin")
@@ -382,10 +690,16 @@ class WebSocketClient:
                     if isinstance(pin, bool):
                         is_pinned = pin
                     elif isinstance(pin, (int, float)):
-                        is_pinned = pin > 0
+                        # Matches the threshold get_remote_chats() (main.py)
+                        # uses for the same field from the polled list-chats
+                        # response — pin is a pin-timestamp in real WhatsApp
+                        # data, so any genuine value is always far above this,
+                        # but keeping both call sites on the same threshold
+                        # avoids the two ever disagreeing on a borderline value.
+                        is_pinned = pin > 1_000_000
                     wx.CallAfter(self.main_window.on_chat_pin_update, jid, is_pinned)
-        except Exception as e:
-            print(f"[WebSocketClient] on_chats_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_chats_update error")
 
     def on_presence_update(self, info):
         """
@@ -404,8 +718,8 @@ class WebSocketClient:
             if not jid or not isinstance(presences, dict):
                 return
             wx.CallAfter(self.main_window.on_presence_update, jid, presences)
-        except Exception as e:
-            print(f"[WebSocketClient] on_presence_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_presence_update error")
 
     def on_wpp_presence_changed(self, info):
         """
@@ -454,7 +768,7 @@ class WebSocketClient:
                     # Unknown/unexpected chat-state value — log it so a real-world
                     # mismatch (e.g. a different literal used for audio recording)
                     # can be diagnosed from the logs instead of failing silently.
-                    print(f"[WebSocketClient] Unrecognized presence state: {s!r} (raw info: {info})")
+                    logging.warning(f"[WebSocketClient] Unrecognized presence state: {s!r} (raw info: {info})")
                 return s
 
             timestamp = info.get("t")
@@ -487,8 +801,8 @@ class WebSocketClient:
                 import logging
                 logging.info(f"[WebSocketClient] on_wpp_presence_changed JID: {chat_jid}, presences: {presences}")
                 wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_presence_changed error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_presence_changed error")
 
     def on_contacts_update(self, info):
         """
@@ -559,8 +873,8 @@ class WebSocketClient:
                 # Refresh conversation names shown in the UI (debounced —
                 # contacts.update can fire in bursts for many contacts at once)
                 wx.CallAfter(self.main_window._schedule_set_chats)
-        except Exception as e:
-            print(f"[WebSocketClient] on_contacts_update error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_contacts_update error")
 
     # ── WPPConnect Event Handlers ─────────────────────────────────────────────
 
@@ -578,8 +892,8 @@ class WebSocketClient:
                         }
                     }
                 })
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_qrcode error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_qrcode error")
 
     def on_wpp_session_logged(self, data):
         try:
@@ -607,8 +921,8 @@ class WebSocketClient:
                 # WPPConnect does not emit messages.set; trigger sync here instead,
                 # using the same guards as on_messages_set to prevent double-sync.
                 self.on_messages_set({})
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_session_logged error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_session_logged error")
 
     def _fetch_host_device_jid(self):
         try:
@@ -633,8 +947,8 @@ class WebSocketClient:
                 if wuid:
                     self.main_window.my_jid = wuid
                     wx.CallAfter(self.main_window.resolve_self_lid)
-        except Exception as ex:
-            print(f"[WebSocketClient] Failed to fetch host device JID: {ex}")
+        except Exception:
+            logging.exception("[WebSocketClient] Failed to fetch host device JID")
 
     def _set_wpp_limits(self):
         """Push raised file-size limits into WhatsApp Web via the setLimit API.
@@ -670,7 +984,7 @@ class WebSocketClient:
                 return
             status = data.get("status")
             session = data.get("session")
-            print(f"[WebSocketClient] Received status-find: {status}, session: {session}")
+            logging.info(f"[WebSocketClient] Received status-find: {status}, session: {session}")
             
             # If session is provided in the payload, ignore it if it is not ours
             if session and session != self.instance_name:
@@ -681,8 +995,8 @@ class WebSocketClient:
                 # Only trigger if we were previously fully connected (preventing startup false positives).
                 if self.main_window._wa_connected and self.main_window.settings.get("privateinfo", {}).get("paired"):
                     wx.CallAfter(self._handle_logout)
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_status_find error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_status_find error")
 
     def on_wpp_phone_code(self, data):
         """Handle the 'phoneCode' Socket.IO event emitted by WPPConnect Server.
@@ -697,6 +1011,20 @@ class WebSocketClient:
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
+                # Diagnostic: WPPConnect only emits this event when WhatsApp
+                # Web itself fires its internal conn.auth_code_change (see
+                # host.layer.js) — there's no client-side timer forcing this.
+                # Logged with the previous value + a timestamp so a real
+                # pairing session's log file can show definitively whether
+                # consecutive events really carry different codes (WhatsApp
+                # genuinely rotating it) or the same one repeated (which
+                # would point to a bug — none found by reading the code, but
+                # worth being able to confirm from a real run instead of
+                # just trusting that reading).
+                logging.info(
+                    "[WebSocketClient] phoneCode event: new=%s previous=%s at %s",
+                    code, self._phone_code_value, time.strftime("%H:%M:%S"),
+                )
                 self._phone_code_value = str(code)
                 self._phone_code_event.set()
                 # WPPConnect requests a fresh pairing code whenever WhatsApp
@@ -705,8 +1033,8 @@ class WebSocketClient:
                 # code.
                 if self.connect:
                     wx.CallAfter(self.connect.update_pairing_code, str(code))
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_phone_code error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
 
     def on_wpp_message_received(self, data):
@@ -718,8 +1046,12 @@ class WebSocketClient:
                 return
             normalized = self._normalize_wpp_message(wpp_msg)
             self.on_messages_upsert({"data": normalized})
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_message_received error: {e}")
+        except Exception:
+            # A message is dropped entirely if this raises — log the full
+            # traceback (not just str(e)) so a future normalization bug is
+            # diagnosable from the logs instead of a message just vanishing
+            # with no trace of why.
+            logging.exception("[WebSocketClient] on_wpp_message_received error")
 
     def on_wpp_reaction(self, data):
         """Handle the 'onreactionmessage' Socket.IO event.
@@ -791,18 +1123,26 @@ class WebSocketClient:
             if reactor_participant:
                 normalized["key"]["participant"] = reactor_participant
             wx.CallAfter(self.main_window.on_new_message, normalized)
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_reaction error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_reaction error")
 
     def on_wpp_ack(self, data):
         try:
             if not isinstance(data, dict):
                 return
-            status_mapping = {1: 2, 2: 3, 3: 4, 4: 5}
             wpp_ack = data.get("ack")
+            status = ack_to_status(wpp_ack)
+            if status is None:
+                logging.warning("[WebSocketClient] on_wpp_ack: unrecognised ack %r — "
+                                "leaving the message status untouched", wpp_ack)
+                return
             msg_id = data.get("id", {}).get("_serialized") if isinstance(data.get("id"), dict) else data.get("id")
             parts = msg_id.split("_") if msg_id else []
             clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+            if not clean_id:
+                logging.warning("[WebSocketClient] on_wpp_ack: ack %r with no usable message id "
+                                "(raw id=%r) — dropping", wpp_ack, data.get("id"))
+                return
 
             remote_jid = data.get("to")
             if not remote_jid and isinstance(data.get("id"), dict):
@@ -820,12 +1160,12 @@ class WebSocketClient:
                         "fromMe": True
                     },
                     "update": {
-                        "status": status_mapping.get(wpp_ack, 2)
+                        "status": status
                     }
                 }
             })
-        except Exception as e:
-            print(f"[WebSocketClient] on_wpp_ack error: {e}")
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_ack error")
 
     def _normalize_wpp_message(self, wpp_msg):
         msg_id = wpp_msg.get("id")
@@ -968,6 +1308,21 @@ class WebSocketClient:
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
+        elif msg_type in ("location", "liveLocation"):
+            # main.py/conversations.py both already handle locationMessage /
+            # liveLocationMessage (rendered as a static "📍 Localização" bubble
+            # today, coordinates kept here for when that changes) — this type
+            # had no branch here at all, so a shared live location silently
+            # fell through with no message_content and no matching entry in
+            # type_mapping below, meaning it rendered as nothing.
+            loc_key = "liveLocationMessage" if msg_type == "liveLocation" else "locationMessage"
+            message_content = {
+                loc_key: {
+                    "degreesLatitude": wpp_msg.get("lat"),
+                    "degreesLongitude": wpp_msg.get("lng"),
+                    "name": wpp_msg.get("loc") or wpp_msg.get("body") or "",
+                }
+            }
         elif msg_type == "vcard":
             message_content = {
                 "contactMessage": {
@@ -998,6 +1353,38 @@ class WebSocketClient:
                     "type": 3
                 }
             }
+        elif msg_type == "gp2":
+            # Group membership/settings notifications (join, leave, removed,
+            # promoted, subject/description/picture change, …). WPPConnect
+            # carries the specific action in "subtype" and the affected
+            # participants in "recipients".
+            sender_obj = wpp_msg.get("sender")
+            author_raw = wpp_msg.get("author") or (
+                sender_obj.get("id", "") if isinstance(sender_obj, dict) else ""
+            )
+            # "recipients" entries can be raw JID strings or WPPConnect Wid
+            # objects ({"server":..., "user":..., "_serialized":...}) — always
+            # normalize to plain strings here so downstream UI code (which
+            # expects to call string methods like .endswith() on each one)
+            # never has to guard against a dict slipping through.
+            raw_recipients = wpp_msg.get("recipients") or []
+            clean_recipients = [
+                self._clean_jid(r) for r in raw_recipients if self._clean_jid(r)
+            ]
+            # "body" carries the payload of the change — the new group name for
+            # a subject change, the new description for a description change,
+            # or the on/off value for a settings change. Dropping it (as this
+            # did) is why those events could only be rendered as a vague
+            # "group update" with no indication of what was actually changed.
+            message_content = {
+                "groupNotification": {
+                    "subtype": wpp_msg.get("subtype", ""),
+                    "recipients": clean_recipients,
+                    "author": self._clean_jid(author_raw) if author_raw else "",
+                    "body": wpp_msg.get("body") or wpp_msg.get("subject") or "",
+                    "value": wpp_msg.get("value"),
+                }
+            }
 
         # Fallback to plain text if the message type is unsupported/unmapped but contains body text
         if not message_content and conversation:
@@ -1018,16 +1405,22 @@ class WebSocketClient:
             "list": "listMessage",
             "template": "templateMessage",
             "revoked": "protocolMessage",
-            "extendedText": "extendedTextMessage"
+            "extendedText": "extendedTextMessage",
+            "gp2": "groupNotification",
+            "location": "locationMessage",
+            "liveLocation": "liveLocationMessage",
         }
         mapped_type = type_mapping.get(msg_type, msg_type)
 
         ack = wpp_msg.get("ack")
         message_updates = []
         if ack is not None:
-            status_map = {1: 2, 2: 3, 3: 4, 4: 5}
-            mapped_status = status_map.get(ack, ack)
-            message_updates.append({"status": str(mapped_status)})
+            # Same translation as on_wpp_ack — a negative ack here means the
+            # send failed and must not be passed through raw (it rendered as no
+            # status at all, indistinguishable from a message still in flight).
+            mapped_status = ack_to_status(ack)
+            if mapped_status is not None:
+                message_updates.append({"status": str(mapped_status)})
 
         normalized = {
             "key": {
@@ -1126,7 +1519,15 @@ class WebSocketClient:
             if not participant_jid:
                 author = quoted_msg.get("author") or (quoted_msg.get("sender") or {}).get("id") or ""
                 if author:
-                    participant_jid = author.replace("@c.us", "@s.whatsapp.net")
+                    # author (and .sender.id) can be a raw WPPConnect Wid
+                    # object ({"server":..., "user":..., "_serialized":...})
+                    # rather than a plain string — the sibling quotedMsgObj
+                    # branch below already accounts for this via _clean_jid();
+                    # calling .replace() directly here raised AttributeError,
+                    # which _normalize_wpp_message's only caller swallows with
+                    # a bare `except Exception: print(...)` — silently
+                    # dropping the entire live message, not just its quote.
+                    participant_jid = self._clean_jid(author)
 
         elif isinstance(quoted_msg, str) and quoted_msg:
             has_quote = True

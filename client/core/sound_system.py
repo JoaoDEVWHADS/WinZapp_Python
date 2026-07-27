@@ -1,65 +1,16 @@
 #WinZapp's Sound System Module
 
 import ctypes
+import json
 import logging
 import os
+import shutil
 import sys
+import wx
 import sound_lib, sound_lib.output
 from sound_lib import stream
 from sound_lib.main import bass_call
 import sound_lib.main as _bass_main
-
-
-def _load_bass_plugin_explicit(dll_name: str) -> bool:
-    """Load a BASS plugin DLL using ctypes BASS_PluginLoad with an absolute path.
-
-    pybassopus/pybass_aac may import without error even when their internal
-    libloader search fails silently — so we always try the explicit load too.
-    """
-    candidates_dirs = []
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        candidates_dirs += [exe_dir, os.path.join(exe_dir, 'lib')]
-    if hasattr(sys, '_MEIPASS'):
-        candidates_dirs += [sys._MEIPASS, os.path.join(sys._MEIPASS, 'lib')]
-    # dev mode: source tree lib/ next to this file's parent package
-    _src_lib = os.path.join(os.path.dirname(__file__), '..', 'lib')
-    candidates_dirs.append(os.path.normpath(_src_lib))
-
-    for d in candidates_dirs:
-        path = os.path.join(d, dll_name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            # Load via ctypes directly — works even if BASS_PluginLoad wrapper
-            # in sound_lib has a different calling convention expectation.
-            bass_dll = ctypes.WinDLL("bass.dll")
-            BASS_PluginLoad = bass_dll.BASS_PluginLoad
-            BASS_PluginLoad.restype  = ctypes.c_ulong
-            BASS_PluginLoad.argtypes = [ctypes.c_char_p, ctypes.c_ulong]
-            handle = BASS_PluginLoad(path.encode('utf-8'), 0)
-            if handle:
-                logging.info(
-                    "[sound_system] BASS_PluginLoad OK: %s from %s (handle=%s)",
-                    dll_name, path, handle
-                )
-                return True
-            else:
-                # GetLastError via BASS_ErrorGetCode
-                try:
-                    err = bass_dll.BASS_ErrorGetCode()
-                except Exception:
-                    err = "?"
-                logging.warning(
-                    "[sound_system] BASS_PluginLoad returned 0 for %s at %s (BASS error=%s)",
-                    dll_name, path, err
-                )
-        except Exception as _ex:
-            logging.warning(
-                "[sound_system] explicit BASS_PluginLoad failed for %s at %s: %s",
-                dll_name, path, _ex
-            )
-    return False
 
 
 # ── Import plugin modules (early, so their symbols are available) ─────────────
@@ -168,6 +119,224 @@ class SoundSystem:
 
 
 
+# ── Sound event registry ────────────────────────────────────────────────────
+# Every one-shot UI sound the app plays, as (settings key, default filename in
+# a pack's folder) pairs, listed (and individually enable/path-customizable)
+# in Settings > Sound Events. message_background is included here too so it
+# gets the same enable + custom-path override as any other event; the Alert
+# Tones tab's "Padrão" choice (and the per-conversation "Padrão" override)
+# ultimately resolve to this same event — see
+# MainWindow._resolve_message_background_path().
+SOUND_EVENTS: list[tuple[str, str]] = [
+    ("startup", "startup.ogg"),
+    ("error", "error.ogg"),
+    ("qrcode_loaded", "qrcode_loaded.ogg"),
+    ("waiting_pairing", "waiting_pairing.ogg"),
+    ("pairing_code_updated", "pairing_code_updated.ogg"),
+    ("connected", "connected.ogg"),
+    ("synchronizing", "synchronizing.ogg"),
+    ("sync_complete", "sync_complete.ogg"),
+    ("offline_mode", "offline_mode.ogg"),
+    ("voicemsg_startrecording", "voicemsg_startrecording.ogg"),
+    ("voicemsg_pauserecording", "voicemsg_pauserecording.ogg"),
+    ("voicemsg_discard", "voicemsg_discard.ogg"),
+    ("voicemsg_send", "voicemsg_send.ogg"),
+    ("message_current", "message_current.ogg"),
+    ("message_foreground", "message_foreground.ogg"),
+    ("message_background", "message_background.ogg"),
+    ("message_sent", "message_sent.ogg"),
+]
+
+# ── Alert tone registry (background notification sound choices) ────────────
+# Shared by the Settings > Alert Tones tab (private/group defaults) and the
+# per-conversation notification-sound picker in the conversation data dialog.
+ALERT_TONE_COUNT = 10   # client/sounds/alerts/Alert-01.ogg .. Alert-10.ogg
+
+
+def alert_tone_choice_keys() -> list[str]:
+    """Ordered internal choice keys: 'default', 'alert_1'..'alert_N', 'custom'."""
+    return ["default"] + [f"alert_{i}" for i in range(1, ALERT_TONE_COUNT + 1)] + ["custom"]
+
+
+# ── Soundpacks ───────────────────────────────────────────────────────────────
+# A soundpack is a subfolder of client/sounds/ containing a *.pack.json
+# manifest ({"name": ..., "events": {event_key: relative_path}, "alerts":
+# {alert_key: relative_path}}) plus the .ogg files it references. Paths in
+# the manifest are always relative to the pack's own folder — never absolute,
+# since an absolute path baked in at manifest-authoring time would point at
+# the wrong install location on a different machine.
+PACK_MANIFEST_SUFFIX = ".pack.json"
+DEFAULT_PACK_ID = "default"
+
+
+def _find_pack_manifest(folder: str) -> "str | None":
+    """Return the path to the *.pack.json manifest directly inside `folder`."""
+    try:
+        for name in os.listdir(folder):
+            if name.lower().endswith(PACK_MANIFEST_SUFFIX):
+                candidate = os.path.join(folder, name)
+                if os.path.isfile(candidate):
+                    return candidate
+    except OSError:
+        pass
+    return None
+
+
+def _load_pack(pack_id: str, folder: str) -> "dict | None":
+    manifest = _find_pack_manifest(folder)
+    if not manifest:
+        return None
+    try:
+        with open(manifest, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "id": pack_id,
+        "name": str(data.get("name") or pack_id),
+        "dir": folder,
+        "events": data.get("events") if isinstance(data.get("events"), dict) else {},
+        "alerts": data.get("alerts") if isinstance(data.get("alerts"), dict) else {},
+    }
+
+
+def discover_sound_packs(sounds_root: str) -> dict:
+    """Scan sounds_root for immediate subfolders containing a *.pack.json
+    manifest. Returns {pack_id: pack_dict}, pack_id being the folder name."""
+    packs: dict = {}
+    try:
+        entries = os.listdir(sounds_root)
+    except OSError:
+        return packs
+    for entry in entries:
+        folder = os.path.join(sounds_root, entry)
+        if not os.path.isdir(folder):
+            continue
+        pack = _load_pack(entry, folder)
+        if pack:
+            packs[entry] = pack
+    return packs
+
+
+def _pack_relative_file(pack: dict, rel_path) -> str:
+    """Join a pack-relative path onto the pack's dir. Returns '' if the path
+    is missing or (a corrupted/hand-edited manifest) absolute — a manifest
+    must never carry an absolute path, so one is treated as not resolvable
+    rather than trusted."""
+    if not rel_path or not isinstance(rel_path, str) or os.path.isabs(rel_path):
+        return ""
+    return os.path.join(pack["dir"], rel_path)
+
+
+def resolve_sound_event_path(active_pack, default_pack, event_key: str, override_path: str = "") -> str:
+    """Resolve the file to play for a Sound Events entry, in priority order:
+    1. `override_path` (a per-event custom path the user set), if it exists.
+    2. The active pack's own file for this event.
+    3. The default pack's file for this event — covers packs that don't
+       define every event, or a broken/hand-edited settings.json leaving an
+       empty/stale override path. This is the fallback the previous
+       (non-pack-aware) implementation was missing: an empty or invalid
+       stored path used to silently produce no sound instead of falling
+       back to the bundled default.
+    Returns '' if nothing resolves at all (caller falls back to NullSound).
+    """
+    if override_path and os.path.isfile(override_path):
+        return override_path
+    if active_pack:
+        p = _pack_relative_file(active_pack, active_pack.get("events", {}).get(event_key, ""))
+        if p and os.path.isfile(p):
+            return p
+    if default_pack and default_pack is not active_pack:
+        p = _pack_relative_file(default_pack, default_pack.get("events", {}).get(event_key, ""))
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def resolve_alert_tone_path(active_pack, default_pack, choice: str, custom_path: str = "") -> str:
+    """Resolve an alert-tone choice key ('default' / 'alert_N' / 'custom') to
+    an absolute path, going through the active soundpack with the same
+    fallback-to-default-pack chain as resolve_sound_event_path.
+    """
+    if choice == "custom":
+        return custom_path or ""
+    key = "message_background" if choice == "default" else choice
+    for pack in (active_pack, default_pack if default_pack is not active_pack else None):
+        if not pack:
+            continue
+        source = pack.get("events", {}) if key == "message_background" else pack.get("alerts", {})
+        p = _pack_relative_file(pack, source.get(key, ""))
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def validate_soundpack_folder(folder: str):
+    """Check that `folder` is a valid, importable soundpack.
+
+    Returns (ok: bool, error_i18n_key: str, parsed: dict|None). On success
+    error_i18n_key is '' and parsed has 'name'/'events'/'alerts' (paths still
+    relative to `folder`, not yet pointed at the copied destination).
+    """
+    if not folder or not os.path.isdir(folder):
+        return False, "soundpack_import_error_no_folder", None
+
+    manifest = _find_pack_manifest(folder)
+    if not manifest:
+        return False, "soundpack_import_error_no_manifest", None
+
+    try:
+        with open(manifest, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False, "soundpack_import_error_bad_manifest", None
+
+    if not isinstance(data, dict) or not data.get("name") or not isinstance(data.get("events"), dict):
+        return False, "soundpack_import_error_bad_manifest", None
+
+    events = data.get("events") or {}
+    alerts = data.get("alerts") if isinstance(data.get("alerts"), dict) else {}
+    for rel_path in list(events.values()) + list(alerts.values()):
+        if not isinstance(rel_path, str) or not rel_path:
+            continue
+        if os.path.isabs(rel_path):
+            return False, "soundpack_import_error_absolute_path", None
+        if not os.path.isfile(os.path.join(folder, rel_path)):
+            return False, "soundpack_import_error_missing_file", None
+
+    return True, "", {"name": str(data["name"]), "events": events, "alerts": alerts}
+
+
+def import_soundpack(source_folder: str, sounds_root: str):
+    """Validate `source_folder` as a soundpack, then copy it into
+    `sounds_root` as a new subfolder (named after the source folder,
+    de-duplicated if one with that name already exists).
+
+    Returns (ok: bool, error_i18n_key: str, new_pack_id: str|None).
+    """
+    ok, err_key, _data = validate_soundpack_folder(source_folder)
+    if not ok:
+        return False, err_key, None
+
+    base_name = os.path.basename(os.path.normpath(source_folder)) or "soundpack"
+    safe_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")) or "soundpack"
+    dest_id = safe_name
+    suffix = 2
+    while os.path.exists(os.path.join(sounds_root, dest_id)):
+        dest_id = f"{safe_name}_{suffix}"
+        suffix += 1
+
+    dest_folder = os.path.join(sounds_root, dest_id)
+    try:
+        shutil.copytree(source_folder, dest_folder)
+    except OSError:
+        return False, "soundpack_import_error_copy_failed", None
+
+    return True, "", dest_id
+
+
 class NullSound:
     """Returned when a sound file can't be loaded — all methods are no-ops."""
     def play(self): pass
@@ -175,8 +344,13 @@ class NullSound:
 
 
 class Sound(stream.FileStream):
-    def __init__(self, sound_system, file, *args, **kwargs):
+    def __init__(self, sound_system, file, event_key=None, pack_id=None, *args, **kwargs):
         self.sound_system = sound_system
+        self.event_key = event_key
+        # Which soundpack this event's enabled/path settings live under —
+        # settings["sound_events"] is keyed {pack_id: {event_key: {...}}},
+        # not flat, since a pack switch can carry different enabled states.
+        self.pack_id = pack_id
         if os.path.isfile(os.path.join(self.sound_system.sound_dir, file)): #sound is a file on disk
             self.file = os.path.join(self.sound_system.sound_dir, file)
         else: #sound is coming from memory
@@ -185,15 +359,105 @@ class Sound(stream.FileStream):
 
     def play(self):
         super().stop()
-        #Check if sounds are enabled
-        if self.sound_system.main_window.settings.get("general", {}).get("sounds_enabled", False):
-            super().play()
+        # Each sound event can be individually enabled/disabled from the
+        # Settings > Sound Events tab. Sounds not tied to an event (e.g. the
+        # background notification tone, resolved dynamically elsewhere) always
+        # play — there's nothing here to gate them on.
+        if self.event_key is not None and self.pack_id is not None:
+            events = self.sound_system.main_window.settings.get("sound_events", {})
+            pack_events = events.get(self.pack_id, {})
+            if not pack_events.get(self.event_key, {}).get("enabled", True):
+                return
+        super().play()
 
 
-def load_sound(sound_system, file):
+def load_sound(sound_system, file, event_key=None, pack_id=None):
     """Create a Sound, returning NullSound if the file can't be opened."""
     try:
-        return Sound(sound_system, file)
+        return Sound(sound_system, file, event_key=event_key, pack_id=pack_id)
     except Exception as e:
         logging.warning("[sound_system] Could not load sound '%s': %s", file, e)
         return NullSound()
+
+
+class AlertPreviewController:
+    """Wires a single "preview this sound" wx.Button to play/stop whatever
+    file `resolve_path()` currently points at (an Alert Tones combo choice,
+    a per-conversation sound choice, ...). The button's label flips between
+    "play" and "stop" and flips back on its own once playback finishes —
+    polled via a short wx.Timer since sound_lib has no completion callback.
+
+    Multiple controllers can share a `group`: list (pass the same list to
+    each) so starting one stops any other that's currently previewing —
+    handy for the private/group pair on the Alert Tones tab, where only one
+    preview at a time makes sense.
+    """
+
+    def __init__(self, main_window, button, resolve_path, group=None,
+                 play_label_key="preview_sound_play", stop_label_key="preview_sound_stop"):
+        self.main_window = main_window
+        self.button = button
+        self.resolve_path = resolve_path
+        self.group = group if group is not None else [self]
+        if self not in self.group:
+            self.group.append(self)
+        self.play_label_key = play_label_key
+        self.stop_label_key = stop_label_key
+        self._sound = None
+        self._timer = wx.Timer(button)
+        button.Bind(wx.EVT_TIMER, self._on_timer, self._timer)
+        button.Bind(wx.EVT_BUTTON, self._on_click)
+
+    def _on_click(self, event):
+        if self._sound is not None:
+            self.stop()
+            return
+
+        path = self.resolve_path()
+        if not path or not os.path.isfile(path):
+            wx.MessageBox(
+                self.main_window.i18n.t("preview_sound_error"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR, self.button.GetTopLevelParent(),
+            )
+            return
+
+        for other in self.group:
+            if other is not self:
+                other.stop()
+
+        try:
+            snd = Sound(self.main_window.sound_system, path)
+            snd.play()
+        except Exception as e:
+            logging.warning("[sound_system] Preview playback failed for '%s': %s", path, e)
+            wx.MessageBox(
+                self.main_window.i18n.t("preview_sound_error"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR, self.button.GetTopLevelParent(),
+            )
+            return
+
+        self._sound = snd
+        self.button.SetLabel(self.main_window.i18n.t(self.stop_label_key))
+        self._timer.Start(300)
+
+    def _on_timer(self, event):
+        if self._sound is None or not self._sound.is_playing:
+            self.stop()
+
+    def stop(self):
+        self._timer.Stop()
+        if self._sound is not None:
+            try:
+                self._sound.stop()
+            except Exception:
+                pass
+            self._sound = None
+        self.button.SetLabel(self.main_window.i18n.t(self.play_label_key))
+
+    def refresh_label(self):
+        """Call after a language change to relabel the button correctly for
+        its current play/stop state."""
+        key = self.stop_label_key if self._sound is not None else self.play_label_key
+        self.button.SetLabel(self.main_window.i18n.t(key))
