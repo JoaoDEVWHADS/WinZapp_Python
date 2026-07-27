@@ -473,6 +473,8 @@ class MainWindow(wx.Frame):
         self._resolving_lids = set()
         self._lid_resolution_lock = threading.Lock()
         self._media_sync_running = False
+        self._update_checker = None
+        self._wpp_update_checker = None
 
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
@@ -1748,9 +1750,9 @@ class MainWindow(wx.Frame):
             self.tray_icon = None
         if hasattr(self, "message_queue"):
             self.message_queue.stop()
-        if self._update_checker is not None:
+        if getattr(self, "_update_checker", None) is not None:
             self._update_checker.stop()
-        if self._wpp_update_checker is not None:
+        if getattr(self, "_wpp_update_checker", None) is not None:
             self._wpp_update_checker.stop()
         self._stop_wpp_server()
         if hasattr(self, "db") and self.db is not None:
