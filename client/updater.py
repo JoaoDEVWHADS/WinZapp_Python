@@ -10,6 +10,7 @@ Flow:
   6. After install: batch script waits for our PID, copies files, restarts.
 """
 
+import hashlib
 import os
 import re
 import sys
@@ -17,45 +18,110 @@ import time
 import zipfile
 import tempfile
 import threading
+import logging
 import ctypes
 import subprocess
 import requests
 import wx
-import logging
 
-from app_paths import _outer_exe_dir, _is_frozen
-from config import GITHUB_RELEASE_URL, UPDATE_ZIP_URL
+from app_paths import _outer_exe_dir, _is_frozen, resource_path
+from config import GITHUB_API_LATEST_RELEASE
 from version import __version__
+
+
+def _find_sha256sums_asset(assets: list) -> str:
+    """Return the browser_download_url of a SHA256SUMS.txt asset in a GitHub
+    release's asset list, or "" if the release predates this check (older
+    releases published before CI started generating one)."""
+    for asset in assets:
+        if (asset.get("name") or "").lower() == "sha256sums.txt":
+            return asset.get("browser_download_url", "")
+    return ""
+
+
+def _verify_sha256sums(file_path: str, filename: str, sha256sums_url: str) -> "tuple[bool, str]":
+    """Verify file_path's SHA256 against the checksum manifest published
+    alongside the GitHub release (see .github/workflows/release.yml's
+    "Generate SHA256SUMS.txt" step). Returns (ok, detail).
+
+    Fails OPEN (ok=True) only when sha256sums_url itself is empty — i.e. the
+    release predates this feature and never published a manifest at all;
+    there is nothing to compare against, so refusing to update forever on
+    every pre-existing release would be worse than the risk it closes going
+    forward. Any release that DOES publish a manifest is fully enforced:
+    a fetch failure, a missing entry for our filename, or an actual hash
+    mismatch all fail CLOSED and abort the install.
+    """
+    if not sha256sums_url:
+        logging.warning(
+            "Auto-updater: Release has no SHA256SUMS.txt asset (older release) — "
+            "skipping checksum verification for %s.", filename,
+        )
+        return True, ""
+    try:
+        resp = requests.get(sha256sums_url, timeout=15)
+        resp.raise_for_status()
+    except Exception as exc:
+        return False, f"Failed to download SHA256SUMS.txt: {exc}"
+
+    expected = ""
+    for line in resp.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip().lstrip("*") == filename:
+            expected = parts[0].strip().lower()
+            break
+
+    if not expected:
+        return False, f"No checksum entry for {filename} in SHA256SUMS.txt"
+
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha256.update(chunk)
+    actual = sha256.hexdigest().lower()
+
+    if actual != expected:
+        return False, f"Checksum mismatch for {filename}: expected {expected}, got {actual}"
+
+    logging.info("Auto-updater: Checksum verified for %s (%s).", filename, actual)
+    return True, ""
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, dest_dir: str) -> None:
+    """Extract *zf* into *dest_dir*, rejecting any member whose path would
+    land outside dest_dir (zip-slip: a member name like "../../evil.exe" or
+    an absolute path). zipfile.ZipFile.extractall() sanitizes some of this on
+    modern Python but not all of it, and this ZIP is untrusted content
+    downloaded over the network (a GitHub release asset, but still an
+    external input) rather than something WinZapp generated itself."""
+    dest_dir = os.path.abspath(dest_dir)
+    for member in zf.namelist():
+        target = os.path.abspath(os.path.join(dest_dir, member))
+        if not (target == dest_dir or target.startswith(dest_dir + os.sep)):
+            raise ValueError(f"Refusing to extract unsafe zip member path: {member!r}")
+    zf.extractall(dest_dir)
 
 
 # ── Version helpers ───────────────────────────────────────────────────────────
 
 _PRE_ORDER = {"dev": 0, "alpha": 1, "beta": 2, "": 3}
 
+_VER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)(dev|alpha|beta)?$", re.IGNORECASE)
+
 
 def parse_version(v: str):
-    """Parse version string -> (nums_tuple, suffix) or None on failure."""
+    """Parse "1.2.3.4suffix" -> ((1,2,3,4), suffix) or None on failure."""
     if not v:
         return None
-    v = v.strip()
-    
-    # Extract dev/alpha/beta suffix
-    suffix = ""
-    m_suf = re.search(r'(dev|alpha|beta)', v, re.IGNORECASE)
-    if m_suf:
-        suffix = m_suf.group(1).lower()
-        v = re.sub(r'(dev|alpha|beta)', '', v, flags=re.IGNORECASE)
-        
-    # Extract all digits
-    parts = [int(x) for x in re.findall(r'\d+', v)]
-    if not parts:
+    m = _VER_RE.match(v.strip())
+    if not m:
         return None
-        
-    # Pad to length 4 for standard comparison
-    while len(parts) < 4:
-        parts.append(0)
-        
-    return (tuple(parts[:4]), suffix)
+    nums   = tuple(int(m.group(i)) for i in range(1, 5))
+    suffix = (m.group(5) or "").lower()
+    return (nums, suffix)
 
 
 def is_newer(remote: str, local: str) -> bool:
@@ -69,6 +135,128 @@ def is_newer(remote: str, local: str) -> bool:
     r_key = (r_nums, _PRE_ORDER.get(r_suf, 0))
     l_key = (l_nums, _PRE_ORDER.get(l_suf, 0))
     return r_key > l_key
+
+
+# ── Changelog parser ──────────────────────────────────────────────────────────
+
+_HDR_RE = re.compile(r"^V(\d+\.\d+\.\d+\.(?:\d+)(?:dev|alpha|beta)?)\s*$", re.IGNORECASE)
+
+
+def get_changelog_for_update(changelog_text: str, current: str, new: str) -> str:
+    """
+    Extract changelog entries for all versions > current and <= new.
+    Returns empty string if no relevant entries found.
+    """
+    c_parsed = parse_version(current)
+    n_parsed = parse_version(new)
+    if c_parsed is None or n_parsed is None:
+        return ""
+
+    c_key = (c_parsed[0], _PRE_ORDER.get(c_parsed[1], 0))
+    n_key = (n_parsed[0], _PRE_ORDER.get(n_parsed[1], 0))
+
+    # Split into sections by "V1.2.3.4" header lines
+    sections = []
+    cur_ver   = None
+    cur_lines = []
+    for line in changelog_text.splitlines():
+        m = _HDR_RE.match(line.strip())
+        if m:
+            if cur_ver is not None:
+                sections.append((cur_ver, cur_lines))
+            cur_ver   = m.group(1)
+            cur_lines = []
+        else:
+            if cur_ver is not None:
+                cur_lines.append(line)
+    if cur_ver is not None:
+        sections.append((cur_ver, cur_lines))
+
+    result_parts = []
+    for ver_str, lines in sections:
+        parsed = parse_version(ver_str)
+        if parsed is None:
+            continue
+        key = (parsed[0], _PRE_ORDER.get(parsed[1], 0))
+        if c_key < key <= n_key:
+            body = "\n".join(lines).strip()
+            if body:
+                result_parts.append(f"V{ver_str}\n{body}")
+
+    return "\n\n".join(result_parts)
+
+
+def _read_changelog_file(lang_code: str) -> str:
+    """Return the raw text of changelog_<lang_code>.txt shipped next to the
+    app, or "" if it doesn't exist / can't be read."""
+    path = resource_path(f"changelog_{lang_code}.txt")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        logging.warning("Auto-updater: Failed to read changelog file %s", path, exc_info=True)
+        return ""
+
+
+def load_changelog_text(lang_code: str) -> str:
+    """
+    Resolve the changelog text to show in "What's new".
+
+    Looks for changelog_<lang_code>.txt next to the app first (kept current
+    without a WinZapp rebuild, just like language_map.json is for language
+    names), falls back to changelog_en-US.txt if the user's configured
+    language has none, and returns "" if neither exists so the caller can
+    fall back to the GitHub release notes as a last resort.
+    """
+    text = _read_changelog_file(lang_code)
+    if text:
+        return text
+    if lang_code != "en-US":
+        text = _read_changelog_file("en-US")
+        if text:
+            return text
+    return ""
+
+
+def resolve_changelog(local_version: str, remote_version: str, lang_code: str, release_body: str = "") -> str:
+    """
+    Resolve the text to show in the "What's new" dialog for an update from
+    *local_version* to *remote_version*.
+
+    Preference order:
+      1. changelog_<lang_code>.txt (or changelog_en-US.txt as fallback),
+         filtered down to just the entries between local_version (exclusive)
+         and remote_version (inclusive) via get_changelog_for_update(). If a
+         file was found but has no version-tagged entries in that range
+         (e.g. it predates the "V1.2.3.4" header convention), its raw
+         content is shown as-is rather than being silently discarded.
+      2. The raw GitHub release body — used only when neither changelog
+         file exists at all, since it's written per-release rather than
+         per-version and isn't guaranteed to describe every version in the
+         jump when several were skipped between checks.
+    """
+    raw = load_changelog_text(lang_code)
+    if raw:
+        filtered = get_changelog_for_update(raw, local_version, remote_version)
+        return filtered if filtered else raw.strip()
+    return (release_body or "").strip()
+
+
+def _wrap_changelog_text(text: str, width: int = 100) -> str:
+    """Word-wrap *text* to *width* columns per line for display in the
+    What's New TextCtrl, never breaking a word mid-way. Blank lines
+    (paragraph/section breaks) are preserved as-is."""
+    import textwrap
+    out_lines = []
+    for line in text.splitlines():
+        if not line.strip():
+            out_lines.append("")
+            continue
+        wrapped = textwrap.wrap(line, width=width, break_long_words=False, break_on_hyphens=False)
+        out_lines.extend(wrapped if wrapped else [""])
+    return "\n".join(out_lines)
 
 
 # ── Install helpers ───────────────────────────────────────────────────────────
@@ -86,14 +274,20 @@ def _needs_admin() -> bool:
         return True
 
 
-def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300):
+def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pid: int, api_port: int = 6300) -> bool:
     """
     Write a batch script that:
-      1. Forcefully terminates the WinZapp client process and its children.
-      2. Finds and terminates any leftover Evolution API (port 6300/api_port) and PostgreSQL (port 5433) processes to release file locks.
+      1. Waits for PID to exit.
+      2. Kills any leftover WPPConnect Server (api_port) and PostgreSQL (5433) processes.
       3. Copies all extracted files to install_dir.
       4. Restarts the client executable.
     Then launches it (elevated if the directory needs admin).
+
+    Returns True if the script was actually launched. Callers must check
+    this — previously it was ignored, so a declined UAC prompt (ShellExecuteW
+    returns an error code <= 32, e.g. ERROR_CANCELLED when the user clicks
+    "No") still reported the update as successful and closed the app, even
+    though the batch script never ran and nothing was actually installed.
     """
     source_dir = extracted_dir
     winzapp_sub = os.path.join(extracted_dir, "WinZapp")
@@ -107,20 +301,28 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
 
     bat = (
         "@echo off\n"
-        "chcp 65001 >NUL\n"
         ":WAIT\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
         "if not errorlevel 1 (\n"
         "    timeout /t 1 /nobreak >NUL\n"
         "    goto WAIT\n"
         ")\n"
-        # Give any child processes a moment to exit, then kill any remaining processes listening on the API ports.
+        # Give child processes a moment to exit, then kill stragglers holding file locks.
         "timeout /t 2 /nobreak >NUL\n"
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
-        f'taskkill /F /FI "WINDOWTITLE eq WinZapp*" /IM node.exe >NUL 2>&1\n'
         "timeout /t 1 /nobreak >NUL\n"
+        # xcopy's exit code was previously never checked, so a failed copy
+        # (locked file, disk full, permissions) silently relaunched whatever
+        # was already in install_dir — the user saw the app come back and
+        # assumed the update worked. errorlevel 4+ means xcopy itself failed
+        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
+        # leave a marker file WinZapp checks on next startup so the user is
+        # told instead of silently running a stale/partial install.
         f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
+        "if errorlevel 4 (\n"
+        f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
+        ")\n"
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
     )
@@ -132,18 +334,33 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     if sys.platform == "win32":
         needs_admin = _needs_admin()
         if needs_admin:
-            import ctypes
-            ctypes.windll.shell32.ShellExecuteW(
+            # ShellExecuteW returns an HINSTANCE-shaped value that is > 32 on
+            # success and an SE_ERR_* code <= 32 on failure — notably
+            # ERROR_CANCELLED (1223) when the user clicks "No" on the UAC
+            # consent prompt. That return value used to be discarded, so a
+            # declined prompt still left the caller believing the update had
+            # been launched (self._install_ok = True), when in fact nothing
+            # ran and the app was about to close having done nothing.
+            result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
             )
+            if result <= 32:
+                logging.warning(
+                    "Auto-updater: ShellExecuteW('runas', ...) failed or was "
+                    "declined by the user (result=%s); batch installer was "
+                    "not launched.", result,
+                )
+                return False
         else:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACH_PROCESS", 0)
             subprocess.Popen(
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,
             )
+        return True
     else:
         logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
+        return False
 
 
 # ── WhatsNewDialog ────────────────────────────────────────────────────────────
@@ -152,7 +369,12 @@ class WhatsNewDialog(wx.Dialog):
     """Shows the changelog entries between the current and new version."""
 
     def __init__(self, parent, changelog: str):
-        i18n = parent.main_window.i18n if hasattr(parent, "main_window") else parent.i18n
+        # parent is the UpdateDialog, which stores the real MainWindow as
+        # _main_window (not main_window) and never kept its own .i18n
+        # attribute — looking those up directly raised an AttributeError
+        # every time "Quais as novidades?" was clicked.
+        mw = getattr(parent, "main_window", None) or getattr(parent, "_main_window", None) or parent
+        i18n = mw.i18n
         super().__init__(
             parent,
             title=i18n.t("whats_new_title"),
@@ -168,7 +390,7 @@ class WhatsNewDialog(wx.Dialog):
 
         text_ctrl = wx.TextCtrl(
             self,
-            value=changelog,
+            value=_wrap_changelog_text(changelog),
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         sizer.Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 8)
@@ -188,18 +410,20 @@ class UpdateProgressDialog(wx.Dialog):
     Runs the download in a background thread, updates gauge via CallAfter.
     """
 
-    def __init__(self, parent, new_version: str, main_window):
+    def __init__(self, parent, new_version: str, main_window, zip_url: str, sha256sums_url: str = ""):
         i18n = main_window.i18n
         super().__init__(
             parent,
             title=i18n.t("update_progress_title"),
             style=wx.DEFAULT_DIALOG_STYLE,
         )
-        self._main_window  = main_window
-        self._new_version  = new_version
-        self._cancelled    = False
-        self._install_ok   = False
-        self._error_msg    = ""
+        self._main_window    = main_window
+        self._new_version    = new_version
+        self._zip_url        = zip_url
+        self._sha256sums_url = sha256sums_url
+        self._cancelled      = False
+        self._install_ok     = False
+        self._error_msg      = ""
         self._build(i18n)
         self.SetMinSize((400, -1))
         self.Fit()
@@ -237,8 +461,8 @@ class UpdateProgressDialog(wx.Dialog):
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="winzapp_upd_")
             os.close(zip_fd)
 
-            logging.info("Auto-updater: Downloading ZIP from %s to %s", UPDATE_ZIP_URL, zip_path)
-            resp = requests.get(UPDATE_ZIP_URL, stream=True, timeout=60)
+            logging.info("Auto-updater: Downloading ZIP from %s to %s", self._zip_url, zip_path)
+            resp = requests.get(self._zip_url, stream=True, timeout=60)
             resp.raise_for_status()
 
             total = int(resp.headers.get("content-length", 0))
@@ -260,11 +484,29 @@ class UpdateProgressDialog(wx.Dialog):
 
             logging.info("Auto-updater: Download completed successfully.")
 
+            # ── Verify integrity ─────────────────────────────────────────────────
+            # Before this ZIP is trusted with elevated write access to the
+            # install directory (below), confirm it's byte-for-byte what CI
+            # actually built — not a MITM'd download or a tampered/hijacked
+            # release edit. See _verify_sha256sums()'s docstring for the
+            # fail-open/fail-closed policy.
+            filename = os.path.basename(self._zip_url.split("?")[0])
+            ok, detail = _verify_sha256sums(zip_path, filename, self._sha256sums_url)
+            if not ok:
+                logging.error("Auto-updater: Checksum verification failed for %s: %s", filename, detail)
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    pass
+                self._error_msg = self._main_window.i18n.t("update_checksum_mismatch").format(detail=detail)
+                wx.CallAfter(self.EndModal, wx.ID_ABORT)
+                return
+
             # ── Extract ───────────────────────────────────────────────────────
             extract_dir = tempfile.mkdtemp(prefix="winzapp_ext_")
             logging.info("Auto-updater: Extracting update to %s", extract_dir)
             with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(extract_dir)
+                _safe_extract_zip(zf, extract_dir)
             os.remove(zip_path)
 
             # If the ZIP placed all files inside a single top-level folder,
@@ -298,7 +540,11 @@ class UpdateProgressDialog(wx.Dialog):
             pid         = os.getpid()
 
             logging.info("Auto-updater: Launching batch installer from %s (PID %d)", install_dir, pid)
-            _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "evolution_port", 6300))
+            launched = _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "wpp_port", 6300))
+            if not launched:
+                self._error_msg = self._main_window.i18n.t("update_uac_declined")
+                wx.CallAfter(self.EndModal, wx.ID_ABORT)
+                return
             self._install_ok = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
 
@@ -313,18 +559,19 @@ class UpdateProgressDialog(wx.Dialog):
 class UpdateDialog(wx.Dialog):
     """
     Prompts the user to install an available update.
-    Buttons: Sim | Nao
+    Buttons: Sim | Nao | Quais as novidades? (hidden when no changelog)
     """
 
-    def __init__(self, parent, new_version: str, main_window=None):
-        self._main_window = main_window or parent
-        i18n = self._main_window.i18n
+    def __init__(self, parent, new_version: str, changelog: str):
+        self._main_window = parent
+        i18n = parent.i18n
         super().__init__(
             parent,
             title=i18n.t("update_available_title"),
             style=wx.DEFAULT_DIALOG_STYLE,
         )
         self._new_version = new_version
+        self._changelog   = changelog
         self._build(i18n)
         self.Fit()
         self.SetMinSize((360, -1))
@@ -345,6 +592,13 @@ class UpdateDialog(wx.Dialog):
         btn_sizer.Add(self._yes_btn, 0, wx.RIGHT, 4)
         btn_sizer.Add(self._no_btn,  0, wx.RIGHT, 4)
 
+        if self._changelog:
+            self._news_btn = wx.Button(self, wx.ID_MORE, label=i18n.t("whats_new_btn"))
+            btn_sizer.Add(self._news_btn, 0)
+            self._news_btn.Bind(wx.EVT_BUTTON, self._on_whats_new)
+        else:
+            self._news_btn = None
+
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
         self.SetSizer(sizer)
 
@@ -357,6 +611,11 @@ class UpdateDialog(wx.Dialog):
 
     def _on_no(self, event):
         self.EndModal(wx.ID_NO)
+
+    def _on_whats_new(self, event):
+        dlg = WhatsNewDialog(self, self._changelog)
+        dlg.ShowModal()
+        dlg.Destroy()
 
 
 # ── UpdateChecker ─────────────────────────────────────────────────────────────
@@ -381,7 +640,7 @@ class UpdateChecker:
         t.start()
 
     def force_check(self):
-        """Called from the Help > Force Update menu item."""
+        """Called from the Help > Check for Updates menu item."""
         self._force = True
         if self._retry_timer is not None:
             self._retry_timer.cancel()
@@ -389,28 +648,66 @@ class UpdateChecker:
         t = threading.Thread(target=self._check_once, daemon=True)
         t.start()
 
+    def force_reinstall(self):
+        """
+        Called from the Help > Force Reinstall from ZIP menu item.
+        Unlike force_check(), this skips the version comparison entirely and
+        always re-downloads and reinstalls whatever ZIP is attached to the
+        latest GitHub release — used to recover a broken install without
+        waiting for a newer version to exist.
+        """
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+            self._retry_timer = None
+        t = threading.Thread(target=self._fetch_latest_release_for_reinstall, daemon=True)
+        t.start()
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _check_once(self):
-        logging.info("Auto-updater: Starting update check...")
+        logging.info("Auto-updater: Checking GitHub Releases for updates...")
         try:
-            headers = {"User-Agent": "WinZapp-Updater"}
-            logging.info("Auto-updater: Querying GITHUB_RELEASE_URL: %s", GITHUB_RELEASE_URL)
-            resp = requests.get(GITHUB_RELEASE_URL, headers=headers, timeout=15)
+            resp = requests.get(
+                GITHUB_API_LATEST_RELEASE,
+                headers={"User-Agent": f"WinZapp/{__version__}"},
+                timeout=15,
+            )
             resp.raise_for_status()
-            data           = resp.json()
-            remote_version = data.get("tag_name", "").lstrip("vV")
-            logging.info("Auto-updater: Latest remote version from GitHub is v%s", remote_version)
-        except Exception as e:
+            data = resp.json()
+        except Exception:
             logging.exception("Auto-updater: Exception checking for updates")
-            if self._force:
-                self._force = False
-                wx.CallAfter(self._show_error_message, str(e))
             self._schedule_retry()
             return
 
+        tag_name       = data.get("tag_name", "")
+        remote_version = tag_name.lstrip("vV")
+        logging.info("Auto-updater: Latest release tag=%s version=%s", tag_name, remote_version)
+
+        if not remote_version:
+            logging.warning("Auto-updater: Could not parse version from tag_name=%r", tag_name)
+            self._schedule_retry()
+            return
+
+        # Find the portable ZIP asset (prefer WinZapp.zip by exact name)
+        zip_url = ""
+        for asset in data.get("assets", []):
+            name = asset.get("name", "").lower()
+            url  = asset.get("browser_download_url", "")
+            if name == "winzapp.zip":
+                zip_url = url
+                break
+            if name.endswith(".zip") and not zip_url:
+                zip_url = url
+
+        if not zip_url:
+            logging.warning("Auto-updater: No ZIP asset found in release %s", tag_name)
+            self._schedule_retry()
+            return
+
+        sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
+
         local_version = __version__
-        logging.info("Auto-updater: Local version is v%s", local_version)
+        logging.info("Auto-updater: Local version is %s", local_version)
 
         if not is_newer(remote_version, local_version):
             logging.info("Auto-updater: WinZapp is already up-to-date.")
@@ -421,18 +718,15 @@ class UpdateChecker:
                 self._schedule_retry()
             return
 
-        logging.info("Auto-updater: Newer version v%s is available!", remote_version)
+        logging.info("Auto-updater: Newer version %s is available!", remote_version)
         self._force = False
-        wx.CallAfter(self._show_update_dialog, remote_version)
 
-    def _show_error_message(self, err_msg: str):
-        i18n = self._mw.i18n
-        wx.MessageBox(
-            i18n.t("update_error_msg").format(error=err_msg),
-            i18n.t("update_error_title"),
-            wx.OK | wx.ICON_ERROR,
-            self._mw,
-        )
+        # Prefer a local, per-version changelog file (see resolve_changelog())
+        # over the GitHub release body — only used as a last resort.
+        lang_code = self._mw.i18n.get_language() if hasattr(self._mw, "i18n") else "pt-BR"
+        changelog = resolve_changelog(local_version, remote_version, lang_code, data.get("body", ""))
+
+        wx.CallAfter(self._show_update_dialog, remote_version, changelog, zip_url, sha256sums_url)
 
     def _show_no_update(self):
         i18n = self._mw.i18n
@@ -443,31 +737,77 @@ class UpdateChecker:
             self._mw,
         )
 
-    def _show_update_dialog(self, remote_version: str):
-        app = wx.GetApp()
-        old_exit = True
-        if app:
-            old_exit = app.GetExitOnFrameDelete()
-            app.SetExitOnFrameDelete(False)
+    def _fetch_latest_release_for_reinstall(self):
+        logging.info("Auto-updater: Fetching latest GitHub release for forced ZIP reinstall...")
         try:
-            parent = wx.GetActiveWindow() or self._mw
-            dlg    = UpdateDialog(parent, remote_version, self._mw)
-            result = dlg.ShowModal()
-            dlg.Destroy()
+            resp = requests.get(
+                GITHUB_API_LATEST_RELEASE,
+                headers={"User-Agent": f"WinZapp/{__version__}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logging.exception("Auto-updater: Exception fetching latest release for forced reinstall")
+            wx.CallAfter(self._show_reinstall_error, str(exc))
+            return
 
-            if result == wx.ID_YES:
-                self._do_install(remote_version)
-            else:
-                # User said No — retry in 3 hours
-                self._schedule_retry()
-        finally:
-            if app:
-                app.SetExitOnFrameDelete(old_exit)
+        tag_name       = data.get("tag_name", "")
+        remote_version = tag_name.lstrip("vV") or tag_name
 
-    def _do_install(self, new_version: str):
+        zip_url = ""
+        for asset in data.get("assets", []):
+            name = asset.get("name", "").lower()
+            url  = asset.get("browser_download_url", "")
+            if name == "winzapp.zip":
+                zip_url = url
+                break
+            if name.endswith(".zip") and not zip_url:
+                zip_url = url
+
+        if not zip_url:
+            logging.warning("Auto-updater: No ZIP asset found in latest release %s", tag_name)
+            wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
+            return
+
+        sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
+
+        wx.CallAfter(self._confirm_and_reinstall, remote_version, zip_url, sha256sums_url)
+
+    def _confirm_and_reinstall(self, remote_version: str, zip_url: str, sha256sums_url: str = ""):
+        i18n = self._mw.i18n
+        if wx.MessageBox(
+            i18n.t("force_reinstall_confirm_msg").format(version=remote_version),
+            i18n.t("force_reinstall_confirm_title"),
+            wx.YES_NO | wx.ICON_WARNING,
+            self._mw,
+        ) != wx.YES:
+            return
+        self._do_install(remote_version, zip_url, sha256sums_url)
+
+    def _show_reinstall_error(self, error_msg: str):
+        i18n = self._mw.i18n
+        wx.MessageBox(
+            i18n.t("update_error_msg").format(error=error_msg),
+            i18n.t("update_error_title"),
+            wx.OK | wx.ICON_ERROR,
+            self._mw,
+        )
+
+    def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str, sha256sums_url: str = ""):
+        dlg    = UpdateDialog(self._mw, remote_version, changelog)
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result == wx.ID_YES:
+            self._do_install(remote_version, zip_url, sha256sums_url)
+        else:
+            # User said No — retry in 3 hours
+            self._schedule_retry()
+
+    def _do_install(self, new_version: str, zip_url: str, sha256sums_url: str = ""):
         while True:
-            parent = wx.GetActiveWindow() or self._mw
-            prog = UpdateProgressDialog(parent, new_version, self._mw)
+            prog = UpdateProgressDialog(self._mw, new_version, self._mw, zip_url, sha256sums_url)
             result = prog.run()
             prog.Destroy()
 
@@ -513,7 +853,22 @@ class WppUpdateChecker:
     """
     Periodically checks whether a newer wppconnect-server release exists than
     the one currently installed in client/api/ — independent of WinZapp's own
-    release cycle.
+    release cycle. WPPConnect breaks upstream between WinZapp releases too,
+    and until this existed the only fix was a user manually deleting
+    client/api/ and node_modules so WinZapp would reinstall from scratch.
+
+    Unlike UpdateChecker above, accepting the prompt here doesn't just
+    download a new WinZapp build — it stops the *running* API session,
+    reinstalls it in place (reusing ApiSetupDialog's ZIP-download flow, no
+    git required, works in a compiled build), and restarts it. That's why the
+    retry interval is much longer and the first check is delayed well past
+    startup by the caller (see MainWindow._start_wpp_update_checker): this
+    must never fire while pairing or the initial sync is still settling.
+
+    Version comparison uses packaging.version.Version (plain semver), not
+    parse_version()/is_newer() above — those are tailored to WinZapp's own
+    hybrid date/semver tag scheme, which wppconnect-server's plain-semver
+    tags (e.g. "2.5.3") don't follow.
     """
 
     _RETRY_INTERVAL = 12 * 60 * 60  # 12 hours
@@ -539,7 +894,9 @@ class WppUpdateChecker:
         """
         Called from Help > Force Reinstall WPPConnect. Skips the version
         comparison entirely — always fetches whatever is currently the
-        latest release and replaces the installed one with it.
+        latest release and replaces the installed one with it, to recover a
+        broken/corrupted API install without waiting for a real version
+        bump to be detected.
         """
         if self._retry_timer is not None:
             self._retry_timer.cancel()
@@ -558,6 +915,9 @@ class WppUpdateChecker:
         logging.info("[WppUpdateChecker] Checking for wppconnect-server updates...")
         installed = self._mw._get_installed_wpp_version()
         if not installed:
+            # Not installed yet (or version unreadable) — the normal
+            # first-run setup / version-gate flow owns that case, not this
+            # checker.
             self._schedule_retry()
             return
 
@@ -637,4 +997,3 @@ class WppUpdateChecker:
         if self._retry_timer is not None:
             self._retry_timer.cancel()
             self._retry_timer = None
-
