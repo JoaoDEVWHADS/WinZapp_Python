@@ -1517,17 +1517,14 @@ class MainWindow(wx.Frame):
     # wppconnect-team/wppconnect-server GitHub releases directly.
 
     def _start_wpp_update_checker(self, force: bool = False):
-        if self.background_mode:
+        if not force:
             return
-        updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
-        if not updates_enabled and not force:
+        if self.background_mode:
             return
         from updater import WppUpdateChecker
         self._wpp_update_checker = WppUpdateChecker(self)
-        if force:
-            self._wpp_update_checker.force_check()
-        else:
-            self._wpp_update_checker.start()
+        self._wpp_update_checker.force_check()
+
 
     def _on_force_reinstall_wpp(self, event):
         """
