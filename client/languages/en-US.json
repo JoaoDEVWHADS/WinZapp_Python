@@ -564,5 +564,7 @@
     "soundpack_import_error_copy_failed": "Could not copy the sound pack into the program's sounds folder.",
     "preview_sound_play": "Play sound preview",
     "preview_sound_stop": "Stop sound preview",
-    "preview_sound_error": "Could not play the preview — invalid or missing sound file."
+    "preview_sound_error": "Could not play the preview — invalid or missing sound file.",
+    "wpp_version_unpinned_warning": "Warning: could not pin the WhatsApp Web version. Sending to individual contacts may fail silently; groups still work. Please update WinZapp's WhatsApp Web.",
+    "status_unconfirmed": "Delivery unconfirmed"
 }

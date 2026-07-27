@@ -3092,6 +3092,47 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
+    # Emitted by WPPConnect (controllers/browser.js) when the WhatsApp Web build it
+    # pins is not present in the installed @wppconnect/wa-version package. It is a
+    # plain log line, not an error the API ever returns, so nothing downstream sees
+    # it — yet it is the direct predecessor of a nasty silent failure: WhatsApp Web
+    # then serves its newest build, which the bundled wa-js may not support, and
+    # 1:1 sends start failing inside the browser (isSendFailure, ack 0) while the
+    # REST call still answers 200 and groups keep working.
+    _WPP_VERSION_FALLBACK_MARKER = "using latest as fallback"
+
+    def _check_wpp_version_pin(self):
+        """Warn when WPPConnect could not pin the WhatsApp Web version.
+
+        Reads the WPPConnect log written during this startup. Best-effort: any
+        problem reading it is logged and otherwise ignored, since this is a
+        diagnostic, never a reason to block startup.
+        """
+        log_file = getattr(self, "_wpp_log_path", None)
+        if not log_file or not os.path.isfile(log_file):
+            return
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
+                # The marker is printed during browser init, well inside the first
+                # few dozen lines; reading the whole file would drag in megabytes.
+                head = fh.read(200_000)
+        except Exception as exc:
+            logging.warning("[startup] Could not read %s to check the version pin: %s",
+                            log_file, exc)
+            return
+
+        for line in head.splitlines():
+            if self._WPP_VERSION_FALLBACK_MARKER in line:
+                logging.error(
+                    "[startup] WPPConnect could not pin the WhatsApp Web version and fell back "
+                    "to the live build: %s | Sending to individual contacts may fail silently "
+                    "(groups keep working). Fix: npm update @wppconnect/wa-version in client/api/.",
+                    line.strip(),
+                )
+                wx.CallAfter(self.output, self.i18n.t("wpp_version_unpinned_warning"))
+                return
+        logging.info("[startup] WhatsApp Web version pin OK (no fallback reported by WPPConnect).")
+
     def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
 
@@ -3238,6 +3279,7 @@ class MainWindow(wx.Frame):
             deadline = time.time() + 300
             while time.time() < deadline:
                 if self._is_wpp_running():
+                    self._check_wpp_version_pin()
                     return
                 time.sleep(2)
             sys.exit(1)
@@ -3264,6 +3306,8 @@ class MainWindow(wx.Frame):
                 msg = f"{msg}\n\n{details}"
             wx.MessageBox(msg, self.app_name, wx.OK | wx.ICON_ERROR)
             sys.exit(1)
+
+        self._check_wpp_version_pin()
 
     def create_accelerator_table(self):
         #Set IDs
@@ -7547,9 +7591,50 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_for_send(self, jid: str) -> str:
         """
-        Format the JID for WPPConnect API, keeping it as-is or converting to @c.us format,
-        bypassing forced LID conversion to avoid HTTP 500/400 retry latencies or crashes in private chats.
-        If a @lid JID is passed, translate it back to the phone JID using the cache.
+        Destination JID for the WPPConnect *send* endpoints: @lid whenever the
+        cache knows one, otherwise the @c.us phone form.
+
+        This deliberately prefers @lid, same policy as
+        _resolve_jid_for_chat_state (typing/presence) and as the message-key
+        serialization in _serialize_msg_id — WhatsApp Web keys the chat, and
+        every message in it, under the @lid once the account is on LID
+        addressing, and reports the phone JID only as the chat's legacy
+        `historyChatId`. Sending to that legacy address does NOT fail loudly:
+        WhatsApp Web creates the message, hands back a real 3EB0… id (so the
+        HTTP call looks like a success) and then never gets it acked by the
+        server — ack stays 0/CLOCK, the message sits in the browser's outbox
+        forever and reaches neither the phone nor the recipient. Groups and
+        broadcast lists keep their own address, which is canonical everywhere.
+
+        The @c.us form is still used, as a *fallback*, by every send method
+        whenever the @lid destination is refused with a definite HTTP error
+        (the pre-LID behaviour, which existed because a @lid chat that
+        Puppeteer has not loaded yet answers 400 "o número não existe"); see
+        _legacy_phone_for_send.
+        """
+        return self._resolve_jid_for_chat_state(jid)
+
+    def _legacy_phone_for_send(self, jid: str) -> str:
+        """Legacy @c.us address to retry a failed send on, or '' when there is none.
+
+        Only meaningful for private chats: groups/broadcast lists have a single
+        canonical address and nothing to fall back to.
+        """
+        if not jid or jid.endswith(("@g.us", "@broadcast")):
+            return ""
+        if jid.endswith("@lid"):
+            phone_net = getattr(self, "_lid_to_phone", {}).get(jid, "")
+            return phone_net.replace("@s.whatsapp.net", "@c.us") if phone_net else ""
+        return jid.replace("@s.whatsapp.net", "@c.us")
+
+    def _resolve_jid_for_msg_key(self, jid: str) -> str:
+        """
+        Phone/@c.us form of a JID, translating @lid back through the cache.
+
+        Kept separate from _resolve_jid_for_send: fetch_older_messages uses this
+        both as the /get-messages/:phone URL parameter and as the chat segment of
+        the serialized message id it asks for, and that pair has to stay on the
+        phone form — see the comment at its call site.
         """
         if not jid:
             return jid
@@ -7568,8 +7653,11 @@ class MainWindow(wx.Frame):
 
     def send_text_message(self, remote_jid, text, quoted=None, mentioned_jids=None):
         """Send a plain-text message via the WPPConnect Server API."""
-        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
+        # Canonical destination: @lid when known, else the @c.us phone form —
+        # see _resolve_jid_for_send's docstring for why @lid has to win here.
         remote_jid = self._resolve_jid_for_send(remote_jid)
+        is_lid_target = remote_jid.endswith("@lid")
+        logging.info("[send_text_message] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
 
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -7592,6 +7680,7 @@ class MainWindow(wx.Frame):
                 "message": text,
                 "mentioned": mentioned_clean,
                 "isGroup": phone_net.endswith("@g.us"),
+                "isLid": is_lid_target,
                 "options": {
                     "linkPreview": False
                 }
@@ -7608,6 +7697,7 @@ class MainWindow(wx.Frame):
                     "message": text,
                     "messageId": quoted_id,
                     "isGroup": phone_net.endswith("@g.us"),
+                    "isLid": is_lid_target,
                     "options": {
                         "linkPreview": False
                     }
@@ -7622,6 +7712,7 @@ class MainWindow(wx.Frame):
                     "phone": [phone_net],
                     "message": text,
                     "isGroup": phone_net.endswith("@g.us"),
+                    "isLid": is_lid_target,
                     "options": {
                         "linkPreview": False
                     }
@@ -7634,61 +7725,71 @@ class MainWindow(wx.Frame):
             # a genuine duplicate message to the recipient. A more generous timeout
             # reduces how often that false-timeout/duplicate-send scenario happens.
             response = requests.post(url, json=payload, headers=headers, timeout=25)
+            active_dest = phone_net
             if response.status_code not in (200, 201):
-                # 1. If it's a @lid "number not exists" error, try to resolve to phone JID first (preserving the quote)
-                if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
-                    orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-                    if orig_jid:
-                        fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
-                        logging.warning("[send_text_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
+                # 1. The @lid destination was refused: fall back to the legacy
+                #    @c.us address. Historically this fired only on the 400
+                #    "o número não existe" that a @lid chat Puppeteer has not
+                #    loaded yet answers with, but any definite 4xx/5xx on a @lid
+                #    destination is worth one legacy attempt — that address is
+                #    what WinZapp used before and it still works for chats
+                #    WhatsApp has not moved to LID addressing.
+                #    Skipped when the API reports the session as disconnected:
+                #    nothing was sent, and the message must stay queued as-is
+                #    instead of burning a retry (see MessageQueue).
+                fb_phone = self._legacy_phone_for_send(remote_jid) if is_lid_target else ""
+                if fb_phone and not self._check_wa_connection_closed(response):
+                    logging.warning(
+                        "[send_text_message] @lid destination %s refused (HTTP %s: %s) — retrying with legacy %s",
+                        remote_jid, response.status_code, response.text[:200], fb_phone,
+                    )
+                    if mentioned_jids:
+                        retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
+                        retry_payload = {
+                            "phone": [fb_phone], "message": text,
+                            "mentioned": mentioned_clean,
+                            "isGroup": fb_phone.endswith("@g.us"),
+                            "isLid": False,
+                            "options": {"linkPreview": False}
+                        }
+                    elif quoted_id:
+                        retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
+                        retry_payload = {
+                            "phone": [fb_phone], "message": text,
+                            "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
+                            "isLid": False,
+                            "options": {"linkPreview": False}
+                        }
+                    else:
                         retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
-                        if quoted_id:
-                            retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-reply"
-                            retry_payload = {
-                                "phone": [fb_phone], "message": text,
-                                "messageId": quoted_id, "isGroup": fb_phone.endswith("@g.us"),
-                                "options": {"linkPreview": False}
-                            }
-                        else:
-                            retry_payload = {
-                                "phone": [fb_phone], "message": text,
-                                "isGroup": fb_phone.endswith("@g.us"),
-                                "options": {"linkPreview": False}
-                            }
-                        response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
-                        if response.status_code in (200, 201):
-                            logging.info("[send_text_message] Retry with %s succeeded", fb_phone)
+                        retry_payload = {
+                            "phone": [fb_phone], "message": text,
+                            "isGroup": fb_phone.endswith("@g.us"),
+                            "isLid": False,
+                            "options": {"linkPreview": False}
+                        }
+                    active_dest = fb_phone
+                    response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
+                    if response.status_code in (200, 201):
+                        logging.info("[send_text_message] legacy retry with %s succeeded", fb_phone)
 
-                # 2. If it's still failing and we had a quote, strip the quote and try plain send
+                # 2. If it's still failing and we had a quote, strip the quote and
+                #    try a plain send to whichever address we last used.
                 if response.status_code not in (200, 201) and quoted_id:
-                    logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote...", response.status_code)
+                    logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote on %s...",
+                                    response.status_code, active_dest)
                     wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
-                    fb_phone = remote_jid
-                    if fb_phone.endswith("@s.whatsapp.net"):
-                        fb_phone = fb_phone.replace("@s.whatsapp.net", "@c.us")
                     payload = {
-                        "phone": [fb_phone],
+                        "phone": [active_dest],
                         "message": text,
-                        "isGroup": fb_phone.endswith("@g.us"),
+                        "isGroup": active_dest.endswith("@g.us"),
+                        "isLid": active_dest.endswith("@lid"),
                         "options": {
                             "linkPreview": False
                         }
                     }
                     response = requests.post(url, json=payload, headers=headers, timeout=25)
-                    # If the plain send also failed because @lid is not loaded, retry it with phone JID
-                    if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
-                        orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-                        if orig_jid:
-                            fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
-                            logging.warning("[send_text_message] @lid %s not loaded in browser yet (plain fallback) — retrying with %s (cache preserved)", remote_jid, fb_phone)
-                            retry_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
-                            retry_payload = {
-                                "phone": [fb_phone], "message": text,
-                                "isGroup": fb_phone.endswith("@g.us"),
-                                "options": {"linkPreview": False}
-                            }
-                            response = requests.post(retry_url, json=retry_payload, headers=headers, timeout=25)
 
                 # 3. Final error handling if all retries failed
                 if response.status_code not in (200, 201):
@@ -7795,12 +7896,14 @@ class MainWindow(wx.Frame):
                    disk read and OGG encoding entirely — just base64 + POST.
                    On retry (ogg_bytes=None) falls back to reading wav_path.
         """
-        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
+        # Canonical destination: @lid when known, else the @c.us phone form —
+        # see _resolve_jid_for_send's docstring for why @lid has to win here.
         import time as _time
         _tsend0 = _time.perf_counter()
         remote_jid = self._resolve_jid_for_send(remote_jid)
-        logging.info("[VOICE_TIMING] send_audio_message started for %s (ogg_bytes=%s) — jid resolved in %.3fs",
-                     remote_jid, "yes" if ogg_bytes else "NO", _time.perf_counter() - _tsend0)
+        is_lid_target = remote_jid.endswith("@lid")
+        logging.info("[VOICE_TIMING] send_audio_message started for %s (isLid=%s, ogg_bytes=%s) — jid resolved in %.3fs",
+                     remote_jid, is_lid_target, "yes" if ogg_bytes else "NO", _time.perf_counter() - _tsend0)
 
         if ogg_bytes is None:
             # Fallback path: convert WAV to OGG using ffmpeg and read the bytes
@@ -7842,6 +7945,7 @@ class MainWindow(wx.Frame):
             "phone": [phone_net],
             "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
             "isGroup": phone_net.endswith("@g.us"),
+            "isLid": is_lid_target,
         }
         if quoted_id:
             payload["quotedMessageId"] = quoted_id
@@ -7860,35 +7964,35 @@ class MainWindow(wx.Frame):
                 err = f"HTTP {response.status_code}: {response.text[:300]}"
                 logging.error("[send_audio_message] %s for %s", err, remote_jid)
 
-                # Fallback: If the @lid returned "número não existe", the chat is just not loaded
-                # in Puppeteer yet. Silently retry with the phone JID.
-                if response.status_code == 400 and "não existe" in response.text and remote_jid.endswith("@lid"):
-                    orig_jid = getattr(self, "_lid_to_phone", {}).get(remote_jid, "")
-                    if orig_jid:
-                        fb_phone = orig_jid.replace("@s.whatsapp.net", "@c.us")
-                        logging.warning("[send_audio_message] @lid %s not loaded in browser yet — retrying with %s (cache preserved)", remote_jid, fb_phone)
-                        retry_payload = {
-                            "phone": [fb_phone],
-                            "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
-                            "isGroup": fb_phone.endswith("@g.us"),
-                        }
-                        if quoted_id:
-                            retry_payload["quotedMessageId"] = quoted_id
-                        response = requests.post(url, json=retry_payload, headers=headers, timeout=30)
-                        if response.status_code in (200, 201):
-                            logging.info("[send_audio_message] Retry with %s succeeded", fb_phone)
-                            # fall through to normal response parsing below
-                        else:
-                            err = f"HTTP {response.status_code}: {response.text[:300]}"
-                            logging.error("[send_audio_message] Retry also failed: %s", err)
-                            if self._check_wa_connection_closed(response):
-                                return {"ok": False, "error": err, "retry": False, "disconnected": True}
-                            return {"ok": False, "error": err, "retry": True}
+                # Fallback: the @lid destination was refused — the chat may just
+                # not be loaded in Puppeteer yet (classic 400 "o número não
+                # existe"), but any definite failure on a @lid destination earns
+                # one attempt on the legacy @c.us address. Skipped when the API
+                # reports the session as disconnected: nothing was sent.
+                fb_phone = self._legacy_phone_for_send(remote_jid) if is_lid_target else ""
+                disc = self._check_wa_connection_closed(response)
+                if fb_phone and not disc:
+                    logging.warning("[send_audio_message] @lid destination %s refused (HTTP %s) — retrying with legacy %s",
+                                    remote_jid, response.status_code, fb_phone)
+                    retry_payload = {
+                        "phone": [fb_phone],
+                        "base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}",
+                        "isGroup": fb_phone.endswith("@g.us"),
+                        "isLid": False,
+                    }
+                    if quoted_id:
+                        retry_payload["quotedMessageId"] = quoted_id
+                    response = requests.post(url, json=retry_payload, headers=headers, timeout=30)
+                    if response.status_code in (200, 201):
+                        logging.info("[send_audio_message] legacy retry with %s succeeded", fb_phone)
+                        # fall through to normal response parsing below
                     else:
-                        disc = self._check_wa_connection_closed(response)
-                        return {"ok": False, "error": err, "retry": False, "disconnected": disc}
+                        err = f"HTTP {response.status_code}: {response.text[:300]}"
+                        logging.error("[send_audio_message] legacy retry also failed: %s", err)
+                        if self._check_wa_connection_closed(response):
+                            return {"ok": False, "error": err, "retry": False, "disconnected": True}
+                        return {"ok": False, "error": err, "retry": True}
                 else:
-                    disc = self._check_wa_connection_closed(response)
                     return {"ok": False, "error": err, "retry": False, "disconnected": disc}
 
             self._set_wa_connected(True, "audio send succeeded")
@@ -8050,13 +8154,16 @@ class MainWindow(wx.Frame):
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
 
-        The message is left in its "sending" state in the UI on purpose: it was
-        NOT retried (that is what used to flood conversations with duplicates),
-        and WhatsApp Web may still deliver it on reconnect — in which case the
-        echo arriving over the WebSocket resolves this very bubble.  Just tell
-        the user the delivery is unconfirmed so silence is never mistaken for
-        success.
+        The message is NOT retried (that is what used to flood conversations
+        with duplicates), and WhatsApp Web may still deliver it on reconnect —
+        in which case the echo arriving over the WebSocket resolves this very
+        bubble. Until that happens the row carries an explicit "unconfirmed"
+        status: it used to be left in "sending" forever, which a user reasonably
+        reads as sent, and that is exactly how a message that never left the
+        browser passed for delivered.
         """
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel._mark_message_unconfirmed(local_id)
         if not self.background_mode:
             self.output(self.i18n.t("message_send_unconfirmed"), interrupt=False)
 
@@ -8152,11 +8259,26 @@ class MainWindow(wx.Frame):
                     break
 
         # ── Persist updated message record to DB ─────────────────────────────────
+        # insert_message rewrites message_json (which carries MessageUpdate, what
+        # the UI reads) *and* the indexed status column, so both stay in step.
         if found_msg and found_chat_jid:
             try:
                 self.db.insert_message(found_chat_jid, found_msg)
             except Exception as e:
                 logging.error(f"[on_message_status_update] Failed to persist status update to DB: {e}")
+
+        # A failed ack retires the "sending"/"unconfirmed" state a virtual message
+        # may still be showing: WhatsApp has given its verdict, so stop implying
+        # the send is still in flight.
+        try:
+            if found_msg and int(status) < 0:
+                found_msg.pop("_send_unconfirmed", None)
+                found_msg["_local_pending"] = False
+                found_msg["_send_failed"] = True
+                logging.warning("[on_message_status_update] msg_id=%s reported FAILED by WhatsApp "
+                                "(status=%s) — marking as not delivered", msg_id, status)
+        except (TypeError, ValueError):
+            pass
 
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.refresh_message_status(msg_id, status)
@@ -8728,7 +8850,7 @@ class MainWindow(wx.Frame):
         # WPPConnect's browser store also matches the chat JID (LID if
         # available). These used to be computed twice under two different
         # names for no reason.
-        phone = self._resolve_jid_for_send(remote_jid).replace("@s.whatsapp.net", "@c.us")
+        phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
@@ -8753,8 +8875,8 @@ class MainWindow(wx.Frame):
                 if len(parts) > 3:
                     p_raw = parts[3]
             if p_raw:
-                # Group participant JIDs must also be resolved using _resolve_jid_for_send
-                participant = self._resolve_jid_for_send(p_raw).replace("@s.whatsapp.net", "@c.us")
+                # Group participant JIDs must also be resolved using _resolve_jid_for_msg_key
+                participant = self._resolve_jid_for_msg_key(p_raw).replace("@s.whatsapp.net", "@c.us")
 
         if participant:
             serialized_id = f"{prefix}_{resolved_phone}_{raw_id}_{participant}"
@@ -10195,8 +10317,11 @@ class MainWindow(wx.Frame):
         (no 33 % overhead, no JSON body-size limit).
         media_type: 'image' | 'video' | 'audio' | 'document'
         """
-        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
+        # Canonical destination: @lid when known, else the @c.us phone form —
+        # see _resolve_jid_for_send's docstring for why @lid has to win here.
         remote_jid = self._resolve_jid_for_send(remote_jid)
+        is_lid_target = remote_jid.endswith("@lid")
+        logging.info("[send_media] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
         import mimetypes
         try:
             file_size = os.path.getsize(file_path)
@@ -10221,10 +10346,8 @@ class MainWindow(wx.Frame):
             "audio": "audio", "document": "document",
         }.get(media_type, "document")
         data = {
-            "phone":    [phone_val],
             "filename": filename,
             "caption":  caption,
-            "isGroup":  phone_val.endswith("@g.us"),
             "type":     _wpp_type,
         }
         if quoted:
@@ -10234,15 +10357,44 @@ class MainWindow(wx.Frame):
         # Scale timeout with file size: at least 1 s per 100 KB, min 120 s, max 30 min.
         timeout = max(120, file_size // (100 * 1024))
         timeout = min(timeout, 1800)
-        try:
+
+        def _post(dest: str):
+            """POST the upload to `dest`, reopening the file (a retry cannot
+            reuse the already-consumed handle).
+
+            multipart/form-data has no booleans: requests serializes False as
+            the string "False", which is *truthy* in JavaScript — so a plain
+            `"isGroup": False` made WPPConnect's statusConnection/contactToArray
+            treat every media send as a group send and rewrite the destination
+            to `<digits>@g.us`. Only send these flags when they are true.
+            """
+            post_data = dict(data, phone=[dest])
+            if dest.endswith("@g.us"):
+                post_data["isGroup"] = "true"
+            if dest.endswith("@lid"):
+                post_data["isLid"] = "true"
             with open(file_path, "rb") as fh:
-                r = requests.post(
+                return requests.post(
                     url,
                     headers=headers,
-                    data=data,
+                    data=post_data,
                     files={"file": (filename, fh, mime)},
                     timeout=timeout,
                 )
+
+        try:
+            r = _post(phone_val)
+            if r.status_code not in (200, 201):
+                # Same legacy fallback as the text/audio paths: a @lid
+                # destination that WhatsApp Web refuses gets one attempt on the
+                # old @c.us address, unless the session is simply disconnected.
+                fb_phone = self._legacy_phone_for_send(remote_jid) if is_lid_target else ""
+                if fb_phone and not self._check_wa_connection_closed(r):
+                    logging.warning("[send_media] @lid destination %s refused (HTTP %s) — retrying with legacy %s",
+                                    remote_jid, r.status_code, fb_phone)
+                    r = _post(fb_phone)
+                    if r.status_code in (200, 201):
+                        logging.info("[send_media] legacy retry with %s succeeded", fb_phone)
             if r.status_code in (200, 201):
                 body = r.json()
                 resp = body.get("response", body)
@@ -10283,8 +10435,11 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
-        # Resolve to phone-JID/@c.us form for the API call (@lid is translated back via the cache — see _resolve_jid_for_send's docstring).
+        # Canonical destination: @lid when known, else the @c.us phone form —
+        # see _resolve_jid_for_send's docstring for why @lid has to win here.
         remote_jid = self._resolve_jid_for_send(remote_jid)
+        is_lid_target = remote_jid.endswith("@lid")
+        logging.info("[send_contact_attachment] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
         is_group = remote_jid.endswith("@g.us")
         if is_group:
             remote_jid = remote_jid.split("@")[0]
@@ -10295,6 +10450,7 @@ class MainWindow(wx.Frame):
         payload = {
             "phone":       [remote_jid],
             "isGroup":     is_group,
+            "isLid":       is_lid_target,
             "contactsId":  [f"{phone_raw}@c.us"],
         }
         if quoted:
@@ -10305,18 +10461,35 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+
+        def _parse(r):
+            try:
+                resp = r.json().get("response", {})
+                if isinstance(resp, list) and resp:
+                    resp = resp[0]
+                return (resp or {}).get("id") or True
+            except Exception:
+                return True
+
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
-                try:
-                    resp = r.json().get("response", {})
-                    if isinstance(resp, list) and resp:
-                        resp = resp[0]
-                    return (resp or {}).get("id") or True
-                except Exception:
-                    return True
+                return _parse(r)
+            # Same legacy fallback as the other send paths.
+            fb_phone = self._legacy_phone_for_send(remote_jid) if is_lid_target else ""
+            if fb_phone and not self._check_wa_connection_closed(r):
+                logging.warning("[send_contact_attachment] @lid destination %s refused (HTTP %s) — retrying with legacy %s",
+                                remote_jid, r.status_code, fb_phone)
+                payload["phone"] = [fb_phone]
+                payload["isLid"] = False
+                r = requests.post(url, json=payload, headers=headers, timeout=15)
+                if r.status_code in (200, 201):
+                    logging.info("[send_contact_attachment] legacy retry with %s succeeded", fb_phone)
+                    return _parse(r)
+            logging.error("[send_contact_attachment] HTTP %s for %s: %s", r.status_code, remote_jid, r.text[:300])
             return None
-        except Exception:
+        except Exception as exc:
+            logging.error("[send_contact_attachment] exception for %s: %s", remote_jid, exc)
             return None
 
     # ── Message edit / delete-for-everyone ────────────────────────────────────

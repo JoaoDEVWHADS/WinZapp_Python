@@ -7,6 +7,47 @@ import requests
 from core.i18n import I18n
 from core.utils import looks_like_binary_blob, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
+# ── Message delivery status ──────────────────────────────────────────────────
+# The app's own scale (Baileys-shaped, what messages.status stores and what
+# ui/conversations.py::_map_status renders): 2=sent, 3=delivered, 4=read,
+# 5=played.  Two extra values make the states WhatsApp reports but the app used
+# to swallow explicit:
+STATUS_FAILED  = -1   # WhatsApp Web gave up on the send
+STATUS_PENDING = 0    # created locally, not acked by the server yet
+
+# WhatsApp's own ACK scale is WPP.whatsapp.enums.ACK:
+#   -7 MD_DOWNGRADE, -6 INACTIVE, -5 CONTENT_UNUPLOADABLE, -4 CONTENT_TOO_BIG,
+#   -3 CONTENT_GONE, -2 EXPIRED, -1 FAILED, 0 CLOCK, 1 SENT, 2 RECEIVED,
+#   3 READ, 4 PLAYED, 5 PEER (acked by another of our own devices).
+_ACK_TO_STATUS = {
+    0: STATUS_PENDING,
+    1: 2,
+    2: 3,
+    3: 4,
+    4: 5,
+    5: 2,
+}
+
+
+def ack_to_status(wpp_ack):
+    """Translate a WhatsApp ACK into the app's status scale.
+
+    Returns None when the ack is not one we understand — the caller must then
+    leave the message's status alone. This used to be ``mapping.get(ack, 2)``,
+    which reported *every* unrecognised ack as "sent": a FAILED (-1) ack, i.e.
+    WhatsApp Web telling us the message will never leave the outbox, showed up
+    in the UI as "Enviada". Silence and failure both have to be distinguishable
+    from success here, since this is the app's only delivery feedback.
+    """
+    if not isinstance(wpp_ack, int) or isinstance(wpp_ack, bool):
+        return None
+    if wpp_ack < 0:
+        # -1 FAILED and every more specific failure below it (expired, content
+        # gone, too big, …) all mean the same thing to the user: not delivered.
+        return STATUS_FAILED
+    return _ACK_TO_STATUS.get(wpp_ack)
+
+
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
@@ -1047,11 +1088,19 @@ class WebSocketClient:
         try:
             if not isinstance(data, dict):
                 return
-            status_mapping = {1: 2, 2: 3, 3: 4, 4: 5}
             wpp_ack = data.get("ack")
+            status = ack_to_status(wpp_ack)
+            if status is None:
+                logging.warning("[WebSocketClient] on_wpp_ack: unrecognised ack %r — "
+                                "leaving the message status untouched", wpp_ack)
+                return
             msg_id = data.get("id", {}).get("_serialized") if isinstance(data.get("id"), dict) else data.get("id")
             parts = msg_id.split("_") if msg_id else []
             clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+            if not clean_id:
+                logging.warning("[WebSocketClient] on_wpp_ack: ack %r with no usable message id "
+                                "(raw id=%r) — dropping", wpp_ack, data.get("id"))
+                return
 
             remote_jid = data.get("to")
             if not remote_jid and isinstance(data.get("id"), dict):
@@ -1069,7 +1118,7 @@ class WebSocketClient:
                         "fromMe": True
                     },
                     "update": {
-                        "status": status_mapping.get(wpp_ack, 2)
+                        "status": status
                     }
                 }
             })
@@ -1324,9 +1373,12 @@ class WebSocketClient:
         ack = wpp_msg.get("ack")
         message_updates = []
         if ack is not None:
-            status_map = {1: 2, 2: 3, 3: 4, 4: 5}
-            mapped_status = status_map.get(ack, ack)
-            message_updates.append({"status": str(mapped_status)})
+            # Same translation as on_wpp_ack — a negative ack here means the
+            # send failed and must not be passed through raw (it rendered as no
+            # status at all, indistinguishable from a message still in flight).
+            mapped_status = ack_to_status(ack)
+            if mapped_status is not None:
+                message_updates.append({"status": str(mapped_status)})
 
         normalized = {
             "key": {

@@ -136,6 +136,40 @@ def _timestamp(msg: dict) -> int:
         return 0
 
 
+def _delivery_status(msg: dict) -> int:
+    """Latest delivery status of a message, for the indexed ``status`` column.
+
+    Scale: -1 failed, 0 pending/unknown, 2 sent, 3 delivered, 4 read, 5 played
+    (see core/websocket_client.py). The authoritative value is the last entry of
+    ``MessageUpdate``, which is where acks land; a top-level ``status`` is the
+    fallback used by history-synced messages. Both are already on the app's
+    scale — ``msg["ack"]`` deliberately is NOT consulted here, because that one
+    is on WhatsApp's own scale (1=sent, 2=received, …) and storing it unmapped
+    would record every sent message as delivered.
+
+    This column used to be hardcoded to 0 on every insert, so the delivery state
+    only ever existed in memory: after a restart every message you had sent read
+    back as "no status", and a failed send was indistinguishable from a
+    delivered one.
+    """
+    updates = msg.get("MessageUpdate")
+    if isinstance(updates, list):
+        for update in reversed(updates):
+            if not isinstance(update, dict):
+                continue
+            try:
+                return int(update.get("status"))
+            except (TypeError, ValueError):
+                continue
+    raw = msg.get("status")
+    if raw is not None and not isinstance(raw, bool):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
 def _message_type(msg: dict) -> str:
     """Determine the message-type label from a normalized message."""
     mt = msg.get("messageType", "")
@@ -622,7 +656,8 @@ class DatabaseManager:
         mtype = _message_type(msg)
         ts = _timestamp(msg)
         msg_enc = self._encrypt_json(msg)
-        return (mid, remote_jid, from_me, participant, mtype, msg_enc, ts, 0)
+        return (mid, remote_jid, from_me, participant, mtype, msg_enc, ts,
+                _delivery_status(msg))
 
     async def insert_message(self, remote_jid: str, msg: dict) -> None:
         """Insert a single message record."""

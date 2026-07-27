@@ -1437,6 +1437,28 @@ class ConversationsPanel(wx.Panel):
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
 
+    def _mark_message_unconfirmed(self, local_id: str):
+        """Mark a virtual message whose send timed out with an unknown outcome.
+
+        Deliberately not "failed": WhatsApp Web may still flush it from its own
+        outbox, and if it does the WebSocket echo replaces this bubble with the
+        real message. Until then the row must not claim to be sent — it was left
+        as "sending" forever before, which reads as success once the spinner
+        stops meaning anything.
+        """
+        for i, msg in enumerate(self._sorted_messages):
+            if msg.get("_local_id") == local_id:
+                msg["_local_pending"]     = False
+                msg["_send_unconfirmed"]  = True
+                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                try:
+                    self.messages_list.RefreshItem(i)
+                except Exception:
+                    pass
+                if self.conversation:
+                    self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
+                break
+
     def refresh_message_status(self, msg_id: str, status: str):
         """Update the status icon for a single sent message without full redraw."""
         for i, msg in enumerate(self._sorted_messages):
@@ -4488,15 +4510,24 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("status_pending")
         if msg.get("_send_failed"):
             return i18n.t("status_failed")
+        # Send timed out: we never learned whether WhatsApp accepted it, and it
+        # is deliberately not retried (retrying an ambiguous send is what used to
+        # deliver dozens of duplicates at once). Saying "sent" here would be a
+        # guess, and the wrong one often enough to matter.
+        if msg.get("_send_unconfirmed"):
+            return i18n.t("status_unconfirmed")
 
         statuses = []
+        latest = ""          # newest entry of MessageUpdate — the current verdict
         updates = msg.get("MessageUpdate")
         if isinstance(updates, list) and updates:
             for u in updates:
                 if isinstance(u, dict):
-                    st = u.get("status") or ""
-                    statuses.append(str(st).upper())
-        
+                    st = str(u.get("status") or "").upper()
+                    statuses.append(st)
+                    if st:
+                        latest = st
+
         # Fallback: check status directly on the message (2=sent, 3=delivered, 4=read, 5=played)
         root_status = msg.get("status")
         if root_status is not None:
@@ -4518,6 +4549,14 @@ class ConversationsPanel(wx.Panel):
         if not from_me:
             # Received messages only show status if they were played
             return ""
+
+        # A negative status is WhatsApp telling us the send failed (ACK.FAILED
+        # and the more specific -2..-7 variants). Only the newest verdict counts:
+        # a message can legitimately be acked as sent and *then* reported as
+        # failed, and the checks below would otherwise still call it "sent"
+        # because they scan for any positive status anywhere in the history.
+        if latest.startswith("-") or str(msg.get("status", "")).startswith("-"):
+            return i18n.t("status_failed")
 
         for s in statuses:
             if "READ" in s or s == "4":

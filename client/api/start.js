@@ -132,6 +132,65 @@ const optimizedBrowserArgs = [
   '--disable-client-side-phishing-detection',
 ];
 
+// WPPConnect pins the WhatsApp Web version (default '2.3000.10305x') by serving
+// that build's HTML from the @wppconnect/wa-version package. When the pinned
+// version is not in that package it does NOT fail — it logs
+//   "Version not available for <v>, using latest as fallback"
+// and lets WhatsApp Web serve its newest build, which can be more recent than
+// the bundled wa-js supports. That is how sending to individual contacts started
+// failing silently: every usync query hung, WhatsApp Web flagged the message
+// isSendFailure with ack 0, and the REST call still answered 200. Groups kept
+// working because they use sender keys and need no usync.
+//
+// Rather than hardcoding a version — which rots as soon as WhatsApp removes the
+// old build's assets (HTTP 410) — ask wa-version itself for the newest build it
+// can serve. `npm update @wppconnect/wa-version` is then enough to keep up with
+// WhatsApp Web.
+//
+// wa-version is resolved through WPPConnect's own dependency tree, never as a
+// direct dependency of ours. WPPConnect's setWhatsappVersion() serves the HTML
+// from the copy *it* resolved, so reading any other copy risks picking a build
+// that its catalogue does not have — which lands right back in the silent
+// "using latest as fallback" path. Declaring our own `@wppconnect/wa-version`
+// range would do exactly that the moment the two ranges stop overlapping (say
+// WPPConnect moves to ^2 while ours still says ^1): npm then installs two
+// copies, and the version we pin would be looked up in the wrong one.
+function requireWaVersion() {
+  const path = require('path');
+  try {
+    const wppEntry = require.resolve('@wppconnect-team/wppconnect/package.json');
+    return require(require.resolve('@wppconnect/wa-version', {
+      paths: [path.dirname(wppEntry)],
+    }));
+  } catch (e) {
+    // Hoisted layout / older npm: fall back to plain resolution.
+    return require('@wppconnect/wa-version');
+  }
+}
+
+function resolveWhatsappVersion() {
+  try {
+    const waVersion = requireWaVersion();
+    const available = waVersion.getAvailableVersions();
+    if (!Array.isArray(available) || available.length === 0) return undefined;
+    const newest = available[available.length - 1];
+    // getPageContent throws when the version cannot be served, so only pin what
+    // is known to work: no pin at all beats silently landing in the fallback.
+    waVersion.getPageContent(newest);
+    console.log(`[WinZapp] Pinning WhatsApp Web to ${newest} (of ${available.length} available)`);
+    return newest;
+  } catch (e) {
+    console.error(
+      '[WinZapp] Could not resolve a WhatsApp Web version via @wppconnect/wa-version ' +
+      `(${e && e.message}). Continuing unpinned — WhatsApp Web will serve its newest ` +
+      'build, which the bundled wa-js may not support. Run: npm update @wppconnect/wa-version'
+    );
+    return undefined;
+  }
+}
+
+const whatsappVersion = resolveWhatsappVersion();
+
 // Mesclagem simples recursiva para webhooks e outros objetos aninhados
 const finalConfig = {
   ...configDefault,
@@ -150,6 +209,10 @@ const finalConfig = {
     browserArgs: optimizedBrowserArgs,
     disableSpins: true,  // Disables command line spinners (saves CPU)
     updatesLog: false,   // Disables checking for updates on startup
+    // undefined => WPPConnect pins nothing and uses the live build (see
+    // resolveWhatsappVersion above). Set explicitly here because WPPConnect's
+    // own default points at a version wa-version no longer ships.
+    whatsappVersion,
   }
 };
 

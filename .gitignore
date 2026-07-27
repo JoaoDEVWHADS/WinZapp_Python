@@ -1,7 +1,10 @@
 # ── WinZapp: project-specific ignores ────────────────────────────────────────
 
 # User data / secrets (generated at runtime, never committed)
+client/data/media_failed.json
 client/data/messages.db
+client/data/messages.db-shm
+client/data/messages.db-wal
 client/data/settings.json
 client/data/settings_default.json
 client/data/secret.key

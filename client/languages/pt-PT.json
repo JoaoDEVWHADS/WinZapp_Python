@@ -564,5 +564,7 @@
     "soundpack_import_error_copy_failed": "Não foi possível copiar o pacote de som para a pasta de sons do programa.",
     "preview_sound_play": "Reproduzir pré-visualização do som",
     "preview_sound_stop": "Parar pré-visualização do som",
-    "preview_sound_error": "Não foi possível reproduzir a pré-visualização — ficheiro de som inválido ou não encontrado."
+    "preview_sound_error": "Não foi possível reproduzir a pré-visualização — ficheiro de som inválido ou não encontrado.",
+    "wpp_version_unpinned_warning": "Aviso: não foi possível fixar a versão do WhatsApp Web. O envio para contactos individuais pode falhar silenciosamente; grupos continuam a funcionar. Atualize o WhatsApp Web do WinZapp.",
+    "status_unconfirmed": "Envio não confirmado"
 }

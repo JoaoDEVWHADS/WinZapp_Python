@@ -81,6 +81,32 @@ def main():
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
     already_cloned = os.path.isdir(git_dir)
 
+    # Gather the content to restore for every patched file, preferring
+    # client/api_patches/ (permanent, always-tracked) over whatever
+    # happens to still be sitting in client/api/ right now — the latter
+    # is worthless as a source the moment client/api/ has already been
+    # deleted, which is exactly when this restore matters most.
+    #
+    # Loaded up front, before the clone branch, because BOTH consumers need it:
+    # the post-clone restore below and the post-`git checkout <tag>` restore
+    # further down. It used to be populated only on the clone path, so checking
+    # out a tag against an existing client/api/ raised NameError — and had that
+    # line been reached with an empty dict instead, it would have been worse:
+    # `git checkout -f` overwrites the patched files with upstream's, and
+    # nothing would have put ours back.
+    custom_contents = {}
+    for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
+        patches_path = os.path.join(API_PATCHES_DIR, rel_path)
+        stash_path = os.path.join(CLIENT_API_DIR, rel_path)
+        if os.path.isfile(patches_path):
+            with open(patches_path, "rb") as f:
+                custom_contents[rel_path] = f.read()
+            print(f"[INFO] Loaded {rel_path} from client/api_patches/")
+        elif os.path.isfile(stash_path):
+            with open(stash_path, "rb") as f:
+                custom_contents[rel_path] = f.read()
+            print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
+
     if already_cloned:
         print(f"[INFO] client/api/ already exists — skipping clone.")
     else:
@@ -98,24 +124,6 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to move node_modules: {e}")
                 has_node_modules = False
-
-        # Gather the content to restore for every patched file, preferring
-        # client/api_patches/ (permanent, always-tracked) over whatever
-        # happens to still be sitting in client/api/ right now — the latter
-        # is worthless as a source the moment client/api/ has already been
-        # deleted, which is exactly when this restore matters most.
-        custom_contents = {}
-        for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
-            patches_path = os.path.join(API_PATCHES_DIR, rel_path)
-            stash_path = os.path.join(CLIENT_API_DIR, rel_path)
-            if os.path.isfile(patches_path):
-                with open(patches_path, "rb") as f:
-                    custom_contents[rel_path] = f.read()
-                print(f"[INFO] Loaded {rel_path} from client/api_patches/")
-            elif os.path.isfile(stash_path):
-                with open(stash_path, "rb") as f:
-                    custom_contents[rel_path] = f.read()
-                print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
 
         if os.path.isdir(CLIENT_API_DIR):
             try:
