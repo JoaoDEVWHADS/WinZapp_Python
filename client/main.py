@@ -45,6 +45,7 @@ from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, parse_bool_flag as _parse_bool_flag
 from core.database_bridge import DatabaseBridge
+from core import token_vault
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
 import wx
@@ -435,6 +436,25 @@ class MediaExpiredError(Exception):
 # that after sync — trimming the oldest ones out of RAM (they're still on
 # disk in SQLite, just not resident).
 _MAX_RESIDENT_MESSAGES_PER_CHAT = 1000
+
+# Message types that are WhatsApp/WPPConnect system events, not something a
+# person actually sent — someone joining/leaving a group, a group name/photo/
+# settings change, a revoke, etc. These are still stored and shown as a
+# timeline entry when the conversation is opened (see
+# ConversationsPanel._is_displayable_message(), which allows them), but must
+# never be treated as "new mail": they used to bump an old, already-read
+# conversation back to the top of the list, inflate its unread badge, and
+# even fire a toast/sound notification, purely because a group's metadata
+# changed weeks after everyone stopped talking in it. is_countable_message()
+# gates every one of those: the chat-list sort timestamp, the unread counter
+# (and therefore the unread separator, which reads it), and notifications.
+_NON_COUNTABLE_MESSAGE_TYPES = frozenset({"groupNotification", "protocolMessage"})
+
+
+def is_countable_message(msg: dict) -> bool:
+    """True for a message type that should count as real conversation
+    activity (unread badge, chat-list sort order, notifications)."""
+    return isinstance(msg, dict) and msg.get("messageType") not in _NON_COUNTABLE_MESSAGE_TYPES
 
 
 class MainWindow(wx.Frame):
@@ -1086,8 +1106,9 @@ class MainWindow(wx.Frame):
 
     def _on_disconnect(self, event=None):
         """Disconnect from WhatsApp: wipe credentials, stop WebSocket and show pairing dialog."""
+        old_token = self._get_wa_token()
         pi = self.settings.setdefault("privateinfo", {})
-        old_token = pi.pop("WA_token", "")
+        self._set_wa_token("")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
         self.messages_set_completed = False
@@ -1449,7 +1470,7 @@ class MainWindow(wx.Frame):
                     os.remove(media_failed_path)
             except Exception as exc:
                 logging.warning("[resync_all] failed to remove media_failed.json: %s", exc)
-            self._media_failed_ids = set()
+            self._media_failed_ids = {}
 
             # Resync from scratch, exactly like a fresh pairing. start_sync()
             # takes over _initial_sync_running from here (it sets it True
@@ -2158,7 +2179,11 @@ class MainWindow(wx.Frame):
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
             msg_ts //= 1000
-        if msg_ts > int(chat.get("t", 0) or 0):
+        # System events (group join/leave, settings changes, revokes, ...)
+        # must not bump the chat's sort timestamp — see is_countable_message().
+        # Without this an old, already-read conversation jumped back to the
+        # top of the list purely because a group's metadata changed.
+        if is_countable_message(msg) and msg_ts > int(chat.get("t", 0) or 0):
             chat["t"] = msg_ts
 
         # ── Avoid duplicate insertions or resolve pending ones ────────────────
@@ -2270,7 +2295,8 @@ class MainWindow(wx.Frame):
         self._msg_bg_executor.submit(_bg_insert_msg)
 
         # ── Update unread count (only for messages we received) ───────────────
-        if not from_me:
+        # System events never count as unread — see is_countable_message().
+        if not from_me and is_countable_message(msg):
             # Don't increment unread for the conversation already open — it is
             # immediately visible to the user and will be marked as read.
             _cp   = getattr(self, "conversations_panel", None)
@@ -2305,6 +2331,10 @@ class MainWindow(wx.Frame):
 
         # ── Send notification ─────────────────────────────────────────────────
         if from_me:
+            return
+        # System events never trigger a sound/toast/AO2 announcement either —
+        # see is_countable_message().
+        if not is_countable_message(msg):
             return
 
         # Guard: do not play sound or show notification for messages older than 60 seconds
@@ -2553,13 +2583,16 @@ class MainWindow(wx.Frame):
         if len(records) > _MAX_RESIDENT_MESSAGES_PER_CHAT:
             del records[:len(records) - _MAX_RESIDENT_MESSAGES_PER_CHAT]
 
-        # Update lastMessage and 't' (timestamp) if this message is newer
+        # Update lastMessage and 't' (timestamp) if this message is newer.
+        # System events never count — see is_countable_message() — otherwise
+        # a group-metadata change arriving via history sync could still bump
+        # an old, already-read conversation back to the top of the list.
         msg_ts = int(msg.get("messageTimestamp") or msg.get("timestamp") or 0)
         current_lm = chat.get("lastMessage")
         lm_ts = 0
         if isinstance(current_lm, dict):
             lm_ts = int(current_lm.get("messageTimestamp") or current_lm.get("timestamp") or 0)
-        if msg_ts >= lm_ts:
+        if is_countable_message(msg) and msg_ts >= lm_ts:
             chat["lastMessage"] = msg
             chat["t"] = msg_ts
             # Save updated chat to DB
@@ -3999,18 +4032,78 @@ class MainWindow(wx.Frame):
             cache[path] = snd
         snd.play()
 
+    def _token_key(self) -> bytes:
+        """Return the per-install Fernet key (data_path()/secret.key) that
+        backs token_vault.py, loading it lazily if needed.
+
+        retrieve_token() (and therefore _get_wa_token()/_set_wa_token()) runs
+        early in __init__, before prepare_sync() normally sets self.key —
+        retrieve_secret_key() is idempotent (creates the file on first call,
+        otherwise just reads it), so calling it here too is harmless; it just
+        means whichever of the two call sites runs first is the one that
+        actually creates the key file.
+        """
+        if not getattr(self, "key", None):
+            self.key = self.retrieve_secret_key()
+        return self.key
+
+    def _get_wa_token(self) -> str:
+        """Read the WPPConnect session token, transparently migrating a
+        legacy plaintext copy (settings["privateinfo"]["WA_token"]) to
+        Fernet-protected storage (settings["privateinfo"]["WA_token_protected"],
+        see core/token_vault.py) the first time it's read.
+
+        A value that fails to decrypt (corrupted, or encrypted under a
+        different secret.key — e.g. settings.json copied without it) is
+        treated exactly like "no token saved": retrieve_token() already
+        handles that by showing the pairing dialog again, never a crash.
+        """
+        pi = self.settings.get("privateinfo", {})
+        protected = pi.get("WA_token_protected", "")
+        if protected:
+            token = token_vault.unprotect_token(protected, self._token_key())
+            if token:
+                return token
+            # Falls through to the legacy field below only so a token that
+            # somehow still has a plaintext copy alongside a now-unreadable
+            # protected one isn't lost — normally these are mutually exclusive.
+        legacy = pi.get("WA_token", "").strip()
+        if legacy:
+            # One-time migration: re-save protected, remove the plaintext copy.
+            self._set_wa_token(legacy)
+        return legacy
+
+    def _set_wa_token(self, token: str):
+        """Write the WPPConnect session token, Fernet-protected with the
+        per-install secret.key (see core/token_vault.py). Falls back to
+        plaintext only if encryption genuinely fails for some reason — still
+        functional, just not the hardened path. token="" clears both the
+        protected and legacy fields.
+        """
+        pi = self.settings.setdefault("privateinfo", {})
+        if not token:
+            pi.pop("WA_token_protected", None)
+            pi["WA_token"] = ""
+            self.save_settings()
+            return
+        try:
+            pi["WA_token_protected"] = token_vault.protect_token(token, self._token_key())
+            pi.pop("WA_token", None)  # never leave a plaintext copy lying around
+            self.save_settings()
+        except Exception as e:
+            logging.warning("[_set_wa_token] Token protection failed, falling back to plaintext: %s", e)
+            pi["WA_token"] = token
+            self.save_settings()
+
     def retrieve_token(self):
-        token = self.settings.get("privateinfo", {}).get("WA_token", "").strip()
+        token = self._get_wa_token()
         if not token:
             # Migration: read from legacy token.tk if WA_token not yet present
             try:
                 with open(data_path("token.tk"), "r") as f:
                     token = f.read().strip()
                 if token:
-                    if "privateinfo" not in self.settings:
-                        self.settings["privateinfo"] = {}
-                    self.settings["privateinfo"]["WA_token"] = token
-                    self.save_settings()
+                    self._set_wa_token(token)
             except Exception:
                 pass
         if token and ":" not in token:
@@ -4024,8 +4117,7 @@ class MainWindow(wx.Frame):
                     if hash_token:
                         hash_token = hash_token.replace("/", "_").replace("+", "-")
                         token = f"{token}:{hash_token}"
-                        self.settings["privateinfo"]["WA_token"] = token
-                        self.save_settings()
+                        self._set_wa_token(token)
             except Exception as e:
                 import logging
                 logging.error("[retrieve_token] Failed to migrate WPPConnect token: %s", e)
@@ -5486,6 +5578,14 @@ class MainWindow(wx.Frame):
                                 # Keep the local count to prevent startup wipe of unread badges.
                                 if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
                                     continue
+                                # Never resurrect unread count for the conversation the
+                                # user has open right now — mark_conversation_as_read()
+                                # already set it to 0 locally, and this snapshot can be
+                                # a few seconds stale relative to that. Same guard as
+                                # on_chat_unread_update()'s live-event path.
+                                _cp = getattr(self, "conversations_panel", None)
+                                if jid == getattr(_cp, "_last_open_jid", ""):
+                                    v = 0
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see
@@ -6406,6 +6506,11 @@ class MainWindow(wx.Frame):
                     if result is not None:
                         self.chats = result
                     wx.CallAfter(self._schedule_set_chats)
+                    # Phone-side clears/deletions — active conversation only,
+                    # one extra cheap GET per cycle, nothing at all when no
+                    # conversation is open. See the method's own docstring
+                    # for why this stays scoped to just the open chat.
+                    self._reconcile_active_conversation_with_remote()
                 except Exception as e:
                     logging.warning(f"[periodic_contacts_sync] error: {e}")
 
@@ -6659,21 +6764,29 @@ class MainWindow(wx.Frame):
 
         # Pinned chats float to the top; within each group sort by most-recent
         # message timestamp descending (newest first), then alphabetically.
+        #
+        # Only counts is_countable_message() records — a system event (group
+        # join/leave, settings change, revoke, ...) stored in this chat's
+        # records must never push it back to the top of the list just
+        # because its timestamp is the newest one on file. chat["t"]/
+        # lastMessage are already never set from a non-countable message
+        # (see on_new_message()/on_historical_message()), but this also
+        # scans every raw record directly, so it needs the same filter.
         def _chat_last_ts(c):
             # Fallback to chat's own last activity timestamp (t)
             chat_ts = int(c.get("t", 0) or 0)
             if chat_ts > 1_000_000_000_000:
                 chat_ts //= 1000
             ts = chat_ts
-            
+
             lm = c.get("lastMessage")
-            if isinstance(lm, dict):
+            if isinstance(lm, dict) and is_countable_message(lm):
                 lm_ts = int(lm.get("timestamp", 0) or lm.get("messageTimestamp", 0) or lm.get("t", 0) or 0)
                 if lm_ts > 1_000_000_000_000:
                     lm_ts //= 1000
                 if lm_ts > ts:
                     ts = lm_ts
-                
+
             records_wrapper = c.get("messages") or {}
             if isinstance(records_wrapper, dict):
                 inner_wrapper = records_wrapper.get("messages") or {}
@@ -6682,10 +6795,12 @@ class MainWindow(wx.Frame):
                     if records_copy:
                         for m in records_copy:
                             # Only records the preview would show may move a chat
-                            # — see _counts_as_last_message(). Counting silent
-                            # bookkeeping here (a groupNotification for someone
-                            # joining) floated week-old groups above live ones
-                            # while they still displayed their old preview.
+                            # — see _counts_as_last_message(), which is stricter
+                            # than is_countable_message() and rejects non-dicts
+                            # itself. Counting silent bookkeeping here (a
+                            # groupNotification for someone joining) floated
+                            # week-old groups above live ones while they still
+                            # displayed their old preview.
                             if not self._counts_as_last_message(m):
                                 continue
                             t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
@@ -7942,6 +8057,132 @@ class MainWindow(wx.Frame):
             logging.warning("[sync_chat_messages] incremental DB save failed for %s: %s",
                             remote_jid, exc)
 
+    # ── Phone-side deletions/clears — active conversation only ──────────────
+    # sync_chat_messages() above deliberately never removes anything: its
+    # "extra"/"late_extra" merges exist specifically to protect messages that
+    # arrived live but the API snapshot hasn't indexed yet, so reusing it here
+    # would silently undo real deletions. Detecting a message (or a whole
+    # conversation) that vanished from the phone needs its own comparison —
+    # kept scoped to the conversation the user has open right now: diffing
+    # every chat's messages against the server on every 60s poll would turn
+    # one cheap GET into dozens/hundreds against a local API that is already
+    # doing real work, for a benefit (a stale bubble the user probably
+    # wouldn't notice) that doesn't justify the cost. For the open
+    # conversation specifically, the cost is one extra GET per poll and the
+    # payoff (not staring at a message that no longer exists, or a "cleared"
+    # conversation that stays full until F5) is worth it.
+
+    def _fetch_remote_message_ids(self, remote_jid: str) -> "set[str] | None":
+        """Best-effort GET of the message IDs WPPConnect currently has for
+        remote_jid. Returns None on ANY failure/ambiguity — a failed fetch
+        must never be read as "the phone deleted everything". IDs are
+        extracted via the same _normalize_wpp_message() sync_chat_messages()
+        uses, so they compare equal to what's stored in key.id locally.
+        """
+        if not self.ws:
+            return None
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid:
+            phone = lid
+        elif remote_jid.endswith("@s.whatsapp.net"):
+            phone = remote_jid.split("@")[0] + "@c.us"
+        else:
+            phone = remote_jid
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code not in (200, 201):
+                return None
+            body = response.json()
+            wpp_messages = body.get("response", []) if isinstance(body, dict) else []
+            if not isinstance(wpp_messages, list):
+                return None
+            ids = set()
+            for wm in wpp_messages:
+                if not isinstance(wm, dict):
+                    continue
+                try:
+                    normalized = self.ws._normalize_wpp_message(wm)
+                except Exception:
+                    continue
+                mid = normalized.get("key", {}).get("id", "")
+                if mid:
+                    ids.add(mid)
+            return ids
+        except Exception as e:
+            logging.warning(f"[_fetch_remote_message_ids] failed for {remote_jid}: {e}")
+            return None
+
+    def _reconcile_active_conversation_with_remote(self):
+        """Detect a phone-side clear or individual message deletions in
+        whichever conversation is currently open, and mirror them locally.
+        Called once per periodic-poll cycle (start_periodic_contacts_sync);
+        a no-op — no HTTP call at all — whenever no conversation is open.
+        """
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        remote_jid = self._normalize_jid(cp.conversation.get("remoteJid", ""))
+        if not remote_jid or not getattr(self, "messages_set_completed", False):
+            return
+        chat = self.chats.get(remote_jid)
+        if not chat:
+            return
+        records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        local_ids = {
+            r.get("key", {}).get("id") for r in records
+            if isinstance(r, dict) and not r.get("_local_pending") and r.get("key", {}).get("id")
+        }
+        # Too little history for "the server has fewer messages" to mean
+        # anything other than "this is just a short conversation".
+        if len(local_ids) < 2:
+            return
+        remote_ids = self._fetch_remote_message_ids(remote_jid)
+        if remote_ids is None:
+            return
+        missing_ids = local_ids - remote_ids
+        if not missing_ids:
+            return
+        if missing_ids == local_ids:
+            # Every local message is gone server-side — a clear, not a
+            # handful of individually deleted messages.
+            wx.CallAfter(self._mirror_remote_clear, remote_jid)
+        else:
+            wx.CallAfter(self._mirror_remote_deletions, remote_jid, missing_ids)
+
+    def _mirror_remote_clear(self, remote_jid: str):
+        """Mirror a conversation cleared on the phone. Runs on the main thread."""
+        cp = getattr(self, "conversations_panel", None)
+        # Re-check the conversation is still the one open and still looks
+        # cleared — time passed between the background fetch and this
+        # CallAfter actually running (user could have switched away, or a
+        # new message could have arrived in the meantime).
+        if cp is None or cp.conversation is None:
+            return
+        if self._normalize_jid(cp.conversation.get("remoteJid", "")) != remote_jid:
+            return
+        logging.info("[_mirror_remote_clear] %s appears cleared on the phone — mirroring locally.", remote_jid)
+        # record_cutoff=False: this isn't a cutoff WE are choosing to
+        # remember, the server is already the source of truth going forward.
+        self.clear_chat_messages_local(remote_jid, record_cutoff=False)
+        cp.conversation = self.chats.get(remote_jid, cp.conversation)
+        cp.populate_messages()
+        self._schedule_set_chats()
+
+    def _mirror_remote_deletions(self, remote_jid: str, msg_ids: set):
+        """Mirror one or more messages deleted on the phone from the
+        currently open conversation. Runs on the main thread."""
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        if self._normalize_jid(cp.conversation.get("remoteJid", "")) != remote_jid:
+            return
+        logging.info("[_mirror_remote_deletions] %d message(s) in %s no longer on the phone — removing locally.",
+                     len(msg_ids), remote_jid)
+        cp.remove_messages_by_id(msg_ids, focus_previous=True)
+
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
     # to download older media causes the WPPConnect to enter a 5-second retry
     # loop for every expired URL, which starves the API thread pool and eventually
@@ -7957,20 +8198,44 @@ class MainWindow(wx.Frame):
                                               # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 60              # seconds per request during bulk sync
 
-    def _load_media_failed_ids(self) -> set:
-        """Load the set of message IDs whose media CDN URL has previously expired."""
+    def _load_media_failed_ids(self) -> dict:
+        """Load {message_id: failed_at_timestamp} for media whose CDN URL has
+        previously expired (403/410) — checked by sync_if_media() to skip a
+        pointless repeat download attempt.
+
+        This was a bare set with no eviction, growing forever and persisted
+        across every restart (data/media_failed.json) — for an account with
+        a lot of old/expired media, a genuine unbounded-growth source. Every
+        entry is provably dead weight once its message is older than
+        _MEDIA_MAX_AGE_SECONDS anyway: sync_if_media()'s own age check skips
+        it before ever consulting this set, so there is nothing lost by
+        pruning entries past that point — they can never be looked up again.
+        """
         try:
             with open(data_path("media_failed.json"), "r", encoding="utf-8") as f:
-                return set(json.load(f))
+                raw = json.load(f)
         except Exception:
-            return set()
+            return {}
+        now = time.time()
+        if isinstance(raw, dict):
+            return {
+                mid: ts for mid, ts in raw.items()
+                if isinstance(ts, (int, float)) and (now - ts) <= self._MEDIA_MAX_AGE_SECONDS
+            }
+        if isinstance(raw, list):
+            # Legacy format (plain list from before this became a dict) —
+            # no timestamp to judge age by, so treat every entry as freshly
+            # failed rather than either keeping stale ones forever or
+            # discarding real, still-useful skip-hints outright.
+            return {mid: now for mid in raw if isinstance(mid, str)}
+        return {}
 
     def _save_media_failed_ids(self):
-        """Persist the failed-media set so expired IDs are skipped on future launches."""
+        """Persist the failed-media map so expired IDs are skipped on future launches."""
         with self._media_failed_lock:
             try:
                 with open(data_path("media_failed.json"), "w", encoding="utf-8") as f:
-                    json.dump(list(self._media_failed_ids), f)
+                    json.dump(self._media_failed_ids, f)
             except Exception:
                 pass
 
@@ -8025,7 +8290,7 @@ class MainWindow(wx.Frame):
                     wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
         except MediaExpiredError:
             if msg_id:
-                self._media_failed_ids.add(msg_id)
+                self._media_failed_ids[msg_id] = time.time()
         except Exception:
             pass
 
@@ -9201,7 +9466,12 @@ class MainWindow(wx.Frame):
         # Never resurrect unread count for a conversation the user already read
         # locally (mark_conversation_as_read set it to 0). The server may still
         # carry a stale unread count from before the read-ack arrived.
-        if normalized == getattr(self, "_last_open_jid", ""):
+        # NOTE: _last_open_jid lives on ConversationsPanel, not MainWindow —
+        # this used to read `self._last_open_jid` directly, which never
+        # existed on MainWindow and so always fell back to "", silently
+        # disabling this guard entirely.
+        cp = getattr(self, "conversations_panel", None)
+        if normalized == getattr(cp, "_last_open_jid", ""):
             unread_count = 0
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
@@ -12016,10 +12286,24 @@ def setup_logging():
         os.makedirs(log_path(), exist_ok=True)
         log_file = log_path("log.log")
 
-        handler = logging.handlers.RotatingFileHandler(
+        # Remove the log.log.1/.2/.3 backups a previous RotatingFileHandler
+        # left behind. There is deliberately only ONE log file now, holding
+        # only the current run: when diagnosing a startup/pairing problem,
+        # having to work out where the last launch begins inside a 10 MB file
+        # (or which of four files it landed in) is pure friction.
+        for _n in range(1, 10):
+            try:
+                os.remove(f"{log_file}.{_n}")
+            except OSError:
+                pass
+
+        # mode="w" truncates on open, so each launch starts from a clean file.
+        # Safe because __main__ only calls setup_logging() after the
+        # single-instance mutex is acquired — otherwise a second launch would
+        # wipe the log of the instance that is actually running.
+        handler = logging.FileHandler(
             log_file,
-            maxBytes=10 * 1024 * 1024,  # 10 MB per file
-            backupCount=3,
+            mode="w",
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter(
@@ -12050,17 +12334,17 @@ def setup_logging():
 
 
 if __name__ == "__main__":
-    setup_logging()
     try:
-        import logging
-        logging.info("Checking instance lock...")
         from autostart import acquire_single_instance_mutex, activate_existing_window
 
         background = "--background" in sys.argv
         first_instance = acquire_single_instance_mutex()
 
         if not first_instance:
-            logging.info("Another instance is already running.")
+            # Deliberately BEFORE setup_logging(): the log file is truncated
+            # on open so it only ever holds the current run, which means a
+            # second launch must not touch it — the instance that owns it is
+            # still running and writing to it.
             if not background:
                 # A normal launch while WinZapp is already running in the background:
                 # bring the existing window to the foreground and exit.
@@ -12068,6 +12352,9 @@ if __name__ == "__main__":
             # If --background and already running: nothing to do — exit silently.
             sys.exit(0)
 
+        setup_logging()
+        import logging
+        logging.info("Instance lock acquired.")
         logging.info("Creating wx.App...")
         app = wx.App()
         frame = MainWindow()

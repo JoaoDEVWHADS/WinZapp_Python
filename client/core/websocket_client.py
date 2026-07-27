@@ -373,8 +373,9 @@ class WebSocketClient:
         )
 
         # Wipe the invalidated credentials so next startup goes to pairing.
+        old_token = mw._get_wa_token()
         pi = mw.settings.setdefault("privateinfo", {})
-        old_token = pi.pop("WA_token", "")
+        mw._set_wa_token("")
         pi.pop("WA_phone_number", None)
         pi.pop("paired", None)
         mw.messages_set_completed = False
@@ -423,28 +424,42 @@ class WebSocketClient:
         # End the dialogs' modal loops on the main thread to avoid wx
         # thread-safety issues. Guards against the case where the app is
         # already paired (no dialogs open).
-        def _close_dialogs():
-            # connection_dial (and pairing_dial, its child) are shown via
-            # ShowModal() — Destroy()ing a dialog directly while its modal
-            # loop is still running never signals that loop to unwind, so
-            # wx never re-enables the parent window ShowModal() disabled
-            # when it started. The dialog object goes away but the main
-            # window stays blocked for input — reported live as "reconnected
-            # successfully, but the main window was frozen/unusable and kept
-            # announcing 'connection restored' in the background".
-            #
-            # EndModal() ONLY here — never Destroy(). Both dialogs already
-            # Destroy() themselves right after their own ShowModal() call
-            # returns (show_pairing_dial() / show_connection_dial() in
-            # connect.py); calling Destroy() a second time here, in the same
-            # handler as EndModal() and before that nested modal loop has
-            # actually had a chance to unwind and return control to its own
-            # call frame, tears down the dialog's window out from under its
-            # own still-running native modal loop — which is exactly the
-            # "main window/tray icon never appear after pairing, no error,
-            # no sound, process just sits there" hang this was meant to fix
-            # in the first place. Let each ShowModal() caller destroy its own
-            # dialog once it has genuinely returned.
+        #
+        # connection_dial (and pairing_dial, its child) are shown via
+        # ShowModal() — Destroy()ing a dialog directly while its modal loop
+        # is still running never signals that loop to unwind, so wx never
+        # re-enables the parent window ShowModal() disabled when it started.
+        # The dialog object goes away but the main window stays blocked for
+        # input — reported live as "reconnected successfully, but the main
+        # window was frozen/unusable and kept announcing 'connection
+        # restored' in the background".
+        #
+        # EndModal() ONLY here — never Destroy(). Both dialogs already
+        # Destroy() themselves right after their own ShowModal() call
+        # returns (show_pairing_dial() / show_connection_dial() in
+        # connect.py).
+        #
+        # Close ONLY the innermost modal here. pairing_dial is nested INSIDE
+        # connection_dial's own modal loop (on_continue() opens it from a
+        # button handler running inside connection_dial.ShowModal()), and wx
+        # only allows EndModal() on the loop that is actually running.
+        #
+        # EndModal() does NOT unwind its loop immediately — it merely signals
+        # it — and that still-running loop keeps dispatching pending events,
+        # including any wx.CallAfter queued from within it. So closing
+        # connection_dial from here was impossible: both inline and via a
+        # CallAfter chained off this same handler ran while pairing_dial's
+        # loop was still the running one, and wx rejected it with a hard
+        # assertion ("IsRunning()" failed ... "Use ScheduleExit() on not
+        # running loop"). log.log confirmed the ordering — the parent's close
+        # attempt logged BEFORE "pairing_dial modal loop returned".
+        #
+        # connection_dial is therefore closed by show_pairing_dial() itself,
+        # right after its own ShowModal() returns (see connect.py), which is
+        # the only point where control is provably back in the parent's loop.
+        def _end_innermost_dialog():
+            # Phone-pairing flow: pairing_dial is on top, and closing it lets
+            # show_pairing_dial() resume and close connection_dial in turn.
             if hasattr(self.connect, 'pairing_dial'):
                 try:
                     dlg = self.connect.pairing_dial
@@ -453,16 +468,19 @@ class WebSocketClient:
                     # so this whole block fell straight into the except below and
                     # neither EndModal() nor anything else ever ran. A wxPython
                     # wrapper whose C++ window is gone is falsy, which is the
-                    # check connect.py:1095 already uses for this same dialog.
+                    # check connect.py already uses for this same dialog.
                     if dlg and dlg.IsModal():
                         logging.info("[on_pairing_complete] Ending pairing_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
-                    else:
-                        logging.info("[on_pairing_complete] pairing_dial already destroyed/not modal — nothing to end.")
+                        return
+                    logging.info("[on_pairing_complete] pairing_dial not modal — falling through to connection_dial.")
                 except Exception:
                     logging.exception("[on_pairing_complete] Failed to end pairing_dial.")
+                    return
             else:
-                logging.info("[on_pairing_complete] No pairing_dial attribute — nothing to close.")
+                logging.info("[on_pairing_complete] No pairing_dial attribute — closing connection_dial directly.")
+            # QR-code flow (or pairing_dial already gone): connection_dial is
+            # itself the innermost running loop, so it can be ended here.
             if hasattr(self.connect, 'connection_dial'):
                 try:
                     dlg = self.connect.connection_dial
@@ -471,14 +489,14 @@ class WebSocketClient:
                         logging.info("[on_pairing_complete] Ending connection_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
                     else:
-                        logging.info("[on_pairing_complete] connection_dial already destroyed/not modal — nothing to end.")
+                        logging.info("[on_pairing_complete] connection_dial not modal — nothing to end.")
                 except Exception:
                     logging.exception("[on_pairing_complete] Failed to end connection_dial.")
             else:
                 logging.info("[on_pairing_complete] No connection_dial attribute — nothing to close.")
 
         logging.info("[on_pairing_complete] Scheduling dialog close via CallAfter.")
-        wx.CallAfter(_close_dialogs)
+        wx.CallAfter(_end_innermost_dialog)
 
 
     @staticmethod

@@ -132,6 +132,16 @@ class ConversationsPanel(wx.Panel):
         self._editing_message_id: str | None = None    # key.id of msg being edited
         self._editing_message_index: int = -1          # list row index
 
+        # ── Message bookmarks (Ctrl+0..9 / Ctrl+Shift+0..9) ──────────────────
+        # digit (0-9) -> stable message identifier (key.id, or _local_id for a
+        # still-pending outgoing message). Identifiers, not raw list indices,
+        # so a bookmark keeps pointing at the same message even if the list
+        # is rebuilt/reordered (new message arriving, pagination, etc.)
+        # between setting it and jumping to it. Scoped to the open
+        # conversation only — cleared on close_conversation() and on every
+        # conversation switch in navigate_to_conversation(), never persisted.
+        self._msg_bookmarks: dict = {}
+
         # ── Media download progress ─────────────────────────────────────────
         # msg_id -> float 0.0-1.0  (absent = not tracked / already complete)
         self._download_progress: dict = {}
@@ -687,6 +697,9 @@ class ConversationsPanel(wx.Panel):
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
         self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
+        # ── Message bookmarks ────────────────────────────────────────────────
+        self.ID_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Ctrl+0..9)
+        self.ID_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Shift+0..9)
         # ── Group actions ────────────────────────────────────────────────────
         self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
@@ -734,6 +747,10 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("O"),           self.ID_CTRL_SHIFT_O),
             (wx.ACCEL_ALT,     ord(","),           self.ID_ALT_COMMA),
             (wx.ACCEL_ALT,     ord("."),           self.ID_ALT_PERIOD),
+        ] + [
+            (wx.ACCEL_CTRL, ord(str(d)), self.ID_BOOKMARK[d]) for d in range(10)
+        ] + [
+            (CS,            ord(str(d)), self.ID_BOOKMARK_REMOVE[d]) for d in range(10)
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message,       id=self.ID_CTRL_R)
@@ -768,6 +785,9 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_star,                 id=self.ID_CTRL_SHIFT_O)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_decrease,      id=self.ID_ALT_COMMA)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_increase,      id=self.ID_ALT_PERIOD)
+        for _d in range(10):
+            self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_set_or_jump(d), id=self.ID_BOOKMARK[_d])
+            self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_remove(d),      id=self.ID_BOOKMARK_REMOVE[_d])
 
     # ── Conversations list events ───────────────────────────────────────────
 
@@ -816,6 +836,7 @@ class ConversationsPanel(wx.Panel):
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
+        self._msg_bookmarks = {}  # bookmarks are scoped to the conversation being left
         self._first_unread_msg_id = None
         self._first_unread_count = 0
         if self._unread_sep_dismiss_timer.IsRunning():
@@ -1837,6 +1858,7 @@ class ConversationsPanel(wx.Panel):
             self._search_panel.Hide()
             self._search_open_btn.Show()
             self._search_field.SetValue("")
+        self._msg_bookmarks = {}
         closed_jid = self._last_open_jid
         self.conversation = None
         self.conversation_panel.Hide()
@@ -5715,25 +5737,58 @@ class ConversationsPanel(wx.Panel):
             threading.Thread(target=_revoke, daemon=True).start()
 
         # Always delete locally
-        self._sorted_messages.pop(index)
-        self.messages_list.DeleteItem(index)
-        # Keep the unread-separator index and the full (unpaginated) message
-        # list in sync with the row that just disappeared. Without this, every
-        # later consumer of _unread_sep_idx (focus handling, the dismiss
-        # timer, on_incoming_message's separator relocation) kept operating on
-        # the pre-delete row — off by one for every message deleted above the
-        # separator — and _load_more_messages()/_load_older_messages() could
-        # re-introduce the just-deleted message from the still-stale
-        # _all_sorted_messages the next time the user scrolled to the top.
-        if self._unread_sep_idx >= 0 and index < self._unread_sep_idx:
-            self._unread_sep_idx -= 1
         if msg_id:
-            for i, m in enumerate(self._all_sorted_messages):
-                if isinstance(m, dict) and m.get("key", {}).get("id") == msg_id:
-                    self._all_sorted_messages.pop(i)
-                    if i < self._messages_offset:
-                        self._messages_offset -= 1
-                    break
+            self.remove_messages_by_id({msg_id}, focus_previous=True)
+        else:
+            self._sorted_messages.pop(index)
+            self.messages_list.DeleteItem(index)
+
+    def remove_messages_by_id(self, msg_ids: set, focus_previous: bool = False):
+        """Remove every row whose key.id is in msg_ids from messages_list,
+        _sorted_messages, _all_sorted_messages and self.conversation's
+        records (plus the DB copy) — keeping the unread-separator index and
+        pagination offset in sync with whatever just disappeared.
+
+        Shared by _on_menu_delete_message() (single message, user-initiated)
+        and MainWindow._mirror_remote_deletions() (a batch mirrored in from
+        a phone-side deletion detected by the periodic poll).
+
+        focus_previous=True moves the list's internal focused/selected row
+        to just before the earliest removed one (or to row 0 if the removal
+        started at the top) once done — WITHOUT calling messages_list.
+        SetFocus(), so a background-triggered removal never steals keyboard
+        focus from wherever the user actually is right now. The caller is
+        already interacting with the list for the user-initiated path, so
+        not stealing focus there either is harmless.
+        """
+        if not msg_ids:
+            return
+        indices = sorted(
+            i for i, m in enumerate(self._sorted_messages)
+            if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids
+        )
+        if not indices:
+            return
+        earliest = indices[0]
+        # Keep the unread-separator index and the full (unpaginated) message
+        # list in sync with the rows that just disappeared. Without this,
+        # every later consumer of _unread_sep_idx (focus handling, the
+        # dismiss timer, on_incoming_message's separator relocation) kept
+        # operating on pre-delete rows — off by one for every message
+        # deleted above the separator — and _load_more_messages()/
+        # _load_older_messages() could re-introduce a just-deleted message
+        # from the still-stale _all_sorted_messages on the next scroll-to-top.
+        for idx in reversed(indices):
+            self._sorted_messages.pop(idx)
+            self.messages_list.DeleteItem(idx)
+            if self._unread_sep_idx >= 0 and idx < self._unread_sep_idx:
+                self._unread_sep_idx -= 1
+        for i in range(len(self._all_sorted_messages) - 1, -1, -1):
+            m = self._all_sorted_messages[i]
+            if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids:
+                self._all_sorted_messages.pop(i)
+                if i < self._messages_offset:
+                    self._messages_offset -= 1
         if self.conversation:
             records = (
                 self.conversation.get("messages", {})
@@ -5742,14 +5797,23 @@ class ConversationsPanel(wx.Panel):
             )
             self.conversation["messages"]["messages"]["records"] = [
                 m for m in records
-                if m.get("key", {}).get("id") != msg_id
+                if m.get("key", {}).get("id") not in msg_ids
             ]
-            try:
-                self.main_window.db.delete_message(
-                    self.conversation.get("remoteJid", ""), msg_id
-                )
-            except Exception:
-                logging.exception("[conversations] delete_message failed")
+            for mid in msg_ids:
+                try:
+                    self.main_window.db.delete_message(
+                        self.conversation.get("remoteJid", ""), mid
+                    )
+                except Exception:
+                    logging.exception("[conversations] delete_message failed for %s", mid)
+
+        if focus_previous:
+            count = self.messages_list.GetItemCount()
+            if count > 0:
+                new_focus = min(max(earliest - 1, 0), count - 1)
+                self.messages_list.Focus(new_focus)
+                self.messages_list.Select(new_focus, True)
+                self.messages_list.EnsureVisible(new_focus)
 
     def _on_accel_edit_message(self, event):
         """Alt+E: enter edit mode for the focused own text message."""
@@ -6158,6 +6222,90 @@ class ConversationsPanel(wx.Panel):
         )
         # mark_conversation_as_read is triggered by _on_message_focused which
         # fires when Focus() is called above — no need to call it here again.
+
+    # ── Ctrl+0..9 / Ctrl+Shift+0..9: message bookmarks ──────────────────────
+    # Scoped to the currently open conversation only (see _msg_bookmarks'
+    # declaration in __init__): cleared on close_conversation() and on every
+    # conversation switch in navigate_to_conversation().
+
+    def _find_index_by_msg_id(self, msg_id: str) -> int:
+        """Return the current _sorted_messages index for a message ID, or -1."""
+        if not msg_id:
+            return -1
+        for i, m in enumerate(self._sorted_messages):
+            if (isinstance(m, dict) and not self._is_separator(m)
+                    and m.get("key", {}).get("id") == msg_id):
+                return i
+        return -1
+
+    def _on_bookmark_set_or_jump(self, digit: int):
+        """Ctrl+<digit>: bookmark the focused message, or — if <digit> already
+        has a bookmark — move focus/selection to it instead.
+
+        Bookmarks store the message's stable key.id rather than a raw list
+        index, so a bookmark still finds the right message even if the list
+        was rebuilt (e.g. a new message arrived) between setting it and
+        jumping to it.
+        """
+        i18n = self.main_window.i18n
+        existing_id = self._msg_bookmarks.get(digit)
+        if existing_id is not None:
+            idx = self._find_index_by_msg_id(existing_id)
+            if idx < 0:
+                # The bookmarked message is no longer in the loaded list
+                # (deleted, paged out, etc.) — drop the stale bookmark
+                # instead of silently doing nothing.
+                del self._msg_bookmarks[digit]
+                self.main_window.output(
+                    i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+                )
+                return
+            self.messages_list.Focus(idx)
+            self.messages_list.Select(idx, True)
+            self.messages_list.EnsureVisible(idx)
+            self.messages_list.SetFocus()
+            self.main_window.output(
+                i18n.t("bookmark_jumped").format(position=idx + 1, digit=digit),
+                interrupt=True,
+            )
+            return
+
+        idx = self.messages_list.GetFocusedItem()
+        if idx < 0 or idx >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[idx]
+        if self._is_separator(msg):
+            return
+        msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id:
+            return
+        self._msg_bookmarks[digit] = msg_id
+        self.main_window.output(
+            i18n.t("bookmark_set").format(
+                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx)
+            ),
+            interrupt=True,
+        )
+
+    def _on_bookmark_remove(self, digit: int):
+        """Ctrl+Shift+<digit>: remove the bookmark at that digit, if any."""
+        i18n = self.main_window.i18n
+        existing_id = self._msg_bookmarks.pop(digit, None)
+        if existing_id is None:
+            self.main_window.output(
+                i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        idx = self._find_index_by_msg_id(existing_id)
+        if idx < 0:
+            self.main_window.output(
+                i18n.t("bookmark_removed_stale").format(digit=digit), interrupt=True
+            )
+            return
+        self.main_window.output(
+            i18n.t("bookmark_removed").format(digit=digit, position=idx + 1),
+            interrupt=True,
+        )
 
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 

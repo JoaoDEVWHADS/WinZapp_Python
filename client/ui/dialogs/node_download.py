@@ -8,6 +8,7 @@ client/node/ so the bundled WPPConnect Server can run.
 The user never needs to install Node.js manually.
 """
 
+import hashlib
 import io
 import logging
 import os
@@ -25,10 +26,12 @@ from app_paths import resource_path
 log = logging.getLogger(__name__)
 
 _NODE_VERSION = "18.20.4"
-_NODE_URL = (
-    f"https://nodejs.org/dist/v{_NODE_VERSION}/"
-    f"node-v{_NODE_VERSION}-win-x64.zip"
-)
+_NODE_FILENAME = f"node-v{_NODE_VERSION}-win-x64.zip"
+_NODE_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/{_NODE_FILENAME}"
+# nodejs.org publishes a checksum manifest for every release — verify the
+# download against it before ever extracting/running anything from it,
+# rather than trusting an unauthenticated HTTP download outright.
+_NODE_SHASUMS_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/SHASUMS256.txt"
 
 _TOP_DIR = f"node-v{_NODE_VERSION}-win-x64"
 
@@ -153,6 +156,51 @@ class NodeDownloadDialog(wx.Dialog):
 
         return not self._cancelled
 
+    def _verify_checksum(self, zip_path: str) -> bool:
+        self._set_status("Verificando integridade do download...")
+        try:
+            resp = requests.get(_NODE_SHASUMS_URL, timeout=15)
+            resp.raise_for_status()
+        except Exception as exc:
+            if not self._cancelled:
+                self._finish_error(
+                    f"Não foi possível verificar a integridade do download:\n\n{exc}"
+                )
+            return False
+
+        expected = ""
+        for line in resp.text.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].strip().lstrip("*") == _NODE_FILENAME:
+                expected = parts[0].strip().lower()
+                break
+
+        if not expected:
+            if not self._cancelled:
+                self._finish_error(
+                    f"Não foi encontrado um checksum para {_NODE_FILENAME} "
+                    "no manifesto de integridade do nodejs.org."
+                )
+            return False
+
+        sha256 = hashlib.sha256()
+        with open(zip_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                sha256.update(chunk)
+        actual = sha256.hexdigest().lower()
+
+        if actual != expected:
+            if not self._cancelled:
+                self._finish_error(
+                    "O download do Node.js falhou na verificação de integridade "
+                    "e não será usado, por segurança.\n\n"
+                    f"Esperado: {expected}\nObtido: {actual}"
+                )
+            return False
+
+        log.info("Node.js download checksum verified: %s", actual)
+        return True
+
     def _extract_node(self, zip_path: str, node_dir: str) -> bool:
         self._set_status("Extraindo Node.js...")
         try:
@@ -192,6 +240,13 @@ class NodeDownloadDialog(wx.Dialog):
         tmp_zip = tempfile.mktemp(suffix=".zip", prefix="winzapp_node_")
         try:
             ok = self._download_zip(_NODE_URL, tmp_zip)
+            if not ok:
+                return
+
+            if self._cancelled:
+                return
+
+            ok = self._verify_checksum(tmp_zip)
             if not ok:
                 return
 

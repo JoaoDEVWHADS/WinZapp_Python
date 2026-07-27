@@ -27,13 +27,18 @@ from ui.dialogs.connect import Connect
 can_reuse = Connect._can_reuse_existing_session
 
 PHONE = "5511999999999"
+TOKEN = "0000000000000000000000000000dead:$2b$10$abc"
 
 
 def _priv(**overrides):
-    """A privateinfo dict for a fully paired account, before overrides."""
+    """A privateinfo dict for a fully paired account, before overrides.
+
+    No WA_token key: the token lives Fernet-protected under
+    WA_token_protected and reaches the check as an argument, read by
+    MainWindow._get_wa_token() (see core/token_vault.py).
+    """
     base = {
         "WA_phone_number": PHONE,
-        "WA_token": "0000000000000000000000000000dead:$2b$10$abc",
         "paired": True,
     }
     base.update(overrides)
@@ -41,41 +46,49 @@ def _priv(**overrides):
 
 
 def test_reuses_a_genuinely_paired_session():
-    assert can_reuse(_priv(), PHONE) is True
+    assert can_reuse(_priv(), PHONE, TOKEN) is True
 
 
 def test_rejects_a_token_from_a_cancelled_pairing():
-    """The reported bug: code shown, cancelled, retried. WA_token is present
+    """The reported bug: code shown, cancelled, retried. The token is present
     because it was persisted optimistically, but pairing never completed."""
-    assert can_reuse(_priv(paired=False), PHONE) is False
+    assert can_reuse(_priv(paired=False), PHONE, TOKEN) is False
 
 
 def test_rejects_when_paired_key_is_absent_entirely():
     """cleanup_pairing_session() pops the key rather than setting it False."""
     priv = _priv()
     del priv["paired"]
-    assert can_reuse(priv, PHONE) is False
+    assert can_reuse(priv, PHONE, TOKEN) is False
 
 
 def test_rejects_a_different_number():
-    assert can_reuse(_priv(), "5521888888888") is False
+    assert can_reuse(_priv(), "5521888888888", TOKEN) is False
 
 
 def test_rejects_when_no_token_is_stored():
-    assert can_reuse(_priv(WA_token=""), PHONE) is False
+    """Also covers a protected token that failed to decrypt — _get_wa_token()
+    returns "" for that too, deliberately indistinguishable from "no token"."""
+    assert can_reuse(_priv(), PHONE, "") is False
+
+
+def test_ignores_a_legacy_plaintext_token_left_in_privateinfo():
+    """A stale plaintext WA_token in settings must not stand in for the real
+    (protected) one — only what _get_wa_token() returns counts."""
+    assert can_reuse(_priv(WA_token=TOKEN), PHONE, "") is False
 
 
 def test_rejects_an_empty_privateinfo():
-    assert can_reuse({}, PHONE) is False
+    assert can_reuse({}, PHONE, TOKEN) is False
 
 
 def test_rejects_a_missing_privateinfo():
-    assert can_reuse(None, PHONE) is False
+    assert can_reuse(None, PHONE, TOKEN) is False
 
 
 def test_rejects_an_empty_phone_number():
     """An empty field must never match an empty stored number."""
-    assert can_reuse(_priv(WA_phone_number=""), "") is False
+    assert can_reuse(_priv(WA_phone_number=""), "", TOKEN) is False
 
 
 @pytest.mark.parametrize("stored,typed", [
@@ -86,4 +99,4 @@ def test_rejects_an_empty_phone_number():
 def test_number_comparison_ignores_formatting(stored, typed):
     """The stored number keeps whatever formatting the user typed; both sides
     are normalised to digits before comparing."""
-    assert can_reuse(_priv(WA_phone_number=stored), typed) is True
+    assert can_reuse(_priv(WA_phone_number=stored), typed, TOKEN) is True

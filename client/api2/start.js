@@ -89,7 +89,11 @@ const optimizedBrowserArgs = [
   '--ignore-certificate-errors',
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
-  '--js-flags="--max-old-space-size=256"', // Limits V8 heap size to 256MB
+  // No --js-flags="--max-old-space-size=..." here — see the matching note
+  // in client/api_patches/start.js: a hard V8 heap ceiling on the WhatsApp
+  // Web renderer causes a hard crash ("JavaScript heap out of memory")
+  // under heavy load instead of a graceful slowdown, unlike every other
+  // flag in this list (all safe feature-disabling degradations).
   '--no-zygote',
   '--disable-shared-workers',
 ];

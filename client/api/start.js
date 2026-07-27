@@ -87,6 +87,22 @@ if (process.env.AUTHENTICATION_API_KEY) {
 }
 
 // Optimized browser arguments to limit Puppeteer/Chromium CPU and Memory usage
+//
+// NOTE on what was deliberately left OUT of this list: an earlier version
+// included '--js-flags="--max-old-space-size=350"', capping the WhatsApp
+// Web renderer's own V8 JS heap at 350MB. Every other flag here reduces
+// memory by disabling an optional feature (cache, GPU, extensions, ...) —
+// a safe degradation. --max-old-space-size is categorically different: it's
+// a hard ceiling, and WhatsApp Web's own JS heap (message store, media
+// metadata, many open/cached chats — exactly the "muitas conversas
+// chegando" scenario) can legitimately need more than 350MB under real
+// load. Hitting the ceiling doesn't slow anything down gracefully — V8
+// throws "JavaScript heap out of memory" and the renderer process crashes
+// outright, which is what a WhatsApp Web page dying and needing WPPConnect
+// to resync would look like from WinZapp's side. Removed so V8 falls back
+// to its own default (auto-scaled off available system memory, normally
+// well over 1GB) — a real, if higher, ceiling instead of an artificial low
+// one that trades a memory-usage improvement for occasional hard crashes.
 const optimizedBrowserArgs = [
   '--disable-renderer-accessibility',
   '--disable-web-security',
@@ -111,7 +127,6 @@ const optimizedBrowserArgs = [
   '--ignore-certificate-errors',
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
-  '--js-flags="--max-old-space-size=350"', // Limits V8 heap size to 350MB
   '--no-zygote',
   '--disable-shared-workers',
   '--disable-3d-apis',
