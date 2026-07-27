@@ -81,6 +81,8 @@ class ShortcutsDialog(wx.Dialog):
             section("shortcuts_conv_section"),
             i18n.t("shortcut_alt2_label"),
             i18n.t("shortcut_alt3_label"),
+            i18n.t("shortcut_ctrl_num_label"),
+            i18n.t("shortcut_ctrl_shift_num_label"),
             i18n.t("shortcut_ctrl_r_label"),
             i18n.t("shortcut_esc_ctrl_w_label"),
             i18n.t("shortcut_ctrl_shift_j_label"),
