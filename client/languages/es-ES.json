@@ -42,6 +42,7 @@
     "status_delivered": "Entregado",
     "status_read": "Leído",
     "status_played": "Reproducida",
+    "status_edited": "Editada",
     "msg_status_none": "Sin estado disponible.",
     "msg_datetime_none": "Sin fecha disponible.",
     "read_more_button": "&Leer más",

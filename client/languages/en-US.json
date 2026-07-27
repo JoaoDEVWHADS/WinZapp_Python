@@ -42,6 +42,7 @@
     "status_delivered": "Delivered",
     "status_read": "Read",
     "status_played": "Played",
+    "status_edited": "Edited",
     "msg_status_none": "No status available.",
     "msg_datetime_none": "No date available.",
     "read_more_button": "&Read more",

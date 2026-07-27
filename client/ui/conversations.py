@@ -1223,9 +1223,15 @@ class ConversationsPanel(wx.Panel):
             if 0 <= idx < len(self._sorted_messages):
                 self._sorted_messages[idx]["message"] = {"conversation": text}
                 self._sorted_messages[idx]["messageType"] = "conversation"
+                self._sorted_messages[idx]["_edited"] = True
                 self.messages_list.SetItemText(
                     idx, self._render_message_line(self._sorted_messages[idx])
                 )
+                # _sorted_messages[idx] is the same dict object held in
+                # main_window.chats[remote_jid]'s records (populate_messages()
+                # builds it from there without copying) — persist it so the
+                # "Editada" marker and new text survive a restart.
+                self.main_window._schedule_save(dirty_jid=remote_jid)
 
             self._on_cancel_edit()
             return
@@ -4895,6 +4901,8 @@ class ConversationsPanel(wx.Panel):
             pieces.append(f", {time_str}")
         if status:
             pieces[-1] += f", {status}"
+        if msg.get("_edited") and not self._is_system_event(msg):
+            pieces[-1] += f", {i18n.t('status_edited')}"
 
         # Append quoted message preview (if this is a reply)
         if ctx:
