@@ -567,5 +567,6 @@
     "preview_sound_stop": "Stop sound preview",
     "preview_sound_error": "Could not play the preview — invalid or missing sound file.",
     "wpp_version_unpinned_warning": "Warning: could not pin the WhatsApp Web version. Sending to individual contacts may fail silently; groups still work. Please update WinZapp's WhatsApp Web.",
-    "status_unconfirmed": "Delivery unconfirmed"
+    "status_unconfirmed": "Delivery unconfirmed",
+    "history_start_reached": "Start of the history available in this conversation. WhatsApp keeps older messages only on the phone."
 }

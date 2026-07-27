@@ -203,14 +203,25 @@ def prune_chats_messages(chats) -> bool:
 
 
 def effective_unread_count(chat) -> int:
-    """Clamp a chat's server-reported unreadCount to how many messages are
-    actually stored locally for it.
+    """A chat's unread count, suppressed only when it would open empty.
 
-    A chat-list sync can report e.g. unreadCount=2 for a chat whose per-chat
-    message fetch previously failed (or hasn't run yet), leaving 0 messages
-    in the local store — showing "2 unread" on a conversation that opens
-    empty. Since the badge/UI can only ever show messages we actually have,
-    never claim more unread messages than local records exist.
+    The problem this guards against: a chat-list sync can report e.g.
+    unreadCount=2 for a chat whose per-chat message fetch previously failed (or
+    hasn't run yet), leaving 0 messages in the local store — showing "2 unread"
+    on a conversation that opens completely empty.
+
+    This used to return ``min(reported, local_count)``, which fixed that case
+    but silently capped every count at however many messages the last fetch
+    happened to bring back. WhatsApp Web's message store only holds a handful
+    of messages per chat right after a pairing (measured: ~15), so a group with
+    5747 unread announced "15" — badly wrong for a screen-reader user deciding
+    what to open, and indistinguishable from a group with exactly 15.
+
+    Having *some* history is enough to know the conversation is real and opens
+    with content; beyond that, the server's own count is the honest number, and
+    the one the app should report. Callers that need a count bounded by what is
+    actually on screen (the unread separator in conversations.py) already check
+    that themselves.
     """
     if not isinstance(chat, dict):
         return 0
@@ -223,7 +234,9 @@ def effective_unread_count(chat) -> int:
         )
     except AttributeError:
         local_count = 0
-    return min(reported, local_count)
+    if local_count == 0:
+        return 0
+    return reported
 
 
 _CC_SORTED: list[str] | None = None

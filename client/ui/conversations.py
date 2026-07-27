@@ -3216,7 +3216,14 @@ class ConversationsPanel(wx.Panel):
         reached_start = phone_jid in getattr(self, "_reached_server_start", {})
         logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
         if phone_jid and reached_start:
+            # Say so instead of doing nothing. WhatsApp only transfers a recent
+            # window of each conversation to a linked device and keeps the rest
+            # on the phone (the chat record's endOfHistoryTransferType says so),
+            # so there is genuinely nothing more to fetch — but pressing Home and
+            # getting silence is indistinguishable from the app being broken,
+            # especially with a screen reader.
             self._is_loading_more = False
+            self._announce_history_start()
             return
         
         # Get oldest non-separator and non-pending message ID
@@ -3261,6 +3268,24 @@ class ConversationsPanel(wx.Panel):
                 wx.CallAfter(self._clear_loading_more, phone_jid_val)
 
         threading.Thread(target=_fetch, daemon=True).start()
+
+    def _announce_history_start(self):
+        """Tell the user there is no older history to load, at most once per
+        conversation visit — repeating it on every Home press would be noise."""
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            return
+        announced = getattr(self, "_history_start_announced", None)
+        if announced is None:
+            announced = self._history_start_announced = set()
+        if jid in announced:
+            return
+        announced.add(jid)
+        try:
+            self.main_window.output(
+                self.main_window.i18n.t("history_start_reached"), interrupt=False)
+        except Exception:
+            logging.exception("[_announce_history_start] Failed to announce.")
 
     def _set_reached_start(self, requested_jid):
         if not self.conversation or self.conversation.get("remoteJid") != requested_jid:
