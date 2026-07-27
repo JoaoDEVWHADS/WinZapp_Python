@@ -448,11 +448,15 @@ class WebSocketClient:
             if hasattr(self.connect, 'pairing_dial'):
                 try:
                     dlg = self.connect.pairing_dial
-                    if not wx.IsDestroyed(dlg) and dlg.IsModal():
+                    # No module-level wx.IsDestroyed() exists in wxPython —
+                    # calling any method on an already-destroyed dialog
+                    # raises RuntimeError, which the except below catches;
+                    # IsModal() alone is enough to also skip non-modal state.
+                    if dlg.IsModal():
                         logging.info("[on_pairing_complete] Ending pairing_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
                     else:
-                        logging.info("[on_pairing_complete] pairing_dial already destroyed/not modal — nothing to end.")
+                        logging.info("[on_pairing_complete] pairing_dial not modal — nothing to end.")
                 except Exception:
                     logging.exception("[on_pairing_complete] Failed to end pairing_dial.")
             else:
@@ -460,11 +464,11 @@ class WebSocketClient:
             if hasattr(self.connect, 'connection_dial'):
                 try:
                     dlg = self.connect.connection_dial
-                    if not wx.IsDestroyed(dlg) and dlg.IsModal():
+                    if dlg.IsModal():
                         logging.info("[on_pairing_complete] Ending connection_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
                     else:
-                        logging.info("[on_pairing_complete] connection_dial already destroyed/not modal — nothing to end.")
+                        logging.info("[on_pairing_complete] connection_dial not modal — nothing to end.")
                 except Exception:
                     logging.exception("[on_pairing_complete] Failed to end connection_dial.")
             else:
