@@ -505,3 +505,136 @@ class UpdateChecker:
         if self._retry_timer is not None:
             self._retry_timer.cancel()
             self._retry_timer = None
+
+
+# ── WppUpdateChecker ───────────────────────────────────────────────────────────
+
+class WppUpdateChecker:
+    """
+    Periodically checks whether a newer wppconnect-server release exists than
+    the one currently installed in client/api/ — independent of WinZapp's own
+    release cycle.
+    """
+
+    _RETRY_INTERVAL = 12 * 60 * 60  # 12 hours
+
+    def __init__(self, main_window):
+        self._mw          = main_window
+        self._retry_timer = None
+
+    def start(self):
+        """Launch the first check in a background thread."""
+        t = threading.Thread(target=self._check_once, daemon=True)
+        t.start()
+
+    def force_check(self):
+        """Called from a forced re-check (mirrors UpdateChecker.force_check)."""
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+            self._retry_timer = None
+        t = threading.Thread(target=self._check_once, daemon=True)
+        t.start()
+
+    def force_reinstall(self):
+        """
+        Called from Help > Force Reinstall WPPConnect. Skips the version
+        comparison entirely — always fetches whatever is currently the
+        latest release and replaces the installed one with it.
+        """
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+            self._retry_timer = None
+        t = threading.Thread(target=self._force_reinstall_worker, daemon=True)
+        t.start()
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _fetch_latest_tag() -> str:
+        from ui.dialogs.api_setup import fetch_latest_wpp_tag
+        return fetch_latest_wpp_tag()
+
+    def _check_once(self):
+        logging.info("[WppUpdateChecker] Checking for wppconnect-server updates...")
+        installed = self._mw._get_installed_wpp_version()
+        if not installed:
+            self._schedule_retry()
+            return
+
+        tag = self._fetch_latest_tag()
+        if not tag:
+            self._schedule_retry()
+            return
+        remote_version = tag.lstrip("vV")
+
+        try:
+            from packaging.version import Version
+            newer_available = Version(remote_version) > Version(installed)
+        except Exception:
+            logging.warning(
+                "[WppUpdateChecker] Could not compare versions (installed=%r, remote=%r)",
+                installed, remote_version,
+            )
+            self._schedule_retry()
+            return
+
+        if not newer_available:
+            logging.info("[WppUpdateChecker] wppconnect-server is up to date (%s).", installed)
+            self._schedule_retry()
+            return
+
+        logging.info(
+            "[WppUpdateChecker] Newer wppconnect-server release available: %s -> %s",
+            installed, remote_version,
+        )
+        wx.CallAfter(self._prompt_update, installed, remote_version, tag)
+
+    def _prompt_update(self, installed: str, remote_version: str, tag: str):
+        i18n = self._mw.i18n
+        if wx.MessageBox(
+            i18n.t("wpp_update_available_msg").format(current=installed, new=remote_version),
+            i18n.t("wpp_update_available_title"),
+            wx.YES_NO | wx.ICON_INFORMATION,
+            self._mw,
+        ) == wx.YES:
+            self._mw._update_wpp_server(tag)
+        else:
+            self._schedule_retry()
+
+    def _force_reinstall_worker(self):
+        logging.info("[WppUpdateChecker] Force-reinstall requested — fetching latest release tag...")
+        tag = self._fetch_latest_tag()
+        if not tag:
+            wx.CallAfter(
+                wx.MessageBox,
+                self._mw.i18n.t("wpp_update_fetch_failed_msg"),
+                self._mw.i18n.t("update_error_title"),
+                wx.OK | wx.ICON_ERROR,
+                self._mw,
+            )
+            return
+        remote_version = tag.lstrip("vV")
+        wx.CallAfter(self._confirm_force_reinstall, remote_version, tag)
+
+    def _confirm_force_reinstall(self, remote_version: str, tag: str):
+        i18n = self._mw.i18n
+        if wx.MessageBox(
+            i18n.t("wpp_force_reinstall_confirm_msg").format(version=remote_version),
+            i18n.t("wpp_force_reinstall_confirm_title"),
+            wx.YES_NO | wx.ICON_WARNING,
+            self._mw,
+        ) != wx.YES:
+            return
+        self._mw._update_wpp_server(tag)
+
+    def _schedule_retry(self):
+        self._retry_timer = threading.Timer(self._RETRY_INTERVAL, self._check_once)
+        self._retry_timer.daemon = True
+        self._retry_timer.start()
+
+    def stop(self):
+        """Cancel any pending retry timer."""
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+            self._retry_timer = None
+
