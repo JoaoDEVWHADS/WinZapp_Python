@@ -11537,10 +11537,24 @@ def setup_logging():
         os.makedirs(log_path(), exist_ok=True)
         log_file = log_path("log.log")
 
-        handler = logging.handlers.RotatingFileHandler(
+        # Remove the log.log.1/.2/.3 backups a previous RotatingFileHandler
+        # left behind. There is deliberately only ONE log file now, holding
+        # only the current run: when diagnosing a startup/pairing problem,
+        # having to work out where the last launch begins inside a 10 MB file
+        # (or which of four files it landed in) is pure friction.
+        for _n in range(1, 10):
+            try:
+                os.remove(f"{log_file}.{_n}")
+            except OSError:
+                pass
+
+        # mode="w" truncates on open, so each launch starts from a clean file.
+        # Safe because __main__ only calls setup_logging() after the
+        # single-instance mutex is acquired — otherwise a second launch would
+        # wipe the log of the instance that is actually running.
+        handler = logging.FileHandler(
             log_file,
-            maxBytes=10 * 1024 * 1024,  # 10 MB per file
-            backupCount=3,
+            mode="w",
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter(
@@ -11571,17 +11585,17 @@ def setup_logging():
 
 
 if __name__ == "__main__":
-    setup_logging()
     try:
-        import logging
-        logging.info("Checking instance lock...")
         from autostart import acquire_single_instance_mutex, activate_existing_window
 
         background = "--background" in sys.argv
         first_instance = acquire_single_instance_mutex()
 
         if not first_instance:
-            logging.info("Another instance is already running.")
+            # Deliberately BEFORE setup_logging(): the log file is truncated
+            # on open so it only ever holds the current run, which means a
+            # second launch must not touch it — the instance that owns it is
+            # still running and writing to it.
             if not background:
                 # A normal launch while WinZapp is already running in the background:
                 # bring the existing window to the foreground and exit.
@@ -11589,6 +11603,9 @@ if __name__ == "__main__":
             # If --background and already running: nothing to do — exit silently.
             sys.exit(0)
 
+        setup_logging()
+        import logging
+        logging.info("Instance lock acquired.")
         logging.info("Creating wx.App...")
         app = wx.App()
         frame = MainWindow()

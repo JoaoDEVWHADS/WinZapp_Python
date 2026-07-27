@@ -1054,6 +1054,36 @@ class Connect:
         # left alone.
         if result != wx.ID_OK:
             self.cleanup_pairing_session()
+            return
+
+        # Pairing succeeded. Close the parent connection_dial from HERE, not
+        # from WebSocketClient.on_pairing_complete().
+        #
+        # pairing_dial runs as a modal nested inside connection_dial's own
+        # ShowModal() loop. EndModal() does not unwind its loop immediately —
+        # it only signals it — and that still-running loop goes on dispatching
+        # pending events, including any wx.CallAfter queued from within it. So
+        # on_pairing_complete() could not close connection_dial itself: doing
+        # it inline, or from a CallAfter chained off the same handler, both
+        # ran while pairing_dial's loop was still the running one, and wx
+        # rejected EndModal() on the (suspended) parent loop with a hard
+        # assertion — "IsRunning() failed ... Use ScheduleExit() on not
+        # running loop", confirmed in log.log with the parent's close logged
+        # BEFORE "pairing_dial modal loop returned". connection_dial then
+        # stayed open forever, so MainWindow.__init__ never got past
+        # show_connection_dial() — no main window, no tray icon, no sync.
+        #
+        # Reaching this line proves pairing_dial's ShowModal() has genuinely
+        # returned and control is back inside connection_dial's own loop,
+        # which is therefore the running one EndModal() is allowed to target.
+        try:
+            if self.connection_dial.IsModal():
+                logging.info("[show_pairing_dial] Ending connection_dial modal loop after successful pairing.")
+                self.connection_dial.EndModal(wx.ID_OK)
+            else:
+                logging.info("[show_pairing_dial] connection_dial not modal — nothing to end.")
+        except Exception:
+            logging.exception("[show_pairing_dial] Failed to end connection_dial.")
 
     def update_pairing_code(self, code):
         """Refresh the pairing dialog when WPPConnect emits a new phoneCode.

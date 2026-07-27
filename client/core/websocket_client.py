@@ -438,22 +438,27 @@ class WebSocketClient:
         # returns (show_pairing_dial() / show_connection_dial() in
         # connect.py).
         #
-        # pairing_dial is nested INSIDE connection_dial's own modal loop
-        # (on_continue() opens it from a button handler running inside
-        # connection_dial.ShowModal()). Only the innermost/currently-running
-        # modal loop can be told to Exit() — wx enforces this with a hard
+        # Close ONLY the innermost modal here. pairing_dial is nested INSIDE
+        # connection_dial's own modal loop (on_continue() opens it from a
+        # button handler running inside connection_dial.ShowModal()), and wx
+        # only allows EndModal() on the loop that is actually running.
+        #
+        # EndModal() does NOT unwind its loop immediately — it merely signals
+        # it — and that still-running loop keeps dispatching pending events,
+        # including any wx.CallAfter queued from within it. So closing
+        # connection_dial from here was impossible: both inline and via a
+        # CallAfter chained off this same handler ran while pairing_dial's
+        # loop was still the running one, and wx rejected it with a hard
         # assertion ("IsRunning()" failed ... "Use ScheduleExit() on not
-        # running loop", confirmed live in log.log) when connection_dial's
-        # EndModal() was called in the very same handler, immediately after
-        # pairing_dial's, before pairing_dial's loop had actually unwound
-        # and handed control back to connection_dial's. So these must not
-        # be ended in the same tick: end pairing_dial now, and only *queue*
-        # closing connection_dial as a fresh wx.CallAfter — by the time that
-        # one is dispatched, pairing_dial's ShowModal() has already returned
-        # (show_pairing_dial() drains and destroys it synchronously) and
-        # control is back inside connection_dial's own loop, which is then
-        # the running one EndModal() is allowed to target.
-        def _end_pairing_dial():
+        # running loop"). log.log confirmed the ordering — the parent's close
+        # attempt logged BEFORE "pairing_dial modal loop returned".
+        #
+        # connection_dial is therefore closed by show_pairing_dial() itself,
+        # right after its own ShowModal() returns (see connect.py), which is
+        # the only point where control is provably back in the parent's loop.
+        def _end_innermost_dialog():
+            # Phone-pairing flow: pairing_dial is on top, and closing it lets
+            # show_pairing_dial() resume and close connection_dial in turn.
             if hasattr(self.connect, 'pairing_dial'):
                 try:
                     dlg = self.connect.pairing_dial
@@ -464,16 +469,15 @@ class WebSocketClient:
                     if dlg.IsModal():
                         logging.info("[on_pairing_complete] Ending pairing_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
-                    else:
-                        logging.info("[on_pairing_complete] pairing_dial not modal — nothing to end.")
+                        return
+                    logging.info("[on_pairing_complete] pairing_dial not modal — falling through to connection_dial.")
                 except Exception:
                     logging.exception("[on_pairing_complete] Failed to end pairing_dial.")
+                    return
             else:
-                logging.info("[on_pairing_complete] No pairing_dial attribute — nothing to close.")
-            logging.info("[on_pairing_complete] Queueing connection_dial close for a later tick.")
-            wx.CallAfter(_end_connection_dial)
-
-        def _end_connection_dial():
+                logging.info("[on_pairing_complete] No pairing_dial attribute — closing connection_dial directly.")
+            # QR-code flow (or pairing_dial already gone): connection_dial is
+            # itself the innermost running loop, so it can be ended here.
             if hasattr(self.connect, 'connection_dial'):
                 try:
                     dlg = self.connect.connection_dial
@@ -488,7 +492,7 @@ class WebSocketClient:
                 logging.info("[on_pairing_complete] No connection_dial attribute — nothing to close.")
 
         logging.info("[on_pairing_complete] Scheduling dialog close via CallAfter.")
-        wx.CallAfter(_end_pairing_dial)
+        wx.CallAfter(_end_innermost_dialog)
 
 
     def on_qrcode_update(self, info):
