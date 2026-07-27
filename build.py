@@ -284,11 +284,6 @@ def pyinstaller_compile():
         "pyaudio",
         "aiosqlite",
         "numpy",
-        # win32crypt (DPAPI) backs core/token_vault.py's secure token storage.
-        # accessible_output2 already pulls in pywintypes transitively (SAPI5
-        # COM), but collect it explicitly so win32crypt's own extension
-        # module/DLL is never silently left out of a frozen build.
-        "win32crypt",
     ]
 
     cmd = [

@@ -4012,21 +4012,36 @@ class MainWindow(wx.Frame):
             cache[path] = snd
         snd.play()
 
+    def _token_key(self) -> bytes:
+        """Return the per-install Fernet key (data_path()/secret.key) that
+        backs token_vault.py, loading it lazily if needed.
+
+        retrieve_token() (and therefore _get_wa_token()/_set_wa_token()) runs
+        early in __init__, before prepare_sync() normally sets self.key —
+        retrieve_secret_key() is idempotent (creates the file on first call,
+        otherwise just reads it), so calling it here too is harmless; it just
+        means whichever of the two call sites runs first is the one that
+        actually creates the key file.
+        """
+        if not getattr(self, "key", None):
+            self.key = self.retrieve_secret_key()
+        return self.key
+
     def _get_wa_token(self) -> str:
         """Read the WPPConnect session token, transparently migrating a
         legacy plaintext copy (settings["privateinfo"]["WA_token"]) to
-        DPAPI-protected storage (settings["privateinfo"]["WA_token_protected"],
+        Fernet-protected storage (settings["privateinfo"]["WA_token_protected"],
         see core/token_vault.py) the first time it's read.
 
-        A blob that fails to unprotect (corrupted, or DPAPI-protected under a
-        different Windows user/machine — e.g. settings.json copied elsewhere)
-        is treated exactly like "no token saved": retrieve_token() already
+        A value that fails to decrypt (corrupted, or encrypted under a
+        different secret.key — e.g. settings.json copied without it) is
+        treated exactly like "no token saved": retrieve_token() already
         handles that by showing the pairing dialog again, never a crash.
         """
         pi = self.settings.get("privateinfo", {})
         protected = pi.get("WA_token_protected", "")
         if protected:
-            token = token_vault.unprotect_token(protected)
+            token = token_vault.unprotect_token(protected, self._token_key())
             if token:
                 return token
             # Falls through to the legacy field below only so a token that
@@ -4039,11 +4054,11 @@ class MainWindow(wx.Frame):
         return legacy
 
     def _set_wa_token(self, token: str):
-        """Write the WPPConnect session token, DPAPI-protected when
-        available (see core/token_vault.py). Falls back to plaintext only
-        when DPAPI genuinely isn't available (non-Windows, or pywin32's
-        win32crypt missing) — still functional, just not the hardened path.
-        token="" clears both the protected and legacy fields.
+        """Write the WPPConnect session token, Fernet-protected with the
+        per-install secret.key (see core/token_vault.py). Falls back to
+        plaintext only if encryption genuinely fails for some reason — still
+        functional, just not the hardened path. token="" clears both the
+        protected and legacy fields.
         """
         pi = self.settings.setdefault("privateinfo", {})
         if not token:
@@ -4051,16 +4066,14 @@ class MainWindow(wx.Frame):
             pi["WA_token"] = ""
             self.save_settings()
             return
-        if token_vault.is_available():
-            try:
-                pi["WA_token_protected"] = token_vault.protect_token(token)
-                pi.pop("WA_token", None)  # never leave a plaintext copy lying around
-                self.save_settings()
-                return
-            except Exception as e:
-                logging.warning("[_set_wa_token] DPAPI protection failed, falling back to plaintext: %s", e)
-        pi["WA_token"] = token
-        self.save_settings()
+        try:
+            pi["WA_token_protected"] = token_vault.protect_token(token, self._token_key())
+            pi.pop("WA_token", None)  # never leave a plaintext copy lying around
+            self.save_settings()
+        except Exception as e:
+            logging.warning("[_set_wa_token] Token protection failed, falling back to plaintext: %s", e)
+            pi["WA_token"] = token
+            self.save_settings()
 
     def retrieve_token(self):
         token = self._get_wa_token()
