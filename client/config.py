@@ -38,7 +38,10 @@ GITHUB_RELEASE_URL = os.environ.get(
     "https://api.github.com/repos/JoaoDEVWHADS/WinZapp_Python/releases/latest",
 )
 
+GITHUB_API_LATEST_RELEASE = GITHUB_RELEASE_URL
+
 UPDATE_ZIP_URL = os.environ.get(
     "WINZAPP_ZIP_URL",
     "https://github.com/JoaoDEVWHADS/WinZapp_Python/releases/latest/download/WinZapp.zip",
 )
+
