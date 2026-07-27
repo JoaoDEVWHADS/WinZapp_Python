@@ -337,6 +337,19 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
     )
 
 
+def format_toast_unread_suffix(unread_count: int, i18n) -> str:
+    """Return the '✉️ N mensagens não lidas' line WhatsApp appends to the end
+    of its own toast notifications, for the conversation the message arrived
+    in. Toast-only — never shown in the foreground sound/AO2 announcements.
+    """
+    count = int(unread_count or 0)
+    if count <= 1:
+        text = i18n.t("unread_sep_singular")
+    else:
+        text = i18n.t("unread_sep_plural").format(count=count)
+    return f"✉️ {text}"
+
+
 def format_notification_title(msg: dict, main_window, i18n) -> str:
     """
     Build the notification title for a toast notification.

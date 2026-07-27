@@ -409,7 +409,13 @@ class Connect:
         main_sizer.Add(self.quit_btn, 0, wx.ALL | wx.CENTER, 5)
         self.connection_dial.SetSizer(main_sizer)
 
+        logging.info("[show_connection_dial] Entering connection_dial modal loop.")
         self.connection_dial.ShowModal()
+        logging.info("[show_connection_dial] connection_dial modal loop returned.")
+        try:
+            self.connection_dial.Destroy()
+        except Exception:
+            pass
 
     def _close_active_session(self):
         # Retrieve the active token from the dialog state
@@ -1028,7 +1034,9 @@ class Connect:
         self.cancel_btn.Bind(wx.EVT_BUTTON, self.on_cancel_pairing)
 
         self.main_window.waiting_pairing_sound.play()
+        logging.info("[show_pairing_dial] Entering pairing_dial modal loop.")
         result = self.pairing_dial.ShowModal()
+        logging.info("[show_pairing_dial] pairing_dial modal loop returned (result=%s).", result)
         try:
             self.pairing_dial.Destroy()
         except Exception:

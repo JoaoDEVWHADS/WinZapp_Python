@@ -1829,6 +1829,81 @@ class MainWindow(wx.Frame):
             elif active_jid == phone_jid:
                 wx.CallAfter(self.conversations_panel.populate_messages, preserve_focus=True)
 
+    def _apply_possible_edit(self, existing: dict, incoming: dict, remote_jid: str):
+        """Detect and apply a text-message edit re-delivered under the same key.id.
+
+        WhatsApp reuses the original message's ID when a text message is
+        edited (own edits via edit_message(), or an edit made by anyone else
+        from any device) — the edited copy arrives back through the exact
+        same live-message channel as any other message, just with a
+        duplicate key.id. Without this, the dedup check right above ("already
+        stored") silently discarded it, so edits from other people never
+        appeared at all, and our own edits only showed locally because
+        conversations.py already updates them optimistically when sent.
+        Only text messages can be edited (WhatsApp's own edit window never
+        applies to media/audio/etc.), so comparing "conversation"/
+        "extendedTextMessage" text is a reliable, format-agnostic signal —
+        it never fires for a plain re-sync of an unrelated message type.
+        """
+        def _text_of(m):
+            mo = m.get("message") or {}
+            if not isinstance(mo, dict):
+                return None
+            if "conversation" in mo:
+                return mo.get("conversation") or ""
+            if "extendedTextMessage" in mo:
+                return (mo.get("extendedTextMessage") or {}).get("text") or ""
+            return None  # not a text message — never treat as an edit
+
+        old_text = _text_of(existing)
+        new_text = _text_of(incoming)
+        if old_text is None or new_text is None or old_text == new_text:
+            return
+
+        existing["message"]     = incoming.get("message")
+        existing["messageType"] = incoming.get("messageType", existing.get("messageType"))
+        existing["_edited"]     = True
+
+        def _bg_persist():
+            try:
+                self.db.insert_message(remote_jid, existing)
+            except Exception as e:
+                logging.error(f"[_apply_possible_edit] Failed to persist edited message: {e}")
+        self._msg_bg_executor.submit(_bg_persist)
+
+        if hasattr(self, "conversations_panel"):
+            wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+        self._schedule_set_chats()
+
+    def _live_events_ready(self) -> bool:
+        """True once it is safe to let a live WebSocket event mutate self.chats.
+
+        Two separate conditions, both required:
+
+        1. The UI must exist (_ui_ready_event) — see on_new_message()'s old
+           comment: a reused pairing socket can deliver events via
+           wx.CallAfter before MainWindow.__init__ has finished creating
+           self.db/self.chats, which used to crash deep inside save_data().
+
+        2. A real sync must have already completed at least once this
+           session, or be actively running right now (_sync_completed /
+           _initial_sync_running — both reset to False at the top of every
+           startup by prepare_sync(), even for an already-paired account).
+           Between "window shown" and "sync thread actually started" —
+           the "preparando para sincronizar" window — the conversation list
+           is expected to show only what was already on disk (or be empty
+           for a fresh pairing). Accepting live messages during that gap let
+           them sneak into the list ahead of the sync that is about to fetch
+           the complete, authoritative state anyway — redundant at best, and
+           a source of duplicate/out-of-order entries at worst. Once the
+           sync thread is actually running, live events are safe to accept
+           again: sync_chat_messages() already merges them with whatever the
+           REST fetch returns instead of one silently overwriting the other.
+        """
+        if not self._ui_ready_event.is_set():
+            return False
+        return getattr(self, "_sync_completed", False) or getattr(self, "_initial_sync_running", False)
+
     def on_new_message(self, msg: dict):
         """
         Called on the main thread (via wx.CallAfter) when a new message
@@ -1836,22 +1911,12 @@ class MainWindow(wx.Frame):
         Adds the message to local storage, updates the UI, and sends a
         notification if appropriate.
         """
-        # A real-time messages.upsert event can be dispatched via
-        # wx.CallAfter — and actually processed, since CallAfter delivery
-        # doesn't require app.MainLoop() to already be running, only some
-        # active wx event-processing context, which the pairing dialogs'
-        # own modal loops already provide — before MainWindow.__init__ has
-        # finished creating self.db / self.message_queue / self._msg_bg_executor.
-        # WPPConnect starts pushing live messages the instant a pairing
-        # succeeds, and reusing the already-connected socket right after
-        # (see reuse_existing_ws in __init__) means that can happen before
-        # prepare_sync() ever runs. Reported live as a flood of
-        # "'MainWindow' object has no attribute 'db'" / "'_msg_bg_executor'"
-        # unhandled exceptions immediately after a fresh pairing. Safe to
-        # drop here: the initial full sync that's about to run fetches the
-        # complete current chat/message state regardless, so nothing
+        # See _live_events_ready() for why this must be checked before
+        # touching self.chats/self.db at all. Safe to drop unconditionally:
+        # the sync that is either about to start or already running fetches
+        # the complete current chat/message state regardless, so nothing
         # arriving this early is ever actually lost.
-        if not self._ui_ready_event.is_set():
+        if not self._live_events_ready():
             return
         key        = msg.get("key", {})
         from_me    = key.get("fromMe", False)
@@ -2162,7 +2227,8 @@ class MainWindow(wx.Frame):
         if msg_id:
             for existing in records:
                 if existing.get("key", {}).get("id") == msg_id:
-                    return  # already stored
+                    self._apply_possible_edit(existing, msg, remote_jid)
+                    return  # already stored (edited in place if content changed)
 
 
 
@@ -2241,7 +2307,7 @@ class MainWindow(wx.Frame):
 
         from core.notification_manager import (
             format_notification_title, format_notification_body,
-            format_foreground_sender,
+            format_foreground_sender, format_toast_unread_suffix,
         )
 
         body  = format_notification_body(msg, self, self.i18n)
@@ -2294,7 +2360,8 @@ class MainWindow(wx.Frame):
             return
         title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
-            self.notification_manager.send(title, body, remote_jid)
+            toast_body = f"{body}\n{format_toast_unread_suffix(chat.get('unreadCount'), self.i18n)}"
+            self.notification_manager.send(title, toast_body, remote_jid)
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
@@ -2386,6 +2453,11 @@ class MainWindow(wx.Frame):
         Saves them to local storage, sorts records, and updates the lastMessage/t
         of the chat if the incoming message is newer. Does not trigger notifications or sounds.
         """
+        # See _live_events_ready() — same reasoning as on_new_message().
+        # Nothing is lost by dropping it here: the sync that is either about
+        # to start or already running re-fetches all history regardless.
+        if not self._live_events_ready():
+            return
         key        = msg.get("key", {})
         remote_jid = self._normalize_jid(key.get("remoteJid", ""))
         msg_id     = key.get("id", "")
@@ -5764,6 +5836,16 @@ class MainWindow(wx.Frame):
         same time.  Replaces the old messages.dat blob with a transactional
         full-state import.
         """
+        # Root-level safety net: save_data() is reachable from several
+        # background-thread call paths (see _extract_lid_mapping(),
+        # resolve_lid_jids_via_api()) that can fire before prepare_sync() has
+        # created self.db. Those paths now guard against firing this early,
+        # but this no-op keeps a stray/future call from popping the
+        # "data_save_failed" error dialog instead of just skipping the write
+        # — the next debounced/full save retries once self.db exists.
+        if not hasattr(self, "db") or self.db is None:
+            logging.warning("[save_data] Called before self.db exists — skipping.")
+            return
         with self._save_lock:
             try:
                 lid_to_phone = getattr(self, "_lid_to_phone", {})
@@ -6565,6 +6647,18 @@ class MainWindow(wx.Frame):
 
     def _extract_lid_mapping(self, msg):
         """Extract JID mapping from a message object and update cache & persist if new."""
+        # WebSocketClient.on_messages_upsert() (core/websocket_client.py) calls
+        # this directly on the socket.io callback thread — not via
+        # wx.CallAfter like on_new_message()/on_historical_message() — so it
+        # is not protected by either of their guards. See _live_events_ready()
+        # for the two conditions this checks (self.db existing yet, and a
+        # real sync having started) — both crashed or corrupted state here
+        # (self.db.set_lid_mapping()/upsert_contacts_batch() below and their
+        # save_data() fallback) before this guard existed. Safe to drop: the
+        # sync that is either about to start or already running re-derives
+        # every LID mapping from scratch regardless.
+        if not self._live_events_ready():
+            return
         if not isinstance(msg, dict):
             return
         key = msg.get("key")
@@ -9230,6 +9324,12 @@ class MainWindow(wx.Frame):
     def resolve_lid_jids_via_api(self, jids):
         """Resolve a list of @lid JIDs to phone JIDs using WPPConnect contact endpoint."""
         if not jids:
+            return
+        if not hasattr(self, "db") or self.db is None:
+            # Defense in depth: every known caller is now gated behind
+            # _ui_ready_event (see _extract_lid_mapping()), but this batch
+            # runs on its own background thread and can outlive that check —
+            # bail rather than crash self.db.upsert_contacts_batch() below.
             return
             
         updated_contacts = {}
