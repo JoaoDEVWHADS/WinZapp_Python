@@ -127,6 +127,23 @@ jobs:
           Copy-Item -Path "node-temp\node-v24.15.0-win-x64\*" -Destination "client/node" -Recurse -Force
           Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
 
+      - name: Cache MinGit Portátil
+        id: cache-git
+        uses: actions/cache@v4
+        with:
+          path: client/git
+          key: mingit-portable-v2.44.0
+
+      - name: Baixar e Extrair MinGit Portátil
+        if: steps.cache-git.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "client/git"
+          Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile "mingit-portable.zip"
+          Expand-Archive -Path "mingit-portable.zip" -DestinationPath "client/git" -Force
+          Remove-Item -Force "mingit-portable.zip"
+
+
       - name: Cache Node Modules da WPPConnect API
         id: cache-api-modules
         uses: actions/cache@v4

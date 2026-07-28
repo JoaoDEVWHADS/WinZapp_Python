@@ -469,7 +469,8 @@ class ApiSetupDialog(wx.Dialog):
             npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
             npm_cmd  = [node_exe, npm_cli]
             node_dir = resource_path("node")
-            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+            git_dir  = resource_path("git", "cmd")
+            path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
         else:
             local_node = resource_path("node", "node")
             if os.path.isfile(local_node):
@@ -482,7 +483,9 @@ class ApiSetupDialog(wx.Dialog):
             else:
                 npm_cmd = [shutil.which("npm") or "npm"]
             node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+            git_dir = resource_path("git", "bin")
+            path_env = (git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
 
         api_dir  = resource_path("api")
         puppeteer_cache = resource_path("api", ".cache", "puppeteer")
