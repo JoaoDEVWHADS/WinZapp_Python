@@ -159,8 +159,16 @@ def main():
             with open(dest_path, "wb") as f:
                 f.write(content)
         print("[INFO] Re-applied custom files after checking out tag.")
-    else:
-        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
+    # Save current commit SHA to client/api/.commit_sha for version checking
+    try:
+        res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
+            with open(sha_file, "w", encoding="utf-8") as f:
+                f.write(res.stdout.strip())
+            print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
+    except Exception as e:
+        print(f"[WARNING] Could not save .commit_sha: {e}")
 
     print()
     print("[OK] WPPConnect Server ready at client/api/")

@@ -403,12 +403,22 @@ class ApiSetupDialog(wx.Dialog):
                     if dest_abs != api_dir_abs and not dest_abs.startswith(api_dir_abs + os.sep):
                         raise ValueError(f"Unsafe zip member path: {member.filename!r}")
 
-                    if member.is_dir() or rel.endswith("/"):
+                    if member.is_dir():
                         os.makedirs(dest, exist_ok=True)
                     else:
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with zf.open(member) as src_fh, open(dest, "wb") as dst_fh:
-                            shutil.copyfileobj(src_fh, dst_fh)
+                        with zf.open(member) as sf, open(dest, "wb") as df:
+                            shutil.copyfileobj(sf, df)
+
+            # Save installed commit SHA tag
+            if hasattr(self, "_active_tag") and self._active_tag:
+                try:
+                    with open(os.path.join(api_dir, ".commit_sha"), "w", encoding="utf-8") as f:
+                        f.write(self._active_tag)
+                except Exception:
+                    pass
+
+            return True
 
         except Exception as exc:
             if not self._cancelled:
