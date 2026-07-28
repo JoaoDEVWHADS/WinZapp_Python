@@ -389,10 +389,25 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         )
     else:
         chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
+        # format_number(remote_jid) must NEVER run on a bare, unresolved
+        # @lid: a LID's digits are an internal WhatsApp identifier, not a
+        # phone number, and formatting them as one produced notifications
+        # reading "Nova mensagem de 133041125077153" — meaningless to the
+        # user and not even a real phone number they could recognize.
+        # _resolve_participant_name() already refuses to do this (an
+        # unresolved @lid makes it return "" rather than format the raw
+        # digits), so only fall through to format_number() for a JID that
+        # is actually phone-shaped; otherwise show "Contato sem nome",
+        # exactly like the chat list already does when it can't name a chat.
+        can_format_as_phone = (
+            remote_jid.endswith(("@s.whatsapp.net", "@c.us"))
+            or remote_jid in getattr(main_window, "_lid_to_phone", {})
+        )
         base = (
             main_window._resolve_contact_name(chat)
             or _resolve_participant_name(remote_jid, push_name, main_window)
-            or format_number(remote_jid)
+            or (format_number(remote_jid) if can_format_as_phone else "")
+            or i18n.t("unknown_contact")
         )
 
     prefix = _build_notif_prefix(msg, main_window, i18n)

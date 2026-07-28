@@ -437,24 +437,42 @@ class MediaExpiredError(Exception):
 # disk in SQLite, just not resident).
 _MAX_RESIDENT_MESSAGES_PER_CHAT = 1000
 
-# Message types that are WhatsApp/WPPConnect system events, not something a
-# person actually sent — someone joining/leaving a group, a group name/photo/
-# settings change, a revoke, etc. These are still stored and shown as a
-# timeline entry when the conversation is opened (see
-# ConversationsPanel._is_displayable_message(), which allows them), but must
-# never be treated as "new mail": they used to bump an old, already-read
-# conversation back to the top of the list, inflate its unread badge, and
-# even fire a toast/sound notification, purely because a group's metadata
-# changed weeks after everyone stopped talking in it. is_countable_message()
-# gates every one of those: the chat-list sort timestamp, the unread counter
-# (and therefore the unread separator, which reads it), and notifications.
-_NON_COUNTABLE_MESSAGE_TYPES = frozenset({"groupNotification", "protocolMessage"})
+# Message types that are WhatsApp/system-generated rather than something a
+# person actually sent, even though they ARE worth showing as the chat-list
+# preview text once you're already looking at the list (a revoke reads
+# "Mensagem apagada"; a join/leave reads "Fulano entrou no grupo") — see
+# MainWindow._PREVIEW_MESSAGE_TYPES/_counts_as_last_message(), the allowlist
+# this function builds on. is_countable_message() is strictly narrower than
+# that allowlist: these two must ALSO never bump the chat-list sort
+# timestamp, inflate the unread badge, or fire a notification, purely
+# because a group's metadata changed or someone's own revoke arrived weeks
+# after everyone stopped talking in that chat.
+_PREVIEW_ONLY_MESSAGE_TYPES = frozenset({"protocolMessage", "groupNotification"})
 
 
 def is_countable_message(msg: dict) -> bool:
     """True for a message type that should count as real conversation
-    activity (unread badge, chat-list sort order, notifications)."""
-    return isinstance(msg, dict) and msg.get("messageType") not in _NON_COUNTABLE_MESSAGE_TYPES
+    activity (unread badge, chat-list sort order, notifications).
+
+    Deliberately built ON TOP of MainWindow._counts_as_last_message()
+    (a real-content ALLOWLIST, not a blocklist of known-bad types) rather
+    than keeping a second, separately-maintained list: WPPConnect/Baileys
+    keep surfacing new WhatsApp-internal system message types
+    (e2e_notification, notification_template, "unknown", ...) that carry no
+    real content, and two independently-maintained lists are exactly how
+    one of them silently missed one — is_countable_message() used to keep
+    its own short blocklist, which only excluded groupNotification/
+    protocolMessage, so an e2e_notification arriving for a chat nobody had
+    messaged in months still bumped it to the top of the list with a
+    phantom "1 unread" and nothing to show when opened, and fired a toast
+    reading "Nova mensagem de <raw @lid digits>: Mensagem incompatível" —
+    a type format_notification_body() had no way to describe. Deriving from
+    the same allowlist the preview/sort code already trusts means a type
+    only has to be taught to one place to be handled correctly everywhere.
+    """
+    if not MainWindow._counts_as_last_message(msg):
+        return False
+    return msg.get("messageType") not in _PREVIEW_ONLY_MESSAGE_TYPES
 
 
 class MainWindow(wx.Frame):
