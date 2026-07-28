@@ -188,10 +188,13 @@ def main():
             win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
             if os.path.isfile(win_node):
                 node_bin = win_node
-                # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
                     npm_bin = win_npm
+
+            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
+            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
+            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
 
         # Run npm install
         print("[INFO] Running npm install...")
