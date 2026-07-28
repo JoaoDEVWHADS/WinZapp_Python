@@ -456,6 +456,14 @@ def assemble_staging():
     node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
     print(f"  -> node/  ({node_count} files)")
 
+    git_src = os.path.join(CLIENT_DIR, "git")
+    if os.path.isdir(git_src):
+        git_dst = os.path.join(STAGING_DIR, "git")
+        shutil.copytree(git_src, git_dst)
+        git_count = sum(1 for _, _, fs in os.walk(git_dst) for _ in fs)
+        print(f"  -> git/   ({git_count} files)")
+
+
     api_dst = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0
