@@ -37,8 +37,8 @@
   "packageManager": "yarn@4.14.1",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
-    "@wppconnect-team/wa-js": "https://codeload.github.com/wppconnect-team/wa-js/tar.gz/main",
-    "@wppconnect-team/wppconnect": "https://codeload.github.com/wppconnect-team/wppconnect/tar.gz/main",
+    "@wppconnect-team/wa-js": "https://github.com/wppconnect-team/wa-js/archive/refs/heads/main.tar.gz",
+    "@wppconnect-team/wppconnect": "https://github.com/wppconnect-team/wppconnect/archive/refs/heads/main.tar.gz",
     "archiver": "^7.0.1",
     "axios": "^1.14.0",
     "bcrypt": "^6.0.0",
