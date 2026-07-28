@@ -2459,7 +2459,11 @@ class MainWindow(wx.Frame):
             return
         title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
-            toast_body = f"{body}\n{format_toast_unread_suffix(chat.get('unreadCount'), self.i18n)}"
+            # effective_unread_count() (not the raw field) — same cap every
+            # other unread display already uses: a server-reported count
+            # with no locally-fetched messages behind it must not claim a
+            # number the chat list itself wouldn't show for this same chat.
+            toast_body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
             self.notification_manager.send(title, toast_body, remote_jid)
 
     def _learn_sender_name(self, msg: dict) -> bool:
@@ -11566,7 +11570,9 @@ class MainWindow(wx.Frame):
     _PREVIEW_MESSAGE_TYPES = frozenset({
         "conversation", "extendedTextMessage", "imageMessage", "videoMessage",
         "audioMessage", "documentMessage", "stickerMessage", "contactMessage",
-        "locationMessage", "liveLocationMessage", "pollCreationMessage",
+        "locationMessage", "liveLocationMessage",
+        "pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3",
+        "pollUpdateMessage",
         "buttonsMessage", "listMessage", "templateMessage", "interactiveMessage",
         "buttonsResponseMessage", "listResponseMessage", "protocolMessage",
         "reactionMessage",

@@ -2680,10 +2680,12 @@ class ConversationsPanel(wx.Panel):
                     if c.get("isMyContact") or c.get("isSaved") or c.get("syncToAddressbook"):
                         return True
                     name = (c.get("name") or "").strip()
-                    if name and not name.isdigit() and not is_phone_like(name):
-                        name_lower = name.lower()
-                        if "sem nome" not in name_lower and "unnamed" not in name_lower and name_lower not in ("no name", "unknown", "desconhecido"):
-                            return True
+                    # main_window._is_bad_contact_name() instead of a third,
+                    # independently-maintained copy of the same "sem nome"/
+                    # "unknown" placeholder check (see _sender_label()'s
+                    # _contact_name() for the other one and why they drift).
+                    if name and not self.main_window._is_bad_contact_name(name):
+                        return True
             return False
 
         # Individual participant matches filtered by rules:
@@ -4536,6 +4538,9 @@ class ConversationsPanel(wx.Panel):
             "locationMessage",
             "liveLocationMessage",
             "pollCreationMessage",
+            "pollCreationMessageV2",
+            "pollCreationMessageV3",
+            "pollUpdateMessage",
             "buttonsMessage",
             "listMessage",
             "templateMessage",
@@ -4664,30 +4669,29 @@ class ConversationsPanel(wx.Panel):
                 if lid:
                     candidates.append(lid)
 
+            # mw._is_bad_contact_name() instead of hand-rolling a second,
+            # independently-maintained copy of the same "sem nome"/"unknown"
+            # placeholder check: this copy only exact-matched "unknown",
+            # missing WhatsApp's newer "Unknown User" username-feature
+            # placeholder that _is_bad_contact_name() already catches
+            # (substring match) — a real, demonstrated way two "is this name
+            # any good" checks in this codebase silently disagreed.
             ppm = getattr(mw, "_presence_pushname_map", {})
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
                     n = (c.get("name") or c.get("pushName") or "").strip()
-                    if n and not n.isdigit() and not is_phone_like(n):
-                         n_lower = n.lower()
-                         if "sem nome" in n_lower or "unnamed" in n_lower or n_lower in ("no name", "unknown", "desconhecido"):
-                             pass
-                         else:
-                             return n
+                    if n and not mw._is_bad_contact_name(n):
+                        return n
                 chat_obj = mw.chats.get(cjid)
                 if chat_obj:
                     cn = (chat_obj.get("name") or "").strip()
-                    if cn and not cn.isdigit() and not is_phone_like(cn):
-                        cn_lower = cn.lower()
-                        if "sem nome" in cn_lower or "unnamed" in cn_lower or cn_lower in ("no name", "unknown", "desconhecido"):
-                            pass
-                        else:
-                            return cn
+                    if cn and not mw._is_bad_contact_name(cn):
+                        return cn
             # Fallback: presence-learned pushName map
             for cjid in candidates:
                 pname = (ppm.get(cjid) or "").strip()
-                if pname and not pname.isdigit() and not is_phone_like(pname):
+                if pname and not mw._is_bad_contact_name(pname):
                     return pname
             return ""
 
@@ -5452,26 +5456,35 @@ class ConversationsPanel(wx.Panel):
         elif participant_jid.endswith("@c.us"):
             candidates.append(local + "@s.whatsapp.net")
 
+        # not mw._is_bad_contact_name(x) everywhere below instead of each
+        # candidate hand-rolling its own "x.isdigit() or is_phone_like(x)"
+        # check: those two conditions alone let through anything else
+        # _is_bad_contact_name() also rejects (binary blobs, and — the
+        # concrete gap this closes — the literal "Contato sem nome"/
+        # "Unknown User"-style placeholders main.py itself assigns to
+        # contact["name"] in some code paths, which would otherwise get
+        # returned here as if they were a real saved name instead of
+        # falling through to the phone-number fallback below).
         for cjid in candidates:
             contact = mw.contacts.get(cjid)
             if contact:
                 name = (contact.get("name") or contact.get("pushName") or "").strip()
-                if name and not name.isdigit() and not is_phone_like(name):
+                if name and not mw._is_bad_contact_name(name):
                     return name
             chat_obj = mw.chats.get(cjid)
             if chat_obj:
                 cn = (chat_obj.get("name") or "").strip()
-                if cn and not cn.isdigit() and not is_phone_like(cn):
+                if cn and not mw._is_bad_contact_name(cn):
                     return cn
         if msg is not None:
             for key_candidate in ("pushName", "pushname", "name", "displayName"):
                 push = msg.get(key_candidate, "")
-                if push and not push.isdigit() and not is_phone_like(push):
+                if push and not mw._is_bad_contact_name(push):
                     return push
         # Fallback: presence-learned pushName map
         for cjid in candidates:
             pname = (ppm.get(cjid) or "").strip()
-            if pname and not pname.isdigit() and not is_phone_like(pname):
+            if pname and not mw._is_bad_contact_name(pname):
                 return pname
         # Fallback 2: scan sorted messages in the current conversation
         for m in getattr(self, "_sorted_messages", []):
@@ -5482,12 +5495,12 @@ class ConversationsPanel(wx.Panel):
                 m_part = mw._normalize_jid(m_part)
                 if m_part in candidates:
                     push = m.get("pushName", "")
-                    if push and not push.isdigit() and not is_phone_like(push):
+                    if push and not mw._is_bad_contact_name(push):
                         return push
         # Fallback 3: check self._group_participants_cache
         for pname, p_jid in getattr(self, "_group_participants_cache", []):
             if p_jid in candidates:
-                if pname and not pname.isdigit() and not is_phone_like(pname):
+                if pname and not mw._is_bad_contact_name(pname):
                     return pname
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid

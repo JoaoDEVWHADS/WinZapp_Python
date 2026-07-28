@@ -35,6 +35,7 @@ class TestWhatCountsAsActivity:
     @pytest.mark.parametrize("mtype", [
         "conversation", "extendedTextMessage", "imageMessage", "audioMessage",
         "documentMessage", "stickerMessage", "reactionMessage", "pollCreationMessage",
+        "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage",
     ])
     def test_real_messages_count(self, mtype):
         assert counts(_msg(mtype, 100)) is True
