@@ -719,6 +719,22 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             self.startup_sound.play()
 
+        # True from the moment a deliberate app shutdown starts (real_exit())
+        # until the process actually exits. _stop_wpp_server() closes the
+        # WPPConnect session itself (POST /close-session) before killing the
+        # Node/Chrome processes — while our own WebSocket is still connected,
+        # so it receives that as an ordinary "connection.update state=close"
+        # event, indistinguishable at that layer from WhatsApp genuinely
+        # dropping the connection. Without this flag, _set_wa_connected()
+        # read that as a real disconnect and announced "modo offline
+        # ativado" (sound + speech) in the second or two before the process
+        # actually exits — reported live as the app seeming to announce an
+        # error on every quit. Checked at the top of _set_wa_connected(),
+        # the single entry point for every connection-state transition, so
+        # every path into it (the live event above, and the periodic
+        # health-checker) is covered by one guard.
+        self._shutting_down = False
+
         # Track whether the user went through the pairing flow this session
         self._just_paired = False
 
@@ -1316,6 +1332,14 @@ class MainWindow(wx.Frame):
         WPPConnect still initializing) is ambiguous during the first
         connection attempt of a session and gets the grace window instead.
         """
+        if getattr(self, "_shutting_down", False):
+            # The app is on its way out (real_exit()) — closing the
+            # WPPConnect session ourselves as part of shutdown looks
+            # identical, at this layer, to WhatsApp dropping the connection.
+            # Nothing about a deliberate quit should announce an "offline"
+            # transition with sound/speech in the second before the process
+            # actually exits.
+            return
         connected = bool(connected)
         was = bool(getattr(self, "_wa_connected", False))
         self._wa_connected = connected
@@ -1764,6 +1788,13 @@ class MainWindow(wx.Frame):
 
     def real_exit(self):
         """Completely close WinZapp, removing the tray icon and stopping all threads."""
+        # Set FIRST, before anything else: _stop_wpp_server() below closes
+        # the WPPConnect session itself, which — while our WebSocket is
+        # still connected — arrives as an ordinary "connection closed" event
+        # indistinguishable from a real disconnect. _set_wa_connected()
+        # checks this flag and skips entirely, so quitting never announces
+        # "modo offline ativado" in the moment before the process exits.
+        self._shutting_down = True
         # Stop the presence keep-alive timer before tearing down
         if hasattr(self, "_presence_timer") and self._presence_timer.IsRunning():
             self._presence_timer.Stop()
@@ -6365,7 +6396,16 @@ class MainWindow(wx.Frame):
         if not name or name.isdigit() or is_phone_like(name) or looks_like_binary_blob(name):
             return True
         val_lower = name.lower()
-        return "sem nome" in val_lower or "unnamed" in val_lower or val_lower in ("no name", "unknown", "desconhecido")
+        # "unknown" as a substring (not just an exact match) so WhatsApp's
+        # username-feature placeholder — observed as "Unknown User" — is
+        # caught too, not just the older bare "Unknown"/"unknown" contacts
+        # used to arrive as before that feature existed.
+        return (
+            "sem nome" in val_lower
+            or "unnamed" in val_lower
+            or "unknown" in val_lower
+            or val_lower in ("no name", "desconhecido")
+        )
 
     def _clean_contacts_cached(self):
         changed = False
