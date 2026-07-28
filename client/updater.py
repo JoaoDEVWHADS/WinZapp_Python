@@ -912,12 +912,9 @@ class WppUpdateChecker:
         return fetch_latest_wpp_tag()
 
     def _check_once(self):
-        logging.info("[WppUpdateChecker] Checking for wppconnect-server updates...")
+        logging.info("[WppUpdateChecker] Checking for wppconnect-server commit updates...")
         installed = self._mw._get_installed_wpp_version()
         if not installed:
-            # Not installed yet (or version unreadable) — the normal
-            # first-run setup / version-gate flow owns that case, not this
-            # checker.
             self._schedule_retry()
             return
 
@@ -930,12 +927,12 @@ class WppUpdateChecker:
         newer_available = (remote_version != installed)
 
         if not newer_available:
-            logging.info("[WppUpdateChecker] wppconnect-server is up to date (%s).", installed)
+            logging.info("[WppUpdateChecker] wppconnect-server is up to date (commit %s).", installed)
             self._schedule_retry()
             return
 
         logging.info(
-            "[WppUpdateChecker] Newer wppconnect-server release available: %s -> %s",
+            "[WppUpdateChecker] Newer wppconnect-server commit available: %s -> %s",
             installed, remote_version,
         )
         wx.CallAfter(self._prompt_update, installed, remote_version, tag)
@@ -953,7 +950,7 @@ class WppUpdateChecker:
             self._schedule_retry()
 
     def _force_reinstall_worker(self):
-        logging.info("[WppUpdateChecker] Force-reinstall requested — fetching latest release tag...")
+        logging.info("[WppUpdateChecker] Force-reinstall requested — fetching latest commit SHA...")
         tag = self._fetch_latest_tag()
         if not tag:
             wx.CallAfter(
