@@ -589,44 +589,121 @@ class Connect:
             try:
                 response = requests.get(url, headers=self._wpp_headers())
                 response_data = response.json()
+                # `urlcode` is deliberately NOT accepted here: it is the QR's
+                # raw payload string ("2@abc…"), not an image. Feeding it to
+                # display_qrcode_image() base64-decodes gibberish and paints
+                # either nothing or noise — which looks exactly like the broken
+                # QR this was meant to show.
                 qrcode_base64 = (
                     response_data.get("qrcode")
-                    or response_data.get("urlcode")
                     or (response_data.get("response") or {}).get("qrcode")
                 )
                 if qrcode_base64:
                     wx.CallAfter(self.display_qrcode_image, qrcode_base64)
+                else:
+                    # Not an error: the session may simply not have produced a
+                    # QR yet. The qrCode socket event delivers it when it does.
+                    logging.info("[show_connection_dial] No QR in status-session yet — "
+                                 "waiting for the qrCode event.")
             except Exception:
-                pass
+                logging.exception("[show_connection_dial] Failed to poll status-session for a QR.")
 
         except Exception:
             self.main_window.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('connection_failed').format(app_name=self.main_window.app_name)} {format_exc()}", self.i18n.t("connection_error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
 
+    # Side of the square the QR is drawn into (matches the StaticBitmap above).
+    _QR_BOX = 300
+
+    # White border added around the QR, as a fraction of its side.
+    #
+    # The QR standard requires a quiet zone of 4 modules on every side, and
+    # WPPConnect's PNG ships with NONE: measured on a real code, the symbol runs
+    # from x=-1 to x=228 of a 228px image. A decoder fed a clean file copes (jsQR
+    # reads it fine), but a phone camera uses that border to separate the finder
+    # patterns from whatever surrounds them — here, the dialog's own background.
+    # Without it the camera never locks on, which is the "o QR não lê" nobody
+    # could explain from the image alone, because the image really was valid.
+    #
+    # The ratio has to clear 4 modules for the *coarsest* code that could show
+    # up, since a coarser code has bigger modules and therefore needs a wider
+    # border. The worst realistic case is a low-version symbol: 29 modules means
+    # 4/29 = 13.8% of the side. 15% covers it with room to spare, and still fits
+    # the display box (228 + 2x34 = 296 of 300). WhatsApp's own codes measure
+    # version 11 — 61 modules, 3.74px each — where 15% is about 9 modules.
+    _QR_QUIET_ZONE_RATIO = 0.15
+
+    @staticmethod
+    def _qr_quiet_zone(side: int, ratio: float = _QR_QUIET_ZONE_RATIO) -> int:
+        """Border in pixels to add on each side of a `side`-px QR."""
+        if side <= 0:
+            return 0
+        return max(8, int(round(side * ratio)))
+
+    @staticmethod
+    def _qr_scale_factor(src: int, box: int) -> int:
+        """Whole-number magnification that keeps a QR of `src` px inside `box`.
+
+        Never returns 0: a QR larger than the box is left at its own size rather
+        than shrunk, because shrinking merges neighbouring modules and destroys
+        the code outright. At worst it overflows the panel and stays readable.
+        """
+        if src <= 0:
+            return 1
+        return max(1, box // src)
+
     def display_qrcode_image(self, base64_string):
-        """Decodes and displays the base64 QR-CODE image."""
+        """Decodes and displays the base64 QR-CODE image.
+
+        Scaling is nearest-neighbour and by a whole-number factor. Both matter:
+        this used to call Scale(300, 300, wx.IMAGE_QUALITY_HIGH), which resamples
+        with interpolation and stretched the source (264 px from WPPConnect) by
+        a fractional 1.14×. That blurs the black/white module edges and makes
+        their widths uneven — the phone camera then reads it as a damaged code
+        and simply refuses it, which is the "QR Code inválido" users reported.
+        A QR must be magnified in whole pixels with no smoothing, or not at all.
+        """
         try:
             # Remove data URI prefix if present
             if "," in base64_string:
                 base64_string = base64_string.split(",")[1]
 
-            # Decode base64 to image
             image_data = base64.b64decode(base64_string)
             image = wx.Image(BytesIO(image_data))
+            if not image.IsOk():
+                logging.warning("[display_qrcode_image] Decoded data is not a valid image.")
+                return
 
-            # Scale image if needed
-            width, height = 300, 300
-            image = image.Scale(width, height, wx.IMAGE_QUALITY_HIGH)
+            src_w, src_h = image.GetWidth(), image.GetHeight()
+            # Quiet zone first, magnification second: padding then scaling keeps
+            # the border proportional and every edge on a whole pixel.
+            pad = self._qr_quiet_zone(min(src_w, src_h))
+            if pad:
+                image = image.Size(wx.Size(src_w + 2 * pad, src_h + 2 * pad),
+                                   wx.Point(pad, pad), 255, 255, 255)
+            padded = min(image.GetWidth(), image.GetHeight())
+            factor = self._qr_scale_factor(padded, self._QR_BOX)
+            if factor > 1:
+                image = image.Scale(image.GetWidth() * factor, image.GetHeight() * factor,
+                                    wx.IMAGE_QUALITY_NEAREST)
+            logging.info(
+                "[display_qrcode_image] QR %dx%d + quiet zone %dpx -> %dx%d "
+                "(factor %d), alpha=%s, %d bytes in.",
+                src_w, src_h, pad, image.GetWidth(), image.GetHeight(), factor,
+                image.HasAlpha(), len(image_data),
+            )
 
-            # Convert to bitmap and display
-            bitmap = wx.Bitmap(image)
-            self.qrcode_image.SetBitmap(bitmap)
+            self.qrcode_image.SetBitmap(wx.Bitmap(image))
+            # The bitmap is no longer forced to 300x300, so the panel has to
+            # re-measure or the image is clipped to the old placeholder size.
+            self.qrcode_panel.Layout()
 
-            # Play sound notification
             self.main_window.pairing_code_updated_sound.play()
 
         except Exception:
-            pass
+            # Never silently: a QR that fails to render leaves the user staring
+            # at an empty box with no idea why.
+            logging.exception("[display_qrcode_image] Failed to render the QR code.")
 
     def reconnect_websocket(self):
         """Reconnects WebSocket for QR-CODE mode (instance already created)."""
@@ -635,6 +712,43 @@ class Connect:
         except Exception:
             self.main_window.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('websocket_init_failed')} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
+
+    @staticmethod
+    def _can_reuse_existing_session(privateinfo: dict, phone_number: str,
+                                    existing_token: str) -> bool:
+        """True when a stored WPPConnect token is worth reusing for this number.
+
+        The token is passed in rather than read off `privateinfo` here: it lives
+        Fernet-protected under WA_token_protected and only
+        MainWindow._get_wa_token() can read it (see core/token_vault.py).
+        Reading privateinfo["WA_token"] directly would find an empty string on
+        every already-migrated install and silently reject every reusable
+        session.
+
+        Requires `paired`, not merely a stored token. WA_token is persisted
+        optimistically by _bg_pairing_flow() the moment a phoneCode arrives —
+        long before the pairing completes — so a pairing that was cancelled, or
+        one whose app was killed before it finished, leaves a token behind whose
+        WPPConnect session no longer exists. Reusing it means calling
+        /start-session on a token WPPConnect has already dropped from
+        clientsArray: no pairing code is ever emitted and the dialog sits on
+        "Conectando..." until the 90 s wait expires. Reported live as "cancelei
+        o pareamento, cliquei em continuar e o código não aparece mais".
+
+        `paired` is only ever set once WhatsApp is genuinely linked (the
+        connection update in websocket_client.py, check_wa_connection_http()'s
+        host-device fetch, and check_connection_status()), never by merely
+        showing a code — which is what makes it the honest test here.
+        """
+        if not isinstance(privateinfo, dict):
+            return False
+        stored_raw = "".join(
+            c for c in (privateinfo.get("WA_phone_number") or "") if c.isdigit()
+        )
+        phone_digits = "".join(c for c in (phone_number or "") if c.isdigit())
+        if not phone_digits or stored_raw != phone_digits:
+            return False
+        return bool(existing_token) and bool(privateinfo.get("paired", False))
 
     def on_continue(self, event):
         """Phone-number pairing flow (asynchronous to prevent GUI freeze).
@@ -680,16 +794,15 @@ class Connect:
             try:
                 # Capture the old token to close it, preventing conflict
                 _old_token = self.main_window.token or ""
-                # Normalise stored number to digits-only for comparison
-                stored_raw = "".join(
-                    c for c in self.main_window.settings.get("privateinfo", {}).get(
-                        "WA_phone_number", ""
-                    )
-                    if c.isdigit()
-                )
-                # Check if the user has already paired with this number.
+                # Reuse the stored session only when it belongs to this same
+                # number AND the pairing actually completed — see
+                # _can_reuse_existing_session() for why the token alone is not
+                # enough. It normalises the stored number to digits itself.
+                _privateinfo = self.main_window.settings.get("privateinfo", {})
                 existing_token = self.main_window._get_wa_token()
-                _instance_exists = bool(stored_raw == self.phone_number and existing_token)
+                _instance_exists = self._can_reuse_existing_session(
+                    _privateinfo, self.phone_number, existing_token
+                )
                 if not _instance_exists:
                     # New pairing: reset sync flag so we wait for messages.set
                     self.main_window.messages_set_completed = False
@@ -1125,6 +1238,26 @@ class Connect:
 
     def cleanup_pairing_session(self):
         logging.info("[cleanup_pairing_session] Cleanup pairing session triggered.")
+        # Drop the optimistically-persisted token BEFORE anything else.
+        # _bg_pairing_flow() writes WA_token to settings as soon as a phoneCode
+        # arrives — long before the pairing actually completes — and the only
+        # caller of this method runs when the pairing dialog closed with
+        # anything other than wx.ID_OK, i.e. the pairing definitively did not
+        # complete and the close-session below is about to destroy that
+        # session for good. Leaving the token behind made the very next
+        # "Continuar" take _bg_pairing_flow()'s "instance already exists"
+        # branch and call /start-session on this dead token instead of minting
+        # a fresh one: WPPConnect had already removed it from clientsArray, so
+        # no code was ever emitted and the dialog sat on "Conectando..." for
+        # the full 90 s wait. Reported live as "cancelei o pareamento, cliquei
+        # em continuar e o código não aparece mais".
+        if self.main_window._get_wa_token():
+            logging.info("[cleanup_pairing_session] Clearing WA_token of the cancelled attempt.")
+            # _set_wa_token() clears both the protected and legacy fields and
+            # saves; `paired` is popped separately, then saved with it.
+            self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
+            self.main_window._set_wa_token("")
+
         # Disconnect WebSocket
         if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:

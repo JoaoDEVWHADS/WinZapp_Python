@@ -463,11 +463,13 @@ class WebSocketClient:
             if hasattr(self.connect, 'pairing_dial'):
                 try:
                     dlg = self.connect.pairing_dial
-                    # No module-level wx.IsDestroyed() exists in wxPython —
-                    # calling any method on an already-destroyed dialog
-                    # raises RuntimeError, which the except below catches;
-                    # IsModal() alone is enough to also skip non-modal state.
-                    if dlg.IsModal():
+                    # `if dlg` — not wx.IsDestroyed(dlg), which does not exist:
+                    # that call raised AttributeError on every single pairing,
+                    # so this whole block fell straight into the except below and
+                    # neither EndModal() nor anything else ever ran. A wxPython
+                    # wrapper whose C++ window is gone is falsy, which is the
+                    # check connect.py already uses for this same dialog.
+                    if dlg and dlg.IsModal():
                         logging.info("[on_pairing_complete] Ending pairing_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
                         return
@@ -482,7 +484,8 @@ class WebSocketClient:
             if hasattr(self.connect, 'connection_dial'):
                 try:
                     dlg = self.connect.connection_dial
-                    if dlg.IsModal():
+                    # See the pairing_dial guard above for why this is `if dlg`.
+                    if dlg and dlg.IsModal():
                         logging.info("[on_pairing_complete] Ending connection_dial modal loop.")
                         dlg.EndModal(wx.ID_OK)
                     else:
@@ -496,12 +499,58 @@ class WebSocketClient:
         wx.CallAfter(_end_innermost_dialog)
 
 
+    @staticmethod
+    def _extract_qr_payload(info) -> tuple:
+        """(base64_image, pairing_code) from a 'qrCode' event, whatever its shape.
+
+        WPPConnect Server emits, from exportQR() in createSessionUtil.ts:
+
+            req.io.emit('qrCode', {data: 'data:image/png;base64,…', session: …})
+
+        i.e. ``info["data"]`` is a *string*. This used to be read as
+        ``info["data"]["qrcode"]["base64"]``, so every single event raised
+        AttributeError on the string — swallowed by python-socketio, which runs
+        with logging disabled, so nothing ever appeared in the log.
+
+        The damage was not cosmetic: this handler is the only thing that
+        refreshes the QR. WhatsApp rotates it roughly every 20 s, so the dialog
+        was left showing the one-shot copy fetched from status-session when it
+        opened, long expired by the time anyone pointed a phone at it — read as
+        an invalid code. The pairing-code refresh path rode on the same event
+        and was equally dead.
+
+        Nested shapes are still accepted in case a different WPPConnect build
+        wraps it, and top-level keys are used as a last resort.
+        """
+        if not isinstance(info, dict):
+            return "", ""
+        base64_img, pairing_code = "", ""
+        raw = info.get("data")
+        if isinstance(raw, str):
+            base64_img = raw
+        elif isinstance(raw, dict):
+            inner = raw.get("qrcode")
+            if isinstance(inner, dict):
+                base64_img = inner.get("base64") or ""
+                pairing_code = inner.get("pairingCode") or ""
+            elif isinstance(inner, str):
+                base64_img = inner
+            base64_img = base64_img or raw.get("base64") or ""
+            pairing_code = pairing_code or raw.get("pairingCode") or ""
+        base64_img = base64_img or info.get("qrcode") or info.get("base64") or ""
+        pairing_code = pairing_code or info.get("pairingCode") or ""
+        return (base64_img if isinstance(base64_img, str) else "",
+                str(pairing_code) if pairing_code else "")
+
     def on_qrcode_update(self, info):
         logging.debug(f"[WebSocketClient] event payload: {info}")
-        # Check if this is QR-CODE mode (base64) or pairing code mode
-        qr_data = info.get("data", {}).get("qrcode", {})
-        pairing_code = qr_data.get("pairingCode")
-        base64_img = qr_data.get("base64")
+        base64_img, pairing_code = self._extract_qr_payload(info)
+        if not base64_img and not pairing_code:
+            logging.warning("[on_qrcode_update] qrCode event carried nothing usable: %r",
+                            list(info.keys()) if isinstance(info, dict) else type(info).__name__)
+            return
+        logging.info("[on_qrcode_update] Refreshed QR (%d bytes of image, pairing_code=%s).",
+                     len(base64_img), bool(pairing_code))
 
         def _update_ui():
             # Use connection_mode to determine which mode we're in
@@ -511,17 +560,29 @@ class WebSocketClient:
                 self.main_window.speak_output.output(self.i18n.t("qrcode_image_updated"))
                 self.connect.display_qrcode_image(base64_img)
             elif self.connect.connection_mode == "phone" and pairing_code:
-                # Pairing code mode: update the text field only if it exists and not destroyed
-                if hasattr(self.connect, "pairing_code_field") and self.connect.pairing_code_field:
+                # Pairing code mode: update the text field only if it still exists.
+                # `if field` — not wx.IsDestroyed(field), which does not exist and
+                # raised AttributeError here on every single rotated code. Caught
+                # by the bare `except Exception: pass` this used to have, it made
+                # WPPConnect's whole qrCode-carrying-a-pairingCode refresh path
+                # silently dead: the dialog kept showing the first code while
+                # WhatsApp had already rotated it. A destroyed wx wrapper is falsy
+                # and any call on it raises RuntimeError, so the `and` below is the
+                # whole guard needed (same idiom as connect.py's update_pairing_code).
+                field = getattr(self.connect, "pairing_code_field", None)
+                if field:
                     try:
-                        if not wx.IsDestroyed(self.connect.pairing_code_field):
-                            current_val = self.connect.pairing_code_field.GetValue().strip()
-                            if current_val != pairing_code.strip():
-                                self.main_window.pairing_code_updated_sound.play()
-                                self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
-                                self.connect.pairing_code_field.SetValue(pairing_code)
+                        current_val = field.GetValue().strip()
+                        if current_val != pairing_code.strip():
+                            self.main_window.pairing_code_updated_sound.play()
+                            self.main_window.speak_output.output(self.i18n.t("qrcode_updated"))
+                            field.SetValue(pairing_code)
+                    except RuntimeError:
+                        pass  # dialog destroyed between the check and the call
                     except Exception:
-                        pass
+                        # Never let a refresh failure go unnoticed again — this
+                        # bug hid behind a silent `pass` for exactly that reason.
+                        logging.exception("[on_qrcode_update] Failed to refresh the pairing code field.")
 
         wx.CallAfter(_update_ui)
 
