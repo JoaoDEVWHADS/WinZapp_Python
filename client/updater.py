@@ -924,6 +924,20 @@ class WppUpdateChecker:
             return
         remote_version = tag.lstrip("vV")
 
+        # If installed was read from package.json ("2.10.0") on a fresh install without .commit_sha,
+        # seed .commit_sha with the remote SHA instead of prompting a false positive update dialog.
+        if "." in installed and "." not in remote_version and len(remote_version) <= 12:
+            try:
+                from app_paths import resource_path
+                sha_file = resource_path("api", ".commit_sha")
+                with open(sha_file, "w", encoding="utf-8") as f:
+                    f.write(remote_version)
+                logging.info("[WppUpdateChecker] Seeded .commit_sha with initial remote SHA: %s", remote_version)
+            except Exception:
+                pass
+            self._schedule_retry()
+            return
+
         newer_available = (remote_version != installed)
 
         if not newer_available:

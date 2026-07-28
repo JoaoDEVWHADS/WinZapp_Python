@@ -476,7 +476,10 @@ def assemble_staging():
         shutil.copy2(abs_path, dst)
         api_count += 1
 
-    custom_src_count = 0
+    sha_src = os.path.join(API_DIR, ".commit_sha")
+    if os.path.isfile(sha_src):
+        shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
+        print("  -> api/.commit_sha copied to staging")
     for rel_path in API_CUSTOM_SRC_FILES:
         src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
         if not os.path.isfile(src_path):
