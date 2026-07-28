@@ -1519,13 +1519,18 @@ class MainWindow(wx.Frame):
     # wppconnect-team/wppconnect-server GitHub releases directly.
 
     def _start_wpp_update_checker(self, force: bool = False):
-        if not force:
-            return
         if self.background_mode:
+            return
+        updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
+        if not updates_enabled and not force:
             return
         from updater import WppUpdateChecker
         self._wpp_update_checker = WppUpdateChecker(self)
-        self._wpp_update_checker.force_check()
+        if force:
+            self._wpp_update_checker.force_check()
+        else:
+            self._wpp_update_checker.start()
+
 
 
     def _on_force_reinstall_wpp(self, event):
@@ -3002,7 +3007,17 @@ class MainWindow(wx.Frame):
         return default
 
     def _get_installed_wpp_version(self) -> str:
-        """Read the WPPConnect Server version from api/package.json."""
+        """Read the WPPConnect Server commit SHA or version from api/."""
+        sha_path = resource_path("api", ".commit_sha")
+        try:
+            if os.path.isfile(sha_path):
+                with open(sha_path, encoding="utf-8") as fh:
+                    sha = fh.read().strip()
+                    if sha:
+                        return sha
+        except Exception:
+            pass
+
         pkg_path = resource_path("api", "package.json")
         try:
             with open(pkg_path, encoding="utf-8") as fh:
@@ -3011,6 +3026,7 @@ class MainWindow(wx.Frame):
             return pkg.get("version", "")
         except Exception:
             return ""
+
 
     @staticmethod
     def _version_is_below(installed: str, minimum: str) -> bool:

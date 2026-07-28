@@ -927,16 +927,7 @@ class WppUpdateChecker:
             return
         remote_version = tag.lstrip("vV")
 
-        try:
-            from packaging.version import Version
-            newer_available = Version(remote_version) > Version(installed)
-        except Exception:
-            logging.warning(
-                "[WppUpdateChecker] Could not compare versions (installed=%r, remote=%r)",
-                installed, remote_version,
-            )
-            self._schedule_retry()
-            return
+        newer_available = (remote_version != installed)
 
         if not newer_available:
             logging.info("[WppUpdateChecker] wppconnect-server is up to date (%s).", installed)

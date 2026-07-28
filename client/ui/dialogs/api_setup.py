@@ -69,19 +69,33 @@ _REPO_ZIP_TAG  = (
 WPP_GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/wppconnect-team/wppconnect-server/releases/latest"
 )
+WPP_GITHUB_API_LATEST_COMMIT = (
+    "https://api.github.com/repos/wppconnect-team/wppconnect-server/commits/main"
+)
+
+
+def fetch_latest_wpp_commit_sha(timeout: float = 15) -> str:
+    """Return the short SHA of the latest commit on wppconnect-server main branch."""
+    try:
+        resp = requests.get(
+            WPP_GITHUB_API_LATEST_COMMIT,
+            headers={"User-Agent": "WinZapp"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        sha = (data.get("sha") or "").strip()
+        return sha[:7] if sha else ""
+    except Exception as exc:
+        logging.warning("[api_setup] Failed to fetch latest wppconnect-server commit SHA: %s", exc)
+        return ""
 
 
 def fetch_latest_wpp_tag(timeout: float = 15) -> str:
-    """Return the tag name of the latest wppconnect-server GitHub release, or "".
-
-    Used so a fresh install (and the update flows) always land on whatever is
-    actually the newest tagged release instead of a version number baked into
-    WinZapp's own .env at build time — a WPPCONNECT_TAG_VERSION pin only ever
-    gets updated when WinZapp itself ships a new build, so a version fixed
-    that way is stale from the day it's set. Returns "" on any failure so
-    callers can fall back to the previous fixed-tag/main-branch behaviour
-    instead of failing setup outright over a GitHub API hiccup.
-    """
+    """Return the short SHA or tag name of the latest wppconnect-server GitHub commit/release."""
+    sha = fetch_latest_wpp_commit_sha(timeout=timeout)
+    if sha:
+        return sha
     try:
         resp = requests.get(
             WPP_GITHUB_API_LATEST_RELEASE,
@@ -95,6 +109,7 @@ def fetch_latest_wpp_tag(timeout: float = 15) -> str:
     except Exception as exc:
         logging.warning("[api_setup] Failed to fetch latest wppconnect-server release tag: %s", exc)
         return ""
+
 
 # Root-level files whose pre-included content always takes precedence.
 _PRESERVE = {"start.js", ".env", "config.json"}
