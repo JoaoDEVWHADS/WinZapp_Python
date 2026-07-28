@@ -475,6 +475,7 @@ class MainWindow(wx.Frame):
         self._media_sync_running = False
         self._update_checker = None
         self._wpp_update_checker = None
+        self._notification_sound_cache = {}
 
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)

@@ -1171,7 +1171,9 @@ class SettingsDialog(wx.Dialog):
         # Per-conversation overrides use resolved paths cached by object identity
         # (see play_background_notification_sound) — a changed alert-tone
         # default should not keep serving a stale cached Sound for "default".
-        self.main_window._notification_sound_cache.clear()
+        cache = getattr(self.main_window, "_notification_sound_cache", None)
+        if cache is not None:
+            cache.clear()
 
         # Persist and propagate
         self.main_window.save_settings()
