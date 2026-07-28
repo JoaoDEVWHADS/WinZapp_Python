@@ -9026,6 +9026,13 @@ class MainWindow(wx.Frame):
         """
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_failed(local_id)
+        # _mark_message_failed() only updates the row inside the open
+        # conversation — the chat-list preview reads the same underlying
+        # record via _last_msg_preview()/_counts_as_last_message() (which
+        # now excludes a failed send), but the list widget itself was never
+        # told to re-render, so the stale preview sat there until the user
+        # happened to reopen the conversation for an unrelated reason.
+        self._schedule_set_chats()
         if show_dialog:
             self.error_sound.play()
             detail = error[:300] if error else self.i18n.t("error").format(app_name=self.app_name)
@@ -11538,6 +11545,16 @@ class MainWindow(wx.Frame):
         days before.
         """
         if not isinstance(m, dict):
+            return False
+        # A message that permanently failed to send (retries exhausted,
+        # _mark_message_failed()) never reached WhatsApp — it must not be
+        # treated as the conversation's real last message. Without this the
+        # chat-list preview kept showing a message the recipient never got,
+        # with no visible cue anything was wrong, until the user happened to
+        # reopen the conversation (which rebuilds this from the same
+        # records — so it "fixed itself" there for an unrelated reason, not
+        # because this case was actually handled).
+        if m.get("_send_failed"):
             return False
         m_type = m.get("messageType", "")
         if m_type not in cls._PREVIEW_MESSAGE_TYPES:
