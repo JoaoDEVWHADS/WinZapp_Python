@@ -10008,34 +10008,19 @@ class MainWindow(wx.Frame):
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
-        msg_id = _key.get("id", "")
-        
-        # Get raw message ID from key
-        raw_id = msg_id
-        if msg_id and "_" in msg_id:
-            parts = msg_id.split("_")
-            raw_id = parts[2] if len(parts) > 2 else parts[-1]
+        msg_id = _key.get("id", "") or oldest_msg.get("id", "")
 
-        # WPPConnect's getMessages ?id= param expects the FULLY serialized message key
-        # (e.g. "true_226465287282814@lid_3EB0D3BCB679BFCAFD2D39").
-        from_me = bool(_key.get("fromMe", False))
-        prefix = "true" if from_me else "false"
-        
-        participant = ""
-        if phone.endswith("@g.us"):
-            p_raw = _key.get("participant") or oldest_msg.get("participant") or ""
-            if msg_id and msg_id.startswith(("true_", "false_")):
-                parts = msg_id.split("_")
-                if len(parts) > 3:
-                    p_raw = parts[3]
-            if p_raw:
-                # Group participant JIDs must also be resolved using _resolve_jid_for_msg_key
-                participant = self._resolve_jid_for_msg_key(p_raw).replace("@s.whatsapp.net", "@c.us")
-
-        if participant:
-            serialized_id = f"{prefix}_{resolved_phone}_{raw_id}_{participant}"
+        if msg_id and (msg_id.startswith("true_") or msg_id.startswith("false_")):
+            serialized_id = msg_id
         else:
-            serialized_id = f"{prefix}_{resolved_phone}_{raw_id}"
+            raw_id = msg_id
+            if msg_id and "_" in msg_id:
+                parts = msg_id.split("_")
+                raw_id = parts[2] if len(parts) > 2 else parts[-1]
+
+            from_me = bool(_key.get("fromMe", False))
+            prefix = "true" if from_me else "false"
+            serialized_id = f"{prefix}_{phone}_{raw_id}"
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"
