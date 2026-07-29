@@ -3960,7 +3960,8 @@ class ConversationsPanel(wx.Panel):
                 f"Header hex: {content[:16].hex()} "
                 f"(OGG magic = 4f676753, Opus head = 4f707573)"
             )
-            tmp = tempfile.NamedTemporaryFile(suffix=audio_ext, delete=False)
+            actual_ext = ".wav" if content.startswith(b"RIFF") else audio_ext
+            tmp = tempfile.NamedTemporaryFile(suffix=actual_ext, delete=False)
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name

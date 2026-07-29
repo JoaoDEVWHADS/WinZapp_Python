@@ -7776,6 +7776,13 @@ class MainWindow(wx.Frame):
         if not valid_chats:
             return
             
+        # Only sync the top 30 most recent active chats on startup to prevent WPPConnect/CPU overload.
+        # Older chats are fetched on-demand when clicked/scrolled.
+        try:
+            valid_chats = sorted(valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True)[:30]
+        except Exception:
+            pass
+            
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
         max_workers = min(6, len(valid_chats))
