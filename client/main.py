@@ -7776,10 +7776,9 @@ class MainWindow(wx.Frame):
         if not valid_chats:
             return
             
-        # Only sync the top 30 most recent active chats on startup to prevent WPPConnect/CPU overload.
-        # Older chats are fetched on-demand when clicked/scrolled.
+        # Sort chats by most recent active timestamp
         try:
-            valid_chats = sorted(valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True)[:30]
+            valid_chats = sorted(valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True)
         except Exception:
             pass
             
