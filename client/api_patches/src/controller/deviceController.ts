@@ -233,6 +233,7 @@ export async function listChats(req: Request, res: Response) {
     const options: any = {};
     if (id !== undefined) options.id = id;
     if (count !== undefined) options.count = count;
+    else options.count = 0;
     if (direction !== undefined) options.direction = direction;
     if (onlyGroups !== undefined) options.onlyGroups = onlyGroups;
     if (onlyUsers !== undefined) options.onlyUsers = onlyUsers;

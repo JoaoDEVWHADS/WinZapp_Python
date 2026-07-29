@@ -5519,7 +5519,7 @@ class MainWindow(wx.Frame):
         # /group-info, six at a time and with a 10 s timeout each, instead of
         # one at a time with no timeout at all.  A named group is unaffected
         # either way: its subject is already in the store and still serialises.
-        payload = {"ignoreGroupMetadata": True}
+        payload = {"ignoreGroupMetadata": True, "count": 0}
 
         # Escalating per-request timeouts instead of a flat 120 s × 3.
         #
