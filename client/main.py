@@ -8969,11 +8969,23 @@ class MainWindow(wx.Frame):
 
         # 2. Bundled npm package (local API dev/run mode)
         installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
+        explicit_paths = [
+            os.path.join(installer_root, "win32-x64", "ffmpeg.exe"),
+            os.path.join(installer_root, "win32-ia32", "ffmpeg.exe"),
+            os.path.join(installer_root, "win32-arm64", "ffmpeg.exe"),
+            os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg"),
+        ]
+        for ep in explicit_paths:
+            if os.path.isfile(ep):
+                return ep
+
         hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
         if not hits:
             hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
         if hits:
             return hits[0]
+
         # 3. Fallback: ffmpeg on the system PATH (user-installed)
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:

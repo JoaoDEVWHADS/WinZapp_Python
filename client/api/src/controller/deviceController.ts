@@ -1468,9 +1468,32 @@ export async function getMessages(req: Request, res: Response) {
         console.log(`[browser-evaluate] Starting getMessages for ${chatId}, targetCount=${targetCount}, anchorId=${id}`);
         const getMsgSafe = async (msgId: string) => {
           try {
-            const m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
-            console.log(`[browser-evaluate] getMsgSafe for ${msgId}: ${m ? 'Found' : 'Not Found'}`);
-            return m;
+            if (!msgId) return null;
+            let m = (window as any).WPP.chat.getMessageById ? await (window as any).WPP.chat.getMessageById(msgId) : null;
+            if (m) return m;
+
+            // Fallback 1: replace @c.us with @s.whatsapp.net or vice versa
+            if (msgId.includes('@c.us')) {
+              m = await (window as any).WPP.chat.getMessageById(msgId.replace(/@c\.us/g, '@s.whatsapp.net'));
+              if (m) return m;
+            }
+
+            // Fallback 2: strip participant suffix for group messages (first 3 parts: prefix_chatId_id)
+            const parts = msgId.split('_');
+            if (parts.length > 3) {
+              const strippedId = parts.slice(0, 3).join('_');
+              m = await (window as any).WPP.chat.getMessageById(strippedId);
+              if (m) return m;
+            }
+
+            // Fallback 3: search Store.Msg.models by raw message ID (e.g. 3EB07B3AFDC310BCD8C493)
+            const rawId = parts.length > 2 ? parts[2] : msgId;
+            if ((window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
+              const models = (window as any).Store.Msg.models;
+              const found = models.find((item: any) => item && item.id && (item.id.id === rawId || item.id._serialized === msgId));
+              if (found) return found;
+            }
+            return null;
           } catch (e) {
             console.log(`[browser-evaluate] getMsgSafe error for ${msgId}: ${e}`);
             return null;
