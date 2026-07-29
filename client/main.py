@@ -8960,12 +8960,18 @@ class MainWindow(wx.Frame):
         """Locate ffmpeg binary: check bundled lib/ first, then node_modules, then system PATH."""
         import glob as _glob
         import shutil
-        # 1. Check bundled lib/ directory first (packaged during build for remote API support)
-        bundled_lib = resource_path("lib")
-        for name in ["ffmpeg.exe", "ffmpeg"]:
-            path = os.path.join(bundled_lib, name)
-            if os.path.isfile(path):
-                return path
+        # 1. Check bundled lib/ directory first (client/lib in dev mode, lib/ in compiled mode)
+        lib_dirs = [
+            resource_path("lib"),
+            resource_path("client", "lib"),
+            os.path.join(os.path.dirname(__file__), "lib"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "client", "lib"),
+        ]
+        for lib_dir in lib_dirs:
+            for name in ["ffmpeg.exe", "ffmpeg"]:
+                path = os.path.join(lib_dir, name)
+                if os.path.isfile(path):
+                    return path
 
         # 2. Bundled npm package (local API dev/run mode)
         installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
