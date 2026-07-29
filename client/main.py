@@ -10018,22 +10018,11 @@ class MainWindow(wx.Frame):
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
-        msg_id = _key.get("id", "") or oldest_msg.get("id", "")
-
         serialized_key = _key.get("_serialized", "") or oldest_msg.get("_serialized", "")
         if serialized_key:
             serialized_id = serialized_key
-        elif msg_id and (msg_id.startswith("true_") or msg_id.startswith("false_")):
-            serialized_id = msg_id
         else:
-            raw_id = msg_id
-            if msg_id and "_" in msg_id:
-                parts = msg_id.split("_")
-                raw_id = parts[2] if len(parts) > 2 else parts[-1]
-
-            from_me = bool(_key.get("fromMe", False))
-            prefix = "true" if from_me else "false"
-            serialized_id = f"{prefix}_{phone}_{raw_id}"
+            serialized_id = self._serialize_msg_id(remote_jid, _key if _key else oldest_msg)
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"
