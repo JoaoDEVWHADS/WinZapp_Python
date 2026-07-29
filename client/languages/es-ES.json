@@ -310,8 +310,8 @@
     "msg_copied": "Mensaje copiado.",
     "msg_copy_error": "No se pudo copiar este mensaje.",
     "msg_text_title": "Texto del mensaje",
-    "reply_to": "Responder a {name}",
-    "reply_to_group": "Responder a {name} en {group}",
+    "reply_to": "R&esponder a {name}",
+    "reply_to_group": "R&esponder a {name} en {group}",
     "remove_quote": "Eliminar mensaje citado",
     "reaction_preview_them": "{name} reaccionó con {emoji} a:",
     "reaction_preview_you": "tú reaccionaste con {emoji} a:",
@@ -325,6 +325,8 @@
     "date_fmt": "%d/%m/%Y",
     "datetime_fmt": "%d/%m/%Y %H:%M",
     "archived_chats_nav": "Conversaciones archivadas alt+4",
+    "archived_chats_nav_unread_singular": "Conversaciones archivadas, 1 no leída alt+4",
+    "archived_chats_nav_unread_plural": "Conversaciones archivadas, {count} no leídas alt+4",
     "replying_to": "respondiendo a {name}",
     "no_unread_in_conv": "No hay mensajes no leídos en esta conversación.",
     "bookmark_set": "Marcador {digit} colocado en el elemento {position}: {text}",
@@ -579,5 +581,5 @@
     "preview_sound_error": "No se pudo reproducir la vista previa: archivo de sonido inválido o no encontrado.",
     "wpp_version_unpinned_warning": "Aviso: no se pudo fijar la versión de WhatsApp Web. El envío a contactos individuales puede fallar en silencio; los grupos siguen funcionando. Actualice el WhatsApp Web de WinZapp.",
     "status_unconfirmed": "Envío no confirmado",
-    "history_start_reached": "Inicio del historial disponible en esta conversación. WhatsApp mantiene los mensajes más antiguos solo en el teléfono."
+    "no_messages_in_conversation": "No hay mensajes disponibles en esta conversación."
 }

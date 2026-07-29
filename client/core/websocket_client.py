@@ -859,7 +859,6 @@ class WebSocketClient:
                 }
 
             if presences:
-                import logging
                 logging.info(f"[WebSocketClient] on_wpp_presence_changed JID: {chat_jid}, presences: {presences}")
                 wx.CallAfter(self.main_window.on_presence_update, chat_jid, presences)
         except Exception:
@@ -1535,7 +1534,6 @@ class WebSocketClient:
         # Debug quotes
         body_text = str(wpp_msg.get('body') or '').strip().lower()
         if body_text in ('..', 'oi'):
-            import logging
             logging.info(f"[Raw Message Debug] Message {wpp_msg.get('id')} body: {body_text}. Full payload: {wpp_msg}")
 
         # Determine if there is any quoted context

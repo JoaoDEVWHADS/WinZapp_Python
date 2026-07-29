@@ -37,6 +37,7 @@ import wx
 from app_paths import _is_frozen
 from core.i18n import I18n
 from core.message_queue import PendingMessage
+from core.utils import looks_like_binary_blob
 
 
 def _notif_duration(seconds) -> str:
@@ -91,6 +92,8 @@ def _extract_msg_text(msg: dict) -> str:
     text = msg_obj.get("conversation") or ""
     if not text:
         text = (msg_obj.get("extendedTextMessage") or {}).get("text") or ""
+    if looks_like_binary_blob(text):
+        return ""
     return text
 
 
@@ -163,11 +166,14 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
 
     # ── Text ──────────────────────────────────────────────────────────────────
     if msg_type == "conversation":
-        return msg_obj.get("conversation") or ""
+        text = msg_obj.get("conversation") or ""
+        return i18n.t("notif_unsupported") if looks_like_binary_blob(text) else text
 
     if msg_type == "extendedTextMessage":
         ext  = msg_obj.get("extendedTextMessage") or {}
         text = ext.get("text") or ""
+        if looks_like_binary_blob(text):
+            return i18n.t("notif_unsupported")
         mentioned = (
             (msg.get("contextInfo") or {}).get("mentionedJid")
             or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
