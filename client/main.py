@@ -3049,8 +3049,8 @@ class MainWindow(wx.Frame):
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "@ffmpeg-installer"),
-            os.path.join(node_modules, "@babel", "runtime"),
+            os.path.join(node_modules, "express"),
+            os.path.join(node_modules, "@wppconnect-team"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
