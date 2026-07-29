@@ -59,6 +59,13 @@ class _FakeDB:
 class _FakeMainWindowForRemoval:
     def __init__(self, db):
         self.db = db
+        self.recompute_calls = []
+
+    def _recompute_chat_last_message(self, jid):
+        self.recompute_calls.append(jid)
+
+    def _schedule_set_chats(self):
+        pass
 
 
 def _msg(msg_id):

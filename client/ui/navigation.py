@@ -47,9 +47,29 @@ class NavigationPanel(wx.Panel):
         col.SetText(i18n.t("main_nav"))
         self.nav_list.SetColumn(0, col)
         self.nav_list.SetItemText(0, f"{i18n.t('conversations')} alt+1")
-        self.nav_list.SetItemText(1, i18n.t("archived_chats_nav"))
         self.nav_list.SetItemText(2, i18n.t("status_nav"))
         self.nav_list.SetItemText(3, f"{i18n.t('settings')} {i18n.t('settings_shortcut')}")
+        self.refresh_archived_label()
+
+    def refresh_archived_label(self):
+        """Update the "Conversas arquivadas" nav item to reflect how many
+        archived conversations currently have unread messages.
+
+        Archived chats are deliberately excluded from the window-title
+        unread count (see MainWindow._update_title()) — this is where that
+        count surfaces instead, so it is not simply hidden information.
+        """
+        if self.nav_list.GetItemCount() <= 1:
+            return
+        i18n = self.main_window.i18n
+        count = self.main_window.get_archived_unread_count()
+        if count <= 0:
+            label = i18n.t("archived_chats_nav")
+        elif count == 1:
+            label = i18n.t("archived_chats_nav_unread_singular")
+        else:
+            label = i18n.t("archived_chats_nav_unread_plural").format(count=count)
+        self.nav_list.SetItemText(1, label)
 
     def _on_nav_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_SPACE:
@@ -92,7 +112,15 @@ class NavigationPanel(wx.Panel):
         elif index == 1 and hasattr(mw, "archived_conversations_panel"):
             mw.archived_conversations_panel.Show()
             mw.content_panel.Layout()
-            mw.archived_conversations_panel.conversations_list.SetFocus()
+            arch_list = mw.archived_conversations_panel.conversations_list
+            arch_list.SetFocus()
+            # Match the main conversations list's behaviour (preselect_conversations()):
+            # focus and select the first item so a screen reader has something
+            # to announce instead of silence on an empty-looking focused list.
+            if arch_list.GetItemCount() > 0 and arch_list.GetFocusedItem() == -1:
+                arch_list.Focus(0)
+                arch_list.Select(0)
+                arch_list.EnsureVisible(0)
         elif index == 2 and hasattr(mw, "status_panel"):
             mw.status_panel.Show()
             mw.content_panel.Layout()

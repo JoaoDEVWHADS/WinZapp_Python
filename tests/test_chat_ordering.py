@@ -35,6 +35,7 @@ class TestWhatCountsAsActivity:
     @pytest.mark.parametrize("mtype", [
         "conversation", "extendedTextMessage", "imageMessage", "audioMessage",
         "documentMessage", "stickerMessage", "reactionMessage", "pollCreationMessage",
+        "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage",
     ])
     def test_real_messages_count(self, mtype):
         assert counts(_msg(mtype, 100)) is True
@@ -58,6 +59,22 @@ class TestWhatCountsAsActivity:
     @pytest.mark.parametrize("bad", [None, "text", 42, [], {"no": "type"}])
     def test_junk_never_counts(self, bad):
         assert counts(bad) is False
+
+    def test_a_permanently_failed_send_does_not_count(self):
+        """A message that exhausted retries and never reached WhatsApp must
+        not decide the chat-list preview/position — reported live: the
+        preview kept showing a message the recipient never got, with no
+        visible cue anything was wrong, until the conversation happened to
+        be reopened for an unrelated reason."""
+        m = _msg("conversation", 100, _send_failed=True)
+        assert counts(m) is False
+
+    def test_a_still_pending_send_counts_normally(self):
+        """Only a CONFIRMED failure is excluded — a message still sending
+        (optimistic local echo) is exactly what WhatsApp's own official
+        client shows as the preview too."""
+        m = _msg("conversation", 100, _local_pending=True)
+        assert counts(m) is True
 
 
 def _sort_key(chat_t, records):

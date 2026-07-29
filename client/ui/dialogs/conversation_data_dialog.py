@@ -357,10 +357,20 @@ class ConversationDataDialog(wx.Dialog):
 
     def _populate_personal(self, data: dict):
         """Fill the personal-chat TextCtrl (called on main thread)."""
-        if not self or not self.IsShown():
-            return
+        # _fetch_data()'s background thread starts in __init__, before the
+        # caller has called ShowModal() — a fast local WPPConnect response
+        # routinely won this race and got here while IsShown() was still
+        # False (ShowModal() hadn't finished entering its modal loop yet),
+        # so this used to bail out silently every time, leaving every tab on
+        # "loading" forever. The widgets themselves are already built by
+        # _build_ui() before the thread ever starts, so there is nothing to
+        # wait for here — the only real risk is the dialog having been
+        # destroyed (closed) before the data arrived, which self.IsShown()
+        # doesn't reliably guard anyway once the wx C++ object is gone.
         try:
             self._populate_personal_unsafe(data)
+        except RuntimeError:
+            pass  # dialog was closed/destroyed before data arrived
         except Exception:
             # See _populate_group()'s equivalent guard.
             logging.exception("[ConversationDataDialog] _populate_personal failed for %s", self._jid)
@@ -416,10 +426,16 @@ class ConversationDataDialog(wx.Dialog):
 
     def _populate_group(self, data: dict):
         """Fill the group Notebook tabs (called on main thread)."""
-        if not self or not self.IsShown():
-            return
+        # See _populate_personal()'s identical comment: the IsShown() gate
+        # this used to have lost a race against _fetch_data()'s background
+        # thread on every single group (a local WPPConnect group-info call
+        # is fast enough to consistently return before ShowModal() finishes
+        # entering its modal loop), so Overview/Participants/Media never
+        # populated for ANY group — always stuck on "loading".
         try:
             self._populate_group_unsafe(data)
+        except RuntimeError:
+            pass  # dialog was closed/destroyed before data arrived
         except Exception:
             # See _fetch_data(): this runs from a wx.CallAfter callback, so an
             # uncaught exception here is swallowed by wx's event loop with no

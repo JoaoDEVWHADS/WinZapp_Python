@@ -37,6 +37,7 @@ import wx
 from app_paths import _is_frozen
 from core.i18n import I18n
 from core.message_queue import PendingMessage
+from core.utils import looks_like_binary_blob
 
 
 def _notif_duration(seconds) -> str:
@@ -91,6 +92,8 @@ def _extract_msg_text(msg: dict) -> str:
     text = msg_obj.get("conversation") or ""
     if not text:
         text = (msg_obj.get("extendedTextMessage") or {}).get("text") or ""
+    if looks_like_binary_blob(text):
+        return ""
     return text
 
 
@@ -163,11 +166,14 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
 
     # ── Text ──────────────────────────────────────────────────────────────────
     if msg_type == "conversation":
-        return msg_obj.get("conversation") or ""
+        text = msg_obj.get("conversation") or ""
+        return i18n.t("notif_unsupported") if looks_like_binary_blob(text) else text
 
     if msg_type == "extendedTextMessage":
         ext  = msg_obj.get("extendedTextMessage") or {}
         text = ext.get("text") or ""
+        if looks_like_binary_blob(text):
+            return i18n.t("notif_unsupported")
         mentioned = (
             (msg.get("contextInfo") or {}).get("mentionedJid")
             or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
@@ -242,8 +248,48 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         return i18n.t("contact_message").format(name=name)
 
     # ── Location ──────────────────────────────────────────────────────────────
-    if msg_type == "locationMessage":
+    if msg_type in ("locationMessage", "liveLocationMessage"):
         return i18n.t("notif_location")
+
+    # ── Poll ──────────────────────────────────────────────────────────────────
+    if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
+        poll = (
+            msg_obj.get("pollCreationMessage")
+            or msg_obj.get("pollCreationMessageV2")
+            or msg_obj.get("pollCreationMessageV3")
+            or {}
+        )
+        name = (poll.get("name") or "").strip()
+        return i18n.t("notif_poll").format(name=name) if name else i18n.t("notif_poll_no_name")
+
+    # ── Buttons / list (message with selectable options) ────────────────────────
+    if msg_type == "buttonsMessage":
+        btns_msg = msg_obj.get("buttonsMessage") or {}
+        return (btns_msg.get("contentText") or btns_msg.get("text") or "").strip() or i18n.t("interactive_message")
+
+    if msg_type == "listMessage":
+        list_msg = msg_obj.get("listMessage") or {}
+        return (list_msg.get("title") or list_msg.get("description") or "").strip() or i18n.t("interactive_message")
+
+    if msg_type == "templateMessage":
+        return i18n.t("notif_template")
+
+    if msg_type == "interactiveMessage":
+        inter = msg_obj.get("interactiveMessage") or {}
+        body = (inter.get("body") or {}).get("text", "")
+        return body or i18n.t("interactive_message")
+
+    if msg_type == "buttonsResponseMessage":
+        btn = msg_obj.get("buttonsResponseMessage") or {}
+        return btn.get("selectedDisplayText") or i18n.t("interactive_reply")
+
+    if msg_type == "listResponseMessage":
+        lst = msg_obj.get("listResponseMessage") or {}
+        return (
+            lst.get("title")
+            or (lst.get("singleSelectReply") or {}).get("selectedRowId")
+            or i18n.t("list_reply")
+        )
 
     # ── Reaction ──────────────────────────────────────────────────────────────
     if msg_type == "reactionMessage":
@@ -369,9 +415,18 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
 
     if remote_jid.endswith("@g.us"):
         chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
+        # _resolve_contact_name() always returns None for a group (its own
+        # docstring: "Groups are skipped") — calling it here was dead code.
+        # chat.get("name", "") alone also misses WPPConnect's raw chat shape,
+        # which nests a group's real name under groupMetadata.subject rather
+        # than a flat "name"/"subject" key (see _group_name_from_chat_dict()'s
+        # own docstring) — routine right after a fresh pairing, before
+        # WhatsApp Web finishes hydrating group metadata. Without this, a
+        # notification could say "Grupo sem nome" for a group whose name the
+        # chat list itself already displays correctly via the same fallback.
         group_name = (
-            main_window._resolve_contact_name(chat)
-            or chat.get("name", "")
+            chat.get("name", "")
+            or main_window._group_name_from_chat_dict(chat)
             or chat.get("pushName", "")
         )
         if not group_name or not group_name.strip():
@@ -389,10 +444,25 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         )
     else:
         chat = main_window.chats.get(remote_jid) or {"remoteJid": remote_jid}
+        # format_number(remote_jid) must NEVER run on a bare, unresolved
+        # @lid: a LID's digits are an internal WhatsApp identifier, not a
+        # phone number, and formatting them as one produced notifications
+        # reading "Nova mensagem de 133041125077153" — meaningless to the
+        # user and not even a real phone number they could recognize.
+        # _resolve_participant_name() already refuses to do this (an
+        # unresolved @lid makes it return "" rather than format the raw
+        # digits), so only fall through to format_number() for a JID that
+        # is actually phone-shaped; otherwise show "Contato sem nome",
+        # exactly like the chat list already does when it can't name a chat.
+        can_format_as_phone = (
+            remote_jid.endswith(("@s.whatsapp.net", "@c.us"))
+            or remote_jid in getattr(main_window, "_lid_to_phone", {})
+        )
         base = (
             main_window._resolve_contact_name(chat)
             or _resolve_participant_name(remote_jid, push_name, main_window)
-            or format_number(remote_jid)
+            or (format_number(remote_jid) if can_format_as_phone else "")
+            or i18n.t("unknown_contact")
         )
 
     prefix = _build_notif_prefix(msg, main_window, i18n)
