@@ -9978,11 +9978,6 @@ class MainWindow(wx.Frame):
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
-        
-        # Check if history is already marked as exhausted in-memory
-        if remote_jid in getattr(self, "_exhausted_chats", set()):
-            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
-            return []
 
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in

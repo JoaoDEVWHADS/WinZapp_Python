@@ -3307,17 +3307,9 @@ class ConversationsPanel(wx.Panel):
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
-        reached_start = phone_jid in getattr(self, "_reached_server_start", {})
-        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
-        if phone_jid and reached_start:
-            # Say so instead of doing nothing. WhatsApp only transfers a recent
-            # window of each conversation to a linked device and keeps the rest
-            # on the phone (the chat record's endOfHistoryTransferType says so),
-            # so there is genuinely nothing more to fetch — but pressing Home and
-            # getting silence is indistinguishable from the app being broken,
-            # especially with a screen reader.
-            self._is_loading_more = False
-            return
+        # Allow retry if user triggers scrolling up so history beyond 200 can be queried
+        reached_start = False
+        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}")
         
         # Get oldest non-separator and non-pending message ID
         oldest_msg = None
