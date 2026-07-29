@@ -936,15 +936,31 @@ class ConversationsPanel(wx.Panel):
             display_note = f"{i18n.t('phone_label')}: {display_note}"
         self._conv_data_btn.SetNote(display_note)
 
-        is_channel = jid.endswith("@newsletter")
+        is_channel        = jid.endswith("@newsletter")
+        admins_only_group = is_group and self.main_window._is_group_send_restricted(conversation)
         if is_channel:
+            self.message_field.Enable()
+            self.message_field.SetEditable(True)
             self.message_field.Disable()
             self.send_message_btn.Disable()
             self.record_voice_message_btn.Disable()
             self._add_attachment_btn.Disable()
             self.message_label.SetLabel(i18n.t("channel_read_only"))
+        elif admins_only_group:
+            # Keep the field enabled/focusable (unlike the channel case
+            # above) so it stays reachable via Tab/the Alt+D accelerator and
+            # NVDA can announce its read-only state — only actual editing is
+            # blocked. Sending/attaching/recording would just be rejected by
+            # WhatsApp Web anyway, so those stay disabled like the channel case.
+            self.message_field.Enable()
+            self.message_field.SetEditable(False)
+            self.send_message_btn.Disable()
+            self.record_voice_message_btn.Disable()
+            self._add_attachment_btn.Disable()
+            self.message_label.SetLabel(i18n.t("group_admins_only"))
         else:
             self.message_field.Enable()
+            self.message_field.SetEditable(True)
             self.send_message_btn.Enable()
             self.record_voice_message_btn.Enable()
             self._add_attachment_btn.Enable()
@@ -958,11 +974,15 @@ class ConversationsPanel(wx.Panel):
         self.Layout()
         # Snapshot before the background thread zeros unreadCount on the same dict
         self._pending_open_unread = effective_unread_count(conversation)
-        threading.Thread(
-            target=self.main_window.mark_conversation_as_read,
-            args=(jid,),
-            daemon=True,
-        ).start()
+        # mark_conversation_as_read() finishes its synchronous part (zero the
+        # count, wx.CallAfter the chat-list row's text update) almost
+        # instantly — starting the thread here raced against the focus
+        # CallAfter scheduled at the bottom of this method and routinely won,
+        # so NVDA announced the chat-list row's text changing to "read"
+        # before announcing the newly focused messages list/message field
+        # from opening the conversation. Starting it from the SAME
+        # wx.CallAfter queue as the focus change, scheduled further down,
+        # guarantees FIFO order instead of leaving it to thread-timing luck.
         # Background: fetch profile/last-seen and update button note
         threading.Thread(
             target=self._fetch_and_update_profile,
@@ -1031,6 +1051,17 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(_do_focus_messages_list)
         else:
             wx.CallAfter(_do_focus_message_field)
+
+        # Queued after the focus CallAfter above so it always runs later on
+        # the event loop — see this method's comment where the thread start
+        # used to live, right after _pending_open_unread was snapshotted.
+        def _start_mark_as_read():
+            threading.Thread(
+                target=self.main_window.mark_conversation_as_read,
+                args=(jid,),
+                daemon=True,
+            ).start()
+        wx.CallAfter(_start_mark_as_read)
 
     def on_search_query_changed(self, event):
         # Route through add_chats_to_ui so the active filter and proper sort

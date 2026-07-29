@@ -25,17 +25,35 @@ class AccessibleSearchPrevResult(wx.Accessible):
 
 
 class AccessibleStatusPrev(wx.Accessible):
-    """Reports Ctrl+Left as the keyboard shortcut for the previous-status button."""
+    """Reports the keyboard shortcut for the previous-status button.
+
+    Takes the announced string as a constructor argument (i18n's
+    "accessible_ctrl_left") instead of a hardcoded "Ctrl+Left" — NVDA reads
+    whatever GetKeyboardShortcut() returns completely verbatim, with no
+    localization of its own, so a literal English string here was announced
+    to every user regardless of the app's configured language.
+    """
+
+    def __init__(self, shortcut="Ctrl+Left"):
+        super().__init__()
+        self.shortcut = shortcut
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Left")
+        return (wx.ACC_OK, self.shortcut)
 
 
 class AccessibleStatusNext(wx.Accessible):
-    """Reports Ctrl+Right as the keyboard shortcut for the next-status button."""
+    """Reports the keyboard shortcut for the next-status button.
+
+    See AccessibleStatusPrev's docstring — same reasoning.
+    """
+
+    def __init__(self, shortcut="Ctrl+Right"):
+        super().__init__()
+        self.shortcut = shortcut
 
     def GetKeyboardShortcut(self, childId):
-        return (wx.ACC_OK, "Ctrl+Right")
+        return (wx.ACC_OK, self.shortcut)
 
 
 class AccessibleSearchConversations(wx.Accessible):

@@ -56,12 +56,12 @@ class MyStatusDialog(wx.Dialog):
             nav_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
             self._prev_btn = wx.Button(panel, label=i18n.t("status_prev"))
-            self._prev_btn.SetAccessible(AccessibleStatusPrev())
+            self._prev_btn.SetAccessible(AccessibleStatusPrev(i18n.t("accessible_ctrl_left")))
             self._prev_btn.Bind(wx.EVT_BUTTON, self._on_prev)
             nav_sizer.Add(self._prev_btn, 0, wx.RIGHT, 5)
 
             self._next_btn = wx.Button(panel, label=i18n.t("status_next"))
-            self._next_btn.SetAccessible(AccessibleStatusNext())
+            self._next_btn.SetAccessible(AccessibleStatusNext(i18n.t("accessible_ctrl_right")))
             self._next_btn.Bind(wx.EVT_BUTTON, self._on_next)
             nav_sizer.Add(self._next_btn, 0)
 
@@ -203,12 +203,12 @@ class StatusPanel(wx.Panel):
         nav_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         self._prev_status_btn = wx.Button(self._viewer_panel, label=i18n.t("status_prev"))
-        self._prev_status_btn.SetAccessible(AccessibleStatusPrev())
+        self._prev_status_btn.SetAccessible(AccessibleStatusPrev(i18n.t("accessible_ctrl_left")))
         self._prev_status_btn.Bind(wx.EVT_BUTTON, self._on_prev_status)
         nav_sizer.Add(self._prev_status_btn, 0, wx.RIGHT, 5)
 
         self._next_status_btn = wx.Button(self._viewer_panel, label=i18n.t("status_next"))
-        self._next_status_btn.SetAccessible(AccessibleStatusNext())
+        self._next_status_btn.SetAccessible(AccessibleStatusNext(i18n.t("accessible_ctrl_right")))
         self._next_status_btn.Bind(wx.EVT_BUTTON, self._on_next_status)
         nav_sizer.Add(self._next_status_btn, 0, wx.RIGHT, 5)
 

@@ -6239,6 +6239,62 @@ class MainWindow(wx.Frame):
                 return gm_subject
         return ""
 
+    def _is_group_send_restricted(self, chat: dict) -> bool:
+        """True when `chat` is a WhatsApp group set to "only admins can send
+        messages" (Baileys/WPPConnect's groupMetadata.announce) and the
+        current user isn't one of those admins.
+
+        Only ever reads group metadata local sync already has — this must
+        stay synchronous and side-effect-free since it runs from
+        navigate_to_conversation() on the UI thread. If the data needed to
+        decide isn't available yet (participants not hydrated in local
+        metadata), this fails OPEN (returns False, message field stays
+        writable): WhatsApp Web itself is the actual source of truth and
+        would reject the send if this guess were wrong in that direction,
+        whereas guessing wrong the other way would silently lock a user out
+        of a group they can genuinely post in.
+        """
+        jid = chat.get("remoteJid", "")
+        if not jid.endswith("@g.us"):
+            return False
+        group_meta = chat.get("groupMetadata")
+        if not isinstance(group_meta, dict):
+            group_meta = {}
+        announce = _parse_bool_flag(group_meta.get("announce"))
+        if announce is None:
+            announce = _parse_bool_flag(chat.get("announce"))
+        if not announce:
+            return False
+
+        participants = group_meta.get("participants") or chat.get("participants") or []
+        if not isinstance(participants, list) or not participants:
+            return False  # can't verify admin status — fail open
+
+        def _phone_part(j) -> str:
+            if not isinstance(j, str):
+                return ""
+            return j.rsplit("@", 1)[0].split(":")[0]
+
+        my_phone_digits = _phone_part(getattr(self, "my_jid", ""))
+        my_lid_digits   = _phone_part(getattr(self, "my_lid", ""))
+
+        for p in participants:
+            if not isinstance(p, dict):
+                continue
+            p_id = p.get("id") or ""
+            if isinstance(p_id, dict):
+                p_id = p_id.get("_serialized", "")
+            p_digits = _phone_part(p_id)
+            if not p_digits:
+                continue
+            is_me = (
+                (my_phone_digits and self._phone_digits_equivalent(p_digits, my_phone_digits))
+                or (my_lid_digits and p_digits == my_lid_digits)
+            )
+            if is_me:
+                return not bool(p.get("admin") or p.get("isAdmin"))
+        return False  # current user not found in participants — fail open
+
     def _fill_group_name(self, jid: str) -> str:
         """Fetch group info from API and cache the name.
 
