@@ -3049,7 +3049,7 @@ class MainWindow(wx.Frame):
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
+            os.path.join(node_modules, "@ffmpeg-installer"),
             os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
@@ -10044,9 +10044,12 @@ class MainWindow(wx.Frame):
                         alternate_jid = alt_lid
 
                 if alternate_jid and alternate_jid != phone:
-                    alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}"
-                    if participant and alternate_jid.endswith("@g.us"):
-                        alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}_{participant}"
+                    alt_serialized_id = serialized_id
+                    if "_" in serialized_id:
+                        parts = serialized_id.split("_")
+                        if len(parts) >= 3:
+                            parts[1] = alternate_jid
+                            alt_serialized_id = "_".join(parts)
                     alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}&direction=before&id={alt_serialized_id}"
                     logging.info(f"[fetch_older_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
                     try:
