@@ -64,7 +64,7 @@ _REPO_ZIP_MAIN = (
 )
 _REPO_ZIP_TAG  = (
     "https://github.com/wppconnect-team/wppconnect-server"
-    "/archive/refs/tags/{tag}.zip"
+    "/archive/{tag}.zip"
 )
 WPP_GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/wppconnect-team/wppconnect-server/releases/latest"
