@@ -4457,8 +4457,11 @@ class MainWindow(wx.Frame):
     # Consecutive notLogged/QRCODE readings required before believing the device
     # was really unlinked.  The health checker polls every ~30 s, so a genuine
     # logout is still noticed inside a minute — cheap insurance against a
-    # transient reading costing the user their entire local history.
-    _LOGOUT_CONFIRM_STRIKES = 2
+    # _LOGOUT_CONFIRM_STRIKES governs how many consecutive unlinked readings
+    # (notLogged, QRCODE) are required before confirming a real logout.
+    # WPPConnect transiently reports notLogged/QRCODE during the first 15–25 seconds
+    # of Chrome startup while restoring session cookies from userDataDir.
+    _LOGOUT_CONFIRM_STRIKES = 6
 
     def _logout_confirmed(self, status: str) -> bool:
         """True when an unlinked status has been seen often enough to act on it.
@@ -4719,6 +4722,7 @@ class MainWindow(wx.Frame):
                                 wx.OK | wx.ICON_ERROR,
                             )
                             self._on_disconnect()
+                            self._open_connection_dialog()
 
                         if self.settings.get("privateinfo", {}).get("paired"):
                             # Destructive path: _on_disconnect() wipes the whole
@@ -4728,15 +4732,10 @@ class MainWindow(wx.Frame):
                                 return
                             wx.CallAfter(_logout_with_warning)
                         else:
-                            # Not paired: there is nothing to lose (the database
-                            # is empty by definition) and _on_disconnect() is
-                            # what puts the pairing dialog on screen. Delaying it
-                            # behind the confirmation left the app sitting on
-                            # "sem conexão com o WhatsApp / modo offline" with no
-                            # way to connect — the guard was protecting data that
-                            # does not exist, at the cost of the one action the
-                            # user actually needed.
-                            wx.CallAfter(self._on_disconnect)
+                            def _show_pairing():
+                                self._on_disconnect()
+                                self._open_connection_dialog()
+                            wx.CallAfter(_show_pairing)
         except Exception as e:
             # The local API itself did not answer — we certainly cannot reach
             # WhatsApp through it either, but only once this has happened
