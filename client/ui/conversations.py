@@ -3072,8 +3072,30 @@ class ConversationsPanel(wx.Panel):
         # after the user has reached the unread region.
         if self._unread_sep_idx >= 0:
             if idx >= self._unread_sep_idx:
-                # Mark as read immediately (first time focus arrives)
-                if not self._unread_sep_dismiss_timer.IsRunning():
+                # Mark as read immediately (first time focus arrives) — but
+                # not while populate_messages() is still running
+                # (_populating_messages): that method's OWN default-placement
+                # Focus() call (landing exactly on the separator/last row when
+                # a conversation is freshly opened) fires this same
+                # EVT_LIST_ITEM_FOCUSED synchronously, well before the
+                # deferred wx.CallAfter in navigate_to_conversation() ever
+                # moves real keyboard focus off the conversations-list row
+                # the user just pressed Enter on. Starting the mark-as-read
+                # thread here raced ahead of that CallAfter and could get its
+                # own wx.CallAfter(_refresh_chat_row_in_list) queued (and
+                # executed) first — updating the still-focused conversations
+                # list row's text (removing the unread badge) before focus
+                # had actually moved away from it, so NVDA re-announced the
+                # row's new text instead of the newly focused messages
+                # list/message field. navigate_to_conversation() already
+                # starts its own mark-as-read thread (deferred until after
+                # that focus change) for the "just opened this conversation"
+                # case, so nothing is lost by skipping it here. The dismiss
+                # timer itself still arms normally either way — it only
+                # removes the separator row 2s later and never touches OS
+                # focus, so it isn't part of this race.
+                if (not self._unread_sep_dismiss_timer.IsRunning()
+                        and not getattr(self, "_populating_messages", False)):
                     if self.conversation is not None:
                         jid = self.conversation.get("remoteJid", "")
                         if jid:
@@ -3082,6 +3104,7 @@ class ConversationsPanel(wx.Panel):
                                 args=(jid,),
                                 daemon=True,
                             ).start()
+                if not self._unread_sep_dismiss_timer.IsRunning():
                     self._unread_sep_dismiss_timer.StartOnce(2000)
 
         # Show audio controls only when the focused item IS the playing audio.
