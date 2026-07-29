@@ -1477,10 +1477,13 @@ export async function getMessages(req: Request, res: Response) {
           }
         };
 
-        // Ensure the chat is loaded in the browser store
+        // Ensure the chat is loaded and earlier history is fetched from WhatsApp Web
         try {
           if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
             await (window as any).WPP.chat.find(chatId);
+          }
+          if ((window as any).WPP.chat && (window as any).WPP.chat.loadEarlierMessages) {
+            await (window as any).WPP.chat.loadEarlierMessages(chatId);
           }
         } catch (e) {
           // Ignore
