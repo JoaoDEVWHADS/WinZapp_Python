@@ -3469,7 +3469,7 @@ class ConversationsPanel(wx.Panel):
             if idx >= 0:
                 self._do_activate_message(idx)
         elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_HOME):
-            if idx == 0 and not self._is_loading_more:
+            if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
                     self._load_more_messages()
                 else:

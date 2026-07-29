@@ -1486,11 +1486,16 @@ export async function getMessages(req: Request, res: Response) {
               if (m) return m;
             }
 
-            // Fallback 3: search Store.Msg.models by raw message ID (e.g. 3EB07B3AFDC310BCD8C493)
+            // Fallback 3: search Store.Msg.models by raw message ID or prefix match (group messages with participant suffix)
             const rawId = parts.length > 2 ? parts[2] : msgId;
             if ((window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
               const models = (window as any).Store.Msg.models;
-              const found = models.find((item: any) => item && item.id && (item.id.id === rawId || item.id._serialized === msgId));
+              const found = models.find((item: any) => {
+                if (!item || !item.id) return false;
+                const ser = item.id._serialized || '';
+                const itemId = item.id.id || '';
+                return itemId === rawId || ser === msgId || (rawId && ser.includes(rawId));
+              });
               if (found) return found;
             }
             return null;
