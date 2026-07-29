@@ -467,6 +467,7 @@ def assemble_staging():
     api_dst = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0
+    custom_src_count = 0
     for abs_path, rel_path in walk_dir(API_DIR,
                                        exclude_top_dirs=API_EXCLUDE_DIRS,
                                        exclude_top_files=API_EXCLUDE_FILES,
