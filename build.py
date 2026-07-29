@@ -403,18 +403,33 @@ def assemble_staging():
     if not hits:
         hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
     
-    ffmpeg_src = None
-    if hits:
-        ffmpeg_src = hits[0]
-    else:
-        ffmpeg_src = shutil.which("ffmpeg")
+    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
 
-    if ffmpeg_src and os.path.isfile(ffmpeg_src):
+    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+        # Attempt automatic download for Windows target build
+        try:
+            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
+            import zipfile
+            import tempfile
+            import urllib.request
+            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
+            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
+            urllib.request.urlretrieve(dl_url, temp_zip)
+            with zipfile.ZipFile(temp_zip, "r") as zf:
+                zf.extract("ffmpeg.exe", lib_dir)
+            ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
+            if os.path.isfile(ffmpeg_dst):
+                ffmpeg_src = ffmpeg_dst
+                print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
+        except Exception as dl_err:
+            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
+
+    if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
         ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
         ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
         shutil.copy2(ffmpeg_src, ffmpeg_dst)
         print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
-    else:
+    elif not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
         print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
 
     print(f"  -> lib/  ({dll_count} DLLs total)")
