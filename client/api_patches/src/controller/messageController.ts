@@ -386,18 +386,7 @@ export async function sendVoice64(req: Request, res: Response) {
                 quotedMsg,
                 waitForAck: false,
               }).then((result: any) => ({ id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 }))
-                .catch(() => {
-                  // Fallback: if isPtt: true fails (non-Opus WAV audio), send as regular audio attachment
-                  return (window as any).WPP.chat.sendFileMessage(to, base64, {
-                    type: 'audio',
-                    isPtt: false,
-                    filename: 'Voice Audio.wav',
-                    caption: '',
-                    quotedMsg,
-                    waitForAck: false,
-                  }).then((res: any) => ({ id: res?.id?.toString?.() ?? null, ack: res?.ack ?? 0 }))
-                    .catch((e: any) => ({ error: e?.message || String(e), ack: -1 }));
-                });
+                .catch((err: any) => ({ error: err?.message || String(err), ack: -1 }));
             } catch (err: any) {
               return Promise.resolve({ error: err?.message || String(err), ack: -1 });
             }
