@@ -10010,13 +10010,20 @@ class MainWindow(wx.Frame):
         # WPPConnect's browser store also matches the chat JID (LID if
         # available). These used to be computed twice under two different
         # names for no reason.
-        phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
+        # Handle group JIDs (@g.us) vs user JIDs (@c.us / @s.whatsapp.net)
+        if remote_jid.endswith("@g.us"):
+            phone = remote_jid
+        else:
+            phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
         msg_id = _key.get("id", "") or oldest_msg.get("id", "")
 
-        if msg_id and (msg_id.startswith("true_") or msg_id.startswith("false_")):
+        serialized_key = _key.get("_serialized", "") or oldest_msg.get("_serialized", "")
+        if serialized_key:
+            serialized_id = serialized_key
+        elif msg_id and (msg_id.startswith("true_") or msg_id.startswith("false_")):
             serialized_id = msg_id
         else:
             raw_id = msg_id

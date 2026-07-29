@@ -76,13 +76,34 @@ class SoundSystem:
                 except Exception:
                     pass
 
+                # Pre-load libopus-0.dll if present in same directory to satisfy dependency resolution
+                opus_dep = os.path.join(d, "libopus-0.dll")
+                if os.path.isfile(opus_dep):
+                    try:
+                        ctypes.WinDLL(opus_dep)
+                    except Exception as _e:
+                        logging.debug("[sound_system] Failed pre-loading %s: %s", opus_dep, _e)
+
+                # Pre-load the plugin DLL itself via WinDLL so Windows handles dependent symbols
+                try:
+                    ctypes.WinDLL(path)
+                except Exception as _e:
+                    logging.debug("[sound_system] WinDLL pre-load for %s: %s", path, _e)
+
                 bass_dll = ctypes.WinDLL("bass.dll")
                 BASS_PluginLoad = bass_dll.BASS_PluginLoad
+                
+                # 1) Try standard UTF-8 string
                 BASS_PluginLoad.restype  = ctypes.c_ulong
                 BASS_PluginLoad.argtypes = [ctypes.c_char_p, ctypes.c_ulong]
-                
-                # Pass just the filename to BASS_PluginLoad since we already changed the CWD to the target directory
                 handle = BASS_PluginLoad(dll_name.encode('utf-8'), 0)
+                
+                # 2) Try Unicode (BASS_UNICODE = 0x80000000) with full path if relative UTF-8 failed
+                if not handle:
+                    BASS_UNICODE = 0x80000000
+                    BASS_PluginLoad.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong]
+                    handle = BASS_PluginLoad(path, BASS_UNICODE)
+
                 if handle:
                     logging.info("[sound_system] BASS_PluginLoad OK: %s (handle=%s)", path, handle)
                     return True
@@ -113,9 +134,10 @@ class SoundSystem:
         self.enabled = True
         self.output = sound_lib.output.Output()
         # Load BASS plugins AFTER Output() so BASS device is initialised
-        if not self._load_bass_plugin('bassopus.dll'):
+        if not (self._load_bass_plugin('bassopus.dll') or self._load_bass_plugin('bass_opus.dll')):
             logging.warning("[sound_system] bassopus.dll not loaded — OGG Opus playback will fail")
-        self._load_bass_plugin('bass_aac.dll')
+        if not (self._load_bass_plugin('bass_aac.dll') or self._load_bass_plugin('bassaac.dll')):
+            logging.warning("[sound_system] bass_aac.dll not loaded")
 
 
 
