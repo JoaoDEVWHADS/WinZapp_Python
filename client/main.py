@@ -8410,9 +8410,39 @@ class MainWindow(wx.Frame):
         if not chat:
             return
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        # _fetch_remote_message_ids() only asks WhatsApp Web for its last
+        # `limit` messages (same messages_page_size setting) — comparing the
+        # FULL local history against that limited remote window meant any
+        # older local message, once a busy conversation pushed it past the
+        # server's last-`limit` cutoff, looked "missing" and got deleted
+        # locally even though it was never actually removed anywhere. This
+        # was reported live as a message that had demonstrably been
+        # delivered (visible to other group members) vanishing from
+        # WinZapp's own local history shortly after being sent.
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        recent_records = records[-limit:] if len(records) > limit else records
+
+        # Also exclude anything sent/received in roughly the last two
+        # minutes: WhatsApp Web's own /get-messages can lag behind a message
+        # actually reaching the server by a few seconds, so a fetch that
+        # hasn't caught up yet would otherwise flag a message as "missing"
+        # (and delete it) purely because of that race, not a real deletion.
+        _stable_cutoff = time.time() - 120
+
+        def _is_stable(r: dict) -> bool:
+            ts = r.get("messageTimestamp") or r.get("timestamp") or 0
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                return False
+            if ts > 1_000_000_000_000:
+                ts //= 1000
+            return bool(ts) and ts < _stable_cutoff
+
         local_ids = {
-            r.get("key", {}).get("id") for r in records
-            if isinstance(r, dict) and not r.get("_local_pending") and r.get("key", {}).get("id")
+            r.get("key", {}).get("id") for r in recent_records
+            if isinstance(r, dict) and not r.get("_local_pending")
+            and r.get("key", {}).get("id") and _is_stable(r)
         }
         # Too little history for "the server has fewer messages" to mean
         # anything other than "this is just a short conversation".
@@ -9443,7 +9473,12 @@ class MainWindow(wx.Frame):
             phone = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
             if phone:
                 return format_number(phone)
-        if not jid_norm.endswith(("@g.us", "@lid")):
+            # No phone mapping yet for this @lid — `local` here is just the
+            # raw @lid digits, meaningless to a user ("Fulano está digitando"
+            # showing a bare numeric ID instead of a name/phone). A generic
+            # placeholder is far more useful than exposing that internal ID.
+            return self.i18n.t("unnamed_participant")
+        if not jid_norm.endswith("@g.us"):
             return format_number(jid_norm)
         return local
 
@@ -9545,6 +9580,17 @@ class MainWindow(wx.Frame):
                 label = self._presence_label_for_chat(chat_jid_norm, is_group)
                 if label:
                     item_text += f" {label}"
+                # Mirrors add_chats_to_ui()'s _build_item_text() — without
+                # these, a single-row refresh (presence/unread changes, which
+                # fire far more often than a full rebuild) silently dropped
+                # the pinned/muted/blocked suffix from a row until the next
+                # full rebuild happened to run.
+                if self.is_chat_pinned(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('pinned_suffix')})"
+                if self.is_chat_muted(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('muted')})"
+                if self.is_contact_blocked(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('blocked')})"
                 # Only touch the row when the visible text actually changes. Presence
                 # bursts (online/offline toggles that don't alter the row) otherwise
                 # rewrote the focused item's text repeatedly, making NVDA announce the
@@ -12390,6 +12436,8 @@ class MainWindow(wx.Frame):
                 presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
                 if presence_label:
                     text += f" {presence_label}"
+            if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
+                text += f" ({self.i18n.t('pinned_suffix')})"
             if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
                 text += f" ({self.i18n.t('muted')})"
             if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):

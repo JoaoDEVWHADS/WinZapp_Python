@@ -853,6 +853,7 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.message_field.SetFocus)
             return
         self._stop_typing_for_current_conversation()
+        self._cancel_active_recording()
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -1906,19 +1907,39 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_write_and_enqueue, daemon=True).start()
 
+    def _cancel_active_recording(self):
+        """Stop and discard an in-progress voice recording, if any.
+
+        Recording is scoped to whichever conversation was open when it
+        started — there is no "background recording" that survives leaving
+        the chat, so closing OR switching away from that conversation must
+        cancel it the same way, rather than leaving _is_recording true and
+        the voice panel visible while main_window.conversation has already
+        moved on. Without this on the switch path specifically, pressing
+        Enviar afterwards sent the recording to whatever conversation the
+        user had since navigated to — not the one it was actually recorded
+        in, since _send_voice_message() reads self.conversation at send
+        time, not at record-start time.
+        """
+        if not self._is_recording:
+            return
+        self._stop_recording_stream()
+        self._is_recording     = False
+        self._recording_paused = False
+        self._recording_frames = []
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
+        self._voice_panel.Hide()
+        self.record_voice_message_btn.Show()
+
     def close_conversation(self, event=None):
         if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
             self._hide_mention_suggestions()
             self.message_field.SetFocus()
             return
         self._stop_typing_for_current_conversation()
-        if self._is_recording:
-            self._stop_recording_stream()
-            self._is_recording     = False
-            self._recording_paused = False
-            self._recording_frames = []
-            self._voice_panel.Hide()
-            self.record_voice_message_btn.Show()
+        self._cancel_active_recording()
         self._hide_audio_controls()
         self._hide_all_media_controls()
         self._hide_attachment_panel()
