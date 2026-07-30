@@ -189,7 +189,9 @@ def main():
                 # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
-                         # Run npm install
+                    npm_bin = win_npm
+
+        # Run npm install
         print("[INFO] Running npm install...")
         try:
             if npm_bin.endswith("npm-cli.js"):
@@ -233,7 +235,7 @@ def main():
                 _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR, check=False)
             print("[OK] WPPConnect Server dependencies installed and built successfully.")
         except Exception as e:
-            print(f"[WARNING] npm run build inside setup_api.py encountered non-fatal notice: {e}")on-fatal notice: {e}")
+            print(f"[WARNING] npm run build inside setup_api.py encountered non-fatal notice: {e}")
 
     except Exception as e:
         print(f"[WARNING] Node.js setup_api step: {e}")
