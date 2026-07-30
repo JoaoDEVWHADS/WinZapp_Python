@@ -159,8 +159,16 @@ def main():
             with open(dest_path, "wb") as f:
                 f.write(content)
         print("[INFO] Re-applied custom files after checking out tag.")
-    else:
-        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
+    # Save current commit SHA to client/api/.commit_sha for version checking
+    try:
+        res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
+            with open(sha_file, "w", encoding="utf-8") as f:
+                f.write(res.stdout.strip())
+            print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
+    except Exception as e:
+        print(f"[WARNING] Could not save .commit_sha: {e}")
 
     print()
     print("[OK] WPPConnect Server ready at client/api/")
@@ -180,10 +188,13 @@ def main():
             win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
             if os.path.isfile(win_node):
                 node_bin = win_node
-                # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
                     npm_bin = win_npm
+
+            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
+            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
+            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
 
         # Run npm install
         print("[INFO] Running npm install...")

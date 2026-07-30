@@ -490,6 +490,9 @@ class MainWindow(wx.Frame):
         self._resolving_lids = set()
         self._lid_resolution_lock = threading.Lock()
         self._media_sync_running = False
+        self._update_checker = None
+        self._wpp_update_checker = None
+        self._notification_sound_cache = {}
 
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
@@ -1644,6 +1647,8 @@ class MainWindow(wx.Frame):
         else:
             self._wpp_update_checker.start()
 
+
+
     def _on_force_reinstall_wpp(self, event):
         """
         Ajuda > Forçar reinstalação da WPPConnect: always fetches whatever is
@@ -1873,9 +1878,9 @@ class MainWindow(wx.Frame):
             self.tray_icon = None
         if hasattr(self, "message_queue"):
             self.message_queue.stop()
-        if self._update_checker is not None:
+        if getattr(self, "_update_checker", None) is not None:
             self._update_checker.stop()
-        if self._wpp_update_checker is not None:
+        if getattr(self, "_wpp_update_checker", None) is not None:
             self._wpp_update_checker.stop()
         self._stop_wpp_server()
         if hasattr(self, "db") and self.db is not None:
@@ -3044,8 +3049,8 @@ class MainWindow(wx.Frame):
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
-            os.path.join(node_modules, "@babel", "runtime"),
+            os.path.join(node_modules, "express"),
+            os.path.join(node_modules, "@wppconnect-team"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
@@ -3059,7 +3064,8 @@ class MainWindow(wx.Frame):
                     npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
                     npm_cmd  = [node_exe, npm_cli]
                     node_dir = resource_path("node")
-                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+                    git_dir  = resource_path("git", "cmd")
+                    path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
                 else:
                     local_node = resource_path("node", "node")
                     if os.path.isfile(local_node):
@@ -3072,7 +3078,8 @@ class MainWindow(wx.Frame):
                     else:
                         npm_cmd = [shutil.which("npm") or "npm"]
                     node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+                    git_dir  = resource_path("git", "bin")
+                    path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
 
                 npm_env  = {
                     **os.environ,
@@ -3142,7 +3149,17 @@ class MainWindow(wx.Frame):
         return default
 
     def _get_installed_wpp_version(self) -> str:
-        """Read the WPPConnect Server version from api/package.json."""
+        """Read the WPPConnect Server commit SHA or version from api/."""
+        sha_path = resource_path("api", ".commit_sha")
+        try:
+            if os.path.isfile(sha_path):
+                with open(sha_path, encoding="utf-8") as fh:
+                    sha = fh.read().strip()
+                    if sha:
+                        return sha
+        except Exception:
+            pass
+
         pkg_path = resource_path("api", "package.json")
         try:
             with open(pkg_path, encoding="utf-8") as fh:
@@ -3151,6 +3168,7 @@ class MainWindow(wx.Frame):
             return pkg.get("version", "")
         except Exception:
             return ""
+
 
     @staticmethod
     def _version_is_below(installed: str, minimum: str) -> bool:
@@ -4439,8 +4457,11 @@ class MainWindow(wx.Frame):
     # Consecutive notLogged/QRCODE readings required before believing the device
     # was really unlinked.  The health checker polls every ~30 s, so a genuine
     # logout is still noticed inside a minute — cheap insurance against a
-    # transient reading costing the user their entire local history.
-    _LOGOUT_CONFIRM_STRIKES = 2
+    # _LOGOUT_CONFIRM_STRIKES governs how many consecutive unlinked readings
+    # (notLogged, QRCODE) are required before confirming a real logout.
+    # WPPConnect transiently reports notLogged/QRCODE during the first 15–25 seconds
+    # of Chrome startup while restoring session cookies from userDataDir.
+    _LOGOUT_CONFIRM_STRIKES = 6
 
     def _logout_confirmed(self, status: str) -> bool:
         """True when an unlinked status has been seen often enough to act on it.
@@ -4701,6 +4722,7 @@ class MainWindow(wx.Frame):
                                 wx.OK | wx.ICON_ERROR,
                             )
                             self._on_disconnect()
+                            self._open_connection_dialog()
 
                         if self.settings.get("privateinfo", {}).get("paired"):
                             # Destructive path: _on_disconnect() wipes the whole
@@ -4710,15 +4732,10 @@ class MainWindow(wx.Frame):
                                 return
                             wx.CallAfter(_logout_with_warning)
                         else:
-                            # Not paired: there is nothing to lose (the database
-                            # is empty by definition) and _on_disconnect() is
-                            # what puts the pairing dialog on screen. Delaying it
-                            # behind the confirmation left the app sitting on
-                            # "sem conexão com o WhatsApp / modo offline" with no
-                            # way to connect — the guard was protecting data that
-                            # does not exist, at the cost of the one action the
-                            # user actually needed.
-                            wx.CallAfter(self._on_disconnect)
+                            def _show_pairing():
+                                self._on_disconnect()
+                                self._open_connection_dialog()
+                            wx.CallAfter(_show_pairing)
         except Exception as e:
             # The local API itself did not answer — we certainly cannot reach
             # WhatsApp through it either, but only once this has happened
@@ -5502,7 +5519,7 @@ class MainWindow(wx.Frame):
         # /group-info, six at a time and with a 10 s timeout each, instead of
         # one at a time with no timeout at all.  A named group is unaffected
         # either way: its subject is already in the store and still serialises.
-        payload = {"ignoreGroupMetadata": True}
+        payload = {"ignoreGroupMetadata": True, "count": 5000}
 
         # Escalating per-request timeouts instead of a flat 120 s × 3.
         #
@@ -7759,6 +7776,12 @@ class MainWindow(wx.Frame):
         if not valid_chats:
             return
             
+        # Sort chats by most recent active timestamp
+        try:
+            valid_chats = sorted(valid_chats, key=lambda c: c.get("t", 0) or 0, reverse=True)
+        except Exception:
+            pass
+            
         # Parallel HTTP calls dramatically reduce sync time.  WPPConnect handles
         # concurrent requests fine; cap at 6 workers to avoid overloading it.
         max_workers = min(6, len(valid_chats))
@@ -8942,20 +8965,38 @@ class MainWindow(wx.Frame):
         """Locate ffmpeg binary: check bundled lib/ first, then node_modules, then system PATH."""
         import glob as _glob
         import shutil
-        # 1. Check bundled lib/ directory first (packaged during build for remote API support)
-        bundled_lib = resource_path("lib")
-        for name in ["ffmpeg.exe", "ffmpeg"]:
-            path = os.path.join(bundled_lib, name)
-            if os.path.isfile(path):
-                return path
+        # 1. Check bundled lib/ directory first (client/lib in dev mode, lib/ in compiled mode)
+        lib_dirs = [
+            resource_path("lib"),
+            resource_path("client", "lib"),
+            os.path.join(os.path.dirname(__file__), "lib"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "client", "lib"),
+        ]
+        for lib_dir in lib_dirs:
+            for name in ["ffmpeg.exe", "ffmpeg"]:
+                path = os.path.join(lib_dir, name)
+                if os.path.isfile(path):
+                    return path
 
         # 2. Bundled npm package (local API dev/run mode)
         installer_root = resource_path("api", "node_modules", "@ffmpeg-installer")
+        explicit_paths = [
+            os.path.join(installer_root, "win32-x64", "ffmpeg.exe"),
+            os.path.join(installer_root, "win32-ia32", "ffmpeg.exe"),
+            os.path.join(installer_root, "win32-arm64", "ffmpeg.exe"),
+            os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(installer_root, "ffmpeg", "bin", "ffmpeg"),
+        ]
+        for ep in explicit_paths:
+            if os.path.isfile(ep):
+                return ep
+
         hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
         if not hits:
             hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
         if hits:
             return hits[0]
+
         # 3. Fallback: ffmpeg on the system PATH (user-installed)
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
@@ -9127,7 +9168,7 @@ class MainWindow(wx.Frame):
             return self._classify_send_exception(e, "send_audio_message")
 
 
-    def _serialize_msg_id(self, remote_jid: str, msg_key: dict) -> str:
+    def _serialize_msg_id(self, remote_jid: str, msg_key: dict, full_msg: dict = None) -> str:
         """
         Build the full serialized WhatsApp message ID expected by WPPConnect
         (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
@@ -9148,6 +9189,13 @@ class MainWindow(wx.Frame):
                 return lid
             return jid.replace("@s.whatsapp.net", "@c.us")
 
+        def _format_1on1_chat(jid: str) -> str:
+            if not jid:
+                return jid
+            if jid.endswith("@s.whatsapp.net"):
+                return jid.replace("@s.whatsapp.net", "@c.us")
+            return jid
+
         msg_id = msg_key.get("id", "")
         if not msg_id:
             return ""
@@ -9156,23 +9204,34 @@ class MainWindow(wx.Frame):
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
-        chat = _resolve_to_lid_if_available(remote_jid or "")
+        
+        raw_remote = remote_jid or msg_key.get("remoteJid", "") or (full_msg.get("from") if isinstance(full_msg, dict) else "") or ""
+        if raw_remote.endswith("@g.us"):
+            chat = raw_remote
+        else:
+            chat = _format_1on1_chat(raw_remote)
+
         # Group messages always carry the sender's JID in the serialized id,
         # even for our own messages (fromMe=True). 1-on-1 keys have no
-        # participant — gate on chat type, since a 1:1 @lid message's key
-        # often still carries a (same-JID) remoteJidAlt, which would
-        # otherwise get wrongly appended as a 4th segment and break the
-        # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
+        # participant.
         participant = ""
         if chat.endswith("@g.us"):
             if from_me:
-                # Our own group messages: always use our LID/phone as participant.
-                raw = (getattr(self, "my_lid", "") or getattr(self, "my_jid", "") or msg_key.get("participant") or "")
+                raw = (
+                    getattr(self, "my_lid", "")
+                    or getattr(self, "my_jid", "")
+                    or msg_key.get("participant")
+                    or (full_msg.get("participant") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("author") if isinstance(full_msg, dict) else "")
+                    or ""
+                )
             else:
-                # Others' group messages: participant may be in key or a dedicated field.
                 raw = (
                     msg_key.get("participant")
                     or msg_key.get("author")
+                    or (full_msg.get("participant") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("author") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("from") if isinstance(full_msg, dict) and not str(full_msg.get("from", "")).endswith("@g.us") else "")
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
@@ -9838,7 +9897,7 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        msg_id = self._serialize_msg_id(_key.get("remoteJid", ""), _key)
+        msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -9848,16 +9907,44 @@ class MainWindow(wx.Frame):
         # Prepare body with media details to bypass Puppeteer cache lookups in WPPConnect Server
         body_data = dict(media)
         msg_type = media.get("messageType")
-        if msg_type and "message" in media:
-            inner = media["message"].get(msg_type)
+        msg_inner_obj = media.get("message")
+        if isinstance(msg_inner_obj, str):
+            try:
+                msg_inner_obj = json.loads(msg_inner_obj)
+            except Exception:
+                msg_inner_obj = None
+
+        if not msg_type and media.get("type"):
+            t = str(media.get("type"))
+            if t in ("audio", "ptt"):
+                msg_type = "audioMessage"
+            elif t == "image":
+                msg_type = "imageMessage"
+            elif t == "video":
+                msg_type = "videoMessage"
+            elif t in ("document", "doc"):
+                msg_type = "documentMessage"
+
+        if msg_type and isinstance(msg_inner_obj, dict):
+            inner = msg_inner_obj.get(msg_type)
             if isinstance(inner, dict):
                 if "mediaKey" in inner and inner["mediaKey"]:
                     body_data["mediaKey"] = inner["mediaKey"]
                 if "url" in inner and inner["url"]:
                     body_data["clientUrl"] = inner["url"]
+                if "directPath" in inner and inner["directPath"]:
+                    body_data["directPath"] = inner["directPath"]
                 if "mimetype" in inner and inner["mimetype"]:
                     body_data["mimetype"] = inner["mimetype"]
                 body_data["type"] = msg_type.replace("Message", "")
+
+        has_media_key = bool(body_data.get("mediaKey"))
+        has_client_url = bool(body_data.get("clientUrl"))
+        media_type = body_data.get("type", "")
+        logging.info(
+            "[get_base64_from_media] Requesting media for msg_id=%s, url=%s, has_mediaKey=%s, has_clientUrl=%s, type=%s",
+            msg_id, url, has_media_key, has_client_url, media_type
+        )
 
         max_attempts = 3
         for attempt in range(max_attempts):
@@ -9865,23 +9952,33 @@ class MainWindow(wx.Frame):
                 try:
                     response = requests.post(url, headers=headers, json=body_data, timeout=timeout)
                 except MediaExpiredError:
+                    logging.warning("[get_base64_from_media] MediaExpiredError for msg_id=%s", msg_id)
                     raise
                 except Exception as exc:
                     logging.warning(
-                        "[get_base64_from_media] request failed for %s (attempt %d/%d): %s",
+                        "[get_base64_from_media] request exception for %s (attempt %d/%d): %s",
                         msg_id, attempt + 1, max_attempts, exc,
                     )
                     if attempt < max_attempts - 1:
                         time.sleep(3)
                         continue
                     return ""
+                
+                resp_text = response.text or ""
+                logging.info(
+                    "[get_base64_from_media] WPPConnect server status=%d for msg_id=%s, body_snippet=%s",
+                    response.status_code, msg_id, resp_text[:200]
+                )
+
                 if response.status_code in (403, 410):
+                    logging.warning("[get_base64_from_media] HTTP %d (CDN expired) for %s", response.status_code, msg_id)
                     raise MediaExpiredError(response.status_code)
                 if response.status_code in (200, 201):
-                    return response.json().get("base64", "")
-                
+                    b64 = response.json().get("base64", "")
+                    logging.info("[get_base64_from_media] Success for %s — base64 len=%d", msg_id, len(b64))
+                    return b64
+
                 # Check for transient session not active errors
-                resp_text = response.text
                 if response.status_code in (400, 500) and any(x in resp_text.lower() for x in ("session is not active", "not active", "disconnected")):
                     logging.warning(
                         "[get_base64_from_media] session not active for %s, retrying in 3s (attempt %d/%d)",
@@ -9960,11 +10057,6 @@ class MainWindow(wx.Frame):
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
-        
-        # Check if history is already marked as exhausted in-memory
-        if remote_jid in getattr(self, "_exhausted_chats", set()):
-            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
-            return []
 
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
@@ -9973,38 +10065,19 @@ class MainWindow(wx.Frame):
         # WPPConnect's browser store also matches the chat JID (LID if
         # available). These used to be computed twice under two different
         # names for no reason.
-        phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
+        # Handle group JIDs (@g.us) vs user JIDs (@c.us / @s.whatsapp.net)
+        if remote_jid.endswith("@g.us"):
+            phone = remote_jid
+        else:
+            phone = self._resolve_jid_for_msg_key(remote_jid).replace("@s.whatsapp.net", "@c.us")
         resolved_phone = phone
 
         _key = oldest_msg.get("key", {})
-        msg_id = _key.get("id", "")
-        
-        # Get raw message ID from key
-        raw_id = msg_id
-        if msg_id and "_" in msg_id:
-            parts = msg_id.split("_")
-            raw_id = parts[2] if len(parts) > 2 else parts[-1]
-
-        # WPPConnect's getMessages ?id= param expects the FULLY serialized message key
-        # (e.g. "true_226465287282814@lid_3EB0D3BCB679BFCAFD2D39").
-        from_me = bool(_key.get("fromMe", False))
-        prefix = "true" if from_me else "false"
-        
-        participant = ""
-        if phone.endswith("@g.us"):
-            p_raw = _key.get("participant") or oldest_msg.get("participant") or ""
-            if msg_id and msg_id.startswith(("true_", "false_")):
-                parts = msg_id.split("_")
-                if len(parts) > 3:
-                    p_raw = parts[3]
-            if p_raw:
-                # Group participant JIDs must also be resolved using _resolve_jid_for_msg_key
-                participant = self._resolve_jid_for_msg_key(p_raw).replace("@s.whatsapp.net", "@c.us")
-
-        if participant:
-            serialized_id = f"{prefix}_{resolved_phone}_{raw_id}_{participant}"
+        serialized_key = _key.get("_serialized", "") or oldest_msg.get("_serialized", "")
+        if serialized_key:
+            serialized_id = serialized_key
         else:
-            serialized_id = f"{prefix}_{resolved_phone}_{raw_id}"
+            serialized_id = self._serialize_msg_id(remote_jid, _key if _key else oldest_msg)
 
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}&direction=before&id={serialized_id}"
@@ -10029,9 +10102,12 @@ class MainWindow(wx.Frame):
                         alternate_jid = alt_lid
 
                 if alternate_jid and alternate_jid != phone:
-                    alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}"
-                    if participant and alternate_jid.endswith("@g.us"):
-                        alt_serialized_id = f"{prefix}_{alternate_jid}_{raw_id}_{participant}"
+                    alt_serialized_id = serialized_id
+                    if "_" in serialized_id:
+                        parts = serialized_id.split("_")
+                        if len(parts) >= 3:
+                            parts[1] = alternate_jid
+                            alt_serialized_id = "_".join(parts)
                     alt_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{alternate_jid}?count={limit}&direction=before&id={alt_serialized_id}"
                     logging.info(f"[fetch_older_messages] Primary query failed. Retrying with alternate JID {alternate_jid}...")
                     try:
@@ -10735,6 +10811,9 @@ class MainWindow(wx.Frame):
         if not jid or jid.endswith("@newsletter"):
             return
         
+        if not hasattr(self, "_subscribed_presence_cache"):
+            self._subscribed_presence_cache = {}
+            
         jids_to_subscribe = [jid]
         phone_to_lid = getattr(self, "_phone_to_lid", {})
         lid_to_phone = getattr(self, "_lid_to_phone", {})
@@ -10744,9 +10823,20 @@ class MainWindow(wx.Frame):
         elif jid in lid_to_phone:
             jids_to_subscribe.append(lid_to_phone[jid])
             
+        now = time.time()
+        targets = []
+        for target_jid in set(jids_to_subscribe):
+            last_sub = self._subscribed_presence_cache.get(target_jid, 0)
+            if now - last_sub > 10.0:  # Throttle duplicate subscriptions within 10 seconds
+                self._subscribed_presence_cache[target_jid] = now
+                targets.append(target_jid)
+                
+        if not targets:
+            return
+            
         def _api():
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-            for target_jid in set(jids_to_subscribe):
+            for target_jid in targets:
                 is_group = target_jid.endswith("@g.us")
                 is_lid = target_jid.endswith("@lid")
                 phone = target_jid.replace("@s.whatsapp.net", "@c.us")
@@ -10758,6 +10848,7 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error("[subscribe_presence] Error subscribing to %s: %s", phone, e)
         threading.Thread(target=_api, daemon=True).start()
+
 
     def get_group_info(self, jid: str) -> dict:
         """Fetch group metadata via GET /api/{session}/group-info/{groupId}"""
