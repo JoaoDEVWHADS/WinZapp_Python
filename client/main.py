@@ -9897,13 +9897,33 @@ class MainWindow(wx.Frame):
         # Prepare body with media details to bypass Puppeteer cache lookups in WPPConnect Server
         body_data = dict(media)
         msg_type = media.get("messageType")
-        if msg_type and "message" in media:
-            inner = media["message"].get(msg_type)
+        msg_inner_obj = media.get("message")
+        if isinstance(msg_inner_obj, str):
+            try:
+                msg_inner_obj = json.loads(msg_inner_obj)
+            except Exception:
+                msg_inner_obj = None
+
+        if not msg_type and media.get("type"):
+            t = str(media.get("type"))
+            if t in ("audio", "ptt"):
+                msg_type = "audioMessage"
+            elif t == "image":
+                msg_type = "imageMessage"
+            elif t == "video":
+                msg_type = "videoMessage"
+            elif t in ("document", "doc"):
+                msg_type = "documentMessage"
+
+        if msg_type and isinstance(msg_inner_obj, dict):
+            inner = msg_inner_obj.get(msg_type)
             if isinstance(inner, dict):
                 if "mediaKey" in inner and inner["mediaKey"]:
                     body_data["mediaKey"] = inner["mediaKey"]
                 if "url" in inner and inner["url"]:
                     body_data["clientUrl"] = inner["url"]
+                if "directPath" in inner and inner["directPath"]:
+                    body_data["directPath"] = inner["directPath"]
                 if "mimetype" in inner and inner["mimetype"]:
                     body_data["mimetype"] = inner["mimetype"]
                 body_data["type"] = msg_type.replace("Message", "")
