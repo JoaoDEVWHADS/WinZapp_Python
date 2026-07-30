@@ -414,8 +414,12 @@ def pyinstaller_compile():
         "--noconfirm",
     ]
 
+    import importlib.util
     for pkg in collect_all:
-        cmd += ["--collect-all", pkg]
+        if importlib.util.find_spec(pkg) is not None:
+            cmd += ["--collect-all", pkg]
+        else:
+            print(f"  [INFO] Skipping --collect-all for non-installed package: {pkg}")
 
     cmd += ["--paths", CLIENT_DIR]
 
