@@ -66,12 +66,13 @@ def _load_env() -> dict:
     return result
 
 
-def _run(cmd: list, cwd: str = None):
+def _run(cmd: list, cwd: str = None, check: bool = True):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd)
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
+    return result
 
 
 def main():
@@ -188,15 +189,13 @@ def main():
                 # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
-                    npm_bin = win_npm
-
-        # Run npm install
+                         # Run npm install
         print("[INFO] Running npm install...")
         try:
             if npm_bin.endswith("npm-cli.js"):
-                _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+                _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR, check=False)
             else:
-                _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+                _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR, check=False)
         except Exception as e:
             print(f"[WARNING] npm install step inside setup_api.py encountered non-fatal notice: {e}")
 
@@ -216,27 +215,25 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
-
-
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
-            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+            _run([node_bin, install_js], cwd=CLIENT_API_DIR, check=False)
         else:
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
-            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
         try:
             if npm_bin.endswith("npm-cli.js"):
-                _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+                _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR, check=False)
             else:
-                _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+                _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR, check=False)
             print("[OK] WPPConnect Server dependencies installed and built successfully.")
         except Exception as e:
-            print(f"[WARNING] npm run build inside setup_api.py encountered non-fatal notice: {e}")
+            print(f"[WARNING] npm run build inside setup_api.py encountered non-fatal notice: {e}")on-fatal notice: {e}")
 
     except Exception as e:
         print(f"[WARNING] Node.js setup_api step: {e}")
