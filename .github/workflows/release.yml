@@ -161,6 +161,7 @@ jobs:
       - name: Configurar Servidor WPPConnect
         shell: pwsh
         run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\client\node;$env:GITHUB_WORKSPACE\client\git\cmd;$env:PATH"
           ./venv/Scripts/python.exe setup_api.py
 
       - name: Instalar Dependências e Compilar WPPConnect API
