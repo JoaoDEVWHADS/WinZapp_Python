@@ -158,16 +158,17 @@ jobs:
           restore-keys: |
             npm-packages-
 
-      - name: Configurar WPPConnect API
+      - name: Configurar Servidor WPPConnect
+        shell: pwsh
+        run: |
+          ./venv/Scripts/python.exe setup_api.py
+
+      - name: Instalar Dependências e Compilar WPPConnect API
         env:
           PUPPETEER_SKIP_DOWNLOAD: "1"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
         shell: pwsh
         run: |
-          # 1. Configurar repositório da API
-          ./venv/Scripts/python.exe setup_api.py
-          
-          # 2. Configurar caminhos absolutos para Node e NPM
           $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
           $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
           
@@ -175,7 +176,6 @@ jobs:
           
           & $node $npm install --no-audit --no-fund --legacy-peer-deps
           
-          # 3. Gerar schemas Prisma (se existir db:generate)
           if (Test-Path "package.json") {
               $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
               if ($null -ne $scripts.'db:generate') {
@@ -183,7 +183,6 @@ jobs:
               }
           }
           
-          # 4. Compilar a API (TypeScript -> dist/server.js)
           & $node $npm run build
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
