@@ -81,6 +81,7 @@ jobs:
           python -m venv venv
           ./venv/Scripts/python -m pip install --upgrade pip
           ./venv/Scripts/pip install -r requirements.txt
+          ./venv/Scripts/pip install -r requirements-dev.txt
 
       - name: Configurar MSYS2 (para gcc, windres e opus)
         uses: msys2/setup-msys2@v2
