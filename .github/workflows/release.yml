@@ -175,6 +175,8 @@ jobs:
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
+          $msysBin = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          $env:PATH = "$msysBin;$env:PATH"
           ./venv/Scripts/python.exe build.py
 
       - name: Verificar Integridade do dist/WinZapp.zip
