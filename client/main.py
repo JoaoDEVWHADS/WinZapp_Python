@@ -3049,8 +3049,8 @@ class MainWindow(wx.Frame):
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "express"),
-            os.path.join(node_modules, "@wppconnect-team"),
+            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
+            os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
@@ -3064,8 +3064,7 @@ class MainWindow(wx.Frame):
                     npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
                     npm_cmd  = [node_exe, npm_cli]
                     node_dir = resource_path("node")
-                    git_dir  = resource_path("git", "cmd")
-                    path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
+                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
                 else:
                     local_node = resource_path("node", "node")
                     if os.path.isfile(local_node):
@@ -3078,8 +3077,7 @@ class MainWindow(wx.Frame):
                     else:
                         npm_cmd = [shutil.which("npm") or "npm"]
                     node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-                    git_dir  = resource_path("git", "bin")
-                    path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
+                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
 
                 npm_env  = {
                     **os.environ,
@@ -3149,17 +3147,7 @@ class MainWindow(wx.Frame):
         return default
 
     def _get_installed_wpp_version(self) -> str:
-        """Read the WPPConnect Server commit SHA or version from api/."""
-        sha_path = resource_path("api", ".commit_sha")
-        try:
-            if os.path.isfile(sha_path):
-                with open(sha_path, encoding="utf-8") as fh:
-                    sha = fh.read().strip()
-                    if sha:
-                        return sha
-        except Exception:
-            pass
-
+        """Read the WPPConnect Server version from api/package.json."""
         pkg_path = resource_path("api", "package.json")
         try:
             with open(pkg_path, encoding="utf-8") as fh:
@@ -4480,11 +4468,8 @@ class MainWindow(wx.Frame):
     # Consecutive notLogged/QRCODE readings required before believing the device
     # was really unlinked.  The health checker polls every ~30 s, so a genuine
     # logout is still noticed inside a minute — cheap insurance against a
-    # _LOGOUT_CONFIRM_STRIKES governs how many consecutive unlinked readings
-    # (notLogged, QRCODE) are required before confirming a real logout.
-    # WPPConnect transiently reports notLogged/QRCODE during the first 15–25 seconds
-    # of Chrome startup while restoring session cookies from userDataDir.
-    _LOGOUT_CONFIRM_STRIKES = 6
+    # transient reading costing the user their entire local history.
+    _LOGOUT_CONFIRM_STRIKES = 2
 
     def _logout_confirmed(self, status: str) -> bool:
         """True when an unlinked status has been seen often enough to act on it.
@@ -4745,7 +4730,6 @@ class MainWindow(wx.Frame):
                                 wx.OK | wx.ICON_ERROR,
                             )
                             self._on_disconnect()
-                            self._open_connection_dialog()
 
                         if self.settings.get("privateinfo", {}).get("paired"):
                             # Destructive path: _on_disconnect() wipes the whole
@@ -4755,10 +4739,15 @@ class MainWindow(wx.Frame):
                                 return
                             wx.CallAfter(_logout_with_warning)
                         else:
-                            def _show_pairing():
-                                self._on_disconnect()
-                                self._open_connection_dialog()
-                            wx.CallAfter(_show_pairing)
+                            # Not paired: there is nothing to lose (the database
+                            # is empty by definition) and _on_disconnect() is
+                            # what puts the pairing dialog on screen. Delaying it
+                            # behind the confirmation left the app sitting on
+                            # "sem conexão com o WhatsApp / modo offline" with no
+                            # way to connect — the guard was protecting data that
+                            # does not exist, at the cost of the one action the
+                            # user actually needed.
+                            wx.CallAfter(self._on_disconnect)
         except Exception as e:
             # The local API itself did not answer — we certainly cannot reach
             # WhatsApp through it either, but only once this has happened
@@ -10135,6 +10124,11 @@ class MainWindow(wx.Frame):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
 
+        # Check if history is already marked as exhausted in-memory
+        if remote_jid in getattr(self, "_exhausted_chats", set()):
+            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
+            return []
+
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
         # /get-messages/:phone for @lid JIDs) and as the chat segment of the
@@ -12161,7 +12155,7 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime("%H:%M")
+                        time_str = dt.strftime(i18n.t("time_fmt"))
                     else:
                         time_str = dt.strftime(i18n.t("datetime_fmt"))
                 except Exception:
@@ -12327,7 +12321,7 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime("%H:%M")
+                    time_str = dt.strftime(i18n.t("time_fmt"))
                 else:
                     time_str = dt.strftime(i18n.t("datetime_fmt"))
             except Exception:
