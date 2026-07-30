@@ -137,7 +137,7 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to remove client/api: {e}")
         os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
-        _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+        _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR], check=False)
 
         if has_node_modules:
             try:
@@ -156,7 +156,7 @@ def main():
 
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR, check=False)
 
         # Re-restore after checkout just in case git checkout overwrites files
         for rel_path, content in custom_contents.items():
