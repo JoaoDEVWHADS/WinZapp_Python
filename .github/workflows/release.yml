@@ -142,31 +142,29 @@ jobs:
             npm-packages-
 
       - name: Configurar WPPConnect API
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
         shell: pwsh
         run: |
-          # 1. Clonar a API se não existir
-          python setup_api.py
+          # 1. Configurar repositório da API
+          ./venv/Scripts/python.exe setup_api.py
           
-          # 2. Configurar caminhos para usar o Node portátil para instalar dependências
-          cd client/api
-          $nodeExe = "../../client/node/node.exe"
-          $npmCli = "../../client/node/node_modules/npm/bin/npm-cli.js"
+          # 2. Configurar caminhos absolutos para Node e NPM
+          $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
+          $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
           
-          # Adiciona o diretório do node ao PATH temporariamente
-          $env:PATH = "$(Resolve-Path ../../client/node);$env:PATH"
+          Set-Location "$env:GITHUB_WORKSPACE\client\api"
           
-          # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
-          if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install --no-audit --no-fund
-          }
+          & $node $npm install --no-audit --no-fund --legacy-peer-deps
           
-          # Compilar a API
-          &$nodeExe $npmCli run build
+          # 3. Compilar a API (TypeScript -> dist/server.js)
+          & $node $npm run build
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
-          python build.py
+          ./venv/Scripts/python.exe build.py
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
