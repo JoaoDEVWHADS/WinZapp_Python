@@ -472,8 +472,21 @@ class ApiSetupDialog(wx.Dialog):
         # existing means api/ was already cloned and built; all that's
         # missing is node_modules (never bundled in WinZapp.zip), so there's
         # nothing to download/extract/rebuild, just dependencies to install.
+        #
+        # That heuristic breaks for the update/force-reinstall flow though —
+        # _update_wpp_server() and WppUpdateChecker always pass forced_tag
+        # for a specific *newer* version, but dist/server.js from the
+        # currently-installed *older* version is still sitting right there,
+        # so modules_only used to come back True and the download/extract/
+        # build steps below (guarded by `if not modules_only`) were skipped
+        # entirely — npm install just reinstalled dependencies for the same
+        # old source tree. The user would confirm the update, WinZapp would
+        # restart the API, and the "new version available" prompt came right
+        # back because nothing had actually changed. A forced_tag always
+        # means "fetch and build this specific version", never "just repair
+        # node_modules for whatever happens to be on disk".
         dist_server   = os.path.join(api_dir, "dist", "server.js")
-        modules_only  = os.path.isfile(dist_server)
+        modules_only  = os.path.isfile(dist_server) and self._forced_tag is None
         stages        = self._STAGES_MODULES_ONLY if modules_only else self._STAGES_FULL
 
         try:
@@ -618,10 +631,21 @@ class ApiSetupDialog(wx.Dialog):
 
             # ── Step 4: npm install ───────────────────────────────────────
             self._set_stage(self._i18n.t("api_setup_npm_install"), *stages["npm_install"])
+            # puppeteer's own postinstall script (node_modules/puppeteer/install.mjs)
+            # otherwise downloads Chrome silently as part of `npm install` — a
+            # multi-hundred-MB download with zero progress feedback, hidden
+            # behind the generic "Instalando dependências" label and this
+            # stage's indeterminate trickle. On a slow connection or an old
+            # HDD this was reported as the install "hanging" for anywhere from
+            # a couple of minutes to 30+, always around the same 51-54% mark —
+            # right in the middle of the npm_install stage's progress range.
+            # Skip it here; step 4.5 below downloads Chrome explicitly, with
+            # its own status text, right after npm install actually finishes.
+            npm_install_env = {**npm_env, "PUPPETEER_SKIP_DOWNLOAD": "true"}
             ok, err = self._run_subprocess(
                 npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
-                env=npm_env,
+                env=npm_install_env,
             )
             if not ok:
                 if not self._cancelled:

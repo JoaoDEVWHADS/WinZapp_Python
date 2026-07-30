@@ -8550,6 +8550,16 @@ class MainWindow(wx.Frame):
                                               # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 60              # seconds per request during bulk sync
 
+    # A message this large gets skipped by the automatic background sync
+    # (sync_if_media) instead of being downloaded eagerly. WPPConnect base64-
+    # encodes the whole file inside its Node/Puppeteer process before ever
+    # handing it back over HTTP — for a ~1 GB document sent into a group this
+    # was observed pushing node.exe's memory usage past 5 GB and hanging the
+    # machine. The user can still explicitly open/download an oversized file
+    # from the conversation view (_on_action_open/_on_action_download in
+    # conversations.py) — only the unattended background pass is capped.
+    _MEDIA_AUTO_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024   # 100 MB
+
     def _load_media_failed_ids(self) -> dict:
         """Load {message_id: failed_at_timestamp} for media whose CDN URL has
         previously expired (403/410) — checked by sync_if_media() to skip a
@@ -8624,6 +8634,28 @@ class MainWindow(wx.Frame):
         # Skip IDs that previously returned 403/410 (expired CDN URL).
         if msg_id and msg_id in self._media_failed_ids:
             return
+
+        # Skip oversized files during the automatic background sync — see
+        # _MEDIA_AUTO_DOWNLOAD_MAX_BYTES.
+        msg_inner = msg.get("message")
+        if isinstance(msg_inner, str):
+            try:
+                msg_inner = json.loads(msg_inner)
+            except Exception:
+                msg_inner = None
+        inner = msg_inner.get(message_type) if isinstance(msg_inner, dict) else None
+        if isinstance(inner, dict):
+            try:
+                file_length = int(inner.get("fileLength") or 0)
+            except (TypeError, ValueError):
+                file_length = 0
+            if file_length > self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES:
+                logging.info(
+                    "[sync_if_media] Skipping auto-download of %s (%s, %.1f MB > %.0f MB limit)",
+                    msg_id, message_type, file_length / (1024 * 1024),
+                    self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES / (1024 * 1024),
+                )
+                return
 
         try:
             if message_type == "audioMessage":
