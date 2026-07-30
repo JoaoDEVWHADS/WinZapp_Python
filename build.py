@@ -398,7 +398,7 @@ def pyinstaller_compile():
 
     work_dir = os.path.join(BUILD_DIR, "pyinstaller_work")
 
-    collect_all = [
+    collect_all_candidates = [
         "sound_lib",
         "accessible_output2",
         "platform_utils",
@@ -426,8 +426,12 @@ def pyinstaller_compile():
         "--noconfirm",
     ]
 
-    for pkg in collect_all:
-        cmd += ["--collect-all", pkg]
+    import importlib.util
+    for pkg in collect_all_candidates:
+        if importlib.util.find_spec(pkg) is not None:
+            cmd += ["--collect-all", pkg]
+        else:
+            print(f"  [INFO] Skipping --collect-all for non-installed package: {pkg}")
 
     cmd += ["--paths", CLIENT_DIR]
 
