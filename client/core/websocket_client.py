@@ -1290,6 +1290,19 @@ class WebSocketClient:
                 return val
             return ""
 
+        def _safe_media_url(val_dict):
+            url_val = val_dict.get("clientUrl") or val_dict.get("url") or val_dict.get("deprecatedMms3Url") or ""
+            if not url_val and isinstance(val_dict.get("mediaData"), dict):
+                md = val_dict["mediaData"]
+                url_val = md.get("clientUrl") or md.get("url") or md.get("deprecatedMms3Url") or ""
+            return url_val
+
+        def _safe_media_key_extracted(val_dict):
+            mk = val_dict.get("mediaKey")
+            if not mk and isinstance(val_dict.get("mediaData"), dict):
+                mk = val_dict["mediaData"].get("mediaKey")
+            return _safe_media_key(mk)
+
         message_content = {}
         if msg_type == "chat":
             message_content = {"conversation": conversation}
@@ -1309,24 +1322,21 @@ class WebSocketClient:
                 seconds_val = 0
             message_content = {
                 "audioMessage": {
-                    "url": wpp_msg.get("clientUrl", ""),
+                    "url": _safe_media_url(wpp_msg),
                     "seconds": seconds_val,
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
+                    "mediaKey": _safe_media_key_extracted(wpp_msg)
                 }
             }
         elif msg_type == "image":
-            # NOTE: do NOT fall back to wpp_msg["body"] for the caption — for
-            # media messages WPPConnect puts the base64 JPEG thumbnail in `body`,
-            # which then showed up as raw base64 instead of the caption.
             img_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(img_caption):
                 img_caption = ""
             message_content = {
                 "imageMessage": {
                     "caption": img_caption,
-                    "url": wpp_msg.get("clientUrl", ""),
+                    "url": _safe_media_url(wpp_msg),
                     "mimetype": wpp_msg.get("mimetype", "image/jpeg"),
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
+                    "mediaKey": _safe_media_key_extracted(wpp_msg)
                 }
             }
         elif msg_type == "video":
@@ -1345,9 +1355,9 @@ class WebSocketClient:
                     "caption": vid_caption,
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
-                    "url": wpp_msg.get("clientUrl", ""),
+                    "url": _safe_media_url(wpp_msg),
                     "mimetype": wpp_msg.get("mimetype", "video/mp4"),
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
+                    "mediaKey": _safe_media_key_extracted(wpp_msg)
                 }
             }
         elif msg_type == "document":
@@ -1355,17 +1365,17 @@ class WebSocketClient:
                 "documentMessage": {
                     "fileName": wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or "Document",
                     "fileLength": wpp_msg.get("size") or wpp_msg.get("fileLength") or 0,
-                    "url": wpp_msg.get("clientUrl", ""),
+                    "url": _safe_media_url(wpp_msg),
                     "mimetype": wpp_msg.get("mimetype", ""),
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
+                    "mediaKey": _safe_media_key_extracted(wpp_msg)
                 }
             }
         elif msg_type == "sticker":
             message_content = {
                 "stickerMessage": {
-                    "url": wpp_msg.get("clientUrl", ""),
+                    "url": _safe_media_url(wpp_msg),
                     "mimetype": wpp_msg.get("mimetype", "image/webp"),
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
+                    "mediaKey": _safe_media_key_extracted(wpp_msg)
                 }
             }
         elif msg_type in ("location", "liveLocation"):

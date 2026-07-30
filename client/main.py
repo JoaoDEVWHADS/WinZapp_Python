@@ -9925,18 +9925,41 @@ class MainWindow(wx.Frame):
             elif t in ("document", "doc"):
                 msg_type = "documentMessage"
 
+        # Check top-level URL/media fields
+        if not body_data.get("clientUrl"):
+            body_data["clientUrl"] = media.get("clientUrl") or media.get("url") or media.get("deprecatedMms3Url")
+        if not body_data.get("mediaKey"):
+            body_data["mediaKey"] = media.get("mediaKey")
+        if not body_data.get("directPath"):
+            body_data["directPath"] = media.get("directPath")
+        if not body_data.get("mimetype"):
+            body_data["mimetype"] = media.get("mimetype")
+
+        # Check mediaData sub-dict if present
+        media_data_obj = media.get("mediaData")
+        if isinstance(media_data_obj, dict):
+            if not body_data.get("clientUrl"):
+                body_data["clientUrl"] = media_data_obj.get("clientUrl") or media_data_obj.get("url") or media_data_obj.get("deprecatedMms3Url")
+            if not body_data.get("mediaKey"):
+                body_data["mediaKey"] = media_data_obj.get("mediaKey")
+            if not body_data.get("directPath"):
+                body_data["directPath"] = media_data_obj.get("directPath")
+            if not body_data.get("mimetype"):
+                body_data["mimetype"] = media_data_obj.get("mimetype")
+
         if msg_type and isinstance(msg_inner_obj, dict):
             inner = msg_inner_obj.get(msg_type)
             if isinstance(inner, dict):
-                if "mediaKey" in inner and inner["mediaKey"]:
+                if not body_data.get("mediaKey") and inner.get("mediaKey"):
                     body_data["mediaKey"] = inner["mediaKey"]
-                if "url" in inner and inner["url"]:
-                    body_data["clientUrl"] = inner["url"]
-                if "directPath" in inner and inner["directPath"]:
+                if not body_data.get("clientUrl"):
+                    body_data["clientUrl"] = inner.get("clientUrl") or inner.get("url") or inner.get("deprecatedMms3Url")
+                if not body_data.get("directPath") and inner.get("directPath"):
                     body_data["directPath"] = inner["directPath"]
-                if "mimetype" in inner and inner["mimetype"]:
+                if not body_data.get("mimetype") and inner.get("mimetype"):
                     body_data["mimetype"] = inner["mimetype"]
-                body_data["type"] = msg_type.replace("Message", "")
+                if not body_data.get("type"):
+                    body_data["type"] = msg_type.replace("Message", "")
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))

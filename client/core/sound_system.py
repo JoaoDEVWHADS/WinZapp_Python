@@ -82,7 +82,7 @@ class SoundSystem:
                     if os.path.isfile(_op_dep):
                         try:
                             ctypes.WinDLL(_op_dep)
-                            logging.info("[sound_system] Pre-loaded Opus dependency: %s", _op_dep)
+                            logging.info("[sound_system] Pre-loaded audio dependency: %s", _op_dep)
                         except Exception as _e:
                             logging.debug("[sound_system] Failed pre-loading %s: %s", _op_dep, _e)
 
