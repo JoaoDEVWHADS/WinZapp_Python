@@ -492,33 +492,51 @@ export async function getMediaByMessage(req: Request, res: Response) {
         message.mediaKey = Buffer.from(message.mediaKey, 'base64');
       }
     } else {
+      // Normalize 4-part message ID (fromMe_chatId_msgId_participantLid) to 3-part standard ID
+      let lookupId = messageId;
+      const parts = messageId.split('_');
+      if (parts.length === 4) {
+        lookupId = `${parts[0]}_${parts[1]}_${parts[2]}`;
+      }
+
       try {
-        message = await client.getMessageById(messageId);
+        message = await client.getMessageById(lookupId);
       } catch (err: any) {
-        req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
+        if (lookupId !== messageId) {
+          try {
+            message = await client.getMessageById(messageId);
+          } catch (_) {}
+        }
+        if (!message) {
+          req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
+        }
       }
 
       // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
       // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
       // and load earlier messages to force sync it.
       if (!message && messageId) {
-        const parts = messageId.split('_');
-        if (parts.length >= 2) {
-          const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
-            req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+        const chatId = parts.length >= 2 ? parts[1] : '';
+        if (chatId && typeof client.loadEarlierMessages === 'function') {
+          req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+          try {
+            // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
+            await client.loadEarlierMessages(chatId);
+            // Query again
             try {
-              // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
-              await client.loadEarlierMessages(chatId);
-              // Query again
-              try {
-                message = await client.getMessageById(messageId);
-              } catch (retryErr: any) {
+              message = await client.getMessageById(lookupId);
+            } catch (retryErr: any) {
+              if (lookupId !== messageId) {
+                try {
+                  message = await client.getMessageById(messageId);
+                } catch (_) {}
+              }
+              if (!message) {
                 req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
               }
-            } catch (loadErr) {
-              req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
             }
+          } catch (loadErr) {
+            req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
           }
         }
       }

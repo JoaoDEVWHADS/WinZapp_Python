@@ -10043,6 +10043,11 @@ class MainWindow(wx.Frame):
         """
         _key = media.get("key", {})
         msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
+        # Normalize 4-part message IDs (fromMe_chatId_msgId_participantLid) to 3-part standard IDs for get-media endpoint
+        if msg_id and msg_id.count("_") == 3:
+            parts = msg_id.split("_")
+            msg_id = f"{parts[0]}_{parts[1]}_{parts[2]}"
+
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
