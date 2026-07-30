@@ -196,8 +196,20 @@ def main():
                 node_bin = win_node
                 # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
-                if os.path.isfile(win_npm):
-                    npm_bin = win_npm
+            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
+            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
+            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+
+        # Save current commit SHA to client/api/.commit_sha for version checking
+        try:
+            res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
+                with open(sha_file, "w", encoding="utf-8") as f:
+                    f.write(res.stdout.strip())
+                print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
+        except Exception as e:
+            print(f"[WARNING] Could not save .commit_sha: {e}")
 
         # Run npm install
         print("[INFO] Running npm install...")
@@ -205,6 +217,21 @@ def main():
             _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+
+        # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
+        try:
+            import shutil as _shutil
+            custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
+            decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
+            if os.path.isfile(custom_decrypt):
+                print("[INFO] Copying custom decrypt.js patch to node_modules...")
+                os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
+                _shutil.copy2(custom_decrypt, decrypt_js_path)
+                print("[OK] Copied decrypt.js patch successfully.")
+            else:
+                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
+        except Exception as e:
+            print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")
@@ -230,14 +257,13 @@ def main():
         print(f"  cd {CLIENT_API_DIR}")
         print("  npm install")
         print("  npm run build")
+        sys.exit(1)
 
     # 2. Linux OS dependencies installation (Debian/Ubuntu)
     if not is_windows:
         print("\n[INFO] Detecting Linux OS and installing system dependencies for Chromium...")
-        # Check if apt-get is available
         import shutil
         if shutil.which("apt-get"):
-            # Check if running as root or has sudo
             try:
                 getuid = os.getuid
             except AttributeError:
@@ -247,11 +273,11 @@ def main():
             install_cmd = [
                 "apt-get", "install", "-y", "--no-install-recommends",
                 "ca-certificates", "fonts-liberation", "libasound2", "libatk-bridge2.0-0",
-                "libatk1.0-0", "libc6", "libcairo2", "libcups2", "libdbus-1-3", "libexpat1",
+                "libatk1.0-0", "libc6", "libcairo2", "libcups2", "libdbus-1-3", "libdrm2", "libexpat1",
                 "libfontconfig1", "libgbm1", "libglib2.0-0", "libgtk-3-0", "libnspr4",
                 "libnss3", "libpango-1.0-0", "libpangocairo-1.0-0", "libstdc++6", "libx11-6",
                 "libx11-xcb1", "libxcb1", "libxcomposite1", "libxcursor1", "libxdamage1",
-                "libxext6", "libxfixes3", "libxi6", "libxrandr2", "libxrender1", "libxss1",
+                "libxext6", "libxfixes3", "libxi6", "libxkbcommon0", "libxrandr2", "libxrender1", "libxshmfence1", "libxss1",
                 "libxtst6", "lsb-release", "xdg-utils", "wget"
             ]
             if not is_root:
@@ -266,7 +292,6 @@ def main():
 
             if apt_cmd:
                 try:
-                    # Set noninteractive environment variable
                     os.environ["DEBIAN_FRONTEND"] = "noninteractive"
                     print("[INFO] Updating package lists...")
                     subprocess.run(apt_cmd, check=True)
