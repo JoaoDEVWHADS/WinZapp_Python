@@ -64,38 +64,24 @@ _REPO_ZIP_MAIN = (
 )
 _REPO_ZIP_TAG  = (
     "https://github.com/wppconnect-team/wppconnect-server"
-    "/archive/{tag}.zip"
+    "/archive/refs/tags/{tag}.zip"
 )
 WPP_GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/wppconnect-team/wppconnect-server/releases/latest"
 )
-WPP_GITHUB_API_LATEST_COMMIT = (
-    "https://api.github.com/repos/wppconnect-team/wppconnect-server/commits/main"
-)
-
-
-def fetch_latest_wpp_commit_sha(timeout: float = 15) -> str:
-    """Return the short SHA of the latest commit on wppconnect-server main branch."""
-    try:
-        resp = requests.get(
-            WPP_GITHUB_API_LATEST_COMMIT,
-            headers={"User-Agent": "WinZapp"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        sha = (data.get("sha") or "").strip()
-        return sha[:7] if sha else ""
-    except Exception as exc:
-        logging.warning("[api_setup] Failed to fetch latest wppconnect-server commit SHA: %s", exc)
-        return ""
 
 
 def fetch_latest_wpp_tag(timeout: float = 15) -> str:
-    """Return the short SHA or tag name of the latest wppconnect-server GitHub commit/release."""
-    sha = fetch_latest_wpp_commit_sha(timeout=timeout)
-    if sha:
-        return sha
+    """Return the tag name of the latest wppconnect-server GitHub release, or "".
+
+    Used so a fresh install (and the update flows) always land on whatever is
+    actually the newest tagged release instead of a version number baked into
+    WinZapp's own .env at build time — a WPPCONNECT_TAG_VERSION pin only ever
+    gets updated when WinZapp itself ships a new build, so a version fixed
+    that way is stale from the day it's set. Returns "" on any failure so
+    callers can fall back to the previous fixed-tag/main-branch behaviour
+    instead of failing setup outright over a GitHub API hiccup.
+    """
     try:
         resp = requests.get(
             WPP_GITHUB_API_LATEST_RELEASE,
@@ -109,7 +95,6 @@ def fetch_latest_wpp_tag(timeout: float = 15) -> str:
     except Exception as exc:
         logging.warning("[api_setup] Failed to fetch latest wppconnect-server release tag: %s", exc)
         return ""
-
 
 # Root-level files whose pre-included content always takes precedence.
 _PRESERVE = {"start.js", ".env", "config.json"}
@@ -186,9 +171,8 @@ class ApiSetupDialog(wx.Dialog):
     }
 
     def __init__(self, parent, title_override=None, forced_tag=None):
-        title = (title_override
-                 or "WinZapp | Baixando e instalando os módulos necessários para o funcionamento do programa. "
-                    "Isso pode levar alguns minutos.")
+        self._i18n = parent.i18n
+        title = title_override or self._i18n.t("api_setup_dialog_title")
         style = wx.DEFAULT_DIALOG_STYLE & ~wx.CLOSE_BOX
         super().__init__(parent, title=title, style=style)
 
@@ -215,12 +199,12 @@ class ApiSetupDialog(wx.Dialog):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._status_lbl = wx.StaticText(self, label="Aguarde enquanto os módulos necessários para o funcionamento do WinZapp são instalados e configurados.")
+        self._status_lbl = wx.StaticText(self, label=self._i18n.t("api_setup_status_label"))
 
         self._gauge = wx.Gauge(self, range=100,
                                style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
 
-        cancel_btn = wx.Button(self, wx.ID_CANCEL, label="&Cancelar")
+        cancel_btn = wx.Button(self, wx.ID_CANCEL, label=self._i18n.t("api_setup_cancel"))
         cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -310,7 +294,7 @@ class ApiSetupDialog(wx.Dialog):
             if not self._cancelled:
                 wx.CallAfter(
                     self._finish_error,
-                    f"Falha ao iniciar o download:\n\n{exc}",
+                    self._i18n.t("api_setup_error_download_start").format(details=exc),
                 )
             return False
 
@@ -333,18 +317,19 @@ class ApiSetupDialog(wx.Dialog):
                         pct = start_pct + (end_pct - start_pct) * (downloaded / total)
                         wx.CallAfter(self._gauge.SetValue, int(min(end_pct, pct)))
                         self._set_status(
-                            f"Baixando WPPConnect Server... "
-                            f"{mb_down:.1f} MB / {mb_total:.1f} MB"
+                            self._i18n.t("api_setup_downloading").format(
+                                downloaded=f"{mb_down:.1f}", total=f"{mb_total:.1f}"
+                            )
                         )
                     else:
                         self._set_status(
-                            f"Baixando WPPConnect Server... {mb_down:.1f} MB"
+                            self._i18n.t("api_setup_downloading_no_total").format(downloaded=f"{mb_down:.1f}")
                         )
         except Exception as exc:
             if not self._cancelled:
                 wx.CallAfter(
                     self._finish_error,
-                    f"Erro durante o download:\n\n{exc}",
+                    self._i18n.t("api_setup_error_download").format(details=exc),
                 )
             return False
 
@@ -363,7 +348,7 @@ class ApiSetupDialog(wx.Dialog):
         Root-level entries matching _PRESERVE are skipped so our pre-included
         start.js and .env are never overwritten.
         """
-        self._set_status("Extraindo arquivos da API...")
+        self._set_status(self._i18n.t("api_setup_extracting"))
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 members = zf.infolist()
@@ -403,28 +388,18 @@ class ApiSetupDialog(wx.Dialog):
                     if dest_abs != api_dir_abs and not dest_abs.startswith(api_dir_abs + os.sep):
                         raise ValueError(f"Unsafe zip member path: {member.filename!r}")
 
-                    if member.is_dir():
+                    if member.is_dir() or rel.endswith("/"):
                         os.makedirs(dest, exist_ok=True)
                     else:
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with zf.open(member) as sf, open(dest, "wb") as df:
-                            shutil.copyfileobj(sf, df)
-
-            # Save installed commit SHA tag
-            if hasattr(self, "_active_tag") and self._active_tag:
-                try:
-                    with open(os.path.join(api_dir, ".commit_sha"), "w", encoding="utf-8") as f:
-                        f.write(self._active_tag)
-                except Exception:
-                    pass
-
-            return True
+                        with zf.open(member) as src_fh, open(dest, "wb") as dst_fh:
+                            shutil.copyfileobj(src_fh, dst_fh)
 
         except Exception as exc:
             if not self._cancelled:
                 wx.CallAfter(
                     self._finish_error,
-                    f"Falha ao extrair o arquivo ZIP:\n\n{exc}",
+                    self._i18n.t("api_setup_error_extract").format(details=exc),
                 )
             return False
 
@@ -469,8 +444,7 @@ class ApiSetupDialog(wx.Dialog):
             npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
             npm_cmd  = [node_exe, npm_cli]
             node_dir = resource_path("node")
-            git_dir  = resource_path("git", "cmd")
-            path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
+            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
         else:
             local_node = resource_path("node", "node")
             if os.path.isfile(local_node):
@@ -483,9 +457,7 @@ class ApiSetupDialog(wx.Dialog):
             else:
                 npm_cmd = [shutil.which("npm") or "npm"]
             node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-            git_dir = resource_path("git", "bin")
-            path_env = (git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
-
+            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
 
         api_dir  = resource_path("api")
         puppeteer_cache = resource_path("api", ".cache", "puppeteer")
@@ -506,7 +478,7 @@ class ApiSetupDialog(wx.Dialog):
 
         try:
             if not modules_only:
-                self._set_stage("Verificando a versão mais recente do WPPConnect Server...", *stages["resolve_tag"])
+                self._set_stage(self._i18n.t("api_setup_resolving_tag"), *stages["resolve_tag"])
                 tag = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
                 if not tag:
                     # No explicit tag was requested and .env doesn't pin one — resolve
@@ -565,7 +537,7 @@ class ApiSetupDialog(wx.Dialog):
                                 )
 
                     # ── Step 2: clean previous partial setup ──────────────────
-                    self._set_stage("Preparando pasta da API...", *stages["clean"])
+                    self._set_stage(self._i18n.t("api_setup_preparing_folder"), *stages["clean"])
                     # api_dir won't exist at all if the user (or a broken
                     # install) deleted the whole api/ folder — os.listdir() on a
                     # missing directory raises FileNotFoundError ([WinError 3] on
@@ -592,7 +564,7 @@ class ApiSetupDialog(wx.Dialog):
                         return
 
                     # ── Step 3: extract ZIP into client/api/ ──────────────────
-                    self._set_stage("Extraindo arquivos da API...", *stages["extract"])
+                    self._set_stage(self._i18n.t("api_setup_extracting"), *stages["extract"])
                     ok = self._extract_zip(tmp_zip, api_dir)
                     if not ok:
                         return
@@ -645,7 +617,7 @@ class ApiSetupDialog(wx.Dialog):
                     return
 
             # ── Step 4: npm install ───────────────────────────────────────
-            self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])
+            self._set_stage(self._i18n.t("api_setup_npm_install"), *stages["npm_install"])
             ok, err = self._run_subprocess(
                 npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
@@ -654,14 +626,14 @@ class ApiSetupDialog(wx.Dialog):
             if not ok:
                 if not self._cancelled:
                     wx.CallAfter(self._finish_error,
-                                 f"Falha em npm install:\n\n{err}")
+                                 self._i18n.t("api_setup_error_npm_install").format(details=err))
                 return
 
             if self._cancelled:
                 return
 
             # ── Step 4.5: download chrome if using modern puppeteer ───────
-            self._set_stage("Baixando executável do Chrome (puppeteer)...", *stages["chrome"])
+            self._set_stage(self._i18n.t("api_setup_downloading_chrome"), *stages["chrome"])
             ok, err = self._run_subprocess(
                 npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
                 cwd=api_dir,
@@ -689,7 +661,7 @@ class ApiSetupDialog(wx.Dialog):
                 pass
 
             if has_db_generate:
-                self._set_stage("Gerando cliente do banco de dados (npm run db:generate)...", *stages["db_generate"])
+                self._set_stage(self._i18n.t("api_setup_db_generate"), *stages["db_generate"])
                 db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
                 ok, err = self._run_subprocess(
                     npm_cmd + ["run", "db:generate"],
@@ -699,7 +671,7 @@ class ApiSetupDialog(wx.Dialog):
                 if not ok:
                     if not self._cancelled:
                         wx.CallAfter(self._finish_error,
-                                     f"Falha em npm run db:generate:\n\n{err}")
+                                     self._i18n.t("api_setup_error_db_generate").format(details=err))
                     return
 
                 if self._cancelled:
@@ -707,11 +679,7 @@ class ApiSetupDialog(wx.Dialog):
 
             if not modules_only:
                 # ── Step 5: npm run build ─────────────────────────────────────
-                self._set_stage(
-                    "Compilando o WPPConnect Server (npm run build) — "
-                    "isso pode levar alguns minutos...",
-                    *stages["build"]
-                )
+                self._set_stage(self._i18n.t("api_setup_building"), *stages["build"])
                 ok, err = self._run_subprocess(
                     npm_cmd + ["run", "build"],
                     cwd=api_dir,
@@ -720,7 +688,7 @@ class ApiSetupDialog(wx.Dialog):
                 if not ok:
                     if not self._cancelled:
                         wx.CallAfter(self._finish_error,
-                                     f"Falha em npm run build:\n\n{err}")
+                                     self._i18n.t("api_setup_error_build").format(details=err))
                     return
 
             if not self._cancelled:
@@ -767,9 +735,8 @@ class ApiSetupDialog(wx.Dialog):
         self._trickling = False
         self._gauge.SetValue(100)
         wx.MessageBox(
-            "O WPPConnect Server foi configurado com sucesso!\n\n"
-            "O WinZapp irá agora iniciar a API.",
-            "Configuração concluída",
+            self._i18n.t("api_setup_success_message"),
+            self._i18n.t("api_setup_success_title"),
             wx.OK | wx.ICON_INFORMATION,
             self,
         )
@@ -777,8 +744,8 @@ class ApiSetupDialog(wx.Dialog):
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
-        msg = "Ocorreu um erro durante a configuração do WPPConnect Server."
+        msg = self._i18n.t("api_setup_error_generic")
         if details:
             msg = f"{msg}\n\n{details}"
-        wx.MessageBox(msg, "Erro de configuração", wx.OK | wx.ICON_ERROR, self)
+        wx.MessageBox(msg, self._i18n.t("api_setup_error_title"), wx.OK | wx.ICON_ERROR, self)
         self.EndModal(wx.ID_CANCEL)
