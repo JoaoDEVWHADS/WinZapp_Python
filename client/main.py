@@ -12155,7 +12155,7 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime("%H:%M")
+                        time_str = dt.strftime(i18n.t("time_fmt"))
                     else:
                         time_str = dt.strftime(i18n.t("datetime_fmt"))
                 except Exception:
@@ -12321,7 +12321,7 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime("%H:%M")
+                    time_str = dt.strftime(i18n.t("time_fmt"))
                 else:
                     time_str = dt.strftime(i18n.t("datetime_fmt"))
             except Exception:
