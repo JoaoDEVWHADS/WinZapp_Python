@@ -381,10 +381,21 @@ def assemble_staging():
                 dll_count += 1
 
 
+    # Copy all DLLs directly present in client/lib (bassopus.dll, libopus-0.dll, opus.dll, bass_aac.dll, screen reader DLLs, etc.)
+    client_lib_dir = os.path.join(CLIENT_DIR, "lib")
+    if os.path.isdir(client_lib_dir):
+        for fname in os.listdir(client_lib_dir):
+            if fname.lower().endswith(".dll"):
+                dst_file = os.path.join(lib_dir, fname)
+                shutil.copy2(os.path.join(client_lib_dir, fname), dst_file)
+                dll_count += 1
+
     # bassopus.dll — BASS plugin for OGG Opus *playback* (audio messages)
     _bassopus_src_names = ["bassopus.dll", "bass_opus.dll"]
-    _bassopus_copied = False
+    _bassopus_copied = os.path.isfile(os.path.join(lib_dir, "bassopus.dll"))
     for _bname in _bassopus_src_names:
+        if _bassopus_copied:
+            break
         _bsrc = os.path.join(CLIENT_DIR, "lib", _bname)
         if os.path.isfile(_bsrc):
             # Always write as bassopus.dll (the name sound_lib/BASS_PluginLoad expects)
