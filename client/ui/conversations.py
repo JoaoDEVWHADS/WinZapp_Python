@@ -1075,6 +1075,16 @@ class ConversationsPanel(wx.Panel):
         sel = self._filter_radio.GetSelection()
         self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
         self.main_window.add_chats_to_ui()
+        # Selecting a filter option leaves keyboard focus on the radio box —
+        # the list itself gets rebuilt but nothing ever moves focus/selection
+        # there, so the user had no way to tell what (if anything) the new
+        # filter actually matched without tabbing over manually.
+        lst = self.conversations_list
+        if self.chats_list:
+            lst.Focus(0)
+            lst.Select(0)
+            lst.EnsureVisible(0)
+        lst.SetFocus()
 
     def on_ctrl_f(self, event):
         self.search_field.SetFocus()
@@ -7603,6 +7613,18 @@ class ArchivedConversationsPanel(wx.Panel):
         self.chat_names: list = []
         self._init_ui()
 
+    def restore_selection(self):
+        """Select, focus and give keyboard focus to the first archived
+        conversation — mirrors ConversationsPanel._restore_conversation_selection()
+        so the list never ends up empty-focused (nothing for a screen reader
+        to announce) after navigating here via Alt+4 or the nav-list item."""
+        lst = self.conversations_list
+        if self.chats_list:
+            lst.Focus(0)
+            lst.Select(0)
+            lst.EnsureVisible(0)
+        lst.SetFocus()
+
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _init_ui(self):
@@ -7655,6 +7677,14 @@ class ArchivedConversationsPanel(wx.Panel):
         sel = self._filter_radio.GetSelection()
         self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
         self.main_window.add_chats_to_ui()
+        # See ConversationsPanel._on_filter_changed's identical comment —
+        # same reasoning applies to the archived list's own filter tabs.
+        lst = self.conversations_list
+        if self.chats_list:
+            lst.Focus(0)
+            lst.Select(0)
+            lst.EnsureVisible(0)
+        lst.SetFocus()
 
     def _on_arch_list_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_SPACE:

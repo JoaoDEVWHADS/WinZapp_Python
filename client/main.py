@@ -3560,8 +3560,24 @@ class MainWindow(wx.Frame):
         self.ID_ALT_3      = wx.NewIdRef()
         self.ID_ALT_4      = wx.NewIdRef()
         self.ID_ALT_5      = wx.NewIdRef()
+        self.ID_ALT_NAV    = wx.NewIdRef()
         self.ID_CTRL_COMMA = wx.NewIdRef()
         self.ID_F1         = wx.NewIdRef()
+
+        # navigation_panel's "&Navegação principal" label mnemonic is meant
+        # to redirect Alt+N to nav_list, but that native StaticText-mnemonic
+        # redirect proved unreliable elsewhere in this app (see the Alt+D/
+        # Alt+M fixes in ConversationsPanel.create_accel_conversation) —
+        # reported live as barely ever working. An explicit global
+        # accelerator, extracted from the same i18n mnemonic so it still
+        # tracks the label instead of hardcoding "N", works unconditionally
+        # from anywhere in the window instead of depending on that mechanism.
+        nav_letter = "N"
+        _nav_label = self.i18n.t("main_nav")
+        _amp = _nav_label.find("&")
+        if 0 <= _amp < len(_nav_label) - 1 and _nav_label[_amp + 1].isalpha():
+            nav_letter = _nav_label[_amp + 1].upper()
+
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_ALT,    ord('1'),    self.ID_ALT_1),
@@ -3569,6 +3585,7 @@ class MainWindow(wx.Frame):
             (wx.ACCEL_ALT,    ord('3'),    self.ID_ALT_3),
             (wx.ACCEL_ALT,    ord('4'),    self.ID_ALT_4),
             (wx.ACCEL_ALT,    ord('5'),    self.ID_ALT_5),
+            (wx.ACCEL_ALT,    ord(nav_letter), self.ID_ALT_NAV),
             (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
             (wx.ACCEL_NORMAL, wx.WXK_F1,  self.ID_F1),
         ])
@@ -3578,8 +3595,14 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_global_alt3, id=self.ID_ALT_3)
         self.Bind(wx.EVT_MENU, self.on_alt_4,       id=self.ID_ALT_4)
         self.Bind(wx.EVT_MENU, self.on_alt_5,       id=self.ID_ALT_5)
+        self.Bind(wx.EVT_MENU, self._on_alt_nav,    id=self.ID_ALT_NAV)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
         self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
+
+    def _on_alt_nav(self, event):
+        """Alt+N (or the localized equivalent): focus the main navigation list."""
+        if hasattr(self, "navigation_panel"):
+            self.navigation_panel.nav_list.SetFocus()
 
     def _on_global_alt2(self, event):
         """Alt+2: jump to last message regardless of which panel has focus."""
@@ -3645,7 +3668,7 @@ class MainWindow(wx.Frame):
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.Show()
             self.content_panel.Layout()
-            self.archived_conversations_panel.conversations_list.SetFocus()
+            self.archived_conversations_panel.restore_selection()
 
     def on_alt_5(self, event):
         self.conversations_panel.Hide()
@@ -5749,19 +5772,16 @@ class MainWindow(wx.Frame):
                             if k == "name" and jid.endswith("@g.us") and not v:
                                 v = self._group_name_from_chat_dict(chat)
                             # Don't let the server overwrite a positive local
-                            # unreadCount with zero — the local counter may have
-                            # incremented since the server snapshot was taken.
-                            # But always accept a server-reported positive value
-                            # so that newly-arrived unread chats show up.
+                            # unreadCount with a lower one — the local counter
+                            # may have incremented since the server snapshot
+                            # was taken. But always accept a server-reported
+                            # value HIGHER than the local one (e.g. a message
+                            # read/sent from another device this session
+                            # doesn't know about) so newly-arrived unread
+                            # chats still show up.
                             if k == "unreadCount":
                                 server_val = int(v or 0)
                                 local_val = int(chats[jid].get("unreadCount") or 0)
-                                # During startup sync (before messages_set_completed is True),
-                                # WPPConnect often returns 0 unreadCount because WhatsApp Web has
-                                # not fully finished syncing chats from the phone yet.
-                                # Keep the local count to prevent startup wipe of unread badges.
-                                if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
-                                    continue
                                 # Never resurrect unread count for the conversation the
                                 # user has open right now — mark_conversation_as_read()
                                 # already set it to 0 locally, and this snapshot can be
@@ -5770,6 +5790,17 @@ class MainWindow(wx.Frame):
                                 _cp = getattr(self, "conversations_panel", None)
                                 if jid == getattr(_cp, "_last_open_jid", ""):
                                     v = 0
+                                elif server_val < local_val:
+                                    # WPPConnect's list-chats snapshot lagging behind
+                                    # live on_new_message increments isn't just a
+                                    # startup-sync artifact — this periodic resync
+                                    # (get_remote_chats(), polled every 60s) can under-
+                                    # report the same way well after startup too.
+                                    # Silently resetting the count here meant the very
+                                    # next live message's toast notification announced
+                                    # "1 unread" right after the reset, even though
+                                    # several messages had already piled up before it.
+                                    continue
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see

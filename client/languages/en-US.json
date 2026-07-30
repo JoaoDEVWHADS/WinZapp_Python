@@ -505,7 +505,7 @@
     "mention_all_keyword": "all",
     "mention_all_label": "@all — Mention everyone",
     "channel_read_only": "This channel is read-only",
-    "group_admins_only": "Only &admins can send messages in this group",
+    "group_admins_only": "Only admins can send messages in &this group",
     "interactive_reply": "interactive reply",
     "list_reply": "list selection",
     "interactive_message": "interactive message",
