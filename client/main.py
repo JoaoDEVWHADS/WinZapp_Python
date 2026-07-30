@@ -5285,17 +5285,10 @@ class MainWindow(wx.Frame):
                     target=self._backfill_empty_chats, daemon=True, name="chat-backfill")
                 self._backfill_thread.start()
 
-        # ── Phase 2: download media (silent) ──────────────────────────────
-        if self._should_abort_sync_for_offline():
-            logging.info("[start_sync] Aborting sync before phase 2: offline mode activated mid-sync.")
-            return
-        wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-        self._media_sync_running = True
-        try:
-            self.sync_media_for_all_chats()
-        finally:
-            self._media_sync_running = False
-        wx.CallAfter(self._set_status, "")
+        # ── Phase 2: download media (disabled on startup, media is loaded on-demand) ──────
+        # Skip bulk media auto-download on startup so the app opens instantly and doesn't stress the API.
+        # Media/Audio files will download on-demand when opened or played by the user.
+        logging.info("[start_sync] Phase 2 media auto-download on startup bypassed (on-demand mode active).")
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
         # _initial_sync_running is reset by start_sync()'s finally block.
