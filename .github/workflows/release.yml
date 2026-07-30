@@ -144,33 +144,14 @@ jobs:
           restore-keys: |
             npm-packages-
 
-      - name: Configurar Servidor WPPConnect
-        shell: pwsh
-        run: |
-          $env:PATH = "$env:GITHUB_WORKSPACE\client\node;$env:GITHUB_WORKSPACE\client\git\cmd;$env:PATH"
-          ./venv/Scripts/python.exe setup_api.py
-
-      - name: Instalar Dependências e Compilar WPPConnect API
+      - name: Configurar e Compilar WPPConnect API
         env:
           PUPPETEER_SKIP_DOWNLOAD: "1"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
         shell: pwsh
         run: |
-          $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
-          $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
-          
-          Set-Location "$env:GITHUB_WORKSPACE\client\api"
-          
-          & $node $npm install --no-audit --no-fund --legacy-peer-deps
-          
-          if (Test-Path "package.json") {
-              $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
-              if ($null -ne $scripts.'db:generate') {
-                  & $node $npm run db:generate
-              }
-          }
-          
-          & $node $npm run build
+          $env:PATH = "$env:GITHUB_WORKSPACE\client\node;$env:GITHUB_WORKSPACE\client\git\cmd;$env:PATH"
+          ./venv/Scripts/python.exe setup_api.py
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
