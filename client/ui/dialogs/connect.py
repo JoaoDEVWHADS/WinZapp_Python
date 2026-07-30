@@ -12,7 +12,7 @@ from traceback import format_exc
 import json
 import base64
 from io import BytesIO
-from countries import COUNTRIES
+from countries import get_countries
 import logging
 
 
@@ -357,10 +357,11 @@ class Connect:
         self.country_label_ctrl = wx.StaticText(
             self.phone_panel, label=self.i18n.t("country_label")
         )
+        self._countries = get_countries(self.i18n.language)
         self.country_combo = wx.ComboBox(
             self.phone_panel,
             style=wx.CB_READONLY,
-            choices=[c[0] for c in COUNTRIES],
+            choices=[c[0] for c in self._countries],
         )
         self.country_combo.SetSelection(0)   # Brazil
         self.country_combo.Bind(wx.EVT_COMBOBOX, self.on_country_changed)
@@ -990,7 +991,7 @@ class Connect:
         idx = self.country_combo.GetSelection()
         if idx == wx.NOT_FOUND:
             return
-        _, new_code = COUNTRIES[idx]
+        _, new_code = self._countries[idx]
 
         # Preserve the local digits already typed (strip old country code prefix)
         text       = self.phone_field.GetValue()

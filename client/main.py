@@ -1712,6 +1712,53 @@ class MainWindow(wx.Frame):
 
             logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
             self.ensure_wpp_running()
+
+            # ensure_wpp_running() only confirms the new WPPConnect HTTP API
+            # answers — killing the old node.exe process to update it also
+            # dropped the Socket.IO connection this app uses for live
+            # messages/presence, and nothing else here re-establishes it or
+            # tells the new process to resume the WhatsApp session. Left
+            # alone, python-socketio's own auto-reconnect (see
+            # WebSocketClient.__init__) eventually notices and retries on its
+            # own, but with up to a 60 s backoff and no guarantee the
+            # WhatsApp session itself gets told to restart — reported live as
+            # the app sitting in offline/disconnected mode until the whole
+            # program was restarted. Force it explicitly instead of waiting
+            # on the passive health checker to get around to it; a
+            # successful reconnect's on_connect() handler already re-checks
+            # HTTP status and retriggers a sync on its own — but check and
+            # trigger a sync explicitly here too, the same recovery sequence
+            # _recover_from_suspend() uses, as a fallback in case the socket
+            # was already connected (so on_connect() never fires again) or
+            # the reconnect itself is slow.
+            def _recover_after_update():
+                try:
+                    self._reconnect_websocket_now()
+                    self.check_wa_connection_http()
+                    self.trigger_sync_if_needed()
+                except Exception:
+                    logging.exception("[wpp_update] Post-update reconnection failed")
+            threading.Thread(target=_recover_after_update, daemon=True).start()
+
+            # If the window was hidden (minimized to tray) when the update
+            # was requested, bring it back — the update can run for minutes
+            # and finishes with the API restarting, which is exactly the
+            # kind of state change the user needs to see.
+            #
+            # _window_hidden is only set once __init__ reaches its own
+            # "window lifecycle" setup — but WppUpdateChecker's first check
+            # is scheduled via wx.CallLater(90000, ...) very early in
+            # __init__, well before that point, and its own check can take
+            # longer still. If the initial pairing dialog is still on
+            # screen 90+ seconds after launch (completely normal — that's a
+            # human reading/scanning a QR code) and the user accepts an
+            # update from it, _update_wpp_server() runs before
+            # self._window_hidden exists at all — getattr() instead of a
+            # bare attribute access is what keeps that a no-op instead of
+            # an AttributeError crash right after the very first pairing.
+            if getattr(self, "_window_hidden", False) and not self.background_mode:
+                wx.CallAfter(self.restore_window)
+
             if not self.background_mode:
                 self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
         finally:
@@ -3049,8 +3096,8 @@ class MainWindow(wx.Frame):
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "express"),
-            os.path.join(node_modules, "@wppconnect-team"),
+            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
+            os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
@@ -3064,8 +3111,7 @@ class MainWindow(wx.Frame):
                     npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
                     npm_cmd  = [node_exe, npm_cli]
                     node_dir = resource_path("node")
-                    git_dir  = resource_path("git", "cmd")
-                    path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
+                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
                 else:
                     local_node = resource_path("node", "node")
                     if os.path.isfile(local_node):
@@ -3078,8 +3124,7 @@ class MainWindow(wx.Frame):
                     else:
                         npm_cmd = [shutil.which("npm") or "npm"]
                     node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-                    git_dir  = resource_path("git", "bin")
-                    path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
+                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
 
                 npm_env  = {
                     **os.environ,
@@ -3149,17 +3194,7 @@ class MainWindow(wx.Frame):
         return default
 
     def _get_installed_wpp_version(self) -> str:
-        """Read the WPPConnect Server commit SHA or version from api/."""
-        sha_path = resource_path("api", ".commit_sha")
-        try:
-            if os.path.isfile(sha_path):
-                with open(sha_path, encoding="utf-8") as fh:
-                    sha = fh.read().strip()
-                    if sha:
-                        return sha
-        except Exception:
-            pass
-
+        """Read the WPPConnect Server version from api/package.json."""
         pkg_path = resource_path("api", "package.json")
         try:
             with open(pkg_path, encoding="utf-8") as fh:
@@ -3578,8 +3613,24 @@ class MainWindow(wx.Frame):
         self.ID_ALT_3      = wx.NewIdRef()
         self.ID_ALT_4      = wx.NewIdRef()
         self.ID_ALT_5      = wx.NewIdRef()
+        self.ID_ALT_NAV    = wx.NewIdRef()
         self.ID_CTRL_COMMA = wx.NewIdRef()
         self.ID_F1         = wx.NewIdRef()
+
+        # navigation_panel's "&Navegação principal" label mnemonic is meant
+        # to redirect Alt+N to nav_list, but that native StaticText-mnemonic
+        # redirect proved unreliable elsewhere in this app (see the Alt+D/
+        # Alt+M fixes in ConversationsPanel.create_accel_conversation) —
+        # reported live as barely ever working. An explicit global
+        # accelerator, extracted from the same i18n mnemonic so it still
+        # tracks the label instead of hardcoding "N", works unconditionally
+        # from anywhere in the window instead of depending on that mechanism.
+        nav_letter = "N"
+        _nav_label = self.i18n.t("main_nav")
+        _amp = _nav_label.find("&")
+        if 0 <= _amp < len(_nav_label) - 1 and _nav_label[_amp + 1].isalpha():
+            nav_letter = _nav_label[_amp + 1].upper()
+
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_ALT,    ord('1'),    self.ID_ALT_1),
@@ -3587,6 +3638,7 @@ class MainWindow(wx.Frame):
             (wx.ACCEL_ALT,    ord('3'),    self.ID_ALT_3),
             (wx.ACCEL_ALT,    ord('4'),    self.ID_ALT_4),
             (wx.ACCEL_ALT,    ord('5'),    self.ID_ALT_5),
+            (wx.ACCEL_ALT,    ord(nav_letter), self.ID_ALT_NAV),
             (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
             (wx.ACCEL_NORMAL, wx.WXK_F1,  self.ID_F1),
         ])
@@ -3596,8 +3648,14 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_global_alt3, id=self.ID_ALT_3)
         self.Bind(wx.EVT_MENU, self.on_alt_4,       id=self.ID_ALT_4)
         self.Bind(wx.EVT_MENU, self.on_alt_5,       id=self.ID_ALT_5)
+        self.Bind(wx.EVT_MENU, self._on_alt_nav,    id=self.ID_ALT_NAV)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
         self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
+
+    def _on_alt_nav(self, event):
+        """Alt+N (or the localized equivalent): focus the main navigation list."""
+        if hasattr(self, "navigation_panel"):
+            self.navigation_panel.nav_list.SetFocus()
 
     def _on_global_alt2(self, event):
         """Alt+2: jump to last message regardless of which panel has focus."""
@@ -3663,7 +3721,7 @@ class MainWindow(wx.Frame):
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.Show()
             self.content_panel.Layout()
-            self.archived_conversations_panel.conversations_list.SetFocus()
+            self.archived_conversations_panel.restore_selection()
 
     def on_alt_5(self, event):
         self.conversations_panel.Hide()
@@ -4457,11 +4515,8 @@ class MainWindow(wx.Frame):
     # Consecutive notLogged/QRCODE readings required before believing the device
     # was really unlinked.  The health checker polls every ~30 s, so a genuine
     # logout is still noticed inside a minute — cheap insurance against a
-    # _LOGOUT_CONFIRM_STRIKES governs how many consecutive unlinked readings
-    # (notLogged, QRCODE) are required before confirming a real logout.
-    # WPPConnect transiently reports notLogged/QRCODE during the first 15–25 seconds
-    # of Chrome startup while restoring session cookies from userDataDir.
-    _LOGOUT_CONFIRM_STRIKES = 6
+    # transient reading costing the user their entire local history.
+    _LOGOUT_CONFIRM_STRIKES = 2
 
     def _logout_confirmed(self, status: str) -> bool:
         """True when an unlinked status has been seen often enough to act on it.
@@ -4722,7 +4777,6 @@ class MainWindow(wx.Frame):
                                 wx.OK | wx.ICON_ERROR,
                             )
                             self._on_disconnect()
-                            self._open_connection_dialog()
 
                         if self.settings.get("privateinfo", {}).get("paired"):
                             # Destructive path: _on_disconnect() wipes the whole
@@ -4732,10 +4786,15 @@ class MainWindow(wx.Frame):
                                 return
                             wx.CallAfter(_logout_with_warning)
                         else:
-                            def _show_pairing():
-                                self._on_disconnect()
-                                self._open_connection_dialog()
-                            wx.CallAfter(_show_pairing)
+                            # Not paired: there is nothing to lose (the database
+                            # is empty by definition) and _on_disconnect() is
+                            # what puts the pairing dialog on screen. Delaying it
+                            # behind the confirmation left the app sitting on
+                            # "sem conexão com o WhatsApp / modo offline" with no
+                            # way to connect — the guard was protecting data that
+                            # does not exist, at the cost of the one action the
+                            # user actually needed.
+                            wx.CallAfter(self._on_disconnect)
         except Exception as e:
             # The local API itself did not answer — we certainly cannot reach
             # WhatsApp through it either, but only once this has happened
@@ -5766,19 +5825,16 @@ class MainWindow(wx.Frame):
                             if k == "name" and jid.endswith("@g.us") and not v:
                                 v = self._group_name_from_chat_dict(chat)
                             # Don't let the server overwrite a positive local
-                            # unreadCount with zero — the local counter may have
-                            # incremented since the server snapshot was taken.
-                            # But always accept a server-reported positive value
-                            # so that newly-arrived unread chats show up.
+                            # unreadCount with a lower one — the local counter
+                            # may have incremented since the server snapshot
+                            # was taken. But always accept a server-reported
+                            # value HIGHER than the local one (e.g. a message
+                            # read/sent from another device this session
+                            # doesn't know about) so newly-arrived unread
+                            # chats still show up.
                             if k == "unreadCount":
                                 server_val = int(v or 0)
                                 local_val = int(chats[jid].get("unreadCount") or 0)
-                                # During startup sync (before messages_set_completed is True),
-                                # WPPConnect often returns 0 unreadCount because WhatsApp Web has
-                                # not fully finished syncing chats from the phone yet.
-                                # Keep the local count to prevent startup wipe of unread badges.
-                                if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
-                                    continue
                                 # Never resurrect unread count for the conversation the
                                 # user has open right now — mark_conversation_as_read()
                                 # already set it to 0 locally, and this snapshot can be
@@ -5787,6 +5843,17 @@ class MainWindow(wx.Frame):
                                 _cp = getattr(self, "conversations_panel", None)
                                 if jid == getattr(_cp, "_last_open_jid", ""):
                                     v = 0
+                                elif server_val < local_val:
+                                    # WPPConnect's list-chats snapshot lagging behind
+                                    # live on_new_message increments isn't just a
+                                    # startup-sync artifact — this periodic resync
+                                    # (get_remote_chats(), polled every 60s) can under-
+                                    # report the same way well after startup too.
+                                    # Silently resetting the count here meant the very
+                                    # next live message's toast notification announced
+                                    # "1 unread" right after the reset, even though
+                                    # several messages had already piled up before it.
+                                    continue
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see
@@ -8433,9 +8500,39 @@ class MainWindow(wx.Frame):
         if not chat:
             return
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        # _fetch_remote_message_ids() only asks WhatsApp Web for its last
+        # `limit` messages (same messages_page_size setting) — comparing the
+        # FULL local history against that limited remote window meant any
+        # older local message, once a busy conversation pushed it past the
+        # server's last-`limit` cutoff, looked "missing" and got deleted
+        # locally even though it was never actually removed anywhere. This
+        # was reported live as a message that had demonstrably been
+        # delivered (visible to other group members) vanishing from
+        # WinZapp's own local history shortly after being sent.
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        recent_records = records[-limit:] if len(records) > limit else records
+
+        # Also exclude anything sent/received in roughly the last two
+        # minutes: WhatsApp Web's own /get-messages can lag behind a message
+        # actually reaching the server by a few seconds, so a fetch that
+        # hasn't caught up yet would otherwise flag a message as "missing"
+        # (and delete it) purely because of that race, not a real deletion.
+        _stable_cutoff = time.time() - 120
+
+        def _is_stable(r: dict) -> bool:
+            ts = r.get("messageTimestamp") or r.get("timestamp") or 0
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                return False
+            if ts > 1_000_000_000_000:
+                ts //= 1000
+            return bool(ts) and ts < _stable_cutoff
+
         local_ids = {
-            r.get("key", {}).get("id") for r in records
-            if isinstance(r, dict) and not r.get("_local_pending") and r.get("key", {}).get("id")
+            r.get("key", {}).get("id") for r in recent_records
+            if isinstance(r, dict) and not r.get("_local_pending")
+            and r.get("key", {}).get("id") and _is_stable(r)
         }
         # Too little history for "the server has fewer messages" to mean
         # anything other than "this is just a short conversation".
@@ -8499,6 +8596,16 @@ class MainWindow(wx.Frame):
                                               # "session is not active" / "chat not found"
                                               # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 60              # seconds per request during bulk sync
+
+    # A message this large gets skipped by the automatic background sync
+    # (sync_if_media) instead of being downloaded eagerly. WPPConnect base64-
+    # encodes the whole file inside its Node/Puppeteer process before ever
+    # handing it back over HTTP — for a ~1 GB document sent into a group this
+    # was observed pushing node.exe's memory usage past 5 GB and hanging the
+    # machine. The user can still explicitly open/download an oversized file
+    # from the conversation view (_on_action_open/_on_action_download in
+    # conversations.py) — only the unattended background pass is capped.
+    _MEDIA_AUTO_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024   # 100 MB
 
     def _load_media_failed_ids(self) -> dict:
         """Load {message_id: failed_at_timestamp} for media whose CDN URL has
@@ -8574,6 +8681,28 @@ class MainWindow(wx.Frame):
         # Skip IDs that previously returned 403/410 (expired CDN URL).
         if msg_id and msg_id in self._media_failed_ids:
             return
+
+        # Skip oversized files during the automatic background sync — see
+        # _MEDIA_AUTO_DOWNLOAD_MAX_BYTES.
+        msg_inner = msg.get("message")
+        if isinstance(msg_inner, str):
+            try:
+                msg_inner = json.loads(msg_inner)
+            except Exception:
+                msg_inner = None
+        inner = msg_inner.get(message_type) if isinstance(msg_inner, dict) else None
+        if isinstance(inner, dict):
+            try:
+                file_length = int(inner.get("fileLength") or 0)
+            except (TypeError, ValueError):
+                file_length = 0
+            if file_length > self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES:
+                logging.info(
+                    "[sync_if_media] Skipping auto-download of %s (%s, %.1f MB > %.0f MB limit)",
+                    msg_id, message_type, file_length / (1024 * 1024),
+                    self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES / (1024 * 1024),
+                )
+                return
 
         try:
             if message_type == "audioMessage":
@@ -9502,7 +9631,12 @@ class MainWindow(wx.Frame):
             phone = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
             if phone:
                 return format_number(phone)
-        if not jid_norm.endswith(("@g.us", "@lid")):
+            # No phone mapping yet for this @lid — `local` here is just the
+            # raw @lid digits, meaningless to a user ("Fulano está digitando"
+            # showing a bare numeric ID instead of a name/phone). A generic
+            # placeholder is far more useful than exposing that internal ID.
+            return self.i18n.t("unnamed_participant")
+        if not jid_norm.endswith("@g.us"):
             return format_number(jid_norm)
         return local
 
@@ -9604,6 +9738,17 @@ class MainWindow(wx.Frame):
                 label = self._presence_label_for_chat(chat_jid_norm, is_group)
                 if label:
                     item_text += f" {label}"
+                # Mirrors add_chats_to_ui()'s _build_item_text() — without
+                # these, a single-row refresh (presence/unread changes, which
+                # fire far more often than a full rebuild) silently dropped
+                # the pinned/muted/blocked suffix from a row until the next
+                # full rebuild happened to run.
+                if self.is_chat_pinned(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('pinned_suffix')})"
+                if self.is_chat_muted(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('muted')})"
+                if self.is_contact_blocked(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('blocked')})"
                 # Only touch the row when the visible text actually changes. Presence
                 # bursts (online/offline toggles that don't alter the row) otherwise
                 # rewrote the focused item's text repeatedly, making NVDA announce the
@@ -10057,6 +10202,11 @@ class MainWindow(wx.Frame):
     def fetch_older_messages(self, remote_jid, oldest_msg):
         """Fetch older messages from server starting before the oldest_msg."""
         remote_jid = self._normalize_jid(remote_jid)
+
+        # Check if history is already marked as exhausted in-memory
+        if remote_jid in getattr(self, "_exhausted_chats", set()):
+            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
+            return []
 
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
@@ -12084,7 +12234,7 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime("%H:%M")
+                        time_str = dt.strftime(i18n.t("time_fmt"))
                     else:
                         time_str = dt.strftime(i18n.t("datetime_fmt"))
                 except Exception:
@@ -12250,7 +12400,7 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime("%H:%M")
+                    time_str = dt.strftime(i18n.t("time_fmt"))
                 else:
                     time_str = dt.strftime(i18n.t("datetime_fmt"))
             except Exception:
@@ -12481,6 +12631,8 @@ class MainWindow(wx.Frame):
                 presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
                 if presence_label:
                     text += f" {presence_label}"
+            if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
+                text += f" ({self.i18n.t('pinned_suffix')})"
             if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
                 text += f" ({self.i18n.t('muted')})"
             if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):

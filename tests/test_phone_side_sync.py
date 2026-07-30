@@ -13,6 +13,8 @@ functions bound onto small stubs — same approach as
 tests/test_sender_names.py and tests/test_message_bookmarks.py.
 """
 
+import time
+
 import pytest
 
 import wx
@@ -70,7 +72,10 @@ class _FakeMainWindowForRemoval:
 
 def _msg(msg_id):
     return {"key": {"id": msg_id, "fromMe": False}, "message": {"conversation": "x"},
-            "messageType": "conversation"}
+            "messageType": "conversation",
+            # Old enough to clear _reconcile_active_conversation_with_remote's
+            # "recently sent/received" grace window (see that method).
+            "messageTimestamp": 1000}
 
 
 class _RemovalStub:
@@ -207,6 +212,7 @@ class _ReconcileStub:
         self._remote_ids = remote_ids
         self.clear_calls = []
         self._schedule_set_chats_calls = 0
+        self.settings = {}
 
     # Stubbed instead of hitting the network.
     def _fetch_remote_message_ids(self, remote_jid):
@@ -287,6 +293,47 @@ class TestReconcileActiveConversation:
             chats={jid: _chat_with_records("A", "B", "C")},
             conversations_panel=_FakeConversationsPanel(jid),
             remote_ids={"A", "B", "C", "D"},  # server even has a newer message
+        )
+        stub._reconcile_active_conversation_with_remote()
+        assert stub.clear_calls == []
+        assert stub.conversations_panel.removed is None
+
+    def test_messages_older_than_the_remote_fetch_window_are_never_diffed(self):
+        """Regression: _fetch_remote_message_ids() only asks WhatsApp Web for
+        its last `messages_page_size` messages. Comparing the FULL local
+        history against that limited window used to flag (and delete) older
+        local messages just because a busy chat had pushed them past the
+        server's returned window — not because they were actually deleted."""
+        jid = "j@s.whatsapp.net"
+        stub = _ReconcileStub(
+            chats={jid: _chat_with_records("A", "B", "C")},
+            conversations_panel=_FakeConversationsPanel(jid),
+            remote_ids={"B", "C"},  # server's last-`limit` window — "A" is just outside it
+        )
+        stub.settings = {"user_interface": {"messages_page_size": 2}}
+        stub._reconcile_active_conversation_with_remote()
+        assert stub.clear_calls == []
+        assert stub.conversations_panel.removed is None
+
+    def test_recently_sent_message_is_never_diffed(self):
+        """Regression: WhatsApp Web's own /get-messages can lag a few seconds
+        behind a message actually reaching the server. A message younger than
+        the grace window must never be treated as "missing" purely because
+        that fetch hasn't caught up yet — reported live as a message that was
+        demonstrably delivered (visible to other group members) vanishing
+        from WinZapp's own local history right after being sent."""
+        jid = "j@s.whatsapp.net"
+        chat = _chat_with_records("A", "B")
+        chat["messages"]["messages"]["records"].append({
+            "key": {"id": "C", "fromMe": True},
+            "message": {"conversation": "just sent"},
+            "messageType": "conversation",
+            "messageTimestamp": int(time.time()),  # just now
+        })
+        stub = _ReconcileStub(
+            chats={jid: chat},
+            conversations_panel=_FakeConversationsPanel(jid),
+            remote_ids={"A", "B"},  # "C" hasn't shown up in the fetch yet
         )
         stub._reconcile_active_conversation_with_remote()
         assert stub.clear_calls == []
