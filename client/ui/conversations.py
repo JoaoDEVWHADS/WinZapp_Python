@@ -3364,12 +3364,6 @@ class ConversationsPanel(wx.Panel):
         reached_start = phone_jid in getattr(self, "_reached_server_start", {})
         logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
         if phone_jid and reached_start:
-            # Say so instead of doing nothing. WhatsApp only transfers a recent
-            # window of each conversation to a linked device and keeps the rest
-            # on the phone (the chat record's endOfHistoryTransferType says so),
-            # so there is genuinely nothing more to fetch — but pressing Home and
-            # getting silence is indistinguishable from the app being broken,
-            # especially with a screen reader.
             self._is_loading_more = False
             return
         
@@ -3531,7 +3525,7 @@ class ConversationsPanel(wx.Panel):
             if idx >= 0:
                 self._do_activate_message(idx)
         elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_HOME):
-            if idx == 0 and not self._is_loading_more:
+            if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
                     self._load_more_messages()
                 else:
@@ -4022,7 +4016,8 @@ class ConversationsPanel(wx.Panel):
                 f"Header hex: {content[:16].hex()} "
                 f"(OGG magic = 4f676753, Opus head = 4f707573)"
             )
-            tmp = tempfile.NamedTemporaryFile(suffix=audio_ext, delete=False)
+            actual_ext = ".wav" if content.startswith(b"RIFF") else audio_ext
+            tmp = tempfile.NamedTemporaryFile(suffix=actual_ext, delete=False)
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name
@@ -7547,18 +7542,6 @@ class ConversationsPanel(wx.Panel):
                         return
 
             if preserve_focus:
-                # A silent background refresh (e.g. the @lid→phone merge in
-                # main.py's merge_lid(), which can rebuild this list on events
-                # completely unrelated to any new message arriving) must never
-                # yank focus away from wherever the user is currently reading.
-                # The previously-focused message could not be found above —
-                # either it was the unread-separator sentinel itself (restore
-                # that exact position instead) or it fell outside the
-                # pagination window/was otherwise removed, in which case doing
-                # nothing here is far less disruptive than jumping to the
-                # separator or the newest message, which is what used to make
-                # the list appear to "jump to a message in the middle" for no
-                # reason while the user was mid-read.
                 if _preserved_was_separator and self._unread_sep_idx >= 0:
                     if _had_focus:
                         self.messages_list.SetFocus()
@@ -7568,6 +7551,30 @@ class ConversationsPanel(wx.Panel):
                         self.messages_list.EnsureVisible(self._unread_sep_idx)
                 return
 
+        # Make the unread separator visible, or select and focus the last (newest) message by default
+        if not scrolled:
+            if self._unread_sep_idx >= 0:
+                last = self.messages_list.GetItemCount() - 1
+                target_visible = min(self._unread_sep_idx + 3, last)
+                if target_visible >= 0:
+                    self.messages_list.EnsureVisible(target_visible)
+                self.messages_list.EnsureVisible(self._unread_sep_idx)
+                self.messages_list.Focus(self._unread_sep_idx)
+                self.messages_list.Select(self._unread_sep_idx)
+            else:
+                last = self.messages_list.GetItemCount() - 1
+                if last >= 0:
+                    self.messages_list.EnsureVisible(last)
+                    self.messages_list.Focus(last)
+                    self.messages_list.Select(last)
+                    logging.info(
+                        "[populate_messages] default-select tail: last=%d "
+                        "GetFocusedItem()=%d GetFirstSelected()=%d ItemCount=%d",
+                        last, self.messages_list.GetFocusedItem(),
+                        self.messages_list.GetFirstSelected(),
+                        self.messages_list.GetItemCount(),
+                    )
+=======
             # Make the unread separator visible, or select and focus the last (newest) message by default
             if not scrolled:
                 if self._unread_sep_idx >= 0:
@@ -7578,6 +7585,7 @@ class ConversationsPanel(wx.Panel):
                     self.messages_list.EnsureVisible(self._unread_sep_idx)
                     self.messages_list.Focus(self._unread_sep_idx)
                     self.messages_list.Select(self._unread_sep_idx)
+>>>>>>> gabriel/main
                 else:
                     last = self.messages_list.GetItemCount() - 1
                     if last >= 0:
