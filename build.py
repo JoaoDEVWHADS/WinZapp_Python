@@ -1,4 +1,4 @@
-"""
+r"""
 WinZapp build script — PyInstaller variant.
 
 Build modes:
@@ -65,9 +65,8 @@ DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets
-NODE_DIR         = os.path.join(CLIENT_DIR, "node")
-API_DIR          = os.path.join(CLIENT_DIR, "api")
-API_PATCHES_DIR  = os.path.join(CLIENT_DIR, "api_patches")
+NODE_DIR      = os.path.join(CLIENT_DIR, "node")
+API_DIR       = os.path.join(CLIENT_DIR, "api")
 
 PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
 PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
@@ -101,6 +100,140 @@ SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
+# libopus-0.dll — required by client/core/ogg_opus.py for OGG Opus encoding.
+# libopus is a native C library (NOT a Python package).  On Windows it ships
+# with MSYS2 (mingw-w64-ucrt-x86_64-opus) or can be installed via Chocolatey /
+# vcpkg.  build.py searches common locations; if not found it auto-downloads the
+# DLL from the MSYS2 package mirror and saves it to client/lib/.
+
+def _find_opus_dll_on_disk():
+    """Search known filesystem locations for libopus-0.dll / opus.dll."""
+    candidates = [
+        os.path.join(CLIENT_DIR, "lib", "libopus-0.dll"),
+        os.path.join(CLIENT_DIR, "lib", "opus.dll"),
+        r"C:\msys64\ucrt64\bin\libopus-0.dll",         # MSYS2 UCRT64 (CI + local)
+        r"C:\msys64\mingw64\bin\libopus-0.dll",         # MSYS2 MinGW64
+        r"C:\msys2\ucrt64\bin\libopus-0.dll",           # alternate MSYS2 root
+        r"C:\msys2\mingw64\bin\libopus-0.dll",
+        r"C:\ProgramData\chocolatey\bin\libopus-0.dll", # Chocolatey
+        r"C:\ProgramData\scoop\shims\libopus-0.dll",    # Scoop
+    ]
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        if path_dir:
+            candidates.append(os.path.join(path_dir, "libopus-0.dll"))
+            candidates.append(os.path.join(path_dir, "opus.dll"))
+    return next((p for p in candidates if os.path.isfile(p)), None)
+
+
+def _download_opus_dll():
+    """Download libopus-0.dll from the MSYS2 package mirror.
+
+    Uses the MSYS2 packages API to find the latest package URL, then downloads
+    and extracts the DLL from the .tar.zst archive into client/lib/.
+    Requires the ``zstandard`` package (already in requirements.txt).
+    """
+    dst_dir = os.path.join(CLIENT_DIR, "lib")
+    dst     = os.path.join(dst_dir, "libopus-0.dll")
+
+    print("  [opus] libopus-0.dll not found locally — downloading from MSYS2...")
+
+    try:
+        import zstandard  # already in requirements.txt
+    except ImportError:
+        print("  [WARN] 'zstandard' package not installed; cannot auto-download libopus.")
+        print("         Run: venv\\Scripts\\pip install zstandard")
+        return None
+
+    # Query the MSYS2 package API to discover the download URL for the latest
+    # opus package in the UCRT64 repository.
+    api_url = (
+        "https://packages.msys2.org/api/packages/ucrt64/"
+        "mingw-w64-ucrt-x86_64-opus"
+    )
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "WinZapp-build"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            import json
+            info = json.loads(resp.read())
+        # The API returns a list; pick the first (most recent).
+        entry = info[0] if isinstance(info, list) else info
+        pkg_filename = entry.get("filename") or entry.get("name") or ""
+        pkg_url = (
+            entry.get("url")
+            or entry.get("download_url")
+            or (
+                f"https://mirror.msys2.org/mingw/ucrt64/{pkg_filename}"
+                if pkg_filename else ""
+            )
+        )
+    except Exception as exc:
+        # API query failed — fall back to a pinned version URL.
+        print(f"  [opus] MSYS2 API unavailable ({exc}); using pinned version 1.5.2.")
+        pkg_url = (
+            "https://mirror.msys2.org/mingw/ucrt64/"
+            "mingw-w64-ucrt-x86_64-opus-1.5.2-1-any.pkg.tar.zst"
+        )
+
+    if not pkg_url:
+        print("  [WARN] Could not determine libopus package URL.")
+        return None
+
+    print(f"  [opus] Downloading {pkg_url} ...")
+    try:
+        req = urllib.request.Request(pkg_url, headers={"User-Agent": "WinZapp-build"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            pkg_data = resp.read()
+    except Exception as exc:
+        print(f"  [WARN] Download failed: {exc}")
+        return None
+
+    # The .pkg.tar.zst archive is a zstd-compressed tar.
+    # Inside, the DLL lives at  ucrt64/bin/libopus-0.dll
+    print("  [opus] Extracting libopus-0.dll ...")
+    try:
+        dctx = zstandard.ZstdDecompressor()
+        with dctx.stream_reader(io.BytesIO(pkg_data)) as zst_reader:
+            with tarfile.open(fileobj=zst_reader) as tar:
+                dll_member = next(
+                    (m for m in tar.getmembers()
+                     if m.name.endswith("/libopus-0.dll") or m.name == "libopus-0.dll"),
+                    None,
+                )
+                if dll_member is None:
+                    print("  [WARN] libopus-0.dll not found inside the package.")
+                    return None
+                f = tar.extractfile(dll_member)
+                os.makedirs(dst_dir, exist_ok=True)
+                with open(dst, "wb") as out:
+                    out.write(f.read())
+    except Exception as exc:
+        print(f"  [WARN] Extraction failed: {exc}")
+        return None
+
+    print(f"  [opus] Saved to {dst}")
+    return dst
+
+
+def _find_opus_dll():
+    """Find or auto-download libopus-0.dll for bundling."""
+    found = _find_opus_dll_on_disk()
+    if found:
+        return found
+    # Not found locally — attempt auto-download.
+    downloaded = _download_opus_dll()
+    if downloaded:
+        return downloaded
+    print(
+        "  [WARN] libopus-0.dll not found and auto-download failed.\n"
+        "         Voice messages will not work in the built app.\n"
+        "         To fix: install MSYS2 and run:\n"
+        "           pacman -S mingw-w64-ucrt-x86_64-opus\n"
+        "         Or copy libopus-0.dll to client/lib/libopus-0.dll"
+    )
+    return None
+
+OPUS_DLL = _find_opus_dll()
+
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {
     "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
@@ -129,16 +262,12 @@ API_EXCLUDE_SUB_DIRS = {"tests", "types"}
 # visible/patchable directly from an extracted install, not just at dev time.
 API_CUSTOM_SRC_FILES = [
     "src/config.ts",
-    "src/index.ts",
     "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
-    "src/routes/index.ts",
-    "decrypt.js",
 ]
 
 # -- CLI --------------------------------------------------------------------
@@ -159,24 +288,6 @@ def step(msg):
     print(f"\n{'-'*60}")
     print(f"  {msg}")
     print('-'*60)
-
-def read_client_version() -> str:
-    """Read __version__ out of client/version.py without importing it.
-
-    Used to embed the real app version into the compiled installer stub
-    (Add/Remove Programs' DisplayVersion), which used to be hardcoded to a
-    permanent placeholder no build ever updated.
-    """
-    version_path = os.path.join(CLIENT_DIR, "version.py")
-    with open(version_path, "r", encoding="utf-8") as f:
-        contents = f.read()
-    import re
-    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', contents)
-    if not m:
-        print(f"[WARN] Could not find __version__ in {version_path}; "
-              f"installer will report version 0.0.0")
-        return "0.0.0"
-    return m.group(1)
 
 def run(cmd, cwd=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
@@ -242,6 +353,15 @@ def check_tools():
             "         npm run build"
         )
 
+    if OPUS_DLL:
+        print(f"  [opus] libopus found: {OPUS_DLL}")
+    else:
+        print(
+            "  [WARN] libopus-0.dll not found — voice messages will fail in the built app.\n"
+            "         Install MSYS2 and run: pacman -S mingw-w64-ucrt-x86_64-opus\n"
+            "         Or copy libopus-0.dll to client/lib/"
+        )
+
     if missing:
         print("\n[ERROR] Missing required tools or pre-built assets:")
         for m in missing:
@@ -283,7 +403,6 @@ def pyinstaller_compile():
         "winrt",
         "pyaudio",
         "aiosqlite",
-        "numpy",
     ]
 
     cmd = [
@@ -306,7 +425,6 @@ def pyinstaller_compile():
         add_data_pairs = [
             (NODE_DIR, "node"),
             (API_DIR, "api"),
-            (API_PATCHES_DIR, "api_patches"),
             (SOUND_LIB_X64, "lib"),
             (AO2_LIB, "lib"),
             (os.path.join(CLIENT_DIR, "sounds"), "sounds"),
@@ -317,12 +435,14 @@ def pyinstaller_compile():
             add_data_pairs.append(
                 (os.path.join(CLIENT_DIR, ".env"), ".env")
             )
-        for changelog_src in glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt")):
-            add_data_pairs.append((changelog_src, os.path.basename(changelog_src)))
 
         for src, dst in add_data_pairs:
             if os.path.exists(src):
                 cmd += ["--add-data", f"{src};{dst}"]
+
+        # libopus DLL must be bundled as a binary so ctypes can load it at runtime
+        if OPUS_DLL:
+            cmd += ["--add-binary", f"{OPUS_DLL};lib"]
 
     cmd.append(os.path.join(CLIENT_DIR, "main.py"))
 
@@ -379,6 +499,7 @@ def assemble_staging():
                 shutil.copy2(os.path.join(AO2_LIB, fname),
                              os.path.join(lib_dir, fname))
                 dll_count += 1
+<<<<<<< HEAD
 
 
     # Copy all DLLs directly present in client/lib (bassopus.dll, libopus-0.dll, opus.dll, bass_aac.dll, screen reader DLLs, etc.)
@@ -397,11 +518,26 @@ def assemble_staging():
         if _bassopus_copied:
             break
         _bsrc = os.path.join(CLIENT_DIR, "lib", _bname)
+=======
+    # libopus for OGG Opus encoding (client/core/ogg_opus.py)
+    if OPUS_DLL:
+        shutil.copy2(OPUS_DLL, os.path.join(lib_dir, "libopus-0.dll"))
+        dll_count += 1
+        print(f"  -> lib/libopus-0.dll")
+    else:
+        print("  [WARN] libopus-0.dll not found — voice message encoding will fail")
+    # bassopus.dll for sound_lib BASS_PluginLoad
+    _bassopus_candidates = [
+        os.path.join(CLIENT_DIR, "lib", "bassopus.dll"),
+        os.path.join(CLIENT_DIR, "lib", "bass_opus.dll"),
+    ]
+    _bassopus_copied = False
+    for _bsrc in _bassopus_candidates:
+>>>>>>> upstream/main
         if os.path.isfile(_bsrc):
-            # Always write as bassopus.dll (the name sound_lib/BASS_PluginLoad expects)
             shutil.copy2(_bsrc, os.path.join(lib_dir, "bassopus.dll"))
             dll_count += 1
-            print(f"  -> lib/bassopus.dll  (from {_bname})")
+            print(f"  -> lib/bassopus.dll (from {os.path.basename(_bsrc)})")
             _bassopus_copied = True
             break
     if not _bassopus_copied:
@@ -413,11 +549,18 @@ def assemble_staging():
     hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
     if not hits:
         hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+<<<<<<< HEAD
     
     ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
 
     if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
         # Attempt automatic download for Windows target build
+=======
+
+    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
+
+    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+>>>>>>> upstream/main
         try:
             print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
             import zipfile
@@ -445,7 +588,6 @@ def assemble_staging():
 
     print(f"  -> lib/  ({dll_count} DLLs total)")
 
-
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
     shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))
     sounds_count = len(os.listdir(sounds_src))
@@ -468,9 +610,6 @@ def assemble_staging():
     else:
         print(f"  [WARN] client/.env not found — skipping")
 
-    # changelog_<lang>.txt files — read directly from the exe's own folder
-    # (see updater.py's resolve_changelog()), so a new/updated changelog can
-    # be dropped in without a WinZapp rebuild, same as languages/.
     changelog_files = glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt"))
     for src in changelog_files:
         shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
@@ -489,7 +628,10 @@ def assemble_staging():
         git_count = sum(1 for _, _, fs in os.walk(git_dst) for _ in fs)
         print(f"  -> git/   ({git_count} files)")
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/main
     api_dst = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0
@@ -507,6 +649,11 @@ def assemble_staging():
     if os.path.isfile(sha_src):
         shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
         print("  -> api/.commit_sha copied to staging")
+<<<<<<< HEAD
+=======
+
+    custom_src_count = 0
+>>>>>>> upstream/main
     for rel_path in API_CUSTOM_SRC_FILES:
         src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
         if not os.path.isfile(src_path):
@@ -519,27 +666,8 @@ def assemble_staging():
         custom_src_count += 1
     print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
 
-    # Second, untouched copy of the same patch files under api_patches/ — a
-    # pristine reference ApiSetupDialog restores from after every WPPConnect
-    # (re)install/update. api/ itself gets wiped and re-extracted from a
-    # fresh upstream ZIP on every one of those runs, so restoring from
-    # whatever happened to already be sitting in api/ before the wipe just
-    # perpetuates whatever patch snapshot the user's install last happened to
-    # have — including a stale/broken one from an older WinZapp version, with
-    # no way for a newer WinZapp release's improved patches to ever reach an
-    # existing install. api_patches/ is never modified after staging, so it
-    # always reflects exactly what *this* WinZapp build shipped with.
-    #
-    # Copied directly from client/api_patches/ — a permanent, always-git-
-    # tracked copy of these same files (never inside client/api/, so it
-    # survives even a full `rm -rf client/api/`) — rather than pulled from
-    # client/api/src/ at build time. A user deleting client/api/ before
-    # reinstalling used to leave setup_api.py / ApiSetupDialog nothing
-    # reliable to restore from (both only ever stashed whatever happened to
-    # still be on disk right before the wipe); client/api_patches/ is the
-    # single source of truth for what "correctly patched" looks like,
-    # independent of whatever state client/api/ itself is in.
     patches_dst = os.path.join(STAGING_DIR, "api_patches")
+    API_PATCHES_DIR = os.path.join(CLIENT_DIR, "api_patches")
     if os.path.isdir(API_PATCHES_DIR):
         shutil.copytree(API_PATCHES_DIR, patches_dst)
         patches_count = sum(len(fs) for _, _, fs in os.walk(patches_dst))
@@ -590,7 +718,6 @@ def create_payload_zip():
 
 def compile_installer_stub():
     step("6/8  Compiling installer stub")
-    version = read_client_version()
     run([
         WINDRES_CMD, "--codepage", "65001",
         os.path.join(INSTALLER_DIR, "installer.rc"),
@@ -599,13 +726,12 @@ def compile_installer_stub():
     ])
     run([
         GCC_CMD, "-finput-charset=UTF-8", "-fwide-exec-charset=UTF-16LE",
-        f'-DWINZAPP_VERSION=L"{version}"',
         os.path.join(INSTALLER_DIR, "installer.c"),
         INSTALLER_RES, "-o", INSTALLER_STUB, "-mwindows",
         "-I", INSTALLER_DIR,
         "-lole32", "-lshell32", "-lcomctl32", "-lshlwapi", "-ladvapi32", "-luuid",
     ])
-    print(f"  -> {INSTALLER_STUB}  (DisplayVersion={version})")
+    print(f"  -> {INSTALLER_STUB}")
 
 def append_zip_to_stub():
     step("7/8  Appending payload to installer stub")

@@ -3361,11 +3361,17 @@ class ConversationsPanel(wx.Panel):
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
+<<<<<<< HEAD
+        # Allow retry if user triggers scrolling up so history beyond 200 can be queried
+        reached_start = False
+        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}")
+=======
         reached_start = phone_jid in getattr(self, "_reached_server_start", {})
         logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
         if phone_jid and reached_start:
             self._is_loading_more = False
             return
+>>>>>>> upstream/main
         
         # Get oldest non-separator and non-pending message ID
         oldest_msg = None
@@ -7541,8 +7547,42 @@ class ConversationsPanel(wx.Panel):
                             self.messages_list.EnsureVisible(idx)
                         return
 
+<<<<<<< HEAD
+        # A chat with no displayable history (e.g. WhatsApp Web's own store
+        # never loaded this conversation's messages, so all WinZapp captured
+        # was a non-displayable system record) previously left messages_list
+        # with zero rows and nothing was ever focused — for a screen-reader
+        # user that reads as total silence, indistinguishable from the app
+        # being broken. Show one non-actionable placeholder row instead.
+        if not paginated:
+            paginated = [{"_type": "empty_placeholder"}]
+
+        self._sorted_messages = paginated
+
+        for msg in paginated:
+            self.messages_list.Append((self._render_message_line(msg),))
+
+        # Restore scroll position if preserve_focus is True and we tracked a top visible message
+        scrolled = False
+        if preserve_focus and top_msg_id:
+            for idx, msg in enumerate(self._sorted_messages):
+                if isinstance(msg, dict) and msg.get("key", {}).get("id") == top_msg_id:
+                    self.messages_list.EnsureVisible(idx)
+                    scrolled = True
+                    break
+
+        # A background refresh (preserve_focus=True) should keep the user's
+        # current position instead of jumping back to the separator/last
+        # message — only fall back to the default placement below if the
+        # previously-focused message is no longer present (e.g. it was
+        # cleared or paginated out).
+        if _preserved_msg_id:
+            for idx, msg in enumerate(self._sorted_messages):
+                if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
+=======
             if preserve_focus:
                 if _preserved_was_separator and self._unread_sep_idx >= 0:
+>>>>>>> upstream/main
                     if _had_focus:
                         self.messages_list.SetFocus()
                     self.messages_list.Focus(self._unread_sep_idx)
@@ -7551,6 +7591,53 @@ class ConversationsPanel(wx.Panel):
                         self.messages_list.EnsureVisible(self._unread_sep_idx)
                 return
 
+<<<<<<< HEAD
+        if preserve_focus:
+            # A silent background refresh (e.g. the @lid→phone merge in
+            # main.py's merge_lid(), which can rebuild this list on events
+            # completely unrelated to any new message arriving) must never
+            # yank focus away from wherever the user is currently reading.
+            # The previously-focused message could not be found above —
+            # either it was the unread-separator sentinel itself (restore
+            # that exact position instead) or it fell outside the
+            # pagination window/was otherwise removed, in which case doing
+            # nothing here is far less disruptive than jumping to the
+            # separator or the newest message, which is what used to make
+            # the list appear to "jump to a message in the middle" for no
+            # reason while the user was mid-read.
+            if _preserved_was_separator and self._unread_sep_idx >= 0:
+                if _had_focus:
+                    self.messages_list.SetFocus()
+                self.messages_list.Focus(self._unread_sep_idx)
+                self.messages_list.Select(self._unread_sep_idx)
+                if not scrolled:
+                    self.messages_list.EnsureVisible(self._unread_sep_idx)
+            return
+
+        # Make the unread separator visible, or select and focus the last (newest) message by default
+        if not scrolled:
+            if self._unread_sep_idx >= 0:
+                last = self.messages_list.GetItemCount() - 1
+                target_visible = min(self._unread_sep_idx + 3, last)
+                if target_visible >= 0:
+                    self.messages_list.EnsureVisible(target_visible)
+                self.messages_list.EnsureVisible(self._unread_sep_idx)
+                self.messages_list.Focus(self._unread_sep_idx)
+                self.messages_list.Select(self._unread_sep_idx)
+            else:
+                last = self.messages_list.GetItemCount() - 1
+                if last >= 0:
+                    self.messages_list.EnsureVisible(last)
+                    self.messages_list.Focus(last)
+                    self.messages_list.Select(last)
+                    logging.info(
+                        "[populate_messages] default-select tail: last=%d "
+                        "GetFocusedItem()=%d GetFirstSelected()=%d ItemCount=%d",
+                        last, self.messages_list.GetFocusedItem(),
+                        self.messages_list.GetFirstSelected(),
+                        self.messages_list.GetItemCount(),
+                    )
+=======
             # Make the unread separator visible, or select and focus the last (newest) message by default
             if not scrolled:
                 if self._unread_sep_idx >= 0:
@@ -7561,6 +7648,7 @@ class ConversationsPanel(wx.Panel):
                     self.messages_list.EnsureVisible(self._unread_sep_idx)
                     self.messages_list.Focus(self._unread_sep_idx)
                     self.messages_list.Select(self._unread_sep_idx)
+>>>>>>> upstream/main
                 else:
                     last = self.messages_list.GetItemCount() - 1
                     if last >= 0:
