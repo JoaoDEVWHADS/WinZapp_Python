@@ -9205,18 +9205,14 @@ class MainWindow(wx.Frame):
         # otherwise get wrongly appended as a 4th segment and break the
         # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
         participant = ""
-        if chat.endswith("@g.us"):
-            if from_me:
-                # Our own group messages: always use our LID/phone as participant.
-                raw = (getattr(self, "my_lid", "") or getattr(self, "my_jid", "") or msg_key.get("participant") or "")
-            else:
-                # Others' group messages: participant may be in key or a dedicated field.
-                raw = (
-                    msg_key.get("participant")
-                    or msg_key.get("author")
-                    or msg_key.get("remoteJidAlt")
-                    or ""
-                )
+        if chat.endswith("@g.us") and not from_me:
+            # Others' group messages: participant may be in key or a dedicated field.
+            raw = (
+                msg_key.get("participant")
+                or msg_key.get("author")
+                or msg_key.get("remoteJidAlt")
+                or ""
+            )
             participant = _resolve_to_lid_if_available(raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
