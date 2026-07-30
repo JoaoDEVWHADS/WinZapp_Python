@@ -97,6 +97,7 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-opus
 
       - name: Adicionar MSYS2 GCC ao Path do Windows
         shell: pwsh
