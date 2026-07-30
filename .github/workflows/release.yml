@@ -50,13 +50,17 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ env.RELEASE_VERSION }}"
-          git config --local user.name "github-actions"
-          git config --local user.email "github-actions@github.com"
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add client/version.py
-          git commit -m "chore: bump version to $ver [skip ci]"
-          git tag "v$ver"
+          $status = git status --porcelain
+          if ($status) {
+              git commit -m "chore: bump version to $ver [skip ci]"
+          }
+          git tag -f "v$ver"
+          git pull origin main --rebase
           git push origin HEAD:main
-          git push origin "v$ver"
+          git push origin "v$ver" --force
           Write-Output "[INFO] Alterações enviadas e tag v$ver criada."
 
       - name: Configurar Arquivos .env
@@ -82,6 +86,7 @@ jobs:
           python -m venv venv
           ./venv/Scripts/python -m pip install --upgrade pip
           ./venv/Scripts/pip install -r requirements.txt
+          ./venv/Scripts/pip install -r requirements-dev.txt
 
       - name: Configurar MSYS2 (para gcc e windres)
         uses: msys2/setup-msys2@v2
@@ -127,6 +132,7 @@ jobs:
           Copy-Item -Path "node-temp\node-v24.15.0-win-x64\*" -Destination "client/node" -Recurse -Force
           Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
 
+<<<<<<< HEAD
       - name: Cache MinGit Portátil
         id: cache-git
         uses: actions/cache@v4
@@ -143,6 +149,14 @@ jobs:
           Expand-Archive -Path "mingit-portable.zip" -DestinationPath "client/git" -Force
           Remove-Item -Force "mingit-portable.zip"
 
+=======
+      - name: Create Python venv and install dependencies
+        run: |
+          python -m venv venv
+          venv\Scripts\pip install --upgrade pip --quiet
+          venv\Scripts\pip install -r requirements-dev.txt --quiet
+          venv\Scripts\pip install -r requirements.txt --quiet
+>>>>>>> upstream/main
 
       - name: Cache Node Modules da WPPConnect API
         id: cache-api-modules
@@ -154,38 +168,105 @@ jobs:
             npm-packages-
 
       - name: Configurar WPPConnect API
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
         shell: pwsh
         run: |
-          # 1. Clonar a API se não existir
-          python setup_api.py
+          # 1. Configurar repositório da API
+          ./venv/Scripts/python.exe setup_api.py
           
-          # 2. Configurar caminhos para usar o Node portátil para instalar dependências
-          cd client/api
-          $nodeExe = "../../client/node/node.exe"
-          $npmCli = "../../client/node/node_modules/npm/bin/npm-cli.js"
+          # 2. Configurar caminhos absolutos para Node e NPM
+          $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
+          $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
           
-          # Adiciona o diretório do node ao PATH temporariamente
-          $env:PATH = "$(Resolve-Path ../../client/node);$env:PATH"
+          Set-Location "$env:GITHUB_WORKSPACE\client\api"
           
-          # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
-          if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install --no-audit --no-fund
+          & $node $npm install --no-audit --no-fund --legacy-peer-deps
+          
+          # 3. Gerar schemas Prisma (se existir db:generate)
+          if (Test-Path "package.json") {
+              $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
+              if ($null -ne $scripts.'db:generate') {
+                  & $node $npm run db:generate
+              }
           }
           
-          # Compilar a API
-          &$nodeExe $npmCli run build
+          # 4. Compilar a API (TypeScript -> dist/server.js)
+          & $node $npm run build
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
-          python build.py
+          ./venv/Scripts/python.exe build.py
+
+      - name: Verificar Integridade do dist/WinZapp.zip
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist\WinZapp.zip")
+          try {
+            $entries = $zip.Entries | ForEach-Object { $_.FullName }
+            $hasExe      = ($entries | Where-Object { $_ -eq "WinZapp/WinZapp.exe" }).Count -gt 0
+            $hasNodeExe  = ($entries | Where-Object { $_ -eq "WinZapp/node/node.exe" }).Count -gt 0
+            $hasServerJs = ($entries | Where-Object { $_ -eq "WinZapp/api/dist/server.js" }).Count -gt 0
+            Write-Host "[VERIFY] WinZapp.exe        : $hasExe"
+            Write-Host "[VERIFY] node/node.exe      : $hasNodeExe"
+            Write-Host "[VERIFY] api/dist/server.js : $hasServerJs"
+            if (-not ($hasExe -and $hasNodeExe -and $hasServerJs)) {
+              Write-Error "dist/WinZapp.zip missing critical executables — build failed."
+              exit 1
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Gerar SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $lines = @()
+          foreach ($f in @("dist/WinZappInstaller.exe", "dist/WinZapp.zip")) {
+            if (Test-Path $f) {
+              $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+              $name = Split-Path $f -Leaf
+              $lines += "$hash  $name"
+            }
+          }
+          $lines | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding ascii
+          Write-Output "[INFO] dist/SHA256SUMS.txt gerado com sucesso."
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.RELEASE_VERSION }}
           name: Versão ${{ env.RELEASE_VERSION }}
+          make_latest: "true"
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
+            dist/SHA256SUMS.txt
           generate_release_notes: true
+
+      - name: Garantir Selo Latest Release na API do GitHub
+        uses: actions/github-script@v7
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const releases = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 5
+            });
+            const targetTag = `v${process.env.RELEASE_VERSION}`;
+            const targetRelease = releases.data.find(r => r.tag_name === targetTag) || releases.data[0];
+            if (targetRelease) {
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: targetRelease.id,
+                make_latest: "true"
+              });
+              console.log(`[INFO] Release ${targetRelease.tag_name} promovida com sucesso para LATEST no GitHub!`);
+            }
