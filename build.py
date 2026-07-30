@@ -505,6 +505,57 @@ def assemble_staging():
         print(f"  -> lib/libopus-0.dll")
     else:
         print("  [WARN] libopus-0.dll not found — voice message encoding will fail")
+    # bassopus.dll for sound_lib BASS_PluginLoad
+    _bassopus_candidates = [
+        os.path.join(CLIENT_DIR, "lib", "bassopus.dll"),
+        os.path.join(CLIENT_DIR, "lib", "bass_opus.dll"),
+    ]
+    _bassopus_copied = False
+    for _bsrc in _bassopus_candidates:
+        if os.path.isfile(_bsrc):
+            shutil.copy2(_bsrc, os.path.join(lib_dir, "bassopus.dll"))
+            dll_count += 1
+            print(f"  -> lib/bassopus.dll (from {os.path.basename(_bsrc)})")
+            _bassopus_copied = True
+            break
+    if not _bassopus_copied:
+        print("  [WARN] bassopus.dll not found in client/lib — OGG Opus audio playback will fail")
+
+    # Copy ffmpeg binary to staging/lib/ to support audio conversion on remote API setups
+    import glob as _glob
+    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
+    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
+    if not hits:
+        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+
+    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
+
+    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+        try:
+            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
+            import zipfile
+            import tempfile
+            import urllib.request
+            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
+            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
+            urllib.request.urlretrieve(dl_url, temp_zip)
+            with zipfile.ZipFile(temp_zip, "r") as zf:
+                zf.extract("ffmpeg.exe", lib_dir)
+            ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
+            if os.path.isfile(ffmpeg_dst):
+                ffmpeg_src = ffmpeg_dst
+                print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
+        except Exception as dl_err:
+            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
+
+    if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
+        ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
+        ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
+        shutil.copy2(ffmpeg_src, ffmpeg_dst)
+        print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
+    elif not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+        print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
+
     print(f"  -> lib/  ({dll_count} DLLs total)")
 
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
@@ -529,11 +580,23 @@ def assemble_staging():
     else:
         print(f"  [WARN] client/.env not found — skipping")
 
+    changelog_files = glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt"))
+    for src in changelog_files:
+        shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
+    print(f"  -> changelog_*.txt  ({len(changelog_files)} files)")
+
     node_dst = os.path.join(STAGING_DIR, "node")
     shutil.copytree(NODE_DIR, node_dst,
                     ignore=shutil.ignore_patterns("corepack"))
     node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
     print(f"  -> node/  ({node_count} files)")
+
+    git_src = os.path.join(CLIENT_DIR, "git")
+    if os.path.isdir(git_src):
+        git_dst = os.path.join(STAGING_DIR, "git")
+        shutil.copytree(git_src, git_dst)
+        git_count = sum(1 for _, _, fs in os.walk(git_dst) for _ in fs)
+        print(f"  -> git/   ({git_count} files)")
 
     api_dst = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
@@ -547,6 +610,11 @@ def assemble_staging():
         shutil.copy2(abs_path, dst)
         api_count += 1
 
+    sha_src = os.path.join(API_DIR, ".commit_sha")
+    if os.path.isfile(sha_src):
+        shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
+        print("  -> api/.commit_sha copied to staging")
+
     custom_src_count = 0
     for rel_path in API_CUSTOM_SRC_FILES:
         src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
@@ -559,6 +627,25 @@ def assemble_staging():
         api_count += 1
         custom_src_count += 1
     print(f"  -> api/  ({api_count} files, including {custom_src_count} custom src/ patch files)")
+
+    patches_dst = os.path.join(STAGING_DIR, "api_patches")
+    API_PATCHES_DIR = os.path.join(CLIENT_DIR, "api_patches")
+    if os.path.isdir(API_PATCHES_DIR):
+        shutil.copytree(API_PATCHES_DIR, patches_dst)
+        patches_count = sum(len(fs) for _, _, fs in os.walk(patches_dst))
+    else:
+        print(f"  [WARN] client/api_patches/ not found — falling back to client/api/src/")
+        os.makedirs(patches_dst)
+        patches_count = 0
+        for rel_path in API_CUSTOM_SRC_FILES:
+            src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
+            if not os.path.isfile(src_path):
+                continue
+            dst = os.path.join(patches_dst, rel_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src_path, dst)
+            patches_count += 1
+    print(f"  -> api_patches/  ({patches_count} reference patch files)")
 
 # -- Step 4-7: Installer (onedir only) -------------------------------------
 
