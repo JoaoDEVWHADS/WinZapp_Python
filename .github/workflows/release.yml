@@ -175,13 +175,56 @@ jobs:
           
           & $node $npm install --no-audit --no-fund --legacy-peer-deps
           
-          # 3. Compilar a API (TypeScript -> dist/server.js)
+          # 3. Gerar schemas Prisma (se existir db:generate)
+          if (Test-Path "package.json") {
+              $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
+              if ($null -ne $scripts.'db:generate') {
+                  & $node $npm run db:generate
+              }
+          }
+          
+          # 4. Compilar a API (TypeScript -> dist/server.js)
           & $node $npm run build
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
           ./venv/Scripts/python.exe build.py
+
+      - name: Verificar Integridade do dist/WinZapp.zip
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist\WinZapp.zip")
+          try {
+            $entries = $zip.Entries | ForEach-Object { $_.FullName }
+            $hasExe      = ($entries | Where-Object { $_ -eq "WinZapp/WinZapp.exe" }).Count -gt 0
+            $hasNodeExe  = ($entries | Where-Object { $_ -eq "WinZapp/node/node.exe" }).Count -gt 0
+            $hasServerJs = ($entries | Where-Object { $_ -eq "WinZapp/api/dist/server.js" }).Count -gt 0
+            Write-Host "[VERIFY] WinZapp.exe        : $hasExe"
+            Write-Host "[VERIFY] node/node.exe      : $hasNodeExe"
+            Write-Host "[VERIFY] api/dist/server.js : $hasServerJs"
+            if (-not ($hasExe -and $hasNodeExe -and $hasServerJs)) {
+              Write-Error "dist/WinZapp.zip missing critical executables — build failed."
+              exit 1
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Gerar SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $lines = @()
+          foreach ($f in @("dist/WinZappInstaller.exe", "dist/WinZapp.zip")) {
+            if (Test-Path $f) {
+              $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+              $name = Split-Path $f -Leaf
+              $lines += "$hash  $name"
+            }
+          }
+          $lines | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding ascii
+          Write-Output "[INFO] dist/SHA256SUMS.txt gerado com sucesso."
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
@@ -192,6 +235,7 @@ jobs:
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
+            dist/SHA256SUMS.txt
           generate_release_notes: true
 
       - name: Garantir Selo Latest Release na API do GitHub
