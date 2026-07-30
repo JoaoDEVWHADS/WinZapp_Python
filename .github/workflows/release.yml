@@ -172,6 +172,7 @@ jobs:
         with:
           tag_name: v${{ env.RELEASE_VERSION }}
           name: Versão ${{ env.RELEASE_VERSION }}
+          make_latest: true
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
