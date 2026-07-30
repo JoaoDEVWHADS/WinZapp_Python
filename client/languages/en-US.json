@@ -146,6 +146,7 @@
     "mute_chat": "Mute",
     "muted": "muted",
     "blocked": "blocked",
+    "pinned_suffix": "pinned",
     "mute_1h": "1 hour",
     "mute_3h": "3 hours",
     "mute_8h": "8 hours",

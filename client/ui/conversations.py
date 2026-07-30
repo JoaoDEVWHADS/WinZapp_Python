@@ -853,6 +853,7 @@ class ConversationsPanel(wx.Panel):
             wx.CallAfter(self.message_field.SetFocus)
             return
         self._stop_typing_for_current_conversation()
+        self._cancel_active_recording()
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -1074,6 +1075,16 @@ class ConversationsPanel(wx.Panel):
         sel = self._filter_radio.GetSelection()
         self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
         self.main_window.add_chats_to_ui()
+        # Selecting a filter option leaves keyboard focus on the radio box —
+        # the list itself gets rebuilt but nothing ever moves focus/selection
+        # there, so the user had no way to tell what (if anything) the new
+        # filter actually matched without tabbing over manually.
+        lst = self.conversations_list
+        if self.chats_list:
+            lst.Focus(0)
+            lst.Select(0)
+            lst.EnsureVisible(0)
+        lst.SetFocus()
 
     def on_ctrl_f(self, event):
         self.search_field.SetFocus()
@@ -1906,19 +1917,39 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_write_and_enqueue, daemon=True).start()
 
+    def _cancel_active_recording(self):
+        """Stop and discard an in-progress voice recording, if any.
+
+        Recording is scoped to whichever conversation was open when it
+        started — there is no "background recording" that survives leaving
+        the chat, so closing OR switching away from that conversation must
+        cancel it the same way, rather than leaving _is_recording true and
+        the voice panel visible while main_window.conversation has already
+        moved on. Without this on the switch path specifically, pressing
+        Enviar afterwards sent the recording to whatever conversation the
+        user had since navigated to — not the one it was actually recorded
+        in, since _send_voice_message() reads self.conversation at send
+        time, not at record-start time.
+        """
+        if not self._is_recording:
+            return
+        self._stop_recording_stream()
+        self._is_recording     = False
+        self._recording_paused = False
+        self._recording_frames = []
+        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if _rec_jid and not _rec_jid.endswith("@newsletter"):
+            self.main_window.send_recording_status(_rec_jid, False, _rec_jid.endswith("@g.us"))
+        self._voice_panel.Hide()
+        self.record_voice_message_btn.Show()
+
     def close_conversation(self, event=None):
         if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
             self._hide_mention_suggestions()
             self.message_field.SetFocus()
             return
         self._stop_typing_for_current_conversation()
-        if self._is_recording:
-            self._stop_recording_stream()
-            self._is_recording     = False
-            self._recording_paused = False
-            self._recording_frames = []
-            self._voice_panel.Hide()
-            self.record_voice_message_btn.Show()
+        self._cancel_active_recording()
         self._hide_audio_controls()
         self._hide_all_media_controls()
         self._hide_attachment_panel()
@@ -3072,8 +3103,30 @@ class ConversationsPanel(wx.Panel):
         # after the user has reached the unread region.
         if self._unread_sep_idx >= 0:
             if idx >= self._unread_sep_idx:
-                # Mark as read immediately (first time focus arrives)
-                if not self._unread_sep_dismiss_timer.IsRunning():
+                # Mark as read immediately (first time focus arrives) — but
+                # not while populate_messages() is still running
+                # (_populating_messages): that method's OWN default-placement
+                # Focus() call (landing exactly on the separator/last row when
+                # a conversation is freshly opened) fires this same
+                # EVT_LIST_ITEM_FOCUSED synchronously, well before the
+                # deferred wx.CallAfter in navigate_to_conversation() ever
+                # moves real keyboard focus off the conversations-list row
+                # the user just pressed Enter on. Starting the mark-as-read
+                # thread here raced ahead of that CallAfter and could get its
+                # own wx.CallAfter(_refresh_chat_row_in_list) queued (and
+                # executed) first — updating the still-focused conversations
+                # list row's text (removing the unread badge) before focus
+                # had actually moved away from it, so NVDA re-announced the
+                # row's new text instead of the newly focused messages
+                # list/message field. navigate_to_conversation() already
+                # starts its own mark-as-read thread (deferred until after
+                # that focus change) for the "just opened this conversation"
+                # case, so nothing is lost by skipping it here. The dismiss
+                # timer itself still arms normally either way — it only
+                # removes the separator row 2s later and never touches OS
+                # focus, so it isn't part of this race.
+                if (not self._unread_sep_dismiss_timer.IsRunning()
+                        and not getattr(self, "_populating_messages", False)):
                     if self.conversation is not None:
                         jid = self.conversation.get("remoteJid", "")
                         if jid:
@@ -3082,6 +3135,7 @@ class ConversationsPanel(wx.Panel):
                                 args=(jid,),
                                 daemon=True,
                             ).start()
+                if not self._unread_sep_dismiss_timer.IsRunning():
                     self._unread_sep_dismiss_timer.StartOnce(2000)
 
         # Show audio controls only when the focused item IS the playing audio.
@@ -3307,9 +3361,11 @@ class ConversationsPanel(wx.Panel):
             return
         
         phone_jid = self.conversation.get("remoteJid", "")
-        # Allow retry if user triggers scrolling up so history beyond 200 can be queried
-        reached_start = False
-        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}")
+        reached_start = phone_jid in getattr(self, "_reached_server_start", {})
+        logging.info(f"[_load_older_messages_from_server] phone_jid={phone_jid}, reached_start={reached_start}")
+        if phone_jid and reached_start:
+            self._is_loading_more = False
+            return
         
         # Get oldest non-separator and non-pending message ID
         oldest_msg = None
@@ -7328,164 +7384,172 @@ class ConversationsPanel(wx.Panel):
                 if not self._is_separator(m):
                     top_msg_id = m.get("key", {}).get("id", "")
 
-        self.messages_list.DeleteAllItems()
-        self._unread_sep_idx = -1
-        self._reaction_map = {}
-        messages_container = (
-            self.conversation.get("messages", {}) if self.conversation else {}
-        )
-        messages: list = []
-        if isinstance(messages_container, dict):
-            inner = messages_container.get("messages")
-            if isinstance(inner, dict) and isinstance(inner.get("records"), list):
-                messages = inner["records"]
+        # Frozen for the whole rebuild-and-refocus sequence below. Without
+        # this, DeleteAllItems() followed by re-Append()ing every row made
+        # the native SysListView32 control (still holding keyboard focus the
+        # entire time, since this fires from a background wx.CallAfter while
+        # the conversation stays open) briefly auto-assign LVIS_FOCUSED to
+        # row 0 the moment the first item was appended back into what was,
+        # for an instant, an empty focused list — a real Win32 ListView
+        # quirk, independent of any Focus()/Select() call this method makes
+        # itself. That transient focus (on whatever message pagination
+        # happens to put at row 0) fired its own accessibility event, which
+        # NVDA could announce — reported live as focus "randomly" jumping to
+        # a fixed message (always row 0 of the current pagination window)
+        # every time a background refresh (e.g. history backfill delivering
+        # an already-seen message for the open conversation) repopulated the
+        # list, without ever changing the visible selection. Freeze()
+        # suppresses native repaint/accessibility notifications until Thaw()
+        # runs in the finally block below, by which point only the final,
+        # correct Focus()/Select() call (or lack thereof) is ever observed.
+        self.messages_list.Freeze()
         try:
-            messages_sorted = sorted(
-                messages, key=lambda m: self._extract_timestamp(m) or 0
+            self.messages_list.DeleteAllItems()
+            self._unread_sep_idx = -1
+            self._reaction_map = {}
+            messages_container = (
+                self.conversation.get("messages", {}) if self.conversation else {}
             )
-        except Exception:
-            messages_sorted = messages
+            messages: list = []
+            if isinstance(messages_container, dict):
+                inner = messages_container.get("messages")
+                if isinstance(inner, dict) and isinstance(inner.get("records"), list):
+                    messages = inner["records"]
+            try:
+                messages_sorted = sorted(
+                    messages, key=lambda m: self._extract_timestamp(m) or 0
+                )
+            except Exception:
+                messages_sorted = messages
 
-        # Deduplicate by key.id — records may accumulate duplicates when the
-        # same message arrives via both the initial sync and messages.upsert.
-        # Keep the last occurrence (latest version of the message wins).
-        _seen_ids: dict = {}
-        for i, m in enumerate(messages_sorted):
-            if not isinstance(m, dict):
-                continue
-            mid = m.get("key", {}).get("id", "")
-            if mid:
-                _seen_ids[mid] = i
-        _kept = set(_seen_ids.values())
-        messages_sorted = [
-            m for i, m in enumerate(messages_sorted)
-            if isinstance(m, dict) and (
-                not m.get("key", {}).get("id", "") or i in _kept
+            # Deduplicate by key.id — records may accumulate duplicates when the
+            # same message arrives via both the initial sync and messages.upsert.
+            # Keep the last occurrence (latest version of the message wins).
+            _seen_ids: dict = {}
+            for i, m in enumerate(messages_sorted):
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("key", {}).get("id", "")
+                if mid:
+                    _seen_ids[mid] = i
+            _kept = set(_seen_ids.values())
+            messages_sorted = [
+                m for i, m in enumerate(messages_sorted)
+                if isinstance(m, dict) and (
+                    not m.get("key", {}).get("id", "") or i in _kept
+                )
+            ]
+
+            # Build reaction map from all reaction messages. Each sender can only
+            # have ONE active reaction on a message at a time — later records for
+            # the same (message, sender) pair replace the earlier one instead of
+            # accumulating a count, and an empty emoji means that sender removed
+            # their reaction.
+            for m in messages_sorted:
+                if isinstance(m, dict) and m.get("messageType") == "reactionMessage":
+                    reaction   = (m.get("message") or {}).get("reactionMessage") or {}
+                    emoji      = reaction.get("text", "")
+                    orig_id    = (reaction.get("key") or {}).get("id", "")
+                    sender_key = self._reactor_key_from_msg(m)
+                    if orig_id and sender_key:
+                        per_msg = self._reaction_map.setdefault(orig_id, {})
+                        if emoji:
+                            per_msg[sender_key] = emoji
+                        else:
+                            per_msg.pop(sender_key, None)
+
+            # Exclude reaction messages — they must not affect index mapping
+            displayable = [
+                m for m in messages_sorted if self._is_displayable_message(m)
+            ]
+
+            # Insert unread separator before the first unread message.
+            # Use the snapshot taken before mark_conversation_as_read() zeros the dict.
+            unread_count = self._pending_open_unread
+            self._pending_open_unread = 0
+            if unread_count > 0 and len(displayable) >= unread_count:
+                first_unread_idx = len(displayable) - unread_count
+                first_unread_msg = displayable[first_unread_idx]
+                if isinstance(first_unread_msg, dict):
+                    self._first_unread_msg_id = first_unread_msg.get("key", {}).get("id")
+                    self._first_unread_count = unread_count
+
+            if getattr(self, "_first_unread_msg_id", None):
+                sep_pos = -1
+                for idx, msg in enumerate(displayable):
+                    if isinstance(msg, dict) and msg.get("key", {}).get("id") == self._first_unread_msg_id:
+                        sep_pos = idx
+                        break
+                if sep_pos >= 0:
+                    sep = {"_type": "unread_separator", "count": getattr(self, "_first_unread_count", 1)}
+                    displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
+                    self._unread_sep_idx = sep_pos
+                    self._sep_from_open = True
+
+            # ── Pagination: show only last N messages ────────────────────────────
+            self._all_sorted_messages = displayable
+            limit = int(
+                self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
             )
-        ]
+            if len(displayable) > limit:
+                self._messages_offset = len(displayable) - limit
+                paginated = displayable[self._messages_offset:]
+                if self._unread_sep_idx >= 0:
+                    self._unread_sep_idx -= self._messages_offset
+                    if self._unread_sep_idx < 0:
+                        self._unread_sep_idx = -1
+            else:
+                self._messages_offset = 0
+                paginated = displayable
 
-        # Build reaction map from all reaction messages. Each sender can only
-        # have ONE active reaction on a message at a time — later records for
-        # the same (message, sender) pair replace the earlier one instead of
-        # accumulating a count, and an empty emoji means that sender removed
-        # their reaction.
-        for m in messages_sorted:
-            if isinstance(m, dict) and m.get("messageType") == "reactionMessage":
-                reaction   = (m.get("message") or {}).get("reactionMessage") or {}
-                emoji      = reaction.get("text", "")
-                orig_id    = (reaction.get("key") or {}).get("id", "")
-                sender_key = self._reactor_key_from_msg(m)
-                if orig_id and sender_key:
-                    per_msg = self._reaction_map.setdefault(orig_id, {})
-                    if emoji:
-                        per_msg[sender_key] = emoji
-                    else:
-                        per_msg.pop(sender_key, None)
+            # A chat with no displayable history (e.g. WhatsApp Web's own store
+            # never loaded this conversation's messages, so all WinZapp captured
+            # was a non-displayable system record) previously left messages_list
+            # with zero rows and nothing was ever focused — for a screen-reader
+            # user that reads as total silence, indistinguishable from the app
+            # being broken. Show one non-actionable placeholder row instead.
+            if not paginated:
+                paginated = [{"_type": "empty_placeholder"}]
 
-        # Exclude reaction messages — they must not affect index mapping
-        displayable = [
-            m for m in messages_sorted if self._is_displayable_message(m)
-        ]
+            self._sorted_messages = paginated
 
-        # Insert unread separator before the first unread message.
-        # Use the snapshot taken before mark_conversation_as_read() zeros the dict.
-        unread_count = self._pending_open_unread
-        self._pending_open_unread = 0
-        if unread_count > 0 and len(displayable) >= unread_count:
-            first_unread_idx = len(displayable) - unread_count
-            first_unread_msg = displayable[first_unread_idx]
-            if isinstance(first_unread_msg, dict):
-                self._first_unread_msg_id = first_unread_msg.get("key", {}).get("id")
-                self._first_unread_count = unread_count
+            for msg in paginated:
+                self.messages_list.Append((self._render_message_line(msg),))
 
-        if getattr(self, "_first_unread_msg_id", None):
-            sep_pos = -1
-            for idx, msg in enumerate(displayable):
-                if isinstance(msg, dict) and msg.get("key", {}).get("id") == self._first_unread_msg_id:
-                    sep_pos = idx
-                    break
-            if sep_pos >= 0:
-                sep = {"_type": "unread_separator", "count": getattr(self, "_first_unread_count", 1)}
-                displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
-                self._unread_sep_idx = sep_pos
-                self._sep_from_open = True
+            # Restore scroll position if preserve_focus is True and we tracked a top visible message
+            scrolled = False
+            if preserve_focus and top_msg_id:
+                for idx, msg in enumerate(self._sorted_messages):
+                    if isinstance(msg, dict) and msg.get("key", {}).get("id") == top_msg_id:
+                        self.messages_list.EnsureVisible(idx)
+                        scrolled = True
+                        break
 
-        # ── Pagination: show only last N messages ────────────────────────────
-        self._all_sorted_messages = displayable
-        limit = int(
-            self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
-        )
-        if len(displayable) > limit:
-            self._messages_offset = len(displayable) - limit
-            paginated = displayable[self._messages_offset:]
-            if self._unread_sep_idx >= 0:
-                self._unread_sep_idx -= self._messages_offset
-                if self._unread_sep_idx < 0:
-                    self._unread_sep_idx = -1
-        else:
-            self._messages_offset = 0
-            paginated = displayable
+            # A background refresh (preserve_focus=True) should keep the user's
+            # current position instead of jumping back to the separator/last
+            # message — only fall back to the default placement below if the
+            # previously-focused message is no longer present (e.g. it was
+            # cleared or paginated out).
+            if _preserved_msg_id:
+                for idx, msg in enumerate(self._sorted_messages):
+                    if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
+                        if _had_focus:
+                            self.messages_list.SetFocus()
+                        self.messages_list.Focus(idx)
+                        self.messages_list.Select(idx)
+                        if not scrolled:
+                            self.messages_list.EnsureVisible(idx)
+                        return
 
-        # A chat with no displayable history (e.g. WhatsApp Web's own store
-        # never loaded this conversation's messages, so all WinZapp captured
-        # was a non-displayable system record) previously left messages_list
-        # with zero rows and nothing was ever focused — for a screen-reader
-        # user that reads as total silence, indistinguishable from the app
-        # being broken. Show one non-actionable placeholder row instead.
-        if not paginated:
-            paginated = [{"_type": "empty_placeholder"}]
-
-        self._sorted_messages = paginated
-
-        for msg in paginated:
-            self.messages_list.Append((self._render_message_line(msg),))
-
-        # Restore scroll position if preserve_focus is True and we tracked a top visible message
-        scrolled = False
-        if preserve_focus and top_msg_id:
-            for idx, msg in enumerate(self._sorted_messages):
-                if isinstance(msg, dict) and msg.get("key", {}).get("id") == top_msg_id:
-                    self.messages_list.EnsureVisible(idx)
-                    scrolled = True
-                    break
-
-        # A background refresh (preserve_focus=True) should keep the user's
-        # current position instead of jumping back to the separator/last
-        # message — only fall back to the default placement below if the
-        # previously-focused message is no longer present (e.g. it was
-        # cleared or paginated out).
-        if _preserved_msg_id:
-            for idx, msg in enumerate(self._sorted_messages):
-                if isinstance(msg, dict) and msg.get("key", {}).get("id") == _preserved_msg_id:
+            if preserve_focus:
+                if _preserved_was_separator and self._unread_sep_idx >= 0:
                     if _had_focus:
                         self.messages_list.SetFocus()
-                    self.messages_list.Focus(idx)
-                    self.messages_list.Select(idx)
+                    self.messages_list.Focus(self._unread_sep_idx)
+                    self.messages_list.Select(self._unread_sep_idx)
                     if not scrolled:
-                        self.messages_list.EnsureVisible(idx)
-                    return
-
-        if preserve_focus:
-            # A silent background refresh (e.g. the @lid→phone merge in
-            # main.py's merge_lid(), which can rebuild this list on events
-            # completely unrelated to any new message arriving) must never
-            # yank focus away from wherever the user is currently reading.
-            # The previously-focused message could not be found above —
-            # either it was the unread-separator sentinel itself (restore
-            # that exact position instead) or it fell outside the
-            # pagination window/was otherwise removed, in which case doing
-            # nothing here is far less disruptive than jumping to the
-            # separator or the newest message, which is what used to make
-            # the list appear to "jump to a message in the middle" for no
-            # reason while the user was mid-read.
-            if _preserved_was_separator and self._unread_sep_idx >= 0:
-                if _had_focus:
-                    self.messages_list.SetFocus()
-                self.messages_list.Focus(self._unread_sep_idx)
-                self.messages_list.Select(self._unread_sep_idx)
-                if not scrolled:
-                    self.messages_list.EnsureVisible(self._unread_sep_idx)
-            return
+                        self.messages_list.EnsureVisible(self._unread_sep_idx)
+                return
 
         # Make the unread separator visible, or select and focus the last (newest) message by default
         if not scrolled:
@@ -7510,8 +7574,35 @@ class ConversationsPanel(wx.Panel):
                         self.messages_list.GetFirstSelected(),
                         self.messages_list.GetItemCount(),
                     )
+=======
+            # Make the unread separator visible, or select and focus the last (newest) message by default
+            if not scrolled:
+                if self._unread_sep_idx >= 0:
+                    last = self.messages_list.GetItemCount() - 1
+                    target_visible = min(self._unread_sep_idx + 3, last)
+                    if target_visible >= 0:
+                        self.messages_list.EnsureVisible(target_visible)
+                    self.messages_list.EnsureVisible(self._unread_sep_idx)
+                    self.messages_list.Focus(self._unread_sep_idx)
+                    self.messages_list.Select(self._unread_sep_idx)
+>>>>>>> gabriel/main
                 else:
-                    logging.info("[populate_messages] default-select tail: list is empty (last=-1)")
+                    last = self.messages_list.GetItemCount() - 1
+                    if last >= 0:
+                        self.messages_list.EnsureVisible(last)
+                        self.messages_list.Focus(last)
+                        self.messages_list.Select(last)
+                        logging.info(
+                            "[populate_messages] default-select tail: last=%d "
+                            "GetFocusedItem()=%d GetFirstSelected()=%d ItemCount=%d",
+                            last, self.messages_list.GetFocusedItem(),
+                            self.messages_list.GetFirstSelected(),
+                            self.messages_list.GetItemCount(),
+                        )
+                    else:
+                        logging.info("[populate_messages] default-select tail: list is empty (last=-1)")
+        finally:
+            self.messages_list.Thaw()
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────
@@ -7529,6 +7620,18 @@ class ArchivedConversationsPanel(wx.Panel):
         self.chats_list: list = []
         self.chat_names: list = []
         self._init_ui()
+
+    def restore_selection(self):
+        """Select, focus and give keyboard focus to the first archived
+        conversation — mirrors ConversationsPanel._restore_conversation_selection()
+        so the list never ends up empty-focused (nothing for a screen reader
+        to announce) after navigating here via Alt+4 or the nav-list item."""
+        lst = self.conversations_list
+        if self.chats_list:
+            lst.Focus(0)
+            lst.Select(0)
+            lst.EnsureVisible(0)
+        lst.SetFocus()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -7582,6 +7685,14 @@ class ArchivedConversationsPanel(wx.Panel):
         sel = self._filter_radio.GetSelection()
         self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
         self.main_window.add_chats_to_ui()
+        # See ConversationsPanel._on_filter_changed's identical comment —
+        # same reasoning applies to the archived list's own filter tabs.
+        lst = self.conversations_list
+        if self.chats_list:
+            lst.Focus(0)
+            lst.Select(0)
+            lst.EnsureVisible(0)
+        lst.SetFocus()
 
     def _on_arch_list_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_SPACE:

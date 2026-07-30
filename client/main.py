@@ -3578,8 +3578,24 @@ class MainWindow(wx.Frame):
         self.ID_ALT_3      = wx.NewIdRef()
         self.ID_ALT_4      = wx.NewIdRef()
         self.ID_ALT_5      = wx.NewIdRef()
+        self.ID_ALT_NAV    = wx.NewIdRef()
         self.ID_CTRL_COMMA = wx.NewIdRef()
         self.ID_F1         = wx.NewIdRef()
+
+        # navigation_panel's "&Navegação principal" label mnemonic is meant
+        # to redirect Alt+N to nav_list, but that native StaticText-mnemonic
+        # redirect proved unreliable elsewhere in this app (see the Alt+D/
+        # Alt+M fixes in ConversationsPanel.create_accel_conversation) —
+        # reported live as barely ever working. An explicit global
+        # accelerator, extracted from the same i18n mnemonic so it still
+        # tracks the label instead of hardcoding "N", works unconditionally
+        # from anywhere in the window instead of depending on that mechanism.
+        nav_letter = "N"
+        _nav_label = self.i18n.t("main_nav")
+        _amp = _nav_label.find("&")
+        if 0 <= _amp < len(_nav_label) - 1 and _nav_label[_amp + 1].isalpha():
+            nav_letter = _nav_label[_amp + 1].upper()
+
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_ALT,    ord('1'),    self.ID_ALT_1),
@@ -3587,6 +3603,7 @@ class MainWindow(wx.Frame):
             (wx.ACCEL_ALT,    ord('3'),    self.ID_ALT_3),
             (wx.ACCEL_ALT,    ord('4'),    self.ID_ALT_4),
             (wx.ACCEL_ALT,    ord('5'),    self.ID_ALT_5),
+            (wx.ACCEL_ALT,    ord(nav_letter), self.ID_ALT_NAV),
             (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
             (wx.ACCEL_NORMAL, wx.WXK_F1,  self.ID_F1),
         ])
@@ -3596,8 +3613,14 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_global_alt3, id=self.ID_ALT_3)
         self.Bind(wx.EVT_MENU, self.on_alt_4,       id=self.ID_ALT_4)
         self.Bind(wx.EVT_MENU, self.on_alt_5,       id=self.ID_ALT_5)
+        self.Bind(wx.EVT_MENU, self._on_alt_nav,    id=self.ID_ALT_NAV)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
         self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
+
+    def _on_alt_nav(self, event):
+        """Alt+N (or the localized equivalent): focus the main navigation list."""
+        if hasattr(self, "navigation_panel"):
+            self.navigation_panel.nav_list.SetFocus()
 
     def _on_global_alt2(self, event):
         """Alt+2: jump to last message regardless of which panel has focus."""
@@ -3663,7 +3686,7 @@ class MainWindow(wx.Frame):
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.Show()
             self.content_panel.Layout()
-            self.archived_conversations_panel.conversations_list.SetFocus()
+            self.archived_conversations_panel.restore_selection()
 
     def on_alt_5(self, event):
         self.conversations_panel.Hide()
@@ -5766,19 +5789,16 @@ class MainWindow(wx.Frame):
                             if k == "name" and jid.endswith("@g.us") and not v:
                                 v = self._group_name_from_chat_dict(chat)
                             # Don't let the server overwrite a positive local
-                            # unreadCount with zero — the local counter may have
-                            # incremented since the server snapshot was taken.
-                            # But always accept a server-reported positive value
-                            # so that newly-arrived unread chats show up.
+                            # unreadCount with a lower one — the local counter
+                            # may have incremented since the server snapshot
+                            # was taken. But always accept a server-reported
+                            # value HIGHER than the local one (e.g. a message
+                            # read/sent from another device this session
+                            # doesn't know about) so newly-arrived unread
+                            # chats still show up.
                             if k == "unreadCount":
                                 server_val = int(v or 0)
                                 local_val = int(chats[jid].get("unreadCount") or 0)
-                                # During startup sync (before messages_set_completed is True),
-                                # WPPConnect often returns 0 unreadCount because WhatsApp Web has
-                                # not fully finished syncing chats from the phone yet.
-                                # Keep the local count to prevent startup wipe of unread badges.
-                                if server_val == 0 and local_val > 0 and not getattr(self, "messages_set_completed", False):
-                                    continue
                                 # Never resurrect unread count for the conversation the
                                 # user has open right now — mark_conversation_as_read()
                                 # already set it to 0 locally, and this snapshot can be
@@ -5787,6 +5807,17 @@ class MainWindow(wx.Frame):
                                 _cp = getattr(self, "conversations_panel", None)
                                 if jid == getattr(_cp, "_last_open_jid", ""):
                                     v = 0
+                                elif server_val < local_val:
+                                    # WPPConnect's list-chats snapshot lagging behind
+                                    # live on_new_message increments isn't just a
+                                    # startup-sync artifact — this periodic resync
+                                    # (get_remote_chats(), polled every 60s) can under-
+                                    # report the same way well after startup too.
+                                    # Silently resetting the count here meant the very
+                                    # next live message's toast notification announced
+                                    # "1 unread" right after the reset, even though
+                                    # several messages had already piled up before it.
+                                    continue
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see
@@ -8433,9 +8464,39 @@ class MainWindow(wx.Frame):
         if not chat:
             return
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        # _fetch_remote_message_ids() only asks WhatsApp Web for its last
+        # `limit` messages (same messages_page_size setting) — comparing the
+        # FULL local history against that limited remote window meant any
+        # older local message, once a busy conversation pushed it past the
+        # server's last-`limit` cutoff, looked "missing" and got deleted
+        # locally even though it was never actually removed anywhere. This
+        # was reported live as a message that had demonstrably been
+        # delivered (visible to other group members) vanishing from
+        # WinZapp's own local history shortly after being sent.
+        limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
+        recent_records = records[-limit:] if len(records) > limit else records
+
+        # Also exclude anything sent/received in roughly the last two
+        # minutes: WhatsApp Web's own /get-messages can lag behind a message
+        # actually reaching the server by a few seconds, so a fetch that
+        # hasn't caught up yet would otherwise flag a message as "missing"
+        # (and delete it) purely because of that race, not a real deletion.
+        _stable_cutoff = time.time() - 120
+
+        def _is_stable(r: dict) -> bool:
+            ts = r.get("messageTimestamp") or r.get("timestamp") or 0
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                return False
+            if ts > 1_000_000_000_000:
+                ts //= 1000
+            return bool(ts) and ts < _stable_cutoff
+
         local_ids = {
-            r.get("key", {}).get("id") for r in records
-            if isinstance(r, dict) and not r.get("_local_pending") and r.get("key", {}).get("id")
+            r.get("key", {}).get("id") for r in recent_records
+            if isinstance(r, dict) and not r.get("_local_pending")
+            and r.get("key", {}).get("id") and _is_stable(r)
         }
         # Too little history for "the server has fewer messages" to mean
         # anything other than "this is just a short conversation".
@@ -9502,7 +9563,12 @@ class MainWindow(wx.Frame):
             phone = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
             if phone:
                 return format_number(phone)
-        if not jid_norm.endswith(("@g.us", "@lid")):
+            # No phone mapping yet for this @lid — `local` here is just the
+            # raw @lid digits, meaningless to a user ("Fulano está digitando"
+            # showing a bare numeric ID instead of a name/phone). A generic
+            # placeholder is far more useful than exposing that internal ID.
+            return self.i18n.t("unnamed_participant")
+        if not jid_norm.endswith("@g.us"):
             return format_number(jid_norm)
         return local
 
@@ -9604,6 +9670,17 @@ class MainWindow(wx.Frame):
                 label = self._presence_label_for_chat(chat_jid_norm, is_group)
                 if label:
                     item_text += f" {label}"
+                # Mirrors add_chats_to_ui()'s _build_item_text() — without
+                # these, a single-row refresh (presence/unread changes, which
+                # fire far more often than a full rebuild) silently dropped
+                # the pinned/muted/blocked suffix from a row until the next
+                # full rebuild happened to run.
+                if self.is_chat_pinned(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('pinned_suffix')})"
+                if self.is_chat_muted(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('muted')})"
+                if self.is_contact_blocked(chat_jid_norm):
+                    item_text += f" ({self.i18n.t('blocked')})"
                 # Only touch the row when the visible text actually changes. Presence
                 # bursts (online/offline toggles that don't alter the row) otherwise
                 # rewrote the focused item's text repeatedly, making NVDA announce the
@@ -12481,6 +12558,8 @@ class MainWindow(wx.Frame):
                 presence_label = self._presence_label_for_chat(chat_jid_norm, chat_jid_norm.endswith("@g.us"))
                 if presence_label:
                     text += f" {presence_label}"
+            if chat_jid_norm and self.is_chat_pinned(chat_jid_norm):
+                text += f" ({self.i18n.t('pinned_suffix')})"
             if chat_jid_norm and self.is_chat_muted(chat_jid_norm):
                 text += f" ({self.i18n.t('muted')})"
             if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
