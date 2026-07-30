@@ -115,36 +115,22 @@ jobs:
             Write-Warning "[WARN] bassopus.dll not found in client/lib — OGG Opus playback will fail"
           }
 
-      - name: Cache Node.js Portátil
-        id: cache-node
-        uses: actions/cache@v4
-        with:
-          path: client/node
-          key: node-portable-v24.15.0
-
       - name: Baixar e Extrair Node.js Portátil
-        if: steps.cache-node.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "client/node"
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v24.15.0/node-v24.15.0-win-x64.zip" -OutFile "node-portable.zip"
-          Expand-Archive -Path "node-portable.zip" -DestinationPath "node-temp"
-          Copy-Item -Path "node-temp\node-v24.15.0-win-x64\*" -Destination "client/node" -Recurse -Force
-          Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
-
-      - name: Cache MinGit Portátil
-        id: cache-git
-        uses: actions/cache@v4
-        with:
-          path: client/git
-          key: mingit-portable-v2.44.0
+          $version = "20.11.1"
+          $zip = "node-v${version}-win-x64.zip"
+          Invoke-WebRequest "https://nodejs.org/dist/v${version}/${zip}" -OutFile $zip -UseBasicParsing
+          Expand-Archive $zip -DestinationPath . -Force
+          if (Test-Path "client\node") { Remove-Item -Recurse -Force "client\node" }
+          Move-Item "node-v${version}-win-x64" "client\node"
+          Remove-Item -Force $zip
 
       - name: Baixar e Extrair MinGit Portátil
-        if: steps.cache-git.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "client/git"
-          Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile "mingit-portable.zip"
+          Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile "mingit-portable.zip" -UseBasicParsing
           Expand-Archive -Path "mingit-portable.zip" -DestinationPath "client/git" -Force
           Remove-Item -Force "mingit-portable.zip"
 
