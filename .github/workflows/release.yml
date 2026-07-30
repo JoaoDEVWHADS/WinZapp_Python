@@ -193,3 +193,25 @@ jobs:
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
           generate_release_notes: true
+
+      - name: Garantir Selo Latest Release na API do GitHub
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const releases = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 5
+            });
+            const targetTag = `v${process.env.RELEASE_VERSION}`;
+            const targetRelease = releases.data.find(r => r.tag_name === targetTag) || releases.data[0];
+            if (targetRelease) {
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: targetRelease.id,
+                make_latest: "true"
+              });
+              console.log(`[INFO] Release ${targetRelease.tag_name} promovida com sucesso para LATEST no GitHub!`);
+            }
