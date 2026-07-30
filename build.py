@@ -534,74 +534,75 @@ def assemble_staging():
         print("  [WARN] bassopus.dll not found in client/lib — OGG Opus audio playback will fail")
 
     # Copy ffmpeg binary to staging/lib/ to support audio conversion on remote API setups
-    import glob as _glob
-    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
-    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
-    if not hits:
-        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+    try:
+        import glob as _glob
+        installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
+        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
+        if not hits:
+            hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
 
-    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
+        ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
 
-    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
-        try:
-            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
-            import zipfile
-            import tempfile
-            import urllib.request
-            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
-            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
-            urllib.request.urlretrieve(dl_url, temp_zip)
-            with zipfile.ZipFile(temp_zip, "r") as zf:
-                zf.extract("ffmpeg.exe", lib_dir)
-            ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
-            if os.path.isfile(ffmpeg_dst):
-                ffmpeg_src = ffmpeg_dst
-                print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
-        except Exception as dl_err:
-            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
+        if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+            try:
+                print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
+                import zipfile
+                import tempfile
+                import urllib.request
+                dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
+                temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
+                urllib.request.urlretrieve(dl_url, temp_zip)
+                with zipfile.ZipFile(temp_zip, "r") as zf:
+                    zf.extract("ffmpeg.exe", lib_dir)
+                ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
+                if os.path.isfile(ffmpeg_dst):
+                    ffmpeg_src = ffmpeg_dst
+                    print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
+            except Exception as dl_err:
+                print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
 
-    if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
-        ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
-        ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
-        shutil.copy2(ffmpeg_src, ffmpeg_dst)
-        print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
-    elif not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
-        print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
+        if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
+            ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
+            ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
+            shutil.copy2(ffmpeg_src, ffmpeg_dst)
+            print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
+    except Exception as _ff_err:
+        print(f"  [WARN] ffmpeg handling encountered notice: {_ff_err}")
 
     print(f"  -> lib/  ({dll_count} DLLs total)")
 
     sounds_src = os.path.join(CLIENT_DIR, "sounds")
-    shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))
-    sounds_count = len(os.listdir(sounds_src))
-    print(f"  -> sounds/  ({sounds_count} files)")
+    if os.path.isdir(sounds_src):
+        shutil.copytree(sounds_src, os.path.join(STAGING_DIR, "sounds"))
+        sounds_count = len(os.listdir(sounds_src))
+        print(f"  -> sounds/  ({sounds_count} files)")
 
     langs_src = os.path.join(CLIENT_DIR, "languages")
-    shutil.copytree(langs_src, os.path.join(STAGING_DIR, "languages"))
-    langs_count = len(os.listdir(langs_src))
-    print(f"  -> languages/  ({langs_count} files)")
+    if os.path.isdir(langs_src):
+        shutil.copytree(langs_src, os.path.join(STAGING_DIR, "languages"))
+        langs_count = len(os.listdir(langs_src))
+        print(f"  -> languages/  ({langs_count} files)")
 
     data_dir = os.path.join(STAGING_DIR, "data")
-    os.makedirs(data_dir)
-    shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
-    print(f"  -> data/settings_default.json")
+    os.makedirs(data_dir, exist_ok=True)
+    if os.path.isfile(SETTINGS_DEFAULT):
+        shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
+        print(f"  -> data/settings_default.json")
 
     client_env = os.path.join(CLIENT_DIR, ".env")
     if os.path.isfile(client_env):
         shutil.copy2(client_env, os.path.join(STAGING_DIR, ".env"))
         print(f"  -> .env")
-    else:
-        print(f"  [WARN] client/.env not found — skipping")
 
     changelog_files = glob.glob(os.path.join(CLIENT_DIR, "changelog_*.txt"))
     for src in changelog_files:
         shutil.copy2(src, os.path.join(STAGING_DIR, os.path.basename(src)))
-    print(f"  -> changelog_*.txt  ({len(changelog_files)} files)")
 
-    node_dst = os.path.join(STAGING_DIR, "node")
-    shutil.copytree(NODE_DIR, node_dst,
-                    ignore=shutil.ignore_patterns("corepack"))
-    node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
-    print(f"  -> node/  ({node_count} files)")
+    if os.path.isdir(NODE_DIR):
+        node_dst = os.path.join(STAGING_DIR, "node")
+        shutil.copytree(NODE_DIR, node_dst, ignore=shutil.ignore_patterns("corepack"))
+        node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
+        print(f"  -> node/  ({node_count} files)")
 
     git_src = os.path.join(CLIENT_DIR, "git")
     if os.path.isdir(git_src):
