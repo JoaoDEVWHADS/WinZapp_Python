@@ -9127,7 +9127,7 @@ class MainWindow(wx.Frame):
             return self._classify_send_exception(e, "send_audio_message")
 
 
-    def _serialize_msg_id(self, remote_jid: str, msg_key: dict) -> str:
+    def _serialize_msg_id(self, remote_jid: str, msg_key: dict, full_msg: dict = None) -> str:
         """
         Build the full serialized WhatsApp message ID expected by WPPConnect
         (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
@@ -9135,7 +9135,7 @@ class MainWindow(wx.Frame):
         `_<participant>` — including for our own group messages (`fromMe=True`).
         """
         def _resolve_to_lid_if_available(jid: str) -> str:
-            """Resolve JID to cached @lid if available, keeping @g.us / @broadcast, and formatting to @c.us otherwise."""
+            """Resolve JID to cached @lid if available, keeping @g.us / @broadcast."""
             if not jid:
                 return jid
             if jid.endswith(("@g.us", "@broadcast")):
@@ -9148,6 +9148,14 @@ class MainWindow(wx.Frame):
                 return lid
             return jid.replace("@s.whatsapp.net", "@c.us")
 
+        def _format_1on1_chat(jid: str) -> str:
+            """For 1:1 chats, keep @c.us so WPPConnect can find the message in the WhatsApp Web store."""
+            if not jid:
+                return jid
+            if jid.endswith("@s.whatsapp.net"):
+                return jid.replace("@s.whatsapp.net", "@c.us")
+            return jid
+
         msg_id = msg_key.get("id", "")
         if not msg_id:
             return ""
@@ -9156,23 +9164,39 @@ class MainWindow(wx.Frame):
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
-        chat = _resolve_to_lid_if_available(remote_jid or "")
+
+        raw_remote = (
+            remote_jid
+            or msg_key.get("remoteJid", "")
+            or (full_msg.get("from") if isinstance(full_msg, dict) else "")
+            or ""
+        )
+        if raw_remote.endswith("@g.us"):
+            chat = raw_remote
+        else:
+            # 1:1 chats must use @c.us so getMessageById finds the message
+            chat = _format_1on1_chat(raw_remote)
+
         # Group messages always carry the sender's JID in the serialized id,
-        # even for our own messages (fromMe=True). 1-on-1 keys have no
-        # participant — gate on chat type, since a 1:1 @lid message's key
-        # often still carries a (same-JID) remoteJidAlt, which would
-        # otherwise get wrongly appended as a 4th segment and break the
-        # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
+        # even for our own messages (fromMe=True). 1-on-1 keys have no participant.
         participant = ""
         if chat.endswith("@g.us"):
             if from_me:
-                # Our own group messages: always use our LID/phone as participant.
-                raw = (getattr(self, "my_lid", "") or getattr(self, "my_jid", "") or msg_key.get("participant") or "")
+                raw = (
+                    getattr(self, "my_lid", "")
+                    or getattr(self, "my_jid", "")
+                    or msg_key.get("participant")
+                    or (full_msg.get("participant") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("author") if isinstance(full_msg, dict) else "")
+                    or ""
+                )
             else:
-                # Others' group messages: participant may be in key or a dedicated field.
                 raw = (
                     msg_key.get("participant")
                     or msg_key.get("author")
+                    or (full_msg.get("participant") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("author") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("from") if isinstance(full_msg, dict) and not str(full_msg.get("from", "")).endswith("@g.us") else "")
                     or msg_key.get("remoteJidAlt")
                     or ""
                 )
