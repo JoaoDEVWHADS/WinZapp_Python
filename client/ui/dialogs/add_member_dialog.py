@@ -7,7 +7,7 @@ Lets the user select one or more contacts to add to a group.
 import threading
 import wx
 from core.utils import format_number
-from countries import get_countries
+from countries import COUNTRIES
 
 
 class AddMemberDialog(wx.Dialog):
@@ -44,9 +44,8 @@ class AddMemberDialog(wx.Dialog):
         sizer.Add(num_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
 
         num_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self._countries = get_countries(self._i18n.language)
         self._country_combo = wx.ComboBox(
-            self, choices=[c[0] for c in self._countries],
+            self, choices=[c[0] for c in COUNTRIES],
             style=wx.CB_READONLY,
         )
         self._country_combo.SetSelection(0)  # Brazil (default)
@@ -119,7 +118,7 @@ class AddMemberDialog(wx.Dialog):
             return
 
         idx = self._country_combo.GetSelection()
-        dial_code = self._countries[idx][1] if 0 <= idx < len(self._countries) else "55"
+        dial_code = COUNTRIES[idx][1] if 0 <= idx < len(COUNTRIES) else "55"
 
         # If the number as typed doesn't already start with the selected
         # country's dial code, assume it's a local number and prepend it.

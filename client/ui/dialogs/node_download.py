@@ -47,8 +47,7 @@ class NodeDownloadDialog(wx.Dialog):
     _PULSE_MS = 80
 
     def __init__(self, parent):
-        self._i18n = parent.i18n
-        title = self._i18n.t("node_download_dialog_title")
+        title = "WinZapp | Baixando Node.js portátil..."
         style = wx.DEFAULT_DIALOG_STYLE & ~wx.CLOSE_BOX
         super().__init__(parent, title=title, style=style)
 
@@ -68,12 +67,12 @@ class NodeDownloadDialog(wx.Dialog):
     def _build_ui(self):
         self._status_lbl = wx.StaticText(
             self,
-            label=self._i18n.t("node_download_status_label"),
+            label="A preparar o download do Node.js...",
         )
 
         self._gauge = wx.Gauge(self, range=100, style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
 
-        cancel_btn = wx.Button(self, wx.ID_CANCEL, label=self._i18n.t("node_download_cancel"))
+        cancel_btn = wx.Button(self, wx.ID_CANCEL, label="Cancelar")
         cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -106,10 +105,15 @@ class NodeDownloadDialog(wx.Dialog):
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
-        msg = self._i18n.t("node_download_error_generic")
+        msg = (
+            "Ocorreu um erro ao descarregar o Node.js portátil.\n\n"
+            "Verifique a sua ligação à Internet e tente novamente.\n"
+            "Se o problema persistir, instale o Node.js manualmente "
+            "a partir de https://nodejs.org"
+        )
         if details:
             msg = f"{msg}\n\n{details}"
-        wx.MessageBox(msg, self._i18n.t("node_download_error_title"), wx.OK | wx.ICON_ERROR, self)
+        wx.MessageBox(msg, "Erro de download", wx.OK | wx.ICON_ERROR, self)
         self.EndModal(wx.ID_CANCEL)
 
     def _download_zip(self, url: str, dest_path: str) -> bool:
@@ -138,13 +142,12 @@ class NodeDownloadDialog(wx.Dialog):
                     if total:
                         mb_total = total / (1024 * 1024)
                         self._set_status(
-                            self._i18n.t("node_download_downloading").format(
-                                downloaded=f"{mb_down:.1f}", total=f"{mb_total:.1f}"
-                            )
+                            f"Baixando Node.js portátil... "
+                            f"{mb_down:.1f} MB / {mb_total:.1f} MB"
                         )
                     else:
                         self._set_status(
-                            self._i18n.t("node_download_downloading_no_total").format(downloaded=f"{mb_down:.1f}")
+                            f"Baixando Node.js portátil... {mb_down:.1f} MB"
                         )
         except Exception as exc:
             if not self._cancelled:
@@ -154,14 +157,14 @@ class NodeDownloadDialog(wx.Dialog):
         return not self._cancelled
 
     def _verify_checksum(self, zip_path: str) -> bool:
-        self._set_status(self._i18n.t("node_download_verifying"))
+        self._set_status("Verificando integridade do download...")
         try:
             resp = requests.get(_NODE_SHASUMS_URL, timeout=15)
             resp.raise_for_status()
         except Exception as exc:
             if not self._cancelled:
                 self._finish_error(
-                    self._i18n.t("node_download_error_checksum_fetch").format(details=exc)
+                    f"Não foi possível verificar a integridade do download:\n\n{exc}"
                 )
             return False
 
@@ -175,7 +178,8 @@ class NodeDownloadDialog(wx.Dialog):
         if not expected:
             if not self._cancelled:
                 self._finish_error(
-                    self._i18n.t("node_download_error_checksum_missing").format(filename=_NODE_FILENAME)
+                    f"Não foi encontrado um checksum para {_NODE_FILENAME} "
+                    "no manifesto de integridade do nodejs.org."
                 )
             return False
 
@@ -188,7 +192,9 @@ class NodeDownloadDialog(wx.Dialog):
         if actual != expected:
             if not self._cancelled:
                 self._finish_error(
-                    self._i18n.t("node_download_error_checksum_mismatch").format(expected=expected, actual=actual)
+                    "O download do Node.js falhou na verificação de integridade "
+                    "e não será usado, por segurança.\n\n"
+                    f"Esperado: {expected}\nObtido: {actual}"
                 )
             return False
 
@@ -196,7 +202,7 @@ class NodeDownloadDialog(wx.Dialog):
         return True
 
     def _extract_node(self, zip_path: str, node_dir: str) -> bool:
-        self._set_status(self._i18n.t("node_download_extracting"))
+        self._set_status("Extraindo Node.js...")
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 for member in zf.infolist():
@@ -222,7 +228,7 @@ class NodeDownloadDialog(wx.Dialog):
                             shutil.copyfileobj(src_fh, dst_fh)
         except Exception as exc:
             if not self._cancelled:
-                self._finish_error(self._i18n.t("node_download_error_extract").format(details=exc))
+                self._finish_error(f"Falha ao extrair Node.js:\n\n{exc}")
             return False
 
         return not self._cancelled
@@ -254,7 +260,10 @@ class NodeDownloadDialog(wx.Dialog):
             node_exe = os.path.join(node_dir, "node.exe")
             if not os.path.isfile(node_exe):
                 if not self._cancelled:
-                    self._finish_error(self._i18n.t("node_download_error_missing_exe"))
+                    self._finish_error(
+                        "O ZIP do Node.js não continha node.exe. "
+                        "O download pode estar corrompido."
+                    )
                 return
 
             if not self._cancelled:

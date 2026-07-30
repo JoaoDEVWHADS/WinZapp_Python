@@ -1712,53 +1712,6 @@ class MainWindow(wx.Frame):
 
             logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
             self.ensure_wpp_running()
-
-            # ensure_wpp_running() only confirms the new WPPConnect HTTP API
-            # answers — killing the old node.exe process to update it also
-            # dropped the Socket.IO connection this app uses for live
-            # messages/presence, and nothing else here re-establishes it or
-            # tells the new process to resume the WhatsApp session. Left
-            # alone, python-socketio's own auto-reconnect (see
-            # WebSocketClient.__init__) eventually notices and retries on its
-            # own, but with up to a 60 s backoff and no guarantee the
-            # WhatsApp session itself gets told to restart — reported live as
-            # the app sitting in offline/disconnected mode until the whole
-            # program was restarted. Force it explicitly instead of waiting
-            # on the passive health checker to get around to it; a
-            # successful reconnect's on_connect() handler already re-checks
-            # HTTP status and retriggers a sync on its own — but check and
-            # trigger a sync explicitly here too, the same recovery sequence
-            # _recover_from_suspend() uses, as a fallback in case the socket
-            # was already connected (so on_connect() never fires again) or
-            # the reconnect itself is slow.
-            def _recover_after_update():
-                try:
-                    self._reconnect_websocket_now()
-                    self.check_wa_connection_http()
-                    self.trigger_sync_if_needed()
-                except Exception:
-                    logging.exception("[wpp_update] Post-update reconnection failed")
-            threading.Thread(target=_recover_after_update, daemon=True).start()
-
-            # If the window was hidden (minimized to tray) when the update
-            # was requested, bring it back — the update can run for minutes
-            # and finishes with the API restarting, which is exactly the
-            # kind of state change the user needs to see.
-            #
-            # _window_hidden is only set once __init__ reaches its own
-            # "window lifecycle" setup — but WppUpdateChecker's first check
-            # is scheduled via wx.CallLater(90000, ...) very early in
-            # __init__, well before that point, and its own check can take
-            # longer still. If the initial pairing dialog is still on
-            # screen 90+ seconds after launch (completely normal — that's a
-            # human reading/scanning a QR code) and the user accepts an
-            # update from it, _update_wpp_server() runs before
-            # self._window_hidden exists at all — getattr() instead of a
-            # bare attribute access is what keeps that a no-op instead of
-            # an AttributeError crash right after the very first pairing.
-            if getattr(self, "_window_hidden", False) and not self.background_mode:
-                wx.CallAfter(self.restore_window)
-
             if not self.background_mode:
                 self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
         finally:
@@ -8597,16 +8550,6 @@ class MainWindow(wx.Frame):
                                               # failures even though the session was fine.
     _MEDIA_SYNC_TIMEOUT    = 60              # seconds per request during bulk sync
 
-    # A message this large gets skipped by the automatic background sync
-    # (sync_if_media) instead of being downloaded eagerly. WPPConnect base64-
-    # encodes the whole file inside its Node/Puppeteer process before ever
-    # handing it back over HTTP — for a ~1 GB document sent into a group this
-    # was observed pushing node.exe's memory usage past 5 GB and hanging the
-    # machine. The user can still explicitly open/download an oversized file
-    # from the conversation view (_on_action_open/_on_action_download in
-    # conversations.py) — only the unattended background pass is capped.
-    _MEDIA_AUTO_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024   # 100 MB
-
     def _load_media_failed_ids(self) -> dict:
         """Load {message_id: failed_at_timestamp} for media whose CDN URL has
         previously expired (403/410) — checked by sync_if_media() to skip a
@@ -8681,28 +8624,6 @@ class MainWindow(wx.Frame):
         # Skip IDs that previously returned 403/410 (expired CDN URL).
         if msg_id and msg_id in self._media_failed_ids:
             return
-
-        # Skip oversized files during the automatic background sync — see
-        # _MEDIA_AUTO_DOWNLOAD_MAX_BYTES.
-        msg_inner = msg.get("message")
-        if isinstance(msg_inner, str):
-            try:
-                msg_inner = json.loads(msg_inner)
-            except Exception:
-                msg_inner = None
-        inner = msg_inner.get(message_type) if isinstance(msg_inner, dict) else None
-        if isinstance(inner, dict):
-            try:
-                file_length = int(inner.get("fileLength") or 0)
-            except (TypeError, ValueError):
-                file_length = 0
-            if file_length > self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES:
-                logging.info(
-                    "[sync_if_media] Skipping auto-download of %s (%s, %.1f MB > %.0f MB limit)",
-                    msg_id, message_type, file_length / (1024 * 1024),
-                    self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES / (1024 * 1024),
-                )
-                return
 
         try:
             if message_type == "audioMessage":
@@ -12234,7 +12155,7 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime(i18n.t("time_fmt"))
+                        time_str = dt.strftime("%H:%M")
                     else:
                         time_str = dt.strftime(i18n.t("datetime_fmt"))
                 except Exception:
@@ -12400,7 +12321,7 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime(i18n.t("time_fmt"))
+                    time_str = dt.strftime("%H:%M")
                 else:
                     time_str = dt.strftime(i18n.t("datetime_fmt"))
             except Exception:
