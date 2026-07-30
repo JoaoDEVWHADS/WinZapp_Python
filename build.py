@@ -1,4 +1,4 @@
-"""
+r"""
 WinZapp build script — PyInstaller variant.
 
 Build modes:

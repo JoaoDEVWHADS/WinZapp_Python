@@ -1712,6 +1712,41 @@ class MainWindow(wx.Frame):
 
             logging.info("[wpp_update] WPPConnect Server updated to %s — restarting...", target_tag)
             self.ensure_wpp_running()
+
+            # ensure_wpp_running() only confirms the new WPPConnect HTTP API
+            # answers — killing the old node.exe process to update it also
+            # dropped the Socket.IO connection this app uses for live
+            # messages/presence, and nothing else here re-establishes it or
+            # tells the new process to resume the WhatsApp session. Left
+            # alone, python-socketio's own auto-reconnect (see
+            # WebSocketClient.__init__) eventually notices and retries on its
+            # own, but with up to a 60 s backoff and no guarantee the
+            # WhatsApp session itself gets told to restart — reported live as
+            # the app sitting in offline/disconnected mode until the whole
+            # program was restarted. Force it explicitly instead of waiting
+            # on the passive health checker to get around to it; a
+            # successful reconnect's on_connect() handler already re-checks
+            # HTTP status and retriggers a sync on its own — but check and
+            # trigger a sync explicitly here too, the same recovery sequence
+            # _recover_from_suspend() uses, as a fallback in case the socket
+            # was already connected (so on_connect() never fires again) or
+            # the reconnect itself is slow.
+            def _recover_after_update():
+                try:
+                    self._reconnect_websocket_now()
+                    self.check_wa_connection_http()
+                    self.trigger_sync_if_needed()
+                except Exception:
+                    logging.exception("[wpp_update] Post-update reconnection failed")
+            threading.Thread(target=_recover_after_update, daemon=True).start()
+
+            # If the window was hidden (minimized to tray) when the update
+            # was requested, bring it back — the update can run for minutes
+            # and finishes with the API restarting, which is exactly the
+            # kind of state change the user needs to see.
+            if self._window_hidden and not self.background_mode:
+                wx.CallAfter(self.restore_window)
+
             if not self.background_mode:
                 self.output(self.i18n.t("wpp_update_complete"), interrupt=True)
         finally:
