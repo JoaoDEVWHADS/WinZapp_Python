@@ -196,6 +196,8 @@ jobs:
 
       - name: Garantir Selo Latest Release na API do GitHub
         uses: actions/github-script@v7
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
