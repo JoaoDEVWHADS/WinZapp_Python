@@ -121,6 +121,7 @@ def _find_opus_dll_on_disk():
         if path_dir:
             candidates.append(os.path.join(path_dir, "libopus-0.dll"))
             candidates.append(os.path.join(path_dir, "opus.dll"))
+            candidates.append(os.path.join(path_dir, "libopus.dll"))
     return next((p for p in candidates if os.path.isfile(p)), None)
 
 
