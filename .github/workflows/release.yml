@@ -138,9 +138,10 @@ jobs:
       - name: Baixar e Extrair MinGit Portátil
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "client/git"
+          if (Test-Path "client\git") { Remove-Item -Recurse -Force "client\git" }
+          New-Item -ItemType Directory -Force -Path "client\git"
           Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile "mingit-portable.zip" -UseBasicParsing
-          Expand-Archive -Path "mingit-portable.zip" -DestinationPath "client/git" -Force
+          Expand-Archive -Path "mingit-portable.zip" -DestinationPath "client\git" -Force
           Remove-Item -Force "mingit-portable.zip"
 
 

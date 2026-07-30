@@ -292,7 +292,7 @@ def run(cmd, cwd=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:
-        print(f"\n[ERROR] Command failed with exit code {result.returncode}.")
+        print(f"\n[ERROR] Command failed with exit code {result.returncode}: {' '.join(str(c) for c in cmd)}")
         sys.exit(result.returncode)
 
 def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None, exclude_sub_dirs=None):
