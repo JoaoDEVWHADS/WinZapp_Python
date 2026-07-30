@@ -7551,30 +7551,6 @@ class ConversationsPanel(wx.Panel):
                         self.messages_list.EnsureVisible(self._unread_sep_idx)
                 return
 
-        # Make the unread separator visible, or select and focus the last (newest) message by default
-        if not scrolled:
-            if self._unread_sep_idx >= 0:
-                last = self.messages_list.GetItemCount() - 1
-                target_visible = min(self._unread_sep_idx + 3, last)
-                if target_visible >= 0:
-                    self.messages_list.EnsureVisible(target_visible)
-                self.messages_list.EnsureVisible(self._unread_sep_idx)
-                self.messages_list.Focus(self._unread_sep_idx)
-                self.messages_list.Select(self._unread_sep_idx)
-            else:
-                last = self.messages_list.GetItemCount() - 1
-                if last >= 0:
-                    self.messages_list.EnsureVisible(last)
-                    self.messages_list.Focus(last)
-                    self.messages_list.Select(last)
-                    logging.info(
-                        "[populate_messages] default-select tail: last=%d "
-                        "GetFocusedItem()=%d GetFirstSelected()=%d ItemCount=%d",
-                        last, self.messages_list.GetFocusedItem(),
-                        self.messages_list.GetFirstSelected(),
-                        self.messages_list.GetItemCount(),
-                    )
-=======
             # Make the unread separator visible, or select and focus the last (newest) message by default
             if not scrolled:
                 if self._unread_sep_idx >= 0:
@@ -7585,7 +7561,6 @@ class ConversationsPanel(wx.Panel):
                     self.messages_list.EnsureVisible(self._unread_sep_idx)
                     self.messages_list.Focus(self._unread_sep_idx)
                     self.messages_list.Select(self._unread_sep_idx)
->>>>>>> gabriel/main
                 else:
                     last = self.messages_list.GetItemCount() - 1
                     if last >= 0:
