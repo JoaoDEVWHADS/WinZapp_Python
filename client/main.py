@@ -9189,6 +9189,13 @@ class MainWindow(wx.Frame):
                 return lid
             return jid.replace("@s.whatsapp.net", "@c.us")
 
+        def _format_1on1_chat(jid: str) -> str:
+            if not jid:
+                return jid
+            if jid.endswith("@s.whatsapp.net"):
+                return jid.replace("@s.whatsapp.net", "@c.us")
+            return jid
+
         msg_id = msg_key.get("id", "")
         if not msg_id:
             return ""
@@ -9197,13 +9204,16 @@ class MainWindow(wx.Frame):
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
-        chat = _resolve_to_lid_if_available(remote_jid or "")
+        
+        raw_remote = remote_jid or msg_key.get("remoteJid", "") or (full_msg.get("from") if isinstance(full_msg, dict) else "") or ""
+        if raw_remote.endswith("@g.us"):
+            chat = raw_remote
+        else:
+            chat = _format_1on1_chat(raw_remote)
+
         # Group messages always carry the sender's JID in the serialized id,
         # even for our own messages (fromMe=True). 1-on-1 keys have no
-        # participant — gate on chat type, since a 1:1 @lid message's key
-        # often still carries a (same-JID) remoteJidAlt, which would
-        # otherwise get wrongly appended as a 4th segment and break the
-        # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
+        # participant.
         participant = ""
         if chat.endswith("@g.us"):
             if from_me:
