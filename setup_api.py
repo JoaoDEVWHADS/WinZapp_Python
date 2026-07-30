@@ -75,6 +75,11 @@ def _run(cmd: list, cwd: str = None):
 
 
 def main():
+    # Set PATH so portable Node and Git are always discovered in sub-processes
+    win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
+    win_node_dir = os.path.join(ROOT_DIR, "client", "node")
+    os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+
     env = _load_env()
     tag = env.get("WPPCONNECT_TAG_VERSION", "").strip()
 
