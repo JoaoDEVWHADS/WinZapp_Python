@@ -9928,29 +9928,47 @@ class MainWindow(wx.Frame):
                     body_data["mimetype"] = inner["mimetype"]
                 body_data["type"] = msg_type.replace("Message", "")
 
+        has_media_key = bool(body_data.get("mediaKey"))
+        has_client_url = bool(body_data.get("clientUrl"))
+        media_type = body_data.get("type", "")
+        logging.info(
+            "[get_base64_from_media] Requesting media for msg_id=%s, url=%s, has_mediaKey=%s, has_clientUrl=%s, type=%s",
+            msg_id, url, has_media_key, has_client_url, media_type
+        )
+
         max_attempts = 3
         for attempt in range(max_attempts):
             if progress_callback is None:
                 try:
                     response = requests.post(url, headers=headers, json=body_data, timeout=timeout)
                 except MediaExpiredError:
+                    logging.warning("[get_base64_from_media] MediaExpiredError for msg_id=%s", msg_id)
                     raise
                 except Exception as exc:
                     logging.warning(
-                        "[get_base64_from_media] request failed for %s (attempt %d/%d): %s",
+                        "[get_base64_from_media] request exception for %s (attempt %d/%d): %s",
                         msg_id, attempt + 1, max_attempts, exc,
                     )
                     if attempt < max_attempts - 1:
                         time.sleep(3)
                         continue
                     return ""
+                
+                resp_text = response.text or ""
+                logging.info(
+                    "[get_base64_from_media] WPPConnect server status=%d for msg_id=%s, body_snippet=%s",
+                    response.status_code, msg_id, resp_text[:200]
+                )
+
                 if response.status_code in (403, 410):
+                    logging.warning("[get_base64_from_media] HTTP %d (CDN expired) for %s", response.status_code, msg_id)
                     raise MediaExpiredError(response.status_code)
                 if response.status_code in (200, 201):
-                    return response.json().get("base64", "")
-                
+                    b64 = response.json().get("base64", "")
+                    logging.info("[get_base64_from_media] Success for %s — base64 len=%d", msg_id, len(b64))
+                    return b64
+
                 # Check for transient session not active errors
-                resp_text = response.text
                 if response.status_code in (400, 500) and any(x in resp_text.lower() for x in ("session is not active", "not active", "disconnected")):
                     logging.warning(
                         "[get_base64_from_media] session not active for %s, retrying in 3s (attempt %d/%d)",
