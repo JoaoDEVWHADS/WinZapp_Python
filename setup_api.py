@@ -20,34 +20,9 @@ import sys
 
 # ---------------------------------------------------------------------------
 
-ROOT_DIR         = os.path.dirname(os.path.abspath(__file__))
-CLIENT_API_DIR   = os.path.join(ROOT_DIR, "client", "api")
-API_PATCHES_DIR  = os.path.join(ROOT_DIR, "client", "api_patches")
-WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
-
-# Files WinZapp patches on top of upstream wppconnect-server. client/api_patches/
-# is the permanent, always-git-tracked source of truth for all of these —
-# preferred below over whatever (if anything) happens to still be sitting in
-# client/api/ right before it gets wiped. That "stash what's currently there"
-# fallback used to be the ONLY restore path, and is worthless the moment
-# client/api/ is already gone (e.g. a user deletes it before reinstalling,
-# reported live as every patch silently regressing to whatever old snapshot
-# happened to get stashed months earlier) — client/api_patches/ never has
-# that problem since it's never inside the folder that gets deleted.
-CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
-CUSTOM_SRC_FILES = [
-    "src/config.ts",
-    "src/index.ts",
-    "src/util/createSessionUtil.ts",
-    "src/util/sessionUtil.ts",
-    "src/util/functions.ts",
-    "src/middleware/statusConnection.ts",
-    "src/controller/deviceController.ts",
-    "src/controller/messageController.ts",
-    "src/controller/sessionController.ts",
-    "src/routes/index.ts",
-    "decrypt.js",
-]
+ROOT_DIR       = os.path.dirname(os.path.abspath(__file__))
+CLIENT_API_DIR = os.path.join(ROOT_DIR, "client", "api")
+WPPCONNECT_REPO = "https://github.com/wppconnect-team/wppconnect-server.git"
 
 
 def _load_env() -> dict:
@@ -81,32 +56,6 @@ def main():
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
     already_cloned = os.path.isdir(git_dir)
 
-    # Gather the content to restore for every patched file, preferring
-    # client/api_patches/ (permanent, always-tracked) over whatever
-    # happens to still be sitting in client/api/ right now — the latter
-    # is worthless as a source the moment client/api/ has already been
-    # deleted, which is exactly when this restore matters most.
-    #
-    # Loaded up front, before the clone branch, because BOTH consumers need it:
-    # the post-clone restore below and the post-`git checkout <tag>` restore
-    # further down. It used to be populated only on the clone path, so checking
-    # out a tag against an existing client/api/ raised NameError — and had that
-    # line been reached with an empty dict instead, it would have been worse:
-    # `git checkout -f` overwrites the patched files with upstream's, and
-    # nothing would have put ours back.
-    custom_contents = {}
-    for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
-        patches_path = os.path.join(API_PATCHES_DIR, rel_path)
-        stash_path = os.path.join(CLIENT_API_DIR, rel_path)
-        if os.path.isfile(patches_path):
-            with open(patches_path, "rb") as f:
-                custom_contents[rel_path] = f.read()
-            print(f"[INFO] Loaded {rel_path} from client/api_patches/")
-        elif os.path.isfile(stash_path):
-            with open(stash_path, "rb") as f:
-                custom_contents[rel_path] = f.read()
-            print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
-
     if already_cloned:
         print(f"[INFO] client/api/ already exists — skipping clone.")
     else:
@@ -125,6 +74,48 @@ def main():
                 print(f"[WARNING] Failed to move node_modules: {e}")
                 has_node_modules = False
 
+        # Backup our custom start.js, package.json and config.json if they exist
+        start_js_src = os.path.join(CLIENT_API_DIR, "start.js")
+        package_json_src = os.path.join(CLIENT_API_DIR, "package.json")
+        config_json_src = os.path.join(CLIENT_API_DIR, "config.json")
+        has_start_js = os.path.isfile(start_js_src)
+        has_package_json = os.path.isfile(package_json_src)
+        has_config_json = os.path.isfile(config_json_src)
+        
+        # Additional custom files to backup and restore
+        custom_files = [
+            "src/config.ts",
+            "src/util/createSessionUtil.ts",
+            "src/util/functions.ts",
+            "src/middleware/statusConnection.ts",
+            "src/controller/deviceController.ts",
+            "src/controller/messageController.ts",
+            "src/controller/sessionController.ts"
+        ]
+        custom_contents = {}
+        for rel_path in custom_files:
+            full_path = os.path.join(CLIENT_API_DIR, rel_path)
+            if os.path.isfile(full_path):
+                with open(full_path, "rb") as f:
+                    custom_contents[rel_path] = f.read()
+                print(f"[INFO] Stashed custom file: {rel_path}")
+        
+        start_js_content = None
+        package_json_content = None
+        config_json_content = None
+        if has_start_js:
+            with open(start_js_src, "rb") as f:
+                start_js_content = f.read()
+            print("[INFO] Stashed start.js contents.")
+        if has_package_json:
+            with open(package_json_src, "rb") as f:
+                package_json_content = f.read()
+            print("[INFO] Stashed package.json contents.")
+        if has_config_json:
+            with open(config_json_src, "rb") as f:
+                config_json_content = f.read()
+            print("[INFO] Stashed config.json contents.")
+
         if os.path.isdir(CLIENT_API_DIR):
             try:
                 shutil.rmtree(CLIENT_API_DIR)
@@ -140,7 +131,21 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-        # Restore every patched file after cloning
+        # Restore start.js, package.json and config.json after cloning
+        if start_js_content is not None:
+            with open(os.path.join(CLIENT_API_DIR, "start.js"), "wb") as f:
+                f.write(start_js_content)
+            print("[INFO] Restored custom start.js.")
+        if package_json_content is not None:
+            with open(os.path.join(CLIENT_API_DIR, "package.json"), "wb") as f:
+                f.write(package_json_content)
+            print("[INFO] Restored custom package.json.")
+        if config_json_content is not None:
+            with open(os.path.join(CLIENT_API_DIR, "config.json"), "wb") as f:
+                f.write(config_json_content)
+            print("[INFO] Restored custom config.json.")
+            
+        # Restore other custom files
         for rel_path, content in custom_contents.items():
             dest_path = os.path.join(CLIENT_API_DIR, rel_path)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -151,24 +156,25 @@ def main():
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
         _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
-
+        
         # Re-restore after checkout just in case git checkout overwrites files
+        if start_js_content is not None:
+            with open(os.path.join(CLIENT_API_DIR, "start.js"), "wb") as f:
+                f.write(start_js_content)
+        if package_json_content is not None:
+            with open(os.path.join(CLIENT_API_DIR, "package.json"), "wb") as f:
+                f.write(package_json_content)
+        if config_json_content is not None:
+            with open(os.path.join(CLIENT_API_DIR, "config.json"), "wb") as f:
+                f.write(config_json_content)
         for rel_path, content in custom_contents.items():
             dest_path = os.path.join(CLIENT_API_DIR, rel_path)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             with open(dest_path, "wb") as f:
                 f.write(content)
         print("[INFO] Re-applied custom files after checking out tag.")
-    # Save current commit SHA to client/api/.commit_sha for version checking
-    try:
-        res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
-            with open(sha_file, "w", encoding="utf-8") as f:
-                f.write(res.stdout.strip())
-            print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
-    except Exception as e:
-        print(f"[WARNING] Could not save .commit_sha: {e}")
+    else:
+        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
 
     print()
     print("[OK] WPPConnect Server ready at client/api/")
@@ -188,13 +194,10 @@ def main():
             win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
             if os.path.isfile(win_node):
                 node_bin = win_node
+                # Try to locate npm CLI
                 win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
                 if os.path.isfile(win_npm):
                     npm_bin = win_npm
-
-            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
-            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
-            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
 
         # Run npm install
         print("[INFO] Running npm install...")
@@ -202,24 +205,6 @@ def main():
             _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
-
-        # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
-        try:
-            import shutil as _shutil
-            custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
-            decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
-            if os.path.isfile(custom_decrypt):
-                print("[INFO] Copying custom decrypt.js patch to node_modules...")
-                # Ensure the destination directory exists (should exist due to npm install)
-                os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
-                _shutil.copy2(custom_decrypt, decrypt_js_path)
-                print("[OK] Copied decrypt.js patch successfully.")
-            else:
-                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
-        except Exception as e:
-            print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
-
-
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")
@@ -245,14 +230,6 @@ def main():
         print(f"  cd {CLIENT_API_DIR}")
         print("  npm install")
         print("  npm run build")
-        # This used to only print the error and fall through: setup_api.py
-        # exited 0 either way, so a failed/partial `npm run build` silently
-        # left whatever dist/server.js already happened to be on disk (stale,
-        # or from a much older checkout) in place. build.py only checks that
-        # dist/server.js *exists*, not that it matches the current src/patches
-        # — so that stale build got shipped in a release without any warning.
-        # Failing loudly here is what actually surfaces the problem.
-        sys.exit(1)
 
     # 2. Linux OS dependencies installation (Debian/Ubuntu)
     if not is_windows:
@@ -270,11 +247,11 @@ def main():
             install_cmd = [
                 "apt-get", "install", "-y", "--no-install-recommends",
                 "ca-certificates", "fonts-liberation", "libasound2", "libatk-bridge2.0-0",
-                "libatk1.0-0", "libc6", "libcairo2", "libcups2", "libdbus-1-3", "libdrm2", "libexpat1",
+                "libatk1.0-0", "libc6", "libcairo2", "libcups2", "libdbus-1-3", "libexpat1",
                 "libfontconfig1", "libgbm1", "libglib2.0-0", "libgtk-3-0", "libnspr4",
                 "libnss3", "libpango-1.0-0", "libpangocairo-1.0-0", "libstdc++6", "libx11-6",
                 "libx11-xcb1", "libxcb1", "libxcomposite1", "libxcursor1", "libxdamage1",
-                "libxext6", "libxfixes3", "libxi6", "libxkbcommon0", "libxrandr2", "libxrender1", "libxshmfence1", "libxss1",
+                "libxext6", "libxfixes3", "libxi6", "libxrandr2", "libxrender1", "libxss1",
                 "libxtst6", "lsb-release", "xdg-utils", "wget"
             ]
             if not is_root:
