@@ -403,33 +403,18 @@ def assemble_staging():
     if not hits:
         hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
     
-    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
+    ffmpeg_src = None
+    if hits:
+        ffmpeg_src = hits[0]
+    else:
+        ffmpeg_src = shutil.which("ffmpeg")
 
-    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
-        # Attempt automatic download for Windows target build
-        try:
-            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
-            import zipfile
-            import tempfile
-            import urllib.request
-            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
-            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
-            urllib.request.urlretrieve(dl_url, temp_zip)
-            with zipfile.ZipFile(temp_zip, "r") as zf:
-                zf.extract("ffmpeg.exe", lib_dir)
-            ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
-            if os.path.isfile(ffmpeg_dst):
-                ffmpeg_src = ffmpeg_dst
-                print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
-        except Exception as dl_err:
-            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
-
-    if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
+    if ffmpeg_src and os.path.isfile(ffmpeg_src):
         ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
         ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
         shutil.copy2(ffmpeg_src, ffmpeg_dst)
         print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
-    elif not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+    else:
         print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
 
     print(f"  -> lib/  ({dll_count} DLLs total)")
@@ -471,18 +456,9 @@ def assemble_staging():
     node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
     print(f"  -> node/  ({node_count} files)")
 
-    git_src = os.path.join(CLIENT_DIR, "git")
-    if os.path.isdir(git_src):
-        git_dst = os.path.join(STAGING_DIR, "git")
-        shutil.copytree(git_src, git_dst)
-        git_count = sum(1 for _, _, fs in os.walk(git_dst) for _ in fs)
-        print(f"  -> git/   ({git_count} files)")
-
-
     api_dst = os.path.join(STAGING_DIR, "api")
     os.makedirs(api_dst)
     api_count = 0
-    custom_src_count = 0
     for abs_path, rel_path in walk_dir(API_DIR,
                                        exclude_top_dirs=API_EXCLUDE_DIRS,
                                        exclude_top_files=API_EXCLUDE_FILES,
@@ -492,10 +468,7 @@ def assemble_staging():
         shutil.copy2(abs_path, dst)
         api_count += 1
 
-    sha_src = os.path.join(API_DIR, ".commit_sha")
-    if os.path.isfile(sha_src):
-        shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
-        print("  -> api/.commit_sha copied to staging")
+    custom_src_count = 0
     for rel_path in API_CUSTOM_SRC_FILES:
         src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
         if not os.path.isfile(src_path):

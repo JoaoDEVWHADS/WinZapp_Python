@@ -246,9 +246,7 @@ class ConversationDataDialog(wx.Dialog):
             "choice": choice,
             "custom_path": custom_path,
         }
-        cache = getattr(self._mw, "_notification_sound_cache", None)
-        if cache is not None:
-            cache.clear()
+        self._mw._notification_sound_cache.clear()
 
     def _on_conv_sound_changed(self, event):
         self._update_sound_custom_field_state()

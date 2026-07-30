@@ -376,20 +376,15 @@ export async function sendVoice64(req: Request, res: Response) {
         // a short string (contact JID + var name) crosses the CDP channel here.
         await page.evaluate(
           ({ to, varName }: { to: string; varName: string }) => {
-            try {
-              const { base64, quotedMsg } = (window as any)[varName] as { base64: string; quotedMsg: string | undefined };
-              return (window as any).WPP.chat.sendFileMessage(to, base64, {
-                type: 'audio',
-                isPtt: true,
-                filename: 'Voice Audio',
-                caption: '',
-                quotedMsg,
-                waitForAck: false,
-              }).then((result: any) => ({ id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 }))
-                .catch((err: any) => ({ error: err?.message || String(err), ack: -1 }));
-            } catch (err: any) {
-              return Promise.resolve({ error: err?.message || String(err), ack: -1 });
-            }
+            const { base64, quotedMsg } = (window as any)[varName] as { base64: string; quotedMsg: string | undefined };
+            return (window as any).WPP.chat.sendFileMessage(to, base64, {
+              type: 'audio',
+              isPtt: true,
+              filename: 'Voice Audio',
+              caption: '',
+              quotedMsg,
+              waitForAck: false,
+            }).then((result: any) => ({ id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 }));
           },
           { to: contato, varName: tempVar }
         )
