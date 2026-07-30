@@ -50,13 +50,17 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ env.RELEASE_VERSION }}"
-          git config --local user.name "github-actions"
-          git config --local user.email "github-actions@github.com"
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add client/version.py
-          git commit -m "chore: bump version to $ver [skip ci]"
-          git tag "v$ver"
+          $status = git status --porcelain
+          if ($status) {
+              git commit -m "chore: bump version to $ver [skip ci]"
+          }
+          git tag -f "v$ver"
+          git pull origin main --rebase
           git push origin HEAD:main
-          git push origin "v$ver"
+          git push origin "v$ver" --force
           Write-Output "[INFO] Alterações enviadas e tag v$ver criada."
 
       - name: Configurar Arquivos .env
@@ -82,6 +86,7 @@ jobs:
           python -m venv venv
           ./venv/Scripts/python -m pip install --upgrade pip
           ./venv/Scripts/pip install -r requirements.txt
+          ./venv/Scripts/pip install -r requirements-dev.txt
 
       - name: Configurar MSYS2 (para gcc e windres)
         uses: msys2/setup-msys2@v2
@@ -154,37 +159,36 @@ jobs:
             npm-packages-
 
       - name: Configurar WPPConnect API
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
         shell: pwsh
         run: |
-          # 1. Clonar a API se não existir
-          python setup_api.py
+          # 1. Configurar repositório da API
+          ./venv/Scripts/python.exe setup_api.py
           
-          # 2. Configurar caminhos para usar o Node portátil para instalar dependências
-          cd client/api
-          $nodeExe = "../../client/node/node.exe"
-          $npmCli = "../../client/node/node_modules/npm/bin/npm-cli.js"
+          # 2. Configurar caminhos absolutos para Node e NPM
+          $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
+          $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
           
-          # Adiciona o diretório do node ao PATH temporariamente
-          $env:PATH = "$(Resolve-Path ../../client/node);$env:PATH"
+          Set-Location "$env:GITHUB_WORKSPACE\client\api"
           
-          # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
-          if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install --no-audit --no-fund
-          }
+          & $node $npm install --no-audit --no-fund --legacy-peer-deps
           
-          # Compilar a API
-          &$nodeExe $npmCli run build
+          # 3. Compilar a API (TypeScript -> dist/server.js)
+          & $node $npm run build
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
-          python build.py
+          ./venv/Scripts/python.exe build.py
 
       - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.RELEASE_VERSION }}
           name: Versão ${{ env.RELEASE_VERSION }}
+          make_latest: "true"
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
