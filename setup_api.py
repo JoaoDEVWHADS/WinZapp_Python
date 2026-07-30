@@ -14,6 +14,7 @@ Usage:
   venv\\Scripts\\python.exe setup_api.py
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -34,7 +35,17 @@ WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 # reported live as every patch silently regressing to whatever old snapshot
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
-CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+#
+# package.json is NOT in this list — see _merge_package_json_dependencies().
+# It used to be a full-file overwrite like the others, which meant its
+# "version" field (WPPConnect Server's own self-reported version — what
+# WppUpdateChecker compares against the latest GitHub release) came from
+# whatever was checked into api_patches/package.json at the time, not from
+# whatever tag was actually cloned/checked out here. Reported live: WinZapp
+# insisting its installed version was still 2.10.0 on a build that had
+# genuinely cloned/built 2.10.1, because api_patches/package.json's own
+# "version" field had gone stale.
+CUSTOM_ROOT_FILES = ["start.js", "config.json"]
 CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",
@@ -72,6 +83,57 @@ def _run(cmd: list, cwd: str = None):
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
+
+
+# The only dependency entries WinZapp actually overrides on top of whatever
+# upstream wppconnect-server ships for a given tag. Deliberately a narrow,
+# explicit list rather than merging api_patches/package.json's entire
+# "dependencies" block wholesale — the latter would also silently roll back
+# every OTHER dependency to whatever version happened to be frozen in
+# api_patches/ at some earlier point, undoing legitimate upstream bumps on
+# every future tag this script prepares.
+_PATCHED_DEPENDENCY_KEYS = [
+    "@wppconnect-team/wppconnect",  # pinned instead of upstream's own range —
+                                     # see client/api_patches/package.json
+    "@ffmpeg-installer/ffmpeg",     # needed for local audio conversion;
+    "fluent-ffmpeg",                # not always present upstream.
+]
+
+
+def _merge_package_json_dependencies():
+    """Apply WinZapp's specific dependency patches onto whatever
+    package.json the clone/checkout actually left on disk, instead of
+    overwriting the whole file. Only the keys in _PATCHED_DEPENDENCY_KEYS are
+    copied in from client/api_patches/package.json — "version", "name",
+    scripts, and every other dependency all come from the real checked-out
+    file, so WinZapp's own version-check (WppUpdateChecker /
+    _get_installed_wpp_version()) keeps reflecting whatever was genuinely
+    cloned/built rather than a value frozen in api_patches/ at some earlier
+    point in time.
+    """
+    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
+    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
+    if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
+        return
+    try:
+        with open(pkg_path, encoding="utf-8") as f:
+            pkg = json.load(f)
+        with open(patch_path, encoding="utf-8") as f:
+            patch = json.load(f)
+    except Exception as e:
+        print(f"[WARNING] Failed to merge package.json dependency patches: {e}")
+        return
+    patch_deps = patch.get("dependencies", {})
+    deps = pkg.setdefault("dependencies", {})
+    applied = 0
+    for key in _PATCHED_DEPENDENCY_KEYS:
+        if key in patch_deps:
+            deps[key] = patch_deps[key]
+            applied += 1
+    with open(pkg_path, "w", encoding="utf-8") as f:
+        json.dump(pkg, f, indent=2)
+        f.write("\n")
+    print(f"[INFO] Applied {applied} patched dependencies into package.json (version kept at {pkg.get('version', '?')})")
 
 
 def main():
@@ -147,6 +209,7 @@ def main():
             with open(dest_path, "wb") as f:
                 f.write(content)
             print(f"[INFO] Restored custom file: {rel_path}")
+        _merge_package_json_dependencies()
 
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
@@ -158,8 +221,10 @@ def main():
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
             with open(dest_path, "wb") as f:
                 f.write(content)
+        _merge_package_json_dependencies()
         print("[INFO] Re-applied custom files after checking out tag.")
     else:
+        _merge_package_json_dependencies()
         print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
 
     print()
