@@ -69,8 +69,20 @@ API_DIR       = os.path.join(CLIENT_DIR, "api")
 
 PYINSTALLER_CMD = os.path.join(VENV_DIR, "Scripts", "pyinstaller.exe")
 PYTHON_CMD      = os.path.join(VENV_DIR, "Scripts", "python.exe")
-GCC_CMD         = "gcc"
-WINDRES_CMD     = "windres"
+def _find_c_tool(tool_name):
+    direct = shutil.which(tool_name)
+    if direct:
+        return direct
+    msys_candidate = os.path.join(r"C:\msys64\ucrt64\bin", f"{tool_name}.exe")
+    if os.path.isfile(msys_candidate):
+        return msys_candidate
+    msys2_alt = os.path.join(r"C:\msys2\ucrt64\bin", f"{tool_name}.exe")
+    if os.path.isfile(msys2_alt):
+        return msys2_alt
+    return tool_name
+
+GCC_CMD         = _find_c_tool("gcc")
+WINDRES_CMD     = _find_c_tool("windres")
 
 # PyInstaller output directories
 PYINST_OUTDIR   = os.path.join(BUILD_DIR, "pyinstaller_out")
