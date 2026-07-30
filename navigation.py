@@ -112,7 +112,19 @@ class NavigationPanel(wx.Panel):
         elif index == 1 and hasattr(mw, "archived_conversations_panel"):
             mw.archived_conversations_panel.Show()
             mw.content_panel.Layout()
+<<<<<<< HEAD
+            arch_list = mw.archived_conversations_panel.conversations_list
+            arch_list.SetFocus()
+            # Match the main conversations list's behaviour (preselect_conversations()):
+            # focus and select the first item so a screen reader has something
+            # to announce instead of silence on an empty-looking focused list.
+            if arch_list.GetItemCount() > 0 and arch_list.GetFocusedItem() == -1:
+                arch_list.Focus(0)
+                arch_list.Select(0)
+                arch_list.EnsureVisible(0)
+=======
             mw.archived_conversations_panel.restore_selection()
+>>>>>>> upstream/main
         elif index == 2 and hasattr(mw, "status_panel"):
             mw.status_panel.Show()
             mw.content_panel.Layout()
