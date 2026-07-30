@@ -99,8 +99,11 @@ jobs:
             mingw-w64-ucrt-x86_64-binutils
 
       - name: Adicionar MSYS2 GCC ao Path do Windows
-        shell: msys2 {0}
-        run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
+        shell: pwsh
+        run: |
+          $msysBin = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          echo $msysBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Output "[INFO] MSYS2 UCRT64 bin adicionado ao GITHUB_PATH: $msysBin"
 
       - name: Copiar DLL do bassopus para client/lib
         run: |
