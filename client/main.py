@@ -1744,7 +1744,19 @@ class MainWindow(wx.Frame):
             # was requested, bring it back — the update can run for minutes
             # and finishes with the API restarting, which is exactly the
             # kind of state change the user needs to see.
-            if self._window_hidden and not self.background_mode:
+            #
+            # _window_hidden is only set once __init__ reaches its own
+            # "window lifecycle" setup — but WppUpdateChecker's first check
+            # is scheduled via wx.CallLater(90000, ...) very early in
+            # __init__, well before that point, and its own check can take
+            # longer still. If the initial pairing dialog is still on
+            # screen 90+ seconds after launch (completely normal — that's a
+            # human reading/scanning a QR code) and the user accepts an
+            # update from it, _update_wpp_server() runs before
+            # self._window_hidden exists at all — getattr() instead of a
+            # bare attribute access is what keeps that a no-op instead of
+            # an AttributeError crash right after the very first pairing.
+            if getattr(self, "_window_hidden", False) and not self.background_mode:
                 wx.CallAfter(self.restore_window)
 
             if not self.background_mode:
