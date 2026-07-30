@@ -9168,7 +9168,7 @@ class MainWindow(wx.Frame):
             return self._classify_send_exception(e, "send_audio_message")
 
 
-    def _serialize_msg_id(self, remote_jid: str, msg_key: dict) -> str:
+    def _serialize_msg_id(self, remote_jid: str, msg_key: dict, full_msg: dict = None) -> str:
         """
         Build the full serialized WhatsApp message ID expected by WPPConnect
         (`WPP.chat.getMessageById`).  The bare key.id is not enough — the library
@@ -9205,14 +9205,26 @@ class MainWindow(wx.Frame):
         # otherwise get wrongly appended as a 4th segment and break the
         # WPPConnect store lookup (e.g. "false_X@lid_<id>_X@lid").
         participant = ""
-        if chat.endswith("@g.us") and not from_me:
-            # Others' group messages: participant may be in key or a dedicated field.
-            raw = (
-                msg_key.get("participant")
-                or msg_key.get("author")
-                or msg_key.get("remoteJidAlt")
-                or ""
-            )
+        if chat.endswith("@g.us"):
+            if from_me:
+                raw = (
+                    getattr(self, "my_lid", "")
+                    or getattr(self, "my_jid", "")
+                    or msg_key.get("participant")
+                    or (full_msg.get("participant") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("author") if isinstance(full_msg, dict) else "")
+                    or ""
+                )
+            else:
+                raw = (
+                    msg_key.get("participant")
+                    or msg_key.get("author")
+                    or (full_msg.get("participant") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("author") if isinstance(full_msg, dict) else "")
+                    or (full_msg.get("from") if isinstance(full_msg, dict) and not str(full_msg.get("from", "")).endswith("@g.us") else "")
+                    or msg_key.get("remoteJidAlt")
+                    or ""
+                )
             participant = _resolve_to_lid_if_available(raw)
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
@@ -9875,7 +9887,7 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        msg_id = self._serialize_msg_id(_key.get("remoteJid", ""), _key)
+        msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
