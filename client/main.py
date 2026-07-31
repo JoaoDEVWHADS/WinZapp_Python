@@ -4941,14 +4941,13 @@ class MainWindow(wx.Frame):
         return bool(getattr(self, "offline_mode", False)) and not getattr(self, "_sync_completed", False)
 
     def _run_sync(self):
-        logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
+        logging.info("[start_sync] Checking WhatsApp connection status...")
         self.check_wa_connection_http()
-        waited = 0
-        while waited < 30:
+        for _ in range(25):
             if getattr(self, "_wa_connected", False):
                 break
-            time.sleep(1)
-            waited += 1
+            time.sleep(0.2)
+            self.check_wa_connection_http()
         if not getattr(self, "_wa_connected", False):
             # Do NOT sync without a connection.  Every WPPConnect route answers
             # 404 "Disconnected" in this state, so the old behaviour was to
@@ -10064,6 +10063,22 @@ class MainWindow(wx.Frame):
                 if "mimetype" in inner and inner["mimetype"]:
                     body_data["mimetype"] = inner["mimetype"]
                 body_data["type"] = msg_type.replace("Message", "")
+
+        # Fallback: extract root-level media properties if not present in nested message object
+        if not body_data.get("mediaKey"):
+            for key in ("mediaKey", "media_key"):
+                if media.get(key):
+                    body_data["mediaKey"] = media.get(key)
+                    break
+        if not body_data.get("clientUrl"):
+            for key in ("clientUrl", "url", "deprecatedMms3Url", "directPath"):
+                if media.get(key):
+                    body_data["clientUrl"] = media.get(key)
+                    break
+        if not body_data.get("directPath") and media.get("directPath"):
+            body_data["directPath"] = media.get("directPath")
+        if not body_data.get("mimetype") and media.get("mimetype"):
+            body_data["mimetype"] = media.get("mimetype")
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
