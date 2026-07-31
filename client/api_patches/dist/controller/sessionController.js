@@ -549,54 +549,70 @@ async function getMediaByMessage(req, res) {
       }
     }
 
-    // Try direct WPP.chat.downloadMedia in page evaluate if message not found or missing media URL
-    let mediaUrl = message ? (message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath || message.mediaUrl) : null;
+    // If message not found or doesn't have mediaUrl, try direct WPP.chat.downloadMedia in page evaluate
+    const mediaUrl = message ? (message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath) : null;
     if (!message || !mediaUrl) {
       req.logger.info(`Attempting direct browser-side media download via WPP for ${messageId}...`);
       try {
         if (client.page && !client.page.isClosed()) {
           try {
-            const base64Data = await Promise.race([
+            const resultData = await Promise.race([
               client.page.evaluate(async (msgId, lId) => {
                 try {
                   if (window.WPP && window.WPP.chat) {
-                    try {
-                      const blob = await window.WPP.chat.downloadMedia(msgId).catch(() => null)
-                                || await window.WPP.chat.downloadMedia(lId).catch(() => null);
-                      if (blob && blob instanceof Blob) {
-                        return new Promise((resolve) => {
-                          const reader = new FileReader();
-                          reader.onloadend = () => resolve(reader.result);
-                          reader.readAsDataURL(blob);
-                        });
+                    let msg = await window.WPP.chat.getMsg(msgId).catch(() => null)
+                           || await window.WPP.chat.getMsg(lId).catch(() => null);
+                    if (!msg && lId) {
+                      const parts = lId.split('_');
+                      if (parts.length >= 2) {
+                        const chatId = parts[1];
+                        const msgs = await window.WPP.chat.getMessages(chatId, { count: 100 }).catch(() => []);
+                        msg = msgs.find((m) => m && m.id && (m.id._serialized === msgId || m.id._serialized === lId || m.id._serialized.startsWith(lId)));
                       }
-                    } catch (_) {}
+                    }
+
+                    const blob = await window.WPP.chat.downloadMedia(msgId).catch(() => null)
+                              || await window.WPP.chat.downloadMedia(lId).catch(() => null);
+                    let b64 = null;
+                    if (blob && blob instanceof Blob) {
+                      b64 = await new Promise((resolve) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.readAsDataURL(blob);
+                      });
+                    }
+                    return { base64Data: b64, msgObj: msg ? JSON.parse(JSON.stringify(msg)) : null };
                   }
                   if (window.WAPI && typeof window.WAPI.downloadFile === 'function') {
                     const b64 = await window.WAPI.downloadFile(msgId).catch(() => null)
                              || await window.WAPI.downloadFile(lId).catch(() => null);
-                    if (b64) return b64;
+                    if (b64) return { base64Data: b64, msgObj: null };
                   }
                 } catch (err) {
                   return null;
                 }
                 return null;
               }, messageId, lookupId),
-              new Promise((resolve) => setTimeout(() => resolve(null), 1500))
+              new Promise((resolve) => setTimeout(() => resolve(null), 6000))
             ]);
 
-            if (base64Data) {
-              let mimetype = 'audio/ogg';
-              let base64Clean = base64Data;
-              if (base64Data.startsWith('data:')) {
-                const matches = base64Data.match(/^data:(.*?);base64,(.*)$/);
-                if (matches) {
-                  mimetype = matches[1];
-                  base64Clean = matches[2];
-                }
+            if (resultData) {
+              if (resultData.msgObj) {
+                message = resultData.msgObj;
               }
-              req.logger.info(`Successfully retrieved media via WPP browser evaluate for ${messageId}`);
-              return res.status(200).json({ base64: base64Clean, mimetype });
+              if (resultData.base64Data) {
+                let mimetype = (message && message.mimetype) || 'audio/ogg';
+                let base64Clean = resultData.base64Data;
+                if (resultData.base64Data.startsWith('data:')) {
+                  const matches = resultData.base64Data.match(/^data:(.*?);base64,(.*)$/);
+                  if (matches) {
+                    mimetype = matches[1];
+                    base64Clean = matches[2];
+                  }
+                }
+                req.logger.info(`Successfully retrieved media via WPP browser evaluate for ${messageId}`);
+                return res.status(200).json({ base64: base64Clean, mimetype });
+              }
             }
           } catch (evalInnerErr) {
             req.logger.warn(`Browser evaluate media download skipped for ${messageId}: ${evalInnerErr}`);
