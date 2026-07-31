@@ -986,6 +986,7 @@ class MainWindow(wx.Frame):
         self._ID_DISCONNECT    = wx.NewIdRef()
         self._ID_EXIT          = wx.NewIdRef()
         self._ID_RESYNC_ALL    = wx.NewIdRef()
+        self._ID_SYNC_MEDIA    = wx.NewIdRef()
         self._ID_OFFLINE_MENU  = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
@@ -1024,6 +1025,10 @@ class MainWindow(wx.Frame):
             self._ID_RESYNC_ALL,
             f"{self.i18n.t('menu_resync_all')}\tF5",
         )
+        sync_menu.Append(
+            self._ID_SYNC_MEDIA,
+            self.i18n.t("menu_sync_media"),
+        )
         self._sync_offline_menu_item = sync_menu.AppendCheckItem(
             self._ID_OFFLINE_MENU,
             f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O",
@@ -1051,6 +1056,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_menu_disconnect, id=self._ID_DISCONNECT)
         self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
+        self.Bind(wx.EVT_MENU, self._on_menu_sync_media, id=self._ID_SYNC_MEDIA)
         self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
@@ -1080,6 +1086,9 @@ class MainWindow(wx.Frame):
         mb.SetMenuLabel(1, self.i18n.t("menu_sync"))
         mb.GetMenu(1).FindItemById(self._ID_RESYNC_ALL).SetItemLabel(
             f"{self.i18n.t('menu_resync_all')}\tF5"
+        )
+        mb.GetMenu(1).FindItemById(self._ID_SYNC_MEDIA).SetItemLabel(
+            self.i18n.t("menu_sync_media")
         )
         mb.GetMenu(1).FindItemById(self._ID_OFFLINE_MENU).SetItemLabel(
             f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O"
@@ -1508,6 +1517,30 @@ class MainWindow(wx.Frame):
     def _on_menu_toggle_offline(self, event=None):
         """Sincronização menu / Ctrl+Alt+Shift+O: toggle offline mode."""
         self.toggle_offline_mode()
+
+    def _on_menu_sync_media(self, event=None):
+        """Sincronização menu: Baixar mídias manualmente em segundo plano."""
+        if getattr(self, "_media_sync_running", False):
+            if not self.background_mode:
+                self.output(self.i18n.t("sync_media_already_running"))
+            return
+        if not self.background_mode:
+            self.output(self.i18n.t("sync_media_started"))
+        
+        def _worker():
+            self._media_sync_running = True
+            try:
+                self.sync_media_for_all_chats()
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
+            except Exception as exc:
+                logging.exception("[_on_menu_sync_media] Erro ao baixar mídias: %s", exc)
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
+            finally:
+                self._media_sync_running = False
+
+        threading.Thread(target=_worker, daemon=True, name="menu-media-sync").start()
 
     def _on_menu_resync_all(self, event=None):
         """Sincronização menu / F5: wipe all local chat/message state and
