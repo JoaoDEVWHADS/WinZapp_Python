@@ -477,7 +477,9 @@ def is_countable_message(msg: dict) -> bool:
 
 class MainWindow(wx.Frame):
     def __init__(self):
-        logging.info("MainWindow: Initializing MainWindow...")
+        import time as _time
+        self._t_app_start = _time.perf_counter()
+        logging.info("[STARTUP_TIMING] T+0.000s — MainWindow __init__ started")
         super().__init__(None)
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
         self._save_lock = threading.Lock()
@@ -544,7 +546,7 @@ class MainWindow(wx.Frame):
         # Schedule the update checker on the event loop early (but after i18n
         # is initialized) so it can run even if modal dialogs block __init__.
         if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
+            wx.CallLater(15000, self._start_update_checker)
             # Separate, independent check for the WPPConnect Server itself —
             # it breaks between WinZapp releases too, and until now the only
             # fix was a user manually wiping client/api/ and node_modules.
@@ -651,17 +653,30 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
         else:
-            # Check and install API modules if needed (first run only)
-            logging.info("MainWindow: Checking/installing API modules...")
-            self.ensure_api_modules_installed()
-
-            # Check that the installed WPPConnect Server meets the minimum required version
-            logging.info("MainWindow: Checking WPPConnect Server version...")
-            self.ensure_wpp_version()
-
-            # Start local WPPConnect Server (if bundled)
-            logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
-            self.ensure_wpp_running()
+            # Check API modules and start WPPConnect Server synchronously BEFORE init_UI
+            # so the startup dialog shows first before opening the main conversation list.
+            if not self.background_mode:
+                try:
+                    import time as _time
+                    _t_start = getattr(self, "_t_app_start", _time.perf_counter())
+                    logging.info("[STARTUP_TIMING] T+%.3fs — Checking/installing API modules...", _time.perf_counter() - _t_start)
+                    self.ensure_api_modules_installed()
+                    logging.info("[STARTUP_TIMING] T+%.3fs — Checking WPPConnect Server version...", _time.perf_counter() - _t_start)
+                    self.ensure_wpp_version()
+                    logging.info("[STARTUP_TIMING] T+%.3fs — Ensuring WPPConnect Server process is running...", _time.perf_counter() - _t_start)
+                    self.ensure_wpp_running()
+                    logging.info("[STARTUP_TIMING] T+%.3fs — WPPConnect Server process ready!", _time.perf_counter() - _t_start)
+                except Exception as exc:
+                    logging.error("[STARTUP_TIMING] Error in API initialization: %s", exc)
+            else:
+                def _async_api_init():
+                    try:
+                        self.ensure_api_modules_installed()
+                        self.ensure_wpp_version()
+                        self.ensure_wpp_running()
+                    except Exception as exc:
+                        logging.error("Error in background API init: %s", exc)
+                threading.Thread(target=_async_api_init, daemon=True, name="wpp-api-init").start()
 
         # Effective offline state = user-toggled OR auto-detected (no WhatsApp
         # connection).  Kept as a single attribute because everything else in
@@ -716,10 +731,6 @@ class MainWindow(wx.Frame):
         # Starts as "connecting" rather than blank/offline — the connection
         # state genuinely isn't known yet at this point in startup.
         self._tray_status = self.i18n.t("tray_connecting")
-
-        #Play startup sound (skipped in background mode)
-        if not self.background_mode:
-            self.startup_sound.play()
 
         # True from the moment a deliberate app shutdown starts (real_exit())
         # until the process actually exits. _stop_wpp_server() closes the
@@ -958,10 +969,16 @@ class MainWindow(wx.Frame):
         # restored later by a second instance or a future tray-icon action.
         if not self.background_mode:
             self.Show()
-        logging.info("[init_UI] window shown — populating chat list")
+            import time as _time
+            _t_show = _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter())
+            logging.info("[STARTUP_TIMING] T+%.3fs — Window physically SHOWN on screen", _t_show)
+            # Play startup sound only after the window is physically shown on screen
+            self.startup_sound.play()
+        import time as _time
+        logging.info("[STARTUP_TIMING] T+%.3fs — [init_UI] populating initial chat list", _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter()))
         #Set offline chats for the first time
         self.set_chats()
-        logging.info("[init_UI] chat list populated — entering MainLoop")
+        logging.info("[STARTUP_TIMING] T+%.3fs — [init_UI] chat list populated, UI fully ready", _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter()))
         # All widgets exist and the initial chat list is painted — unblock any
         # sync thread that was waiting for the UI to be ready.
         self._ui_ready_event.set()
@@ -983,6 +1000,7 @@ class MainWindow(wx.Frame):
         self._ID_DISCONNECT    = wx.NewIdRef()
         self._ID_EXIT          = wx.NewIdRef()
         self._ID_RESYNC_ALL    = wx.NewIdRef()
+        self._ID_SYNC_MEDIA    = wx.NewIdRef()
         self._ID_OFFLINE_MENU  = wx.NewIdRef()
         self._ID_SHORTCUTS     = wx.NewIdRef()
         self._ID_FORCE_UPDATE  = wx.NewIdRef()
@@ -1021,6 +1039,10 @@ class MainWindow(wx.Frame):
             self._ID_RESYNC_ALL,
             f"{self.i18n.t('menu_resync_all')}\tF5",
         )
+        sync_menu.Append(
+            self._ID_SYNC_MEDIA,
+            self.i18n.t("menu_sync_media"),
+        )
         self._sync_offline_menu_item = sync_menu.AppendCheckItem(
             self._ID_OFFLINE_MENU,
             f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O",
@@ -1048,6 +1070,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_menu_disconnect, id=self._ID_DISCONNECT)
         self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
+        self.Bind(wx.EVT_MENU, self._on_menu_sync_media, id=self._ID_SYNC_MEDIA)
         self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
         self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
         self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
@@ -1077,6 +1100,9 @@ class MainWindow(wx.Frame):
         mb.SetMenuLabel(1, self.i18n.t("menu_sync"))
         mb.GetMenu(1).FindItemById(self._ID_RESYNC_ALL).SetItemLabel(
             f"{self.i18n.t('menu_resync_all')}\tF5"
+        )
+        mb.GetMenu(1).FindItemById(self._ID_SYNC_MEDIA).SetItemLabel(
+            self.i18n.t("menu_sync_media")
         )
         mb.GetMenu(1).FindItemById(self._ID_OFFLINE_MENU).SetItemLabel(
             f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O"
@@ -1505,6 +1531,36 @@ class MainWindow(wx.Frame):
     def _on_menu_toggle_offline(self, event=None):
         """Sincronização menu / Ctrl+Alt+Shift+O: toggle offline mode."""
         self.toggle_offline_mode()
+
+    def _on_menu_sync_media(self, event=None):
+        """Sincronização menu: Baixar mídias manualmente em segundo plano."""
+        if getattr(self, "_media_sync_running", False):
+            if not self.background_mode:
+                self.output(self.i18n.t("sync_media_already_running"))
+            return
+
+        def _worker():
+            if self._should_abort_sync_for_offline():
+                logging.info("[_on_menu_sync_media] Aborting media sync: offline mode active.")
+                return
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+            if not self.background_mode:
+                wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+            self._media_sync_running = True
+            try:
+                self.sync_media_for_all_chats()
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
+            except Exception as exc:
+                logging.exception("[_on_menu_sync_media] Erro ao baixar mídias: %s", exc)
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
+            finally:
+                self._media_sync_running = False
+                wx.CallAfter(self._set_status, "")
+                wx.CallAfter(self.set_chats)
+
+        threading.Thread(target=_worker, daemon=True, name="menu-media-sync").start()
 
     def _on_menu_resync_all(self, event=None):
         """Sincronização menu / F5: wipe all local chat/message state and
@@ -2977,6 +3033,35 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[connection] Forced WebSocket reconnect failed (will keep retrying on its own): %s", exc)
 
+    def run_on_main_thread(self, func, *args, **kwargs):
+        """
+        Execute a callable on the wx main thread using wx.CallAfter if invoked
+        from a background thread, blocking until the callable finishes and returning its result.
+        If called from the main thread, execute directly.
+        """
+        if wx.IsMainThread():
+            return func(*args, **kwargs)
+
+        result_container = []
+        exception_container = []
+        event = threading.Event()
+
+        def _wrapper():
+            try:
+                res = func(*args, **kwargs)
+                result_container.append(res)
+            except Exception as exc:
+                exception_container.append(exc)
+            finally:
+                event.set()
+
+        wx.CallAfter(_wrapper)
+        event.wait()
+
+        if exception_container:
+            raise exception_container[0]
+        return result_container[0]
+
     # ── First-run module installation ──────────────────────────────────────
 
     def ensure_api_modules_installed(self):
@@ -3066,9 +3151,12 @@ class MainWindow(wx.Frame):
                 sys.exit(0)
             logging.info("[ensure_api_modules_installed] Node.js not found — downloading portable version...")
             from ui.dialogs.node_download import NodeDownloadDialog
-            dlg = NodeDownloadDialog(self)
-            result = dlg.ShowModal()
-            dlg.Destroy()
+            def _show_node_download():
+                dlg = NodeDownloadDialog(self)
+                res = dlg.ShowModal()
+                dlg.Destroy()
+                return res
+            result = self.run_on_main_thread(_show_node_download)
             if result != wx.ID_OK:
                 sys.exit(1)
             # Re-resolve path after download
@@ -3092,15 +3180,17 @@ class MainWindow(wx.Frame):
         # ── Check for new required packages in an existing node_modules ──────
         # When we add a new npm dependency (e.g. @ffmpeg-installer/ffmpeg) the
         # user's node_modules is already installed from a previous run, so the
-        # normal "node_modules absent" gate never fires.  We compare a list of
+        # normal "node_modules absent" gate never fires. We compare a list of
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
+        ffmpeg_bin = self._find_api_ffmpeg()
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
             os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
+            if not ffmpeg_bin:
+                missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
@@ -3168,9 +3258,12 @@ class MainWindow(wx.Frame):
         # dist/server.js already exists and runs only the npm-install portion
         # of its flow when so, instead of a second dialog for that case.
         from ui.dialogs.api_setup import ApiSetupDialog
-        dlg    = ApiSetupDialog(self)
-        result = dlg.ShowModal()
-        dlg.Destroy()
+        def _show_api_setup():
+            dlg = ApiSetupDialog(self)
+            res = dlg.ShowModal()
+            dlg.Destroy()
+            return res
+        result = self.run_on_main_thread(_show_api_setup)
 
         if result != wx.ID_OK:
             sys.exit(0)
@@ -3260,9 +3353,12 @@ class MainWindow(wx.Frame):
             RESULT_UPDATE, RESULT_EXIT, RESULT_CONTINUE,
         )
 
-        dlg    = ApiVersionOutdatedDialog(self, self.i18n, installed, minimum)
-        result = dlg.ShowModal()
-        dlg.Destroy()
+        def _show_outdated_dlg():
+            dlg = ApiVersionOutdatedDialog(self, self.i18n, installed, minimum)
+            res = dlg.ShowModal()
+            dlg.Destroy()
+            return res
+        result = self.run_on_main_thread(_show_outdated_dlg)
 
         if result == RESULT_EXIT:
             sys.exit(0)
@@ -3272,13 +3368,16 @@ class MainWindow(wx.Frame):
 
         # RESULT_UPDATE: re-download and rebuild using the minimum-version tag
         from ui.dialogs.api_setup import ApiSetupDialog
-        update_dlg = ApiSetupDialog(
-            self,
-            title_override=self.i18n.t("api_update_dialog_title"),
-            forced_tag=minimum,
-        )
-        update_result = update_dlg.ShowModal()
-        update_dlg.Destroy()
+        def _show_update_dlg():
+            update_dlg = ApiSetupDialog(
+                self,
+                title_override=self.i18n.t("api_update_dialog_title"),
+                forced_tag=minimum,
+            )
+            res = update_dlg.ShowModal()
+            update_dlg.Destroy()
+            return res
+        update_result = self.run_on_main_thread(_show_update_dlg)
 
         if update_result != wx.ID_OK:
             # Update was cancelled or failed — exit to avoid running an
@@ -3572,23 +3671,25 @@ class MainWindow(wx.Frame):
         self._start_wpp_background()
 
         if self.background_mode:
-            # Silent wait — no dialog, no speech.  Timeout → exit code 1.
             deadline = time.time() + 300
             while time.time() < deadline:
                 if self._is_wpp_running():
                     self._check_wpp_version_pin()
                     return
-                time.sleep(2)
+                time.sleep(1)
             sys.exit(1)
 
         from ui.dialogs.api_startup import ApiStartupDialog
-        dlg    = ApiStartupDialog(self, self.wpp_port)
-        result = dlg.ShowModal()
-        if dlg:
+        def _show_startup_dlg():
+            if self._is_wpp_running():
+                return wx.ID_OK
+            dlg = ApiStartupDialog(self, self.wpp_port)
+            res = dlg.ShowModal()
             dlg.Destroy()
+            return res
+        result = self.run_on_main_thread(_show_startup_dlg)
 
         if result != wx.ID_OK:
-            # Collect the last 40 lines of the WPPConnect log for diagnosis
             details = ""
             log_path = getattr(self, "_wpp_log_path", None)
             if log_path and os.path.isfile(log_path):
@@ -3601,7 +3702,7 @@ class MainWindow(wx.Frame):
             msg = self.i18n.t("api_startup_warning")
             if details:
                 msg = f"{msg}\n\n{details}"
-            wx.MessageBox(msg, self.app_name, wx.OK | wx.ICON_ERROR)
+            self.run_on_main_thread(wx.MessageBox, msg, self.app_name, wx.OK | wx.ICON_ERROR)
             sys.exit(1)
 
         self._check_wpp_version_pin()
@@ -4938,14 +5039,13 @@ class MainWindow(wx.Frame):
         return bool(getattr(self, "offline_mode", False)) and not getattr(self, "_sync_completed", False)
 
     def _run_sync(self):
-        logging.info("[start_sync] Waiting for WhatsApp connection before syncing...")
+        logging.info("[start_sync] Checking WhatsApp connection status...")
         self.check_wa_connection_http()
-        waited = 0
-        while waited < 30:
+        for _ in range(25):
             if getattr(self, "_wa_connected", False):
                 break
-            time.sleep(1)
-            waited += 1
+            time.sleep(0.2)
+            self.check_wa_connection_http()
         if not getattr(self, "_wa_connected", False):
             # Do NOT sync without a connection.  Every WPPConnect route answers
             # 404 "Disconnected" in this state, so the old behaviour was to
@@ -4957,10 +5057,9 @@ class MainWindow(wx.Frame):
             logging.warning("[start_sync] No WhatsApp connection — skipping sync until it returns.")
             self._sync_completed = False
             return
-        # Give WPPConnect/WA-JS internal stores a few seconds to fully initialize
-        # before querying chats and contacts. This prevents HTTP 500/TypeError crashes.
-        logging.info("[start_sync] WhatsApp connected. Waiting 5s for stores to initialize...")
-        time.sleep(5)
+        # Give WPPConnect/WA-JS internal stores 1s to settle if needed
+        logging.info("[start_sync] WhatsApp connected. Proceeding to sync...")
+        time.sleep(1)
 
         # Bundle the title/tray text, sound and speech for this stage into a
         # single wx.CallAfter so they can never visibly fall out of step.
@@ -5285,17 +5384,10 @@ class MainWindow(wx.Frame):
                     target=self._backfill_empty_chats, daemon=True, name="chat-backfill")
                 self._backfill_thread.start()
 
-        # ── Phase 2: download media (silent) ──────────────────────────────
-        if self._should_abort_sync_for_offline():
-            logging.info("[start_sync] Aborting sync before phase 2: offline mode activated mid-sync.")
-            return
-        wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-        self._media_sync_running = True
-        try:
-            self.sync_media_for_all_chats()
-        finally:
-            self._media_sync_running = False
-        wx.CallAfter(self._set_status, "")
+        # ── Phase 2: download media (disabled on startup, media is loaded on-demand) ──────
+        # Skip bulk media auto-download on startup so the app opens instantly and doesn't stress the API.
+        # Media/Audio files will download on-demand when opened or played by the user.
+        logging.info("[start_sync] Phase 2 media auto-download on startup bypassed (on-demand mode active).")
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
         # _initial_sync_running is reset by start_sync()'s finally block.
@@ -6718,7 +6810,7 @@ class MainWindow(wx.Frame):
                             logging.error(f"[get_remote_contacts] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
                             body = {}
                         response_data = body.get("response", []) if isinstance(body, dict) else []
-                    
+
                     if isinstance(response_data, list) and len(response_data) > 0:
                         break
                     else:
