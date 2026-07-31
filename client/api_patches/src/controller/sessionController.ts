@@ -580,10 +580,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
         // force load earlier messages for the chat and retry downloadMedia.
         if (!base64 && parts.length >= 2) {
           const chatId = parts[1];
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
-            req.logger.info(`downloadMedia failed for ${messageId}. Forcing loadEarlierMessages for ${chatId}...`);
+          if (chatId && client.page) {
+            req.logger.info(`downloadMedia failed for ${messageId}. Forcing WPP.chat.loadEarlierMessages for ${chatId}...`);
             try {
-              await client.loadEarlierMessages(chatId);
+              await client.page.evaluate((cId: string) => {
+                if ((window as any).WPP && (window as any).WPP.chat && typeof (window as any).WPP.chat.loadEarlierMessages === 'function') {
+                  return (window as any).WPP.chat.loadEarlierMessages(cId);
+                }
+              }, chatId);
               base64 = await tryDownload(lookupId) || await tryDownload(messageId);
             } catch (loadErr) {
               req.logger.error(`loadEarlierMessages retry error: ${loadErr}`);
