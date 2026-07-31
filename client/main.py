@@ -3167,15 +3167,17 @@ class MainWindow(wx.Frame):
         # ── Check for new required packages in an existing node_modules ──────
         # When we add a new npm dependency (e.g. @ffmpeg-installer/ffmpeg) the
         # user's node_modules is already installed from a previous run, so the
-        # normal "node_modules absent" gate never fires.  We compare a list of
+        # normal "node_modules absent" gate never fires. We compare a list of
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
+        ffmpeg_bin = self._find_api_ffmpeg()
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"),
             os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
+            if not ffmpeg_bin:
+                missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
