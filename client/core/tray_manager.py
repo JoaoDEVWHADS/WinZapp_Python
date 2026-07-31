@@ -61,14 +61,7 @@ class TrayIcon(wx.adv.TaskBarIcon):
         dc.SetBackground(wx.Brush(wx.Colour(37, 211, 102)))  # WhatsApp green
         dc.Clear()
         dc.SetTextForeground(wx.WHITE)
-        dc.SetFont(wx.Font(
-            9, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD
-        ))
-        try:
-            tw, th = dc.GetTextExtent("W")
-            dc.DrawText("W", max(0, (size - tw) // 2), max(0, (size - th) // 2))
-        except Exception:
-            dc.DrawText("W", 3, 1)
+        dc.DrawText("W", 3, 1)
         dc.SelectObject(wx.NullBitmap)
         icon = wx.Icon()
         icon.CopyFromBitmap(bmp)
