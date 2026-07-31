@@ -720,10 +720,6 @@ class MainWindow(wx.Frame):
         # state genuinely isn't known yet at this point in startup.
         self._tray_status = self.i18n.t("tray_connecting")
 
-        #Play startup sound (skipped in background mode)
-        if not self.background_mode:
-            self.startup_sound.play()
-
         # True from the moment a deliberate app shutdown starts (real_exit())
         # until the process actually exits. _stop_wpp_server() closes the
         # WPPConnect session itself (POST /close-session) before killing the
@@ -961,6 +957,8 @@ class MainWindow(wx.Frame):
         # restored later by a second instance or a future tray-icon action.
         if not self.background_mode:
             self.Show()
+            # Play startup sound only after the window is physically shown on screen
+            self.startup_sound.play()
         logging.info("[init_UI] window shown — populating chat list")
         #Set offline chats for the first time
         self.set_chats()
@@ -3649,17 +3647,18 @@ class MainWindow(wx.Frame):
         self._start_wpp_background()
 
         if self.background_mode:
-            # Silent wait — no dialog, no speech.  Timeout → exit code 1.
             deadline = time.time() + 300
             while time.time() < deadline:
                 if self._is_wpp_running():
                     self._check_wpp_version_pin()
                     return
-                time.sleep(2)
+                time.sleep(1)
             sys.exit(1)
 
         from ui.dialogs.api_startup import ApiStartupDialog
         def _show_startup_dlg():
+            if self._is_wpp_running():
+                return wx.ID_OK
             dlg = ApiStartupDialog(self, self.wpp_port)
             res = dlg.ShowModal()
             dlg.Destroy()
@@ -3667,7 +3666,6 @@ class MainWindow(wx.Frame):
         result = self.run_on_main_thread(_show_startup_dlg)
 
         if result != wx.ID_OK:
-            # Collect the last 40 lines of the WPPConnect log for diagnosis
             details = ""
             log_path = getattr(self, "_wpp_log_path", None)
             if log_path and os.path.isfile(log_path):
