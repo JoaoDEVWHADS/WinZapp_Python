@@ -3013,6 +3013,35 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             logging.warning("[connection] Forced WebSocket reconnect failed (will keep retrying on its own): %s", exc)
 
+    def run_on_main_thread(self, func, *args, **kwargs):
+        """
+        Execute a callable on the wx main thread using wx.CallAfter if invoked
+        from a background thread, blocking until the callable finishes and returning its result.
+        If called from the main thread, execute directly.
+        """
+        if wx.IsMainThread():
+            return func(*args, **kwargs)
+
+        result_container = []
+        exception_container = []
+        event = threading.Event()
+
+        def _wrapper():
+            try:
+                res = func(*args, **kwargs)
+                result_container.append(res)
+            except Exception as exc:
+                exception_container.append(exc)
+            finally:
+                event.set()
+
+        wx.CallAfter(_wrapper)
+        event.wait()
+
+        if exception_container:
+            raise exception_container[0]
+        return result_container[0]
+
     # ── First-run module installation ──────────────────────────────────────
 
     def ensure_api_modules_installed(self):
@@ -3102,9 +3131,12 @@ class MainWindow(wx.Frame):
                 sys.exit(0)
             logging.info("[ensure_api_modules_installed] Node.js not found — downloading portable version...")
             from ui.dialogs.node_download import NodeDownloadDialog
-            dlg = NodeDownloadDialog(self)
-            result = dlg.ShowModal()
-            dlg.Destroy()
+            def _show_node_download():
+                dlg = NodeDownloadDialog(self)
+                res = dlg.ShowModal()
+                dlg.Destroy()
+                return res
+            result = self.run_on_main_thread(_show_node_download)
             if result != wx.ID_OK:
                 sys.exit(1)
             # Re-resolve path after download
@@ -3204,9 +3236,12 @@ class MainWindow(wx.Frame):
         # dist/server.js already exists and runs only the npm-install portion
         # of its flow when so, instead of a second dialog for that case.
         from ui.dialogs.api_setup import ApiSetupDialog
-        dlg    = ApiSetupDialog(self)
-        result = dlg.ShowModal()
-        dlg.Destroy()
+        def _show_api_setup():
+            dlg = ApiSetupDialog(self)
+            res = dlg.ShowModal()
+            dlg.Destroy()
+            return res
+        result = self.run_on_main_thread(_show_api_setup)
 
         if result != wx.ID_OK:
             sys.exit(0)
@@ -3296,9 +3331,12 @@ class MainWindow(wx.Frame):
             RESULT_UPDATE, RESULT_EXIT, RESULT_CONTINUE,
         )
 
-        dlg    = ApiVersionOutdatedDialog(self, self.i18n, installed, minimum)
-        result = dlg.ShowModal()
-        dlg.Destroy()
+        def _show_outdated_dlg():
+            dlg = ApiVersionOutdatedDialog(self, self.i18n, installed, minimum)
+            res = dlg.ShowModal()
+            dlg.Destroy()
+            return res
+        result = self.run_on_main_thread(_show_outdated_dlg)
 
         if result == RESULT_EXIT:
             sys.exit(0)
@@ -3308,13 +3346,16 @@ class MainWindow(wx.Frame):
 
         # RESULT_UPDATE: re-download and rebuild using the minimum-version tag
         from ui.dialogs.api_setup import ApiSetupDialog
-        update_dlg = ApiSetupDialog(
-            self,
-            title_override=self.i18n.t("api_update_dialog_title"),
-            forced_tag=minimum,
-        )
-        update_result = update_dlg.ShowModal()
-        update_dlg.Destroy()
+        def _show_update_dlg():
+            update_dlg = ApiSetupDialog(
+                self,
+                title_override=self.i18n.t("api_update_dialog_title"),
+                forced_tag=minimum,
+            )
+            res = update_dlg.ShowModal()
+            update_dlg.Destroy()
+            return res
+        update_result = self.run_on_main_thread(_show_update_dlg)
 
         if update_result != wx.ID_OK:
             # Update was cancelled or failed — exit to avoid running an
@@ -3618,10 +3659,12 @@ class MainWindow(wx.Frame):
             sys.exit(1)
 
         from ui.dialogs.api_startup import ApiStartupDialog
-        dlg    = ApiStartupDialog(self, self.wpp_port)
-        result = dlg.ShowModal()
-        if dlg:
+        def _show_startup_dlg():
+            dlg = ApiStartupDialog(self, self.wpp_port)
+            res = dlg.ShowModal()
             dlg.Destroy()
+            return res
+        result = self.run_on_main_thread(_show_startup_dlg)
 
         if result != wx.ID_OK:
             # Collect the last 40 lines of the WPPConnect log for diagnosis
@@ -3637,7 +3680,7 @@ class MainWindow(wx.Frame):
             msg = self.i18n.t("api_startup_warning")
             if details:
                 msg = f"{msg}\n\n{details}"
-            wx.MessageBox(msg, self.app_name, wx.OK | wx.ICON_ERROR)
+            self.run_on_main_thread(wx.MessageBox, msg, self.app_name, wx.OK | wx.ICON_ERROR)
             sys.exit(1)
 
         self._check_wpp_version_pin()
