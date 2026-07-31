@@ -653,23 +653,30 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
         else:
-            # Asynchronously check API modules and start WPPConnect Server in background
-            # so the UI window opens instantly without blocking on npm/process checks.
-            def _async_api_init():
-                import time as _time
-                _t_start = getattr(self, "_t_app_start", _time.perf_counter())
+            # Check API modules and start WPPConnect Server synchronously BEFORE init_UI
+            # so the startup dialog shows first before opening the main conversation list.
+            if not self.background_mode:
                 try:
-                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] Checking/installing API modules...", _time.perf_counter() - _t_start)
+                    import time as _time
+                    _t_start = getattr(self, "_t_app_start", _time.perf_counter())
+                    logging.info("[STARTUP_TIMING] T+%.3fs — Checking/installing API modules...", _time.perf_counter() - _t_start)
                     self.ensure_api_modules_installed()
-                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] Checking WPPConnect Server version...", _time.perf_counter() - _t_start)
+                    logging.info("[STARTUP_TIMING] T+%.3fs — Checking WPPConnect Server version...", _time.perf_counter() - _t_start)
                     self.ensure_wpp_version()
-                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] Ensuring WPPConnect Server process is running...", _time.perf_counter() - _t_start)
+                    logging.info("[STARTUP_TIMING] T+%.3fs — Ensuring WPPConnect Server process is running...", _time.perf_counter() - _t_start)
                     self.ensure_wpp_running()
-                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] WPPConnect Server process ready and listening!", _time.perf_counter() - _t_start)
+                    logging.info("[STARTUP_TIMING] T+%.3fs — WPPConnect Server process ready!", _time.perf_counter() - _t_start)
                 except Exception as exc:
-                    logging.error("[STARTUP_TIMING] Error in background API initialization: %s", exc)
-
-            threading.Thread(target=_async_api_init, daemon=True, name="wpp-api-init").start()
+                    logging.error("[STARTUP_TIMING] Error in API initialization: %s", exc)
+            else:
+                def _async_api_init():
+                    try:
+                        self.ensure_api_modules_installed()
+                        self.ensure_wpp_version()
+                        self.ensure_wpp_running()
+                    except Exception as exc:
+                        logging.error("Error in background API init: %s", exc)
+                threading.Thread(target=_async_api_init, daemon=True, name="wpp-api-init").start()
 
         # Effective offline state = user-toggled OR auto-detected (no WhatsApp
         # connection).  Kept as a single attribute because everything else in
