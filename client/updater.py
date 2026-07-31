@@ -305,14 +305,14 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
         "if not errorlevel 1 (\n"
         "    timeout /t 1 /nobreak >NUL\n"
-        "    goto WAIT\n"
-        ")\n"
         # Give child processes a moment to exit, then kill stragglers holding file locks.
         "timeout /t 2 /nobreak >NUL\n"
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "timeout /t 1 /nobreak >NUL\n"
+        f'if exist "{install_dir}\\api\\src" rmdir /s /q "{install_dir}\\api\\src"\n'
         f'if exist "{install_dir}\\api\\dist" rmdir /s /q "{install_dir}\\api\\dist"\n'
+        f'if exist "{install_dir}\\api_patches" rmdir /s /q "{install_dir}\\api_patches"\n'
         f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
         "if errorlevel 4 (\n"
         f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
