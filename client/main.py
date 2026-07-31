@@ -10094,9 +10094,13 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
-        # Normalize 4-part message IDs (fromMe_chatId_msgId_participantLid) to 3-part standard IDs for get-media endpoint
-        if msg_id and msg_id.count("_") == 3:
+        msg_id = media.get("id") or media.get("_serialized") or media.get("msgId")
+        if not msg_id or not isinstance(msg_id, str):
+            msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", "") or media.get("chatId", ""), _key, full_msg=media)
+
+        # Normalize 4-part message IDs for groups (fromMe_chatId_msgId_participant) when appropriate,
+        # but preserve full serialized ID if remoteJid is @g.us
+        if msg_id and msg_id.count("_") == 3 and not "@g.us" in msg_id:
             parts = msg_id.split("_")
             msg_id = f"{parts[0]}_{parts[1]}_{parts[2]}"
 
