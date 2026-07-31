@@ -75,7 +75,52 @@ def _run(cmd: list, cwd: str = None):
         sys.exit(result.returncode)
 
 
+def ensure_portable_git():
+    import shutil
+    import urllib.request
+    import zipfile
+
+    if sys.platform != "win32":
+        return
+
+    client_git_dir = os.path.join(ROOT_DIR, "client", "git")
+    git_cmd_dir = os.path.join(client_git_dir, "cmd")
+    git_bin_dir = os.path.join(client_git_dir, "bin")
+    git_exe = os.path.join(git_cmd_dir, "git.exe")
+
+    # Add to PATH immediately if present
+    if os.path.isfile(git_exe):
+        if git_cmd_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{git_cmd_dir};{git_bin_dir};" + os.environ.get("PATH", "")
+        return
+
+    if shutil.which("git") is not None:
+        return
+
+    print("[INFO] Portable Git not found — downloading MinGit for Windows...")
+    git_url = "https://github.com/git-for-windows/git/releases/download/v2.48.1.windows.1/MinGit-2.48.1-64-bit.zip"
+    zip_path = os.path.join(ROOT_DIR, "mingit.zip")
+    try:
+        os.makedirs(client_git_dir, exist_ok=True)
+        print(f"  Downloading {git_url} ...")
+        urllib.request.urlretrieve(git_url, zip_path)
+        print("  Extracting MinGit archive...")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(client_git_dir)
+        print("[OK] MinGit downloaded and extracted to client/git successfully.")
+    except Exception as e:
+        print(f"[WARNING] Could not download MinGit: {e}")
+    finally:
+        if os.path.isfile(zip_path):
+            try: os.remove(zip_path)
+            except: pass
+
+    if os.path.isfile(git_exe):
+        os.environ["PATH"] = f"{git_cmd_dir};{git_bin_dir};" + os.environ.get("PATH", "")
+
+
 def main():
+    ensure_portable_git()
     env = _load_env()
     tag = env.get("WPPCONNECT_TAG_VERSION", "").strip()
 
