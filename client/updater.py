@@ -312,13 +312,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "timeout /t 1 /nobreak >NUL\n"
-        # xcopy's exit code was previously never checked, so a failed copy
-        # (locked file, disk full, permissions) silently relaunched whatever
-        # was already in install_dir — the user saw the app come back and
-        # assumed the update worked. errorlevel 4+ means xcopy itself failed
-        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
-        # leave a marker file WinZapp checks on next startup so the user is
-        # told instead of silently running a stale/partial install.
+        f'if exist "{install_dir}\\api\\dist" rmdir /s /q "{install_dir}\\api\\dist"\n'
         f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
         "if errorlevel 4 (\n"
         f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
