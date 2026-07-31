@@ -705,23 +705,22 @@ class ApiSetupDialog(wx.Dialog):
                 if self._cancelled:
                     return
 
-            if not modules_only:
-                # ── Step 5: npm run build ─────────────────────────────────────
-                self._set_stage(
-                    "Compilando o WPPConnect Server (npm run build) — "
-                    "isso pode levar alguns minutos...",
-                    *stages["build"]
-                )
-                ok, err = self._run_subprocess(
-                    npm_cmd + ["run", "build"],
-                    cwd=api_dir,
-                    env=npm_env,
-                )
-                if not ok:
-                    if not self._cancelled:
-                        wx.CallAfter(self._finish_error,
-                                     f"Falha em npm run build:\n\n{err}")
-                    return
+            # ── Step 5: npm run build ─────────────────────────────────────
+            self._set_stage(
+                "Compilando o WPPConnect Server (npm run build) — "
+                "isso pode levar alguns minutos...",
+                *stages["build"]
+            )
+            ok, err = self._run_subprocess(
+                npm_cmd + ["run", "build"],
+                cwd=api_dir,
+                env=npm_env,
+            )
+            if not ok:
+                if not self._cancelled:
+                    wx.CallAfter(self._finish_error,
+                                 f"Falha em npm run build:\n\n{err}")
+                return
 
             if not self._cancelled:
                 wx.CallAfter(self._finish_success)
