@@ -572,7 +572,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
                         }
                       }
 
-                      const blob = await (window as any).WPP.chat.downloadMedia(msgId).catch(() => null)
+                      let targetId = (msg && msg.id) ? (msg.id._serialized || msg.id) : msgId;
+                      const blob = await (window as any).WPP.chat.downloadMedia(targetId).catch(() => null)
+                                || await (window as any).WPP.chat.downloadMedia(msgId).catch(() => null)
                                 || await (window as any).WPP.chat.downloadMedia(lId).catch(() => null);
                       let b64: string | null = null;
                       if (blob && blob instanceof Blob) {
