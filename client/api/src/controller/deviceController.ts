@@ -1607,17 +1607,11 @@ export async function getMessages(req: Request, res: Response) {
           if (originalOldestId) {
             queryId = originalOldestId;
             console.log(`[browser-evaluate] Anchor not found after walkback. Falling back to originalOldestId: ${queryId}`);
-          } else {
-                  oldestMsg = m;
-                }
-              }
-              queryId = oldestMsg.id._serialized || oldestMsg.id;
-            }
           }
         }
 
         console.log(`[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`);
-        const result = await (window as any).WAPI.getMessages(chatId, {
+        const result = await (window as any).WAPI.getMessages(realChatId, {
           count: targetCount,
           direction: 'before',
           id: queryId
