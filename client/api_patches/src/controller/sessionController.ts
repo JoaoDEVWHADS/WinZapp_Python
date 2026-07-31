@@ -512,43 +512,40 @@ export async function getMediaByMessage(req: Request, res: Response) {
     } else {
       try {
         message = await client.getMessageById(lookupId);
-      } catch (err: any) {
-        if (lookupId !== messageId) {
-          try {
-            message = await client.getMessageById(messageId);
-          } catch (_) {}
-        }
-        if (!message) {
-          req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
-        }
+      } catch (err: any) {}
+      if (!message && lookupId !== messageId) {
+        try {
+          message = await client.getMessageById(messageId);
+        } catch (_) {}
       }
 
-      // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
-      // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
-      // and load earlier messages to force sync it.
-      if (!message && messageId) {
-        const chatId = parts.length >= 2 ? parts[1] : '';
-        if (chatId && typeof client.loadEarlierMessages === 'function') {
-          req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
-          try {
-            // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
-            await client.loadEarlierMessages(chatId);
-            // Query again
+      // Robust fallback: query WhatsApp Web Store via WPP.chat.getMsg or scanning chat messages by ID prefix
+      if (!message && client.page && !client.page.isClosed()) {
+        try {
+          const browserMsg = await client.page.evaluate(async (mId: string, lId: string) => {
             try {
-              message = await client.getMessageById(lookupId);
-            } catch (retryErr: any) {
-              if (lookupId !== messageId) {
-                try {
-                  message = await client.getMessageById(messageId);
-                } catch (_) {}
+              if ((window as any).WPP && (window as any).WPP.chat) {
+                let msg = await (window as any).WPP.chat.getMsg(mId).catch(() => null)
+                       || await (window as any).WPP.chat.getMsg(lId).catch(() => null);
+                if (!msg && lId) {
+                  const parts = lId.split('_');
+                  if (parts.length >= 2) {
+                    const chatId = parts[1];
+                    const msgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 }).catch(() => []);
+                    msg = msgs.find((m: any) => m && m.id && (m.id._serialized === mId || m.id._serialized === lId || m.id._serialized.startsWith(lId)));
+                  }
+                }
+                if (msg) return JSON.parse(JSON.stringify(msg));
               }
-              if (!message) {
-                req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
-              }
-            }
-          } catch (loadErr) {
-            req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+            } catch (_) {}
+            return null;
+          }, messageId, lookupId);
+          if (browserMsg) {
+            message = browserMsg;
+            req.logger.info(`Found message ${messageId} in browser Store via WPP.chat.getMsg`);
           }
+        } catch (evalMsgErr) {
+          req.logger.warn(`Browser evaluate message lookup error for ${messageId}: ${evalMsgErr}`);
         }
       }
     }
