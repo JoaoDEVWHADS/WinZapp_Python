@@ -1522,7 +1522,7 @@ export async function getMessages(req: Request, res: Response) {
               console.log(`[browser-evaluate] Resolved ${chatId} to actual store chatId ${realChatId}`);
             }
           }
-        } catch (_) {}
+        } catch (_) { }
 
         // Ensure the chat is loaded and earlier history is fetched from WhatsApp Web
         try {
@@ -1576,12 +1576,12 @@ export async function getMessages(req: Request, res: Response) {
             direction: 'before',
             id: oldestId
           }).catch(() => []);
-          
+
           console.log(`[browser-evaluate] Walkback returned ${loaded ? loaded.length : 0} messages`);
           if (!loaded || loaded.length === 0) {
             break;
           }
-          
+
           // Find the new oldest message from the loaded batch
           let oldestMsg = loaded[0];
           for (const m of loaded) {
@@ -1590,14 +1590,14 @@ export async function getMessages(req: Request, res: Response) {
             }
           }
           oldestId = oldestMsg.id._serialized || oldestMsg.id;
-          
+
           const checkMsg = await getMsgSafe(id);
           if (checkMsg) {
             anchorExists = true;
             console.log(`[browser-evaluate] Anchor found during walkback!`);
             break;
           }
-          
+
           attempts++;
         }
 
@@ -2157,7 +2157,7 @@ export async function getAllContacts(req: Request, res: Response) {
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
-      
+
       response = response.filter((c: any) => {
         if (!c) return false;
         const jid = c.id?._serialized || c.id;
@@ -2534,11 +2534,10 @@ export async function chatWoot(req: Request, res: Response): Promise<any> {
       for (const contato of contactToArray(phone, false)) {
         if (message_type == 'outgoing') {
           if (message.attachments) {
-            const base_url = `${
-              client.config.chatWoot.baseURL
-            }/${message.attachments[0].data_url.substring(
-              message.attachments[0].data_url.indexOf('/rails/') + 1
-            )}`;
+            const base_url = `${client.config.chatWoot.baseURL
+              }/${message.attachments[0].data_url.substring(
+                message.attachments[0].data_url.indexOf('/rails/') + 1
+              )}`;
 
             // Check if attachments is Push-to-talk and send this
             if (message.attachments[0].file_type === 'audio') {
