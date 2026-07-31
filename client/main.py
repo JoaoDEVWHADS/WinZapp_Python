@@ -651,17 +651,20 @@ class MainWindow(wx.Frame):
                 except Exception as e:
                     logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
         else:
-            # Check and install API modules if needed (first run only)
-            logging.info("MainWindow: Checking/installing API modules...")
-            self.ensure_api_modules_installed()
+            # Asynchronously check API modules and start WPPConnect Server in background
+            # so the UI window opens instantly without blocking on npm/process checks.
+            def _async_api_init():
+                try:
+                    logging.info("MainWindow [async_init]: Checking/installing API modules...")
+                    self.ensure_api_modules_installed()
+                    logging.info("MainWindow [async_init]: Checking WPPConnect Server version...")
+                    self.ensure_wpp_version()
+                    logging.info("MainWindow [async_init]: Ensuring WPPConnect Server process is running...")
+                    self.ensure_wpp_running()
+                except Exception as exc:
+                    logging.error("MainWindow [async_init]: Error in background API initialization: %s", exc)
 
-            # Check that the installed WPPConnect Server meets the minimum required version
-            logging.info("MainWindow: Checking WPPConnect Server version...")
-            self.ensure_wpp_version()
-
-            # Start local WPPConnect Server (if bundled)
-            logging.info("MainWindow: Ensuring WPPConnect Server process is running...")
-            self.ensure_wpp_running()
+            threading.Thread(target=_async_api_init, daemon=True, name="wpp-api-init").start()
 
         # Effective offline state = user-toggled OR auto-detected (no WhatsApp
         # connection).  Kept as a single attribute because everything else in
