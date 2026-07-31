@@ -10100,6 +10100,18 @@ class MainWindow(wx.Frame):
             parts = msg_id.split("_")
             msg_id = f"{parts[0]}_{parts[1]}_{parts[2]}"
 
+        # If the msg_id contains a phone JID (@c.us or @s.whatsapp.net), convert it to LID if available in self._phone_to_lid
+        if msg_id and ("@c.us_" in msg_id or "@s.whatsapp.net_" in msg_id):
+            phone_to_lid = getattr(self, "_phone_to_lid", {})
+            for phone_jid, lid in phone_to_lid.items():
+                phone_num = phone_jid.split("@")[0]
+                if phone_num and f"_{phone_num}@c.us_" in msg_id:
+                    msg_id = msg_id.replace(f"_{phone_num}@c.us_", f"_{lid}_")
+                    break
+                elif phone_num and f"_{phone_num}@s.whatsapp.net_" in msg_id:
+                    msg_id = msg_id.replace(f"_{phone_num}@s.whatsapp.net_", f"_{lid}_")
+                    break
+
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
