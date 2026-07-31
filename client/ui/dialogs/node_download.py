@@ -63,7 +63,7 @@ class NodeDownloadDialog(wx.Dialog):
         t = threading.Thread(target=self._run_download, daemon=True)
         t.start()
 
-        self._timer.Start(self._PULSE_MS)
+        wx.CallAfter(self._timer.Start, self._PULSE_MS)
 
     def _build_ui(self):
         self._status_lbl = wx.StaticText(
