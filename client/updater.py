@@ -309,6 +309,8 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         ")\n"
         # Give child processes a moment to exit, then kill stragglers holding file locks.
         "timeout /t 2 /nobreak >NUL\n"
+        "taskkill /F /IM node.exe >NUL 2>&1\n"
+        "taskkill /F /IM chrome.exe >NUL 2>&1\n"
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "timeout /t 1 /nobreak >NUL\n"
