@@ -488,21 +488,20 @@ async function getMediaByMessage(req, res) {
   try {
     let message = null;
 
-    // If details are provided in the request body (e.g. POST request with local cache), use them directly.
-    if (req.body && (req.body.mediaKey || req.body.clientUrl || req.body.url || req.body.directPath || req.body.deprecatedMms3Url)) {
-      req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
+    // If details are provided in the request body (e.g. POST request with local cache) AND contain a valid URL, use them directly.
+    const bodyUrl = req.body ? (req.body.clientUrl || req.body.url || req.body.deprecatedMms3Url || req.body.directPath || req.body.mediaUrl) : null;
+    if (req.body && req.body.mediaKey && bodyUrl) {
+      req.logger.info(`Received decryption keys and valid media URL in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
-      let effectiveUrl = message.clientUrl || message.url || message.deprecatedMms3Url || message.directPath || message.mediaUrl;
-      if (effectiveUrl) {
-        if (typeof effectiveUrl === 'string' && effectiveUrl.startsWith('/')) {
-          effectiveUrl = `https://mmg.whatsapp.net${effectiveUrl}`;
-        }
-        message.clientUrl = effectiveUrl;
-        message.deprecatedMms3Url = effectiveUrl;
-        message.url = effectiveUrl;
-        message.mediaUrl = effectiveUrl;
-        message.directPath = message.directPath || effectiveUrl;
+      let effectiveUrl = bodyUrl;
+      if (typeof effectiveUrl === 'string' && effectiveUrl.startsWith('/')) {
+        effectiveUrl = `https://mmg.whatsapp.net${effectiveUrl}`;
       }
+      message.clientUrl = effectiveUrl;
+      message.deprecatedMms3Url = effectiveUrl;
+      message.url = effectiveUrl;
+      message.mediaUrl = effectiveUrl;
+      message.directPath = message.directPath || effectiveUrl;
       // Normalise key types and structures if needed by decryptFile
       if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
         message.mediaKey = Buffer.from(message.mediaKey.data);
