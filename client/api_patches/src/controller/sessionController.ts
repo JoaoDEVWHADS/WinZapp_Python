@@ -609,16 +609,45 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
+    // 1. Primary approach: Try WPPConnect's downloadMedia using active browser context
+    if (typeof (client as any).downloadMedia === 'function') {
+      try {
+        let timer: any;
+        const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+        const timeoutPromise = new Promise<string>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 12000);
+        });
+        let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
+        if (base64) {
+          let mimetype = message.mimetype || 'audio/ogg';
+          if (base64.startsWith('data:')) {
+            const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+            if (matches) {
+              mimetype = matches[1];
+              base64 = matches[2];
+            }
+          }
+          req.logger.info(`Successfully downloaded media via client.downloadMedia for ${messageId}`);
+          return res.status(200).json({ base64, mimetype });
+        }
+      } catch (dlErr) {
+        req.logger.warn(`Primary client.downloadMedia failed for ${messageId}: ${dlErr}. Falling back to decryptFile...`);
+      }
+    }
+
+    // 2. Fallback approach: Try direct file decryption
     try {
       if (!message.mediaUrl) {
         message.mediaUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath;
       }
       const buffer = await client.decryptFile(message);
-      res
+      return res
         .status(200)
         .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
     } catch (decryptErr) {
-      req.logger.error(`decryptFile failed, trying browser-side recovery: ${decryptErr}`);
+      req.logger.error(`decryptFile failed for ${messageId}: ${decryptErr}`);
       
       // Attempt browser-side recovery: fetch the message fresh from WhatsApp Web to get updated CDN URLs
       let freshMessage: any = null;
@@ -649,33 +678,6 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
         } catch (freshDecryptErr) {
           req.logger.error(`Decryption of fresh browser message failed: ${freshDecryptErr}`);
-        }
-      }
-
-      // Final fallback to WPPConnect's downloadMedia
-      if (typeof (client as any).downloadMedia === 'function') {
-        try {
-          let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
-            if (timer) clearTimeout(timer);
-          });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
-          });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
-          if (base64) {
-            let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
-            if (base64.startsWith('data:')) {
-              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
-              if (matches) {
-                mimetype = matches[1];
-                base64 = matches[2];
-              }
-            }
-            return res.status(200).json({ base64, mimetype });
-          }
-        } catch (downloadErr) {
-          req.logger.error(`Error in client.downloadMedia fallback after decryption error: ${downloadErr}`);
         }
       }
       throw decryptErr; // rethrow to trigger the 500 block if both failed
