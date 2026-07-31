@@ -477,7 +477,9 @@ def is_countable_message(msg: dict) -> bool:
 
 class MainWindow(wx.Frame):
     def __init__(self):
-        logging.info("MainWindow: Initializing MainWindow...")
+        import time as _time
+        self._t_app_start = _time.perf_counter()
+        logging.info("[STARTUP_TIMING] T+0.000s — MainWindow __init__ started")
         super().__init__(None)
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
         self._save_lock = threading.Lock()
@@ -654,15 +656,18 @@ class MainWindow(wx.Frame):
             # Asynchronously check API modules and start WPPConnect Server in background
             # so the UI window opens instantly without blocking on npm/process checks.
             def _async_api_init():
+                import time as _time
+                _t_start = getattr(self, "_t_app_start", _time.perf_counter())
                 try:
-                    logging.info("MainWindow [async_init]: Checking/installing API modules...")
+                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] Checking/installing API modules...", _time.perf_counter() - _t_start)
                     self.ensure_api_modules_installed()
-                    logging.info("MainWindow [async_init]: Checking WPPConnect Server version...")
+                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] Checking WPPConnect Server version...", _time.perf_counter() - _t_start)
                     self.ensure_wpp_version()
-                    logging.info("MainWindow [async_init]: Ensuring WPPConnect Server process is running...")
+                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] Ensuring WPPConnect Server process is running...", _time.perf_counter() - _t_start)
                     self.ensure_wpp_running()
+                    logging.info("[STARTUP_TIMING] T+%.3fs — [async_init] WPPConnect Server process ready and listening!", _time.perf_counter() - _t_start)
                 except Exception as exc:
-                    logging.error("MainWindow [async_init]: Error in background API initialization: %s", exc)
+                    logging.error("[STARTUP_TIMING] Error in background API initialization: %s", exc)
 
             threading.Thread(target=_async_api_init, daemon=True, name="wpp-api-init").start()
 
@@ -957,12 +962,16 @@ class MainWindow(wx.Frame):
         # restored later by a second instance or a future tray-icon action.
         if not self.background_mode:
             self.Show()
+            import time as _time
+            _t_show = _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter())
+            logging.info("[STARTUP_TIMING] T+%.3fs — Window physically SHOWN on screen", _t_show)
             # Play startup sound only after the window is physically shown on screen
             self.startup_sound.play()
-        logging.info("[init_UI] window shown — populating chat list")
+        import time as _time
+        logging.info("[STARTUP_TIMING] T+%.3fs — [init_UI] populating initial chat list", _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter()))
         #Set offline chats for the first time
         self.set_chats()
-        logging.info("[init_UI] chat list populated — entering MainLoop")
+        logging.info("[STARTUP_TIMING] T+%.3fs — [init_UI] chat list populated, UI fully ready", _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter()))
         # All widgets exist and the initial chat list is painted — unblock any
         # sync thread that was waiting for the UI to be ready.
         self._ui_ready_event.set()
