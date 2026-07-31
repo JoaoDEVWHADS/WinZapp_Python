@@ -1078,13 +1078,15 @@ class ConversationsPanel(wx.Panel):
         # Selecting a filter option leaves keyboard focus on the radio box —
         # the list itself gets rebuilt but nothing ever moves focus/selection
         # there, so the user had no way to tell what (if anything) the new
-        # filter actually matched without tabbing over manually.
+        # filter actually matched without tabbing over manually. Only the
+        # list's own item focus/selection is updated here, NOT keyboard focus
+        # (no SetFocus()) — moving keyboard focus away from the radio box cut
+        # off NVDA mid-announcement of the option that was just selected.
         lst = self.conversations_list
         if self.chats_list:
             lst.Focus(0)
             lst.Select(0)
             lst.EnsureVisible(0)
-        lst.SetFocus()
 
     def on_ctrl_f(self, event):
         self.search_field.SetFocus()
@@ -7661,13 +7663,14 @@ class ArchivedConversationsPanel(wx.Panel):
         self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
         self.main_window.add_chats_to_ui()
         # See ConversationsPanel._on_filter_changed's identical comment —
-        # same reasoning applies to the archived list's own filter tabs.
+        # same reasoning applies to the archived list's own filter tabs, and
+        # keyboard focus (SetFocus()) must stay off the list for the same
+        # reason: it cuts NVDA off mid-announcement of the radio option.
         lst = self.conversations_list
         if self.chats_list:
             lst.Focus(0)
             lst.Select(0)
             lst.EnsureVisible(0)
-        lst.SetFocus()
 
     def _on_arch_list_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_SPACE:
