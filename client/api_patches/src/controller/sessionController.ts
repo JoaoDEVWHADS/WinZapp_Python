@@ -554,28 +554,51 @@ export async function getMediaByMessage(req: Request, res: Response) {
     if (!mediaUrl) {
       if (typeof (client as any).downloadMedia === 'function') {
         req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
-        try {
-          let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
-            if (timer) clearTimeout(timer);
-          });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
-          });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
-          if (base64) {
-            let mimetype = message.mimetype || 'audio/ogg';
-            if (base64.startsWith('data:')) {
-              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
-              if (matches) {
-                mimetype = matches[1];
-                base64 = matches[2];
-              }
-            }
-            return res.status(200).json({ base64, mimetype });
+        const tryDownload = async (targetId: string): Promise<string | null> => {
+          try {
+            let timer: any;
+            const downloadPromise = (client as any).downloadMedia(targetId).finally(() => {
+              if (timer) clearTimeout(timer);
+            });
+            const timeoutPromise = new Promise<string>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 25000);
+            });
+            return await Promise.race([downloadPromise, timeoutPromise]);
+          } catch (e) {
+            return null;
           }
-        } catch (downloadErr) {
-          req.logger.error(`Error in client.downloadMedia fallback: ${downloadErr}`);
+        };
+
+        let base64: string | null = await tryDownload(lookupId);
+        if (!base64 && lookupId !== messageId) {
+          base64 = await tryDownload(messageId);
+        }
+
+        // Fallback: If downloadMedia failed because message was not found in active browser memory,
+        // force load earlier messages for the chat and retry downloadMedia.
+        if (!base64 && parts.length >= 2) {
+          const chatId = parts[1];
+          if (chatId && typeof client.loadEarlierMessages === 'function') {
+            req.logger.info(`downloadMedia failed for ${messageId}. Forcing loadEarlierMessages for ${chatId}...`);
+            try {
+              await client.loadEarlierMessages(chatId);
+              base64 = await tryDownload(lookupId) || await tryDownload(messageId);
+            } catch (loadErr) {
+              req.logger.error(`loadEarlierMessages retry error: ${loadErr}`);
+            }
+          }
+        }
+
+        if (base64) {
+          let mimetype = message.mimetype || 'audio/ogg';
+          if (base64.startsWith('data:')) {
+            const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+            if (matches) {
+              mimetype = matches[1];
+              base64 = matches[2];
+            }
+          }
+          return res.status(200).json({ base64, mimetype });
         }
       }
       return res.status(400).json({
