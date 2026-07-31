@@ -717,7 +717,9 @@ class ApiSetupDialog(wx.Dialog):
                 cwd=api_dir,
                 env=npm_env,
             )
-            if not ok:
+            dist_server_path = os.path.join(api_dir, "dist", "server.js")
+            # If server.js exists, build actually succeeded regardless of non-fatal npm warnings/stderr logs
+            if not ok and not os.path.isfile(dist_server_path):
                 if not self._cancelled:
                     wx.CallAfter(self._finish_error,
                                  f"Falha em npm run build:\n\n{err}")
