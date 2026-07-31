@@ -4960,10 +4960,9 @@ class MainWindow(wx.Frame):
             logging.warning("[start_sync] No WhatsApp connection — skipping sync until it returns.")
             self._sync_completed = False
             return
-        # Give WPPConnect/WA-JS internal stores a few seconds to fully initialize
-        # before querying chats and contacts. This prevents HTTP 500/TypeError crashes.
-        logging.info("[start_sync] WhatsApp connected. Waiting 5s for stores to initialize...")
-        time.sleep(5)
+        # Give WPPConnect/WA-JS internal stores 1s to settle if needed
+        logging.info("[start_sync] WhatsApp connected. Proceeding to sync...")
+        time.sleep(1)
 
         # Bundle the title/tray text, sound and speech for this stage into a
         # single wx.CallAfter so they can never visibly fall out of step.
