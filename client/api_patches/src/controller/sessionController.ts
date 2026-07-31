@@ -489,9 +489,11 @@ export async function getMediaByMessage(req: Request, res: Response) {
     let message: any = null;
 
     // If details are provided in the request body (e.g. POST request with local cache), use them directly.
-    if (req.body && (req.body.mediaKey || req.body.clientUrl)) {
+    if (req.body && (req.body.mediaKey || req.body.clientUrl || req.body.url || req.body.directPath)) {
       req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
+      if (!message.clientUrl && message.url) message.clientUrl = message.url;
+      if (!message.clientUrl && message.deprecatedMms3Url) message.clientUrl = message.deprecatedMms3Url;
       // Normalise key types and structures if needed by decryptFile
       if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
         message.mediaKey = Buffer.from(message.mediaKey.data);
@@ -550,7 +552,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
     }
 
     // Ensure it contains media properties or has mimetype
-    const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
+    const mediaUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath;
     if (!mediaUrl) {
       if (typeof (client as any).downloadMedia === 'function') {
         req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
