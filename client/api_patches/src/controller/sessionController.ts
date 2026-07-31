@@ -609,9 +609,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
-    // Ensure mediaUrl property is populated early for decryptFile and WPPConnect helpers
-    if (!message.mediaUrl) {
-      message.mediaUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath;
+    // Ensure mediaUrl and clientUrl/deprecatedMms3Url properties are fully populated early for decryptFile and WPPConnect helpers
+    const effectiveUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath || message.mediaUrl;
+    if (effectiveUrl) {
+      message.clientUrl = effectiveUrl;
+      message.deprecatedMms3Url = effectiveUrl;
+      message.url = effectiveUrl;
+      message.mediaUrl = effectiveUrl;
+      message.directPath = message.directPath || effectiveUrl;
     }
 
     // 1. Primary approach: Try WPPConnect's downloadMedia using active browser context with normalized lookupId
