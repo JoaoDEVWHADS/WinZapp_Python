@@ -546,7 +546,7 @@ class MainWindow(wx.Frame):
         # Schedule the update checker on the event loop early (but after i18n
         # is initialized) so it can run even if modal dialogs block __init__.
         if not self.background_mode:
-            wx.CallLater(2000, self._start_update_checker)
+            wx.CallLater(15000, self._start_update_checker)
             # Separate, independent check for the WPPConnect Server itself —
             # it breaks between WinZapp releases too, and until now the only
             # fix was a user manually wiping client/api/ and node_modules.

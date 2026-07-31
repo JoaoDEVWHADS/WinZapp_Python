@@ -797,6 +797,11 @@ class UpdateChecker:
         result = dlg.ShowModal()
         dlg.Destroy()
 
+        # Restore main window visibility and focus when dialog closes
+        if hasattr(self._mw, "IsShown") and self._mw.IsShown():
+            self._mw.Raise()
+            self._mw.SetFocus()
+
         if result == wx.ID_YES:
             self._do_install(remote_version, zip_url, sha256sums_url)
         else:
