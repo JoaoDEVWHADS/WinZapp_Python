@@ -63,7 +63,7 @@ class NodeDownloadDialog(wx.Dialog):
         t = threading.Thread(target=self._run_download, daemon=True)
         t.start()
 
-        wx.CallAfter(self._timer.Start, self._PULSE_MS)
+        self._timer.Start(self._PULSE_MS)
 
     def _build_ui(self):
         self._status_lbl = wx.StaticText(
@@ -93,26 +93,16 @@ class NodeDownloadDialog(wx.Dialog):
     def _on_pulse(self, _event):
         self._gauge.Pulse()
 
-    def _close_dialog(self, return_code: int):
-        if self.IsModal():
-            self.EndModal(return_code)
-        else:
-          if return_code == wx.ID_OK:
-              self.SetReturnCode(wx.ID_OK)
-          else:
-              self.SetReturnCode(wx.ID_CANCEL)
-          self.Close()
-
     def _on_cancel(self, _event=None):
         if self._cancelled:
             return
         self._cancelled = True
         self._timer.Stop()
-        self._close_dialog(wx.ID_CANCEL)
+        self.EndModal(wx.ID_CANCEL)
 
     def _finish_success(self):
         self._timer.Stop()
-        self._close_dialog(wx.ID_OK)
+        self.EndModal(wx.ID_OK)
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
@@ -120,7 +110,7 @@ class NodeDownloadDialog(wx.Dialog):
         if details:
             msg = f"{msg}\n\n{details}"
         wx.MessageBox(msg, self._i18n.t("node_download_error_title"), wx.OK | wx.ICON_ERROR, self)
-        self._close_dialog(wx.ID_CANCEL)
+        self.EndModal(wx.ID_CANCEL)
 
     def _download_zip(self, url: str, dest_path: str) -> bool:
         try:
