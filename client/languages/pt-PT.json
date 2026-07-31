@@ -622,5 +622,10 @@
     "preview_sound_error": "Não foi possível reproduzir a pré-visualização — ficheiro de som inválido ou não encontrado.",
     "wpp_version_unpinned_warning": "Aviso: não foi possível fixar a versão do WhatsApp Web. O envio para contactos individuais pode falhar silenciosamente; grupos continuam a funcionar. Atualize o WhatsApp Web do WinZapp.",
     "status_unconfirmed": "Envio não confirmado",
-    "no_messages_in_conversation": "Nenhuma mensagem disponível nesta conversa."
+    "no_messages_in_conversation": "Nenhuma mensagem disponível nesta conversa.",
+    "menu_sync_media": "&Descarregar ficheiros de multimédia",
+    "sync_media_started": "A descarregar ficheiros de multimédia em segundo plano...",
+    "sync_media_completed": "Download de ficheiros de multimédia concluído.",
+    "sync_media_failed": "Falha ao descarregar ficheiros de multimédia.",
+    "sync_media_already_running": "O download de ficheiros de multimédia já está em curso."
 }
