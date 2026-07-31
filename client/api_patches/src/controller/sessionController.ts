@@ -492,11 +492,12 @@ export async function getMediaByMessage(req: Request, res: Response) {
     if (req.body && (req.body.mediaKey || req.body.clientUrl || req.body.url || req.body.directPath || req.body.deprecatedMms3Url)) {
       req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
-      const effectiveUrl = message.clientUrl || message.url || message.deprecatedMms3Url || message.directPath;
+      const effectiveUrl = message.clientUrl || message.url || message.deprecatedMms3Url || message.directPath || message.mediaUrl;
       if (effectiveUrl) {
         message.clientUrl = effectiveUrl;
         message.deprecatedMms3Url = effectiveUrl;
         message.url = effectiveUrl;
+        message.mediaUrl = effectiveUrl;
       }
       // Normalise key types and structures if needed by decryptFile
       if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
@@ -609,6 +610,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
     }
 
     try {
+      if (!message.mediaUrl) {
+        message.mediaUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath;
+      }
       const buffer = await client.decryptFile(message);
       res
         .status(200)
