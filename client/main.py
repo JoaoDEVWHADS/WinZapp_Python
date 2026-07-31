@@ -10080,6 +10080,25 @@ class MainWindow(wx.Frame):
         if not body_data.get("mimetype") and media.get("mimetype"):
             body_data["mimetype"] = media.get("mimetype")
 
+        # Fallback: If local record is missing clientUrl and directPath, fetch fresh message details from API
+        if not body_data.get("clientUrl") and not body_data.get("directPath") and msg_id:
+            try:
+                fetch_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-message-by-id/{msg_id}"
+                resp = requests.get(fetch_url, headers=headers, timeout=5)
+                if resp.status_code == 200:
+                    fresh_msg = resp.json().get("response", {}) if isinstance(resp.json(), dict) else {}
+                    if isinstance(fresh_msg, dict):
+                        for k in ("clientUrl", "url", "deprecatedMms3Url", "directPath"):
+                            if fresh_msg.get(k):
+                                body_data["clientUrl"] = fresh_msg.get(k)
+                                break
+                        if fresh_msg.get("mediaKey"):
+                            body_data["mediaKey"] = fresh_msg.get("mediaKey")
+                        if fresh_msg.get("directPath"):
+                            body_data["directPath"] = fresh_msg.get("directPath")
+            except Exception as f_err:
+                logging.debug("[get_base64_from_media] Failed to fetch fresh message details for %s: %s", msg_id, f_err)
+
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
         media_type = body_data.get("type", "")
