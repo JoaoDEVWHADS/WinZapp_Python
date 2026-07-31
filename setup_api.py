@@ -132,7 +132,39 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to remove client/api: {e}")
         os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
-        _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+
+        has_git = shutil.which("git") is not None
+        if has_git:
+            _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
+        else:
+            print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
+            import urllib.request
+            import zipfile
+            zip_url = f"https://github.com/wppconnect-team/wppconnect-server/archive/refs/tags/{tag}.zip" if tag else "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
+            zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
+            extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
+            try:
+                print(f"  Downloading {zip_url} ...")
+                urllib.request.urlretrieve(zip_url, zip_tmp)
+                print("  Extracting ZIP archive...")
+                with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+                    zip_ref.extractall(extract_tmp)
+                
+                # Find extracted root folder (e.g. wppconnect-server-main)
+                extracted_subdirs = [os.path.join(extract_tmp, d) for d in os.listdir(extract_tmp) if os.path.isdir(os.path.join(extract_tmp, d))]
+                source_folder = extracted_subdirs[0] if extracted_subdirs else extract_tmp
+                shutil.move(source_folder, CLIENT_API_DIR)
+                print("[INFO] WPPConnect Server ZIP extracted to client/api successfully.")
+            except Exception as zip_err:
+                print(f"[ERROR] Failed to download or extract WPPConnect Server ZIP: {zip_err}")
+                sys.exit(1)
+            finally:
+                if os.path.exists(zip_tmp):
+                    try: os.remove(zip_tmp)
+                    except: pass
+                if os.path.exists(extract_tmp):
+                    try: shutil.rmtree(extract_tmp)
+                    except: pass
 
         if has_node_modules:
             try:
@@ -141,7 +173,7 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-        # Restore every patched file after cloning
+        # Restore every patched file after cloning/extracting
         for rel_path, content in custom_contents.items():
             dest_path = os.path.join(CLIENT_API_DIR, rel_path)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -149,7 +181,7 @@ def main():
                 f.write(content)
             print(f"[INFO] Restored custom file: {rel_path}")
 
-    if tag:
+    if tag and shutil.which("git"):
         print(f"[INFO] Checking out tag: {tag}")
         _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
 
@@ -160,14 +192,20 @@ def main():
             with open(dest_path, "wb") as f:
                 f.write(content)
         print("[INFO] Re-applied custom files after checking out tag.")
+
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
-        res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
+        sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
+        if shutil.which("git"):
+            res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                with open(sha_file, "w", encoding="utf-8") as f:
+                    f.write(res.stdout.strip())
+                print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
+        else:
             with open(sha_file, "w", encoding="utf-8") as f:
-                f.write(res.stdout.strip())
-            print(f"[INFO] Saved installed commit SHA ({res.stdout.strip()}) to client/api/.commit_sha")
+                f.write("997164f")
+            print("[INFO] Saved default commit SHA (997164f) to client/api/.commit_sha")
     except Exception as e:
         print(f"[WARNING] Could not save .commit_sha: {e}")
 
