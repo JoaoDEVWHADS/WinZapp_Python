@@ -972,8 +972,8 @@ class MainWindow(wx.Frame):
             import time as _time
             _t_show = _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter())
             logging.info("[STARTUP_TIMING] T+%.3fs — Window physically SHOWN on screen", _t_show)
-            # Play startup sound only after the window is physically shown on screen
-            self.startup_sound.play()
+            # Play startup sound only after the window is physically shown on screen (if not played already)
+            self.play_startup_sound()
         import time as _time
         logging.info("[STARTUP_TIMING] T+%.3fs — [init_UI] populating initial chat list", _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter()))
         #Set offline chats for the first time
@@ -4327,6 +4327,18 @@ class MainWindow(wx.Frame):
                 snd = self.message_background_sound
             cache[path] = snd
         snd.play()
+
+    def play_startup_sound(self):
+        """Play startup sound exactly once per application run."""
+        if getattr(self, "_startup_sound_played", False):
+            return
+        self._startup_sound_played = True
+        try:
+            if hasattr(self, "startup_sound") and self.startup_sound:
+                logging.info("[sound] Playing startup sound")
+                self.startup_sound.play()
+        except Exception as e:
+            logging.warning("[sound] Error playing startup sound: %s", e)
 
     def _token_key(self) -> bytes:
         """Return the per-install Fernet key (data_path()/secret.key) that

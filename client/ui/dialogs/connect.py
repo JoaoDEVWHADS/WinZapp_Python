@@ -411,6 +411,8 @@ class Connect:
         self.connection_dial.SetSizer(main_sizer)
 
         logging.info("[show_connection_dial] Entering connection_dial modal loop.")
+        if hasattr(self.main_window, "play_startup_sound"):
+            self.main_window.play_startup_sound()
         self.connection_dial.ShowModal()
         logging.info("[show_connection_dial] connection_dial modal loop returned.")
         try:
