@@ -548,72 +548,63 @@ export async function getMediaByMessage(req: Request, res: Response) {
       }
     }
 
+    // If message not found or doesn't have mediaUrl, try direct WPP.chat.downloadMedia in page evaluate
+    const mediaUrl = message ? (message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath) : null;
+    if (!message || !mediaUrl) {
+      req.logger.info(`Attempting direct browser-side media download via WPP for ${messageId}...`);
+      try {
+        if (client.page) {
+          const base64Data: string | null = await client.page.evaluate(async (msgId: string, lId: string) => {
+            try {
+              if ((window as any).WPP && (window as any).WPP.chat) {
+                // 1. Try WPP.chat.downloadMedia directly
+                try {
+                  const blob = await (window as any).WPP.chat.downloadMedia(msgId).catch(() => null)
+                            || await (window as any).WPP.chat.downloadMedia(lId).catch(() => null);
+                  if (blob && blob instanceof Blob) {
+                    return new Promise<string>((resolve) => {
+                      const reader = new FileReader();
+                      reader.onloadend = () => resolve(reader.result as string);
+                      reader.readAsDataURL(blob);
+                    });
+                  }
+                } catch (_) {}
+              }
+              // 2. Fallback: try WAPI.downloadFile
+              if ((window as any).WAPI && typeof (window as any).WAPI.downloadFile === 'function') {
+                const b64 = await (window as any).WAPI.downloadFile(msgId).catch(() => null)
+                         || await (window as any).WAPI.downloadFile(lId).catch(() => null);
+                if (b64) return b64;
+              }
+            } catch (err) {
+              return null;
+            }
+            return null;
+          }, messageId, lookupId);
+
+          if (base64Data) {
+            let mimetype = 'audio/ogg';
+            let base64Clean = base64Data;
+            if (base64Data.startsWith('data:')) {
+              const matches = base64Data.match(/^data:(.*?);base64,(.*)$/);
+              if (matches) {
+                mimetype = matches[1];
+                base64Clean = matches[2];
+              }
+            }
+            req.logger.info(`Successfully retrieved media via WPP browser evaluate for ${messageId}`);
+            return res.status(200).json({ base64: base64Clean, mimetype });
+          }
+        }
+      } catch (evalErr) {
+        req.logger.error(`Error in WPP direct browser media download: ${evalErr}`);
+      }
+    }
+
     if (!message) {
       return res.status(400).json({
         status: 'error',
         message: `Message ${messageId} not found`,
-      });
-    }
-
-    // Ensure it contains media properties or has mimetype
-    const mediaUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath;
-    if (!mediaUrl) {
-      if (typeof (client as any).downloadMedia === 'function') {
-        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
-        const tryDownload = async (targetId: string): Promise<string | null> => {
-          try {
-            let timer: any;
-            const downloadPromise = (client as any).downloadMedia(targetId).finally(() => {
-              if (timer) clearTimeout(timer);
-            });
-            const timeoutPromise = new Promise<string>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 25000);
-            });
-            return await Promise.race([downloadPromise, timeoutPromise]);
-          } catch (e) {
-            return null;
-          }
-        };
-
-        let base64: string | null = await tryDownload(lookupId);
-        if (!base64 && lookupId !== messageId) {
-          base64 = await tryDownload(messageId);
-        }
-
-        // Fallback: If downloadMedia failed because message was not found in active browser memory,
-        // force load earlier messages for the chat and retry downloadMedia.
-        if (!base64 && parts.length >= 2) {
-          const chatId = parts[1];
-          if (chatId && client.page) {
-            req.logger.info(`downloadMedia failed for ${messageId}. Forcing WPP.chat.loadEarlierMessages for ${chatId}...`);
-            try {
-              await client.page.evaluate((cId: string) => {
-                if ((window as any).WPP && (window as any).WPP.chat && typeof (window as any).WPP.chat.loadEarlierMessages === 'function') {
-                  return (window as any).WPP.chat.loadEarlierMessages(cId);
-                }
-              }, chatId);
-              base64 = await tryDownload(lookupId) || await tryDownload(messageId);
-            } catch (loadErr) {
-              req.logger.error(`loadEarlierMessages retry error: ${loadErr}`);
-            }
-          }
-        }
-
-        if (base64) {
-          let mimetype = message.mimetype || 'audio/ogg';
-          if (base64.startsWith('data:')) {
-            const matches = base64.match(/^data:(.*?);base64,(.*)$/);
-            if (matches) {
-              mimetype = matches[1];
-              base64 = matches[2];
-            }
-          }
-          return res.status(200).json({ base64, mimetype });
-        }
-      }
-      return res.status(400).json({
-        status: 'error',
-        message: 'Message does not contain media download URL',
       });
     }
 
