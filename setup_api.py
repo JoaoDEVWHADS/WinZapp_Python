@@ -69,7 +69,7 @@ def _load_env() -> dict:
 
 def _run(cmd: list, cwd: str = None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, cwd=cwd)
+    result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"))
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
