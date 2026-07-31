@@ -6699,33 +6699,15 @@ class MainWindow(wx.Frame):
                 "Content-Type": "application/json"
             }
             
-            response_data = []
-            for attempt in range(5):
-                try:
-                    response = requests.get(url, headers=headers, timeout=90)
-                    if response.status_code not in (200, 201):
-                        logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
-                        response_data = []
-                    else:
-                        try:
-                            body = response.json()
-                        except Exception as json_err:
-                            logging.error(f"[get_remote_contacts] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
-                            body = {}
-                        response_data = body.get("response", []) if isinstance(body, dict) else []
-                    
-                    if isinstance(response_data, list) and len(response_data) > 0:
-                        break
-                    else:
-                        logging.info(f"[get_remote_contacts] Got 0 contacts from API, waiting for WPPConnect initialization... (attempt {attempt+1}/5)")
-                        import time
-                        time.sleep(4)
-                except Exception as e:
-                    logging.error(f"[get_remote_contacts] Request failed: {e}")
-                    import time
-                    time.sleep(4)
-
-            if not isinstance(response_data, list):
+            try:
+                response = requests.get(url, headers=headers, timeout=15)
+                if response.status_code in (200, 201):
+                    body = response.json() if response.text else {}
+                    response_data = body.get("response", []) if isinstance(body, dict) else []
+                else:
+                    response_data = []
+            except Exception as e:
+                logging.error(f"[get_remote_contacts] Request failed: {e}")
                 response_data = []
 
             # Traduzir id._serialized para remoteJid e definir type = contact
