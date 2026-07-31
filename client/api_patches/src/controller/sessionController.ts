@@ -478,6 +478,13 @@ export async function getMediaByMessage(req: Request, res: Response) {
     });
   }
 
+  // Normalize 4-part message ID (fromMe_chatId_msgId_participantLid) to 3-part standard ID
+  let lookupId = messageId;
+  const parts = messageId ? messageId.split('_') : [];
+  if (parts.length === 4) {
+    lookupId = `${parts[0]}_${parts[1]}_${parts[2]}`;
+  }
+
   try {
     let message: any = null;
 
@@ -492,13 +499,6 @@ export async function getMediaByMessage(req: Request, res: Response) {
         message.mediaKey = Buffer.from(message.mediaKey, 'base64');
       }
     } else {
-      // Normalize 4-part message ID (fromMe_chatId_msgId_participantLid) to 3-part standard ID
-      let lookupId = messageId;
-      const parts = messageId.split('_');
-      if (parts.length === 4) {
-        lookupId = `${parts[0]}_${parts[1]}_${parts[2]}`;
-      }
-
       try {
         message = await client.getMessageById(lookupId);
       } catch (err: any) {
