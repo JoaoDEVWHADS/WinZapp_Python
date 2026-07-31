@@ -554,53 +554,58 @@ export async function getMediaByMessage(req: Request, res: Response) {
     if (!message || !mediaUrl) {
       req.logger.info(`Attempting direct browser-side media download via WPP for ${messageId}...`);
       try {
-        if (client.page) {
-          const base64Data: string | null = await client.page.evaluate(async (msgId: string, lId: string) => {
+          if (client.page && !client.page.isClosed()) {
             try {
-              if ((window as any).WPP && (window as any).WPP.chat) {
-                // 1. Try WPP.chat.downloadMedia directly
-                try {
-                  const blob = await (window as any).WPP.chat.downloadMedia(msgId).catch(() => null)
-                            || await (window as any).WPP.chat.downloadMedia(lId).catch(() => null);
-                  if (blob && blob instanceof Blob) {
-                    return new Promise<string>((resolve) => {
-                      const reader = new FileReader();
-                      reader.onloadend = () => resolve(reader.result as string);
-                      reader.readAsDataURL(blob);
-                    });
+              const base64Data: string | null = await Promise.race([
+                client.page.evaluate(async (msgId: string, lId: string) => {
+                  try {
+                    if ((window as any).WPP && (window as any).WPP.chat) {
+                      try {
+                        const blob = await (window as any).WPP.chat.downloadMedia(msgId).catch(() => null)
+                                  || await (window as any).WPP.chat.downloadMedia(lId).catch(() => null);
+                        if (blob && blob instanceof Blob) {
+                          return new Promise<string>((resolve) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result as string);
+                            reader.readAsDataURL(blob);
+                          });
+                        }
+                      } catch (_) {}
+                    }
+                    if ((window as any).WAPI && typeof (window as any).WAPI.downloadFile === 'function') {
+                      const b64 = await (window as any).WAPI.downloadFile(msgId).catch(() => null)
+                               || await (window as any).WAPI.downloadFile(lId).catch(() => null);
+                      if (b64) return b64;
+                    }
+                  } catch (err) {
+                    return null;
                   }
-                } catch (_) {}
-              }
-              // 2. Fallback: try WAPI.downloadFile
-              if ((window as any).WAPI && typeof (window as any).WAPI.downloadFile === 'function') {
-                const b64 = await (window as any).WAPI.downloadFile(msgId).catch(() => null)
-                         || await (window as any).WAPI.downloadFile(lId).catch(() => null);
-                if (b64) return b64;
-              }
-            } catch (err) {
-              return null;
-            }
-            return null;
-          }, messageId, lookupId);
+                  return null;
+                }, messageId, lookupId),
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
+              ]);
 
-          if (base64Data) {
-            let mimetype = 'audio/ogg';
-            let base64Clean = base64Data;
-            if (base64Data.startsWith('data:')) {
-              const matches = base64Data.match(/^data:(.*?);base64,(.*)$/);
-              if (matches) {
-                mimetype = matches[1];
-                base64Clean = matches[2];
+              if (base64Data) {
+                let mimetype = 'audio/ogg';
+                let base64Clean = base64Data;
+                if (base64Data.startsWith('data:')) {
+                  const matches = base64Data.match(/^data:(.*?);base64,(.*)$/);
+                  if (matches) {
+                    mimetype = matches[1];
+                    base64Clean = matches[2];
+                  }
+                }
+                req.logger.info(`Successfully retrieved media via WPP browser evaluate for ${messageId}`);
+                return res.status(200).json({ base64: base64Clean, mimetype });
               }
+            } catch (evalInnerErr) {
+              req.logger.warn(`Browser evaluate media download skipped for ${messageId}: ${evalInnerErr}`);
             }
-            req.logger.info(`Successfully retrieved media via WPP browser evaluate for ${messageId}`);
-            return res.status(200).json({ base64: base64Clean, mimetype });
           }
+        } catch (evalErr) {
+          req.logger.error(`Error in WPP direct browser media download: ${evalErr}`);
         }
-      } catch (evalErr) {
-        req.logger.error(`Error in WPP direct browser media download: ${evalErr}`);
       }
-    }
 
     if (!message) {
       return res.status(400).json({
