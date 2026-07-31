@@ -139,7 +139,7 @@ def _slim_quoted_message(quoted):
 # waveforms are pure dead weight inside messages.dat. jpegThumbnail is kept
 # because the inline-thumbnail view uses it.
 _HEAVY_MEDIA_FIELDS = frozenset({
-    "mediaKeyTimestamp", "deprecatedMms3Url",
+    "url", "directPath", "mediaKey", "mediaKeyTimestamp", "deprecatedMms3Url",
     "fileSha256", "fileEncSha256", "filehash", "encFilehash",
     "thumbnailDirectPath", "thumbnailSha256", "thumbnailEncSha256",
     "streamingSidecar", "waveform", "midQualityFileSha256",

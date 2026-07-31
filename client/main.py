@@ -6796,15 +6796,33 @@ class MainWindow(wx.Frame):
                 "Content-Type": "application/json"
             }
             
-            try:
-                response = requests.get(url, headers=headers, timeout=15)
-                if response.status_code in (200, 201):
-                    body = response.json() if response.text else {}
-                    response_data = body.get("response", []) if isinstance(body, dict) else []
-                else:
-                    response_data = []
-            except Exception as e:
-                logging.error(f"[get_remote_contacts] Request failed: {e}")
+            response_data = []
+            for attempt in range(5):
+                try:
+                    response = requests.get(url, headers=headers, timeout=90)
+                    if response.status_code not in (200, 201):
+                        logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
+                        response_data = []
+                    else:
+                        try:
+                            body = response.json()
+                        except Exception as json_err:
+                            logging.error(f"[get_remote_contacts] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
+                            body = {}
+                        response_data = body.get("response", []) if isinstance(body, dict) else []
+
+                    if isinstance(response_data, list) and len(response_data) > 0:
+                        break
+                    else:
+                        logging.info(f"[get_remote_contacts] Got 0 contacts from API, waiting for WPPConnect initialization... (attempt {attempt+1}/5)")
+                        import time
+                        time.sleep(4)
+                except Exception as e:
+                    logging.error(f"[get_remote_contacts] Request failed: {e}")
+                    import time
+                    time.sleep(4)
+
+            if not isinstance(response_data, list):
                 response_data = []
 
             # Traduzir id._serialized para remoteJid e definir type = contact
@@ -10116,16 +10134,7 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        msg_id = media.get("id") or media.get("_serialized") or media.get("msgId")
-        if not msg_id or not isinstance(msg_id, str):
-            msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", "") or media.get("chatId", ""), _key, full_msg=media)
-
-        # Normalize 4-part message IDs for groups (fromMe_chatId_msgId_participant) when appropriate,
-        # but preserve full serialized ID if remoteJid is @g.us
-        if msg_id and msg_id.count("_") == 3 and not "@g.us" in msg_id:
-            parts = msg_id.split("_")
-            msg_id = f"{parts[0]}_{parts[1]}_{parts[2]}"
-
+        msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -10165,41 +10174,6 @@ class MainWindow(wx.Frame):
                 if "mimetype" in inner and inner["mimetype"]:
                     body_data["mimetype"] = inner["mimetype"]
                 body_data["type"] = msg_type.replace("Message", "")
-
-        # Fallback: extract root-level media properties if not present in nested message object
-        if not body_data.get("mediaKey"):
-            for key in ("mediaKey", "media_key"):
-                if media.get(key):
-                    body_data["mediaKey"] = media.get(key)
-                    break
-        if not body_data.get("clientUrl"):
-            for key in ("clientUrl", "url", "deprecatedMms3Url", "directPath"):
-                if media.get(key):
-                    body_data["clientUrl"] = media.get(key)
-                    break
-        if not body_data.get("directPath") and media.get("directPath"):
-            body_data["directPath"] = media.get("directPath")
-        if not body_data.get("mimetype") and media.get("mimetype"):
-            body_data["mimetype"] = media.get("mimetype")
-
-        # Fallback: If local record is missing clientUrl and directPath, fetch fresh message details from API
-        if not body_data.get("clientUrl") and not body_data.get("directPath") and msg_id:
-            try:
-                fetch_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-message-by-id/{msg_id}"
-                resp = requests.get(fetch_url, headers=headers, timeout=5)
-                if resp.status_code == 200:
-                    fresh_msg = resp.json().get("response", {}) if isinstance(resp.json(), dict) else {}
-                    if isinstance(fresh_msg, dict):
-                        for k in ("clientUrl", "url", "deprecatedMms3Url", "directPath"):
-                            if fresh_msg.get(k):
-                                body_data["clientUrl"] = fresh_msg.get(k)
-                                break
-                        if fresh_msg.get("mediaKey"):
-                            body_data["mediaKey"] = fresh_msg.get("mediaKey")
-                        if fresh_msg.get("directPath"):
-                            body_data["directPath"] = fresh_msg.get("directPath")
-            except Exception as f_err:
-                logging.debug("[get_base64_from_media] Failed to fetch fresh message details for %s: %s", msg_id, f_err)
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
@@ -13033,6 +13007,17 @@ def setup_logging():
     try:
         os.makedirs(log_path(), exist_ok=True)
         log_file = log_path("log.log")
+
+        # Remove the log.log.1/.2/.3 backups a previous RotatingFileHandler
+        # left behind. There is deliberately only ONE log file now, holding
+        # only the current run: when diagnosing a startup/pairing problem,
+        # having to work out where the last launch begins inside a 10 MB file
+        # (or which of four files it landed in) is pure friction.
+        for _n in range(1, 10):
+            try:
+                os.remove(f"{log_file}.{_n}")
+            except OSError:
+                pass
 
         # mode="w" truncates on open, so each launch starts from a clean file.
         # Safe because __main__ only calls setup_logging() after the
