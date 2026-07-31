@@ -478,13 +478,27 @@ export async function getMediaByMessage(req: Request, res: Response) {
     });
   }
 
+  // Normalize 4-part message ID (fromMe_chatId_msgId_participantLid) to 3-part standard ID
+  let lookupId = messageId;
+  const parts = messageId ? messageId.split('_') : [];
+  if (parts.length === 4) {
+    lookupId = `${parts[0]}_${parts[1]}_${parts[2]}`;
+  }
+
   try {
     let message: any = null;
 
     // If details are provided in the request body (e.g. POST request with local cache), use them directly.
-    if (req.body && (req.body.mediaKey || req.body.clientUrl)) {
+    if (req.body && (req.body.mediaKey || req.body.clientUrl || req.body.url || req.body.directPath || req.body.deprecatedMms3Url)) {
       req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
+      const effectiveUrl = message.clientUrl || message.url || message.deprecatedMms3Url || message.directPath || message.mediaUrl;
+      if (effectiveUrl) {
+        message.clientUrl = effectiveUrl;
+        message.deprecatedMms3Url = effectiveUrl;
+        message.url = effectiveUrl;
+        message.mediaUrl = effectiveUrl;
+      }
       // Normalise key types and structures if needed by decryptFile
       if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
         message.mediaKey = Buffer.from(message.mediaKey.data);
@@ -493,36 +507,105 @@ export async function getMediaByMessage(req: Request, res: Response) {
       }
     } else {
       try {
-        message = await client.getMessageById(messageId);
+        message = await client.getMessageById(lookupId);
       } catch (err: any) {
-        req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
+        if (lookupId !== messageId) {
+          try {
+            message = await client.getMessageById(messageId);
+          } catch (_) {}
+        }
+        if (!message) {
+          req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
+        }
       }
 
       // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
       // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
       // and load earlier messages to force sync it.
       if (!message && messageId) {
-        const parts = messageId.split('_');
-        if (parts.length >= 2) {
-          const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
-            req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+        const chatId = parts.length >= 2 ? parts[1] : '';
+        if (chatId && typeof client.loadEarlierMessages === 'function') {
+          req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+          try {
+            // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
+            await client.loadEarlierMessages(chatId);
+            // Query again
             try {
-              // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
-              await client.loadEarlierMessages(chatId);
-              // Query again
-              try {
-                message = await client.getMessageById(messageId);
-              } catch (retryErr: any) {
+              message = await client.getMessageById(lookupId);
+            } catch (retryErr: any) {
+              if (lookupId !== messageId) {
+                try {
+                  message = await client.getMessageById(messageId);
+                } catch (_) {}
+              }
+              if (!message) {
                 req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
               }
-            } catch (loadErr) {
-              req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
             }
+          } catch (loadErr) {
+            req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
           }
         }
       }
     }
+
+    // If message not found or doesn't have mediaUrl, try direct WPP.chat.downloadMedia in page evaluate
+    const mediaUrl = message ? (message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath) : null;
+    if (!message || !mediaUrl) {
+      req.logger.info(`Attempting direct browser-side media download via WPP for ${messageId}...`);
+      try {
+          if (client.page && !client.page.isClosed()) {
+            try {
+              const base64Data: string | null = await Promise.race([
+                client.page.evaluate(async (msgId: string, lId: string) => {
+                  try {
+                    if ((window as any).WPP && (window as any).WPP.chat) {
+                      try {
+                        const blob = await (window as any).WPP.chat.downloadMedia(msgId).catch(() => null)
+                                  || await (window as any).WPP.chat.downloadMedia(lId).catch(() => null);
+                        if (blob && blob instanceof Blob) {
+                          return new Promise<string>((resolve) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result as string);
+                            reader.readAsDataURL(blob);
+                          });
+                        }
+                      } catch (_) {}
+                    }
+                    if ((window as any).WAPI && typeof (window as any).WAPI.downloadFile === 'function') {
+                      const b64 = await (window as any).WAPI.downloadFile(msgId).catch(() => null)
+                               || await (window as any).WAPI.downloadFile(lId).catch(() => null);
+                      if (b64) return b64;
+                    }
+                  } catch (err) {
+                    return null;
+                  }
+                  return null;
+                }, messageId, lookupId),
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500))
+              ]);
+
+              if (base64Data) {
+                let mimetype = 'audio/ogg';
+                let base64Clean = base64Data;
+                if (base64Data.startsWith('data:')) {
+                  const matches = base64Data.match(/^data:(.*?);base64,(.*)$/);
+                  if (matches) {
+                    mimetype = matches[1];
+                    base64Clean = matches[2];
+                  }
+                }
+                req.logger.info(`Successfully retrieved media via WPP browser evaluate for ${messageId}`);
+                return res.status(200).json({ base64: base64Clean, mimetype });
+              }
+            } catch (evalInnerErr) {
+              req.logger.warn(`Browser evaluate media download skipped for ${messageId}: ${evalInnerErr}`);
+            }
+          }
+        } catch (evalErr) {
+          req.logger.error(`Error in WPP direct browser media download: ${evalErr}`);
+        }
+      }
 
     if (!message) {
       return res.status(400).json({
@@ -531,48 +614,69 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
-    // Ensure it contains media properties or has mimetype
-    const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
-    if (!mediaUrl) {
-      if (typeof (client as any).downloadMedia === 'function') {
-        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
-        try {
-          let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
-            if (timer) clearTimeout(timer);
-          });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
-          });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
-          if (base64) {
-            let mimetype = message.mimetype || 'audio/ogg';
-            if (base64.startsWith('data:')) {
-              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
-              if (matches) {
-                mimetype = matches[1];
-                base64 = matches[2];
-              }
-            }
-            return res.status(200).json({ base64, mimetype });
-          }
-        } catch (downloadErr) {
-          req.logger.error(`Error in client.downloadMedia fallback: ${downloadErr}`);
-        }
+    // Ensure mediaUrl and clientUrl/deprecatedMms3Url properties are fully populated early for decryptFile and WPPConnect helpers
+    let effectiveUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath || message.mediaUrl;
+    if (effectiveUrl) {
+      if (typeof effectiveUrl === 'string' && effectiveUrl.startsWith('/')) {
+        effectiveUrl = `https://mmg.whatsapp.net${effectiveUrl}`;
       }
-      return res.status(400).json({
-        status: 'error',
-        message: 'Message does not contain media download URL',
-      });
+      message.clientUrl = effectiveUrl;
+      message.deprecatedMms3Url = effectiveUrl;
+      message.url = effectiveUrl;
+      message.mediaUrl = effectiveUrl;
+      message.directPath = message.directPath || effectiveUrl;
     }
 
+    // Fast path: Try direct file decryption first if mediaKey and effectiveUrl are available
+    if (message.mediaKey && effectiveUrl) {
+      try {
+        const buffer = await client.decryptFile(message);
+        req.logger.info(`Successfully decrypted media via fast-path decryptFile for ${messageId}`);
+        return res
+          .status(200)
+          .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
+      } catch (fastDecryptErr) {
+        req.logger.warn(`Fast decryptFile failed for ${messageId}: ${fastDecryptErr}. Proceeding to browser download fallback...`);
+      }
+    }
+
+    // 1. Primary approach: Try WPPConnect's downloadMedia using active browser context with normalized lookupId (short 2.5s timeout)
+    if (typeof (client as any).downloadMedia === 'function') {
+      try {
+        let timer: any;
+        const downloadPromise = ((client as any).downloadMedia(lookupId).catch(() => null)
+                             || (client as any).downloadMedia(messageId).catch(() => null)).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+        const timeoutPromise = new Promise<string>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 2500);
+        });
+        let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
+        if (base64) {
+          let mimetype = message.mimetype || 'audio/ogg';
+          if (base64.startsWith('data:')) {
+            const matches = base64.match(/^data:(.*?);base64,(.*)$/);
+            if (matches) {
+              mimetype = matches[1];
+              base64 = matches[2];
+            }
+          }
+          req.logger.info(`Successfully downloaded media via client.downloadMedia for ${messageId}`);
+          return res.status(200).json({ base64, mimetype });
+        }
+      } catch (dlErr) {
+        req.logger.warn(`Primary client.downloadMedia failed for ${messageId}: ${dlErr}. Falling back to decryptFile...`);
+      }
+    }
+
+    // 2. Fallback approach: Try direct file decryption
     try {
       const buffer = await client.decryptFile(message);
-      res
+      return res
         .status(200)
         .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
     } catch (decryptErr) {
-      req.logger.error(`decryptFile failed, trying browser-side recovery: ${decryptErr}`);
+      req.logger.error(`decryptFile failed for ${messageId}: ${decryptErr}`);
       
       // Attempt browser-side recovery: fetch the message fresh from WhatsApp Web to get updated CDN URLs
       let freshMessage: any = null;
@@ -603,33 +707,6 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
         } catch (freshDecryptErr) {
           req.logger.error(`Decryption of fresh browser message failed: ${freshDecryptErr}`);
-        }
-      }
-
-      // Final fallback to WPPConnect's downloadMedia
-      if (typeof (client as any).downloadMedia === 'function') {
-        try {
-          let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
-            if (timer) clearTimeout(timer);
-          });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
-          });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
-          if (base64) {
-            let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
-            if (base64.startsWith('data:')) {
-              const matches = base64.match(/^data:(.*?);base64,(.*)$/);
-              if (matches) {
-                mimetype = matches[1];
-                base64 = matches[2];
-              }
-            }
-            return res.status(200).json({ base64, mimetype });
-          }
-        } catch (downloadErr) {
-          req.logger.error(`Error in client.downloadMedia fallback after decryption error: ${downloadErr}`);
         }
       }
       throw decryptErr; // rethrow to trigger the 500 block if both failed

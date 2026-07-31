@@ -582,7 +582,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
                   }
                   return null;
                 }, messageId, lookupId),
-                new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500))
               ]);
 
               if (base64Data) {
@@ -615,8 +615,11 @@ export async function getMediaByMessage(req: Request, res: Response) {
     }
 
     // Ensure mediaUrl and clientUrl/deprecatedMms3Url properties are fully populated early for decryptFile and WPPConnect helpers
-    const effectiveUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath || message.mediaUrl;
+    let effectiveUrl = message.clientUrl || message.deprecatedMms3Url || message.url || message.directPath || message.mediaUrl;
     if (effectiveUrl) {
+      if (typeof effectiveUrl === 'string' && effectiveUrl.startsWith('/')) {
+        effectiveUrl = `https://mmg.whatsapp.net${effectiveUrl}`;
+      }
       message.clientUrl = effectiveUrl;
       message.deprecatedMms3Url = effectiveUrl;
       message.url = effectiveUrl;
@@ -624,7 +627,20 @@ export async function getMediaByMessage(req: Request, res: Response) {
       message.directPath = message.directPath || effectiveUrl;
     }
 
-    // 1. Primary approach: Try WPPConnect's downloadMedia using active browser context with normalized lookupId
+    // Fast path: Try direct file decryption first if mediaKey and effectiveUrl are available
+    if (message.mediaKey && effectiveUrl) {
+      try {
+        const buffer = await client.decryptFile(message);
+        req.logger.info(`Successfully decrypted media via fast-path decryptFile for ${messageId}`);
+        return res
+          .status(200)
+          .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
+      } catch (fastDecryptErr) {
+        req.logger.warn(`Fast decryptFile failed for ${messageId}: ${fastDecryptErr}. Proceeding to browser download fallback...`);
+      }
+    }
+
+    // 1. Primary approach: Try WPPConnect's downloadMedia using active browser context with normalized lookupId (short 2.5s timeout)
     if (typeof (client as any).downloadMedia === 'function') {
       try {
         let timer: any;
@@ -633,7 +649,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
           if (timer) clearTimeout(timer);
         });
         const timeoutPromise = new Promise<string>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 12000);
+          timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 2500);
         });
         let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
         if (base64) {
