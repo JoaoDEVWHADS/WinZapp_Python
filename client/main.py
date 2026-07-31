@@ -13021,17 +13021,6 @@ def setup_logging():
         os.makedirs(log_path(), exist_ok=True)
         log_file = log_path("log.log")
 
-        # Remove the log.log.1/.2/.3 backups a previous RotatingFileHandler
-        # left behind. There is deliberately only ONE log file now, holding
-        # only the current run: when diagnosing a startup/pairing problem,
-        # having to work out where the last launch begins inside a 10 MB file
-        # (or which of four files it landed in) is pure friction.
-        for _n in range(1, 10):
-            try:
-                os.remove(f"{log_file}.{_n}")
-            except OSError:
-                pass
-
         # mode="w" truncates on open, so each launch starts from a clean file.
         # Safe because __main__ only calls setup_logging() after the
         # single-instance mutex is acquired — otherwise a second launch would
