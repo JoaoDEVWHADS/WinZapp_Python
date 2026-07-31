@@ -1505,13 +1505,32 @@ export async function getMessages(req: Request, res: Response) {
           }
         };
 
+        let realChatId = chatId;
+        try {
+          let c = (window as any).WPP.chat.get ? await (window as any).WPP.chat.get(realChatId).catch(() => null) : null;
+          if (!c && (window as any).Store && (window as any).Store.Chat && (window as any).Store.Chat.models) {
+            const rawUser = realChatId.split('@')[0];
+            const foundChat = (window as any).Store.Chat.models.find((item: any) => {
+              if (!item || !item.id) return false;
+              const ser = item.id._serialized || '';
+              const user = item.id.user || '';
+              const phone = item.phoneNumber || '';
+              return user === rawUser || phone === rawUser || ser.includes(rawUser);
+            });
+            if (foundChat && foundChat.id) {
+              realChatId = foundChat.id._serialized || foundChat.id;
+              console.log(`[browser-evaluate] Resolved ${chatId} to actual store chatId ${realChatId}`);
+            }
+          }
+        } catch (_) { }
+
         // Ensure the chat is loaded and earlier history is fetched from WhatsApp Web
         try {
           if ((window as any).WPP.chat && (window as any).WPP.chat.find) {
-            await (window as any).WPP.chat.find(chatId);
+            await (window as any).WPP.chat.find(realChatId).catch(() => null);
           }
           if ((window as any).WPP.chat && (window as any).WPP.chat.loadEarlierMessages) {
-            await (window as any).WPP.chat.loadEarlierMessages(chatId);
+            await (window as any).WPP.chat.loadEarlierMessages(realChatId).catch(() => null);
           }
         } catch (e) {
           // Ignore
@@ -1535,7 +1554,7 @@ export async function getMessages(req: Request, res: Response) {
         // Get initial oldest message currently loaded
         if (id && !anchorExists) {
           console.log(`[browser-evaluate] Anchor not found in store. Fetching current messages to find oldest...`);
-          const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
+          const currentMsgs = await (window as any).WPP.chat.getMessages(realChatId, { count: 100 }).catch(() => []);
           console.log(`[browser-evaluate] Current messages in store count: ${currentMsgs ? currentMsgs.length : 0}`);
           if (currentMsgs && currentMsgs.length > 0) {
             let oldestMsg = currentMsgs[0];
@@ -1552,17 +1571,17 @@ export async function getMessages(req: Request, res: Response) {
 
         while (id && !anchorExists && oldestId && attempts < maxAttempts) {
           console.log(`[browser-evaluate] Walkback attempt ${attempts + 1}/${maxAttempts} from oldestId=${oldestId}...`);
-          const loaded = await (window as any).WPP.chat.getMessages(chatId, {
+          const loaded = await (window as any).WPP.chat.getMessages(realChatId, {
             count: 100,
             direction: 'before',
             id: oldestId
-          });
-          
+          }).catch(() => []);
+
           console.log(`[browser-evaluate] Walkback returned ${loaded ? loaded.length : 0} messages`);
           if (!loaded || loaded.length === 0) {
             break;
           }
-          
+
           // Find the new oldest message from the loaded batch
           let oldestMsg = loaded[0];
           for (const m of loaded) {
@@ -1571,14 +1590,14 @@ export async function getMessages(req: Request, res: Response) {
             }
           }
           oldestId = oldestMsg.id._serialized || oldestMsg.id;
-          
+
           const checkMsg = await getMsgSafe(id);
           if (checkMsg) {
             anchorExists = true;
             console.log(`[browser-evaluate] Anchor found during walkback!`);
             break;
           }
-          
+
           attempts++;
         }
 
@@ -1588,23 +1607,11 @@ export async function getMessages(req: Request, res: Response) {
           if (originalOldestId) {
             queryId = originalOldestId;
             console.log(`[browser-evaluate] Anchor not found after walkback. Falling back to originalOldestId: ${queryId}`);
-          } else {
-            console.log(`[browser-evaluate] Anchor not found, and no originalOldestId resolved. Fetching default messages...`);
-            const currentMsgs = await (window as any).WPP.chat.getMessages(chatId, { count: 100 });
-            if (currentMsgs && currentMsgs.length > 0) {
-              let oldestMsg = currentMsgs[0];
-              for (const m of currentMsgs) {
-                if (m.t < oldestMsg.t) {
-                  oldestMsg = m;
-                }
-              }
-              queryId = oldestMsg.id._serialized || oldestMsg.id;
-            }
           }
         }
 
         console.log(`[browser-evaluate] Final query using WAPI.getMessages with anchor: ${queryId}`);
-        const result = await (window as any).WAPI.getMessages(chatId, {
+        const result = await (window as any).WAPI.getMessages(realChatId, {
           count: targetCount,
           direction: 'before',
           id: queryId
@@ -2150,7 +2157,7 @@ export async function getAllContacts(req: Request, res: Response) {
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
-      
+
       response = response.filter((c: any) => {
         if (!c) return false;
         const jid = c.id?._serialized || c.id;
@@ -2527,11 +2534,10 @@ export async function chatWoot(req: Request, res: Response): Promise<any> {
       for (const contato of contactToArray(phone, false)) {
         if (message_type == 'outgoing') {
           if (message.attachments) {
-            const base_url = `${
-              client.config.chatWoot.baseURL
-            }/${message.attachments[0].data_url.substring(
-              message.attachments[0].data_url.indexOf('/rails/') + 1
-            )}`;
+            const base_url = `${client.config.chatWoot.baseURL
+              }/${message.attachments[0].data_url.substring(
+                message.attachments[0].data_url.indexOf('/rails/') + 1
+              )}`;
 
             // Check if attachments is Push-to-talk and send this
             if (message.attachments[0].file_type === 'audio') {
