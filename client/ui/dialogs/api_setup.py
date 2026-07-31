@@ -182,8 +182,9 @@ class ApiSetupDialog(wx.Dialog):
     }
     _STAGES_MODULES_ONLY = {
         "npm_install": (0, 55),
-        "chrome":      (55, 80),
-        "db_generate": (80, 99),
+        "chrome":      (55, 75),
+        "db_generate": (75, 88),
+        "build":       (88, 99),
     }
 
     def __init__(self, parent, title_override=None, forced_tag=None):
