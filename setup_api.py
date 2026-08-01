@@ -284,9 +284,6 @@ def main():
     # 1. Automating Node dependency installation and build
     print("[INFO] Automating Node.js dependency installation and compilation...")
     try:
-        node_cmd = "node"
-        npm_args = ["npm"]
-        os.environ["GIT_TERMINAL_PROMPT"] = "0"
         if is_windows:
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
             win_git_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
@@ -294,18 +291,9 @@ def main():
             sys_git = shutil.which("git")
             sys_git_dir = os.path.dirname(sys_git) if sys_git else ""
             os.environ["PATH"] = f"{win_node_dir};{sys_git_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
-            
-            win_node_exe = os.path.join(win_node_dir, "node.exe")
-            win_npm_cli = os.path.join(win_node_dir, "node_modules", "npm", "bin", "npm-cli.js")
-            win_npm_cmd = os.path.join(win_node_dir, "npm.cmd")
-            if os.path.isfile(win_node_exe) and os.path.isfile(win_npm_cli):
-                node_cmd = win_node_exe
-                npm_args = [win_node_exe, win_npm_cli]
-            elif os.path.isfile(win_npm_cmd):
-                node_cmd = win_node_exe if os.path.isfile(win_node_exe) else "node"
-                npm_args = ["cmd.exe", "/c", win_npm_cmd]
-            else:
-                npm_args = ["cmd.exe", "/c", "npm"]
+            npm_args = ["npm.cmd"]
+        else:
+            npm_args = ["npm"]
 
         # Run npm install
         print("[INFO] Running npm install...", flush=True)
@@ -327,11 +315,11 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}", flush=True)
 
-        # Download Chromium (Puppeteer postinstall)
+        # Download Chromium (Puppeteer)
         print("[INFO] Downloading Chromium (Puppeteer)...", flush=True)
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
-            _run([node_cmd, install_js], cwd=CLIENT_API_DIR)
+            _run(["node", install_js], cwd=CLIENT_API_DIR)
         else:
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...", flush=True)
             _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR)
