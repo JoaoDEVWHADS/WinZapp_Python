@@ -3734,9 +3734,10 @@ class MainWindow(wx.Frame):
         if gd and acc_id:
             try:
                 import node_coord
+                import update_coord
                 node_coord.release_node_lease(gd, acc_id)
                 live = [l.get("account_id") for l in node_coord.live_node_leases(
-                    gd, is_alive=node_coord.lease_alive) if not l.get("_corrupt")]
+                    gd, is_alive=update_coord.lease_alive) if not l.get("_corrupt")]
                 other_live = [a for a in live if a and a != acc_id]
                 if other_live:
                     logging.info("[shutdown] leaving WPPConnect up for other live "

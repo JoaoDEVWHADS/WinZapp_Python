@@ -283,6 +283,21 @@ class Connect:
                 if status not in _INCOMPLETE and is_paired:
                     # Session is connected or closed (but closed is allowed if still paired)
                     return True
+                # A transient warm-up status right after launch (the WPPConnect
+                # browser is still re-attaching the session) must NOT be treated
+                # as a logout for an already-paired account: doing so wiped a
+                # perfectly valid session on a cold start (the session comes up
+                # as INITIALIZING/notLogged for ~30s). Only an explicit 401/403
+                # (handled above) or a user disconnect may drop a paired token.
+                # Keep it and let the normal connect/reconnect flow settle it.
+                if is_paired:
+                    logging.info(
+                        "[check_connection_status] Token exists, session status is "
+                        "'%s' (transient warm-up) and paired=True — keeping the "
+                        "paired session; connect/reconnect flow will settle it.",
+                        status,
+                    )
+                    return True
                 # Stale token — pairing was never finished. Clear it so the
                 # connection dialog is shown on this and future launches.
                 logging.warning(
