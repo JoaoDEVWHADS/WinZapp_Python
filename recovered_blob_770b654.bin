@@ -1,0 +1,4786 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "WPPConnect API REST",
+    "version": "2.0.0",
+    "description": "Documentation generated through Swagger to be able to test the functions via REST API of WPP Connect"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:21465/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Methods for authentication"
+    },
+    {
+      "name": "Chat",
+      "description": "Chat Methods"
+    },
+    {
+      "name": "Send Message"
+    },
+    {
+      "name": "Profile",
+      "description": "Profile Methods"
+    },
+    {
+      "name": "Status Stories",
+      "description": "Status Stories Methods"
+    },
+    {
+      "name": "Labels",
+      "description": "Labels Methods"
+    },
+    {
+      "name": "Contact",
+      "description": "Contact Methods"
+    },
+    {
+      "name": "Group"
+    },
+    {
+      "name": "Phone Status"
+    },
+    {
+      "name": "Blocklist"
+    },
+    {
+      "name": "System"
+    },
+    {
+      "name": "Catalog & Products"
+    }
+  ],
+  "paths": {
+    "/api/{session}/{secretkey}/generate-token": {
+      "post": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secretkey",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{secretkey}/show-all-sessions": {
+      "get": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "secretkey",
+            "default": "THISISMYSECURETOKEN",
+            "in": "path",
+            "description": "(Required) chave do admin",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        }
+      }
+    },
+    "/api/{secretkey}/start-all": {
+      "post": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "secretkey",
+            "default": "THISISMYSECURETOKEN",
+            "in": "path",
+            "description": "(Required) chave do admin",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        }
+      }
+    },
+    "/api/{session}/check-connection-session": {
+      "get": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/{session}/get-media-by-message/{messageId}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "messageId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/status-session": {
+      "get": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/{session}/qrcode-session": {
+      "get": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/start-session": {
+      "post": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "waitQrCode": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/logout-session": {
+      "post": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/close-session": {
+      "post": {
+        "tags": ["Auth"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/subscribe-presence": {
+      "post": {
+        "tags": ["Contact"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  },
+                  "all": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/download-media": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "messageId": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/kill-service-workier": {
+      "post": {
+        "tags": ["System"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/restart-service": {
+      "post": {
+        "tags": ["System"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/send-message": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "options": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-image": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "filename": {
+                    "example": "any"
+                  },
+                  "caption": {
+                    "example": "any"
+                  },
+                  "path": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-sticker": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "path": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-sticker-gif": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "path": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-reply": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  },
+                  "messageId": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-file": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "path": {
+                    "example": "any"
+                  },
+                  "filename": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-file-base64": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "options": {
+                    "example": "any"
+                  },
+                  "base64": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  },
+                  "filename": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-voice": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "path": {
+                    "example": "any"
+                  },
+                  "filename": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  },
+                  "quotedMessageId": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-voice-base64": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "base64Ptt": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-status": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-link-preview": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "url": {
+                    "example": "any"
+                  },
+                  "caption": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-location": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "lat": {
+                    "example": "any"
+                  },
+                  "lng": {
+                    "example": "any"
+                  },
+                  "title": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-mentioned": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  },
+                  "mentioned": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-buttons": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-list-message": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "description": {
+                    "example": "any"
+                  },
+                  "sections": {
+                    "example": "any"
+                  },
+                  "buttonText": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-poll-message": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "name": {
+                    "example": "any"
+                  },
+                  "choices": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/all-broadcast-list": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/all-groups": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/group-members/{groupId}": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/group-admins/{groupId}": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/group-invite-link/{groupId}": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/group-revoke-link/{groupId}": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        }
+      }
+    },
+    "/api/{session}/group-members-ids/{groupId}": {
+      "get": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/create-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "participants": {
+                    "example": "any"
+                  },
+                  "name": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/leave-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/join-code": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "inviteCode": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/add-participant-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/remove-participant-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/promote-participant-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/demote-participant-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/group-info-from-invite-link": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "invitecode": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/group-description": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "description": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/group-property": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "property": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/group-subject": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "title": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/messages-admins-only": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/group-pic": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "path": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/change-privacy-group": {
+      "post": {
+        "tags": ["Group"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "groupId": {
+                    "example": "any"
+                  },
+                  "status": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/all-chats": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/all-chats-with-messages": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/all-messages-in-chat/{phone}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "isGroup",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeMe",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeNotifications",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/{session}/all-new-messages": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/{session}/unread-messages": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/{session}/all-unread-messages": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/chat-by-id/{phone}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "isGroup",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/message-by-id/{messageId}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "messageId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/{session}/chat-is-online/{phone}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/last-seen/{phone}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/list-mutes/{type}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/load-messages-in-chat/{phone}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/{session}/get-messages/{phone}": {
+      "get": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/{session}/archive-chat": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/archive-all-chats": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/clear-chat": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/clear-all-chats": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/delete-chat": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/delete-all-chats": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/delete-message": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "messageId": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/react-message": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "msgId": {
+                    "example": "any"
+                  },
+                  "reaction": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/forward-messages": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "messageId": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/mark-unseen": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/pin-chat": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "state": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/contact-vcard": {
+      "post": {
+        "tags": ["Send Message"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "contactsId": {
+                    "example": "any"
+                  },
+                  "name": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-mute": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "time": {
+                    "example": "any"
+                  },
+                  "type": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-seen": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {},
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/chat-state": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "deprecated": true,
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "chatstate": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/temporary-messages": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/typing": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/recording": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  },
+                  "duration": {
+                    "example": "any"
+                  },
+                  "isGroup": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/star-message": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "messageId": {
+                    "example": "any"
+                  },
+                  "star": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/reject-call": {
+      "post": {
+        "tags": ["Chat"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "callId": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/get-products": {
+      "get": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "qnt",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/get-product-by-id": {
+      "get": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/edit-product": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/del-products": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/change-product-image": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  },
+                  "base64": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/add-product-image": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  },
+                  "base64": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/remove-product-image": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  },
+                  "index": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/get-collections": {
+      "get": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "qnt",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "max",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/create-collection": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "example": "any"
+                  },
+                  "products": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/edit-collection": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/del-collection": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/set-product-visibility": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "example": "any"
+                  },
+                  "value": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/set-cart-enabled": {
+      "post": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-text-storie": {
+      "post": {
+        "tags": ["Status Stories"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-image-storie": {
+      "post": {
+        "tags": ["Status Stories"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/send-video-storie": {
+      "post": {
+        "tags": ["Status Stories"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/add-new-label": {
+      "post": {
+        "tags": ["Labels"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/add-or-remove-label": {
+      "post": {
+        "tags": ["Labels"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "chatIds": {
+                    "example": "any"
+                  },
+                  "options": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/get-all-labels": {
+      "get": {
+        "tags": ["Labels"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/delete-all-labels": {
+      "put": {
+        "tags": ["Labels"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/delete-label/{id}": {
+      "put": {
+        "tags": ["Labels"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/check-number-status/{phone}": {
+      "get": {
+        "tags": ["Contact"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/all-contacts": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/{session}/contact/{phone}": {
+      "get": {
+        "tags": ["Contact"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/profile/{phone}": {
+      "get": {
+        "tags": ["Contact"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/profile-pic/{phone}": {
+      "get": {
+        "tags": ["Contact"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/profile-status/{phone}": {
+      "get": {
+        "tags": ["Contact"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "phone",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/blocklist": {
+      "get": {
+        "tags": ["Blocklist"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/block-contact": {
+      "post": {
+        "tags": ["Blocklist"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/unblock-contact": {
+      "post": {
+        "tags": ["Blocklist"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/get-battery-level": {
+      "get": {
+        "tags": ["Phone Status"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/host-device": {
+      "get": {
+        "tags": ["Phone Status"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/get-phone-number": {
+      "get": {
+        "tags": ["Phone Status"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/set-profile-pic": {
+      "post": {
+        "tags": ["Profile"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/{session}/profile-status": {
+      "post": {
+        "tags": ["Profile"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/change-username": {
+      "post": {
+        "tags": ["Profile"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/{session}/get-business-profiles-products": {
+      "get": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/{session}/get-order-by-messageId": {
+      "get": {
+        "tags": ["Catalog & Products"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/{session}/chatwoot": {
+      "post": {
+        "tags": ["System"],
+        "description": "",
+        "parameters": [
+          {
+            "name": "session",
+            "default": "NERDWHATS_AMERICA",
+            "in": "path",
+            "description": "Nome da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "event": {
+                    "example": "any"
+                  },
+                  "private": {
+                    "example": "any"
+                  },
+                  "conversation": {
+                    "example": "any"
+                  },
+                  "message_type": {
+                    "example": "any"
+                  },
+                  "phone": {
+                    "example": "any"
+                  },
+                  "message": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api-docs": {
+      "get": {
+        "description": "",
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": ["System"],
+        "description": "",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "503": {
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/unhealthy": {
+      "get": {
+        "tags": ["System"],
+        "description": "",
+        "parameters": [],
+        "responses": {
+          "503": {
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "httpBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "httpBearer": []
+    }
+  ]
+}
