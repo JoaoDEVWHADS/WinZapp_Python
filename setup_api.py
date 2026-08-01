@@ -245,22 +245,24 @@ def main():
                 f.write(content)
             print(f"[INFO] Restored custom file: {rel_path}")
 
-    if tag and shutil.which("git"):
+    if tag and shutil.which("git") and os.path.isdir(os.path.join(CLIENT_API_DIR, ".git")):
         print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
-
-        # Re-restore after checkout just in case git checkout overwrites files
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-        print("[INFO] Re-applied custom files after checking out tag.")
+        try:
+            _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+            # Re-restore after checkout just in case git checkout overwrites files
+            for rel_path, content in custom_contents.items():
+                dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with open(dest_path, "wb") as f:
+                    f.write(content)
+            print("[INFO] Re-applied custom files after checking out tag.")
+        except Exception as err:
+            print(f"[WARNING] Could not checkout tag {tag}: {err}")
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
         sha_file = os.path.join(CLIENT_API_DIR, ".commit_sha")
-        if shutil.which("git"):
+        if shutil.which("git") and os.path.isdir(os.path.join(CLIENT_API_DIR, ".git")):
             res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CLIENT_API_DIR, capture_output=True, text=True)
             if res.returncode == 0 and res.stdout.strip():
                 with open(sha_file, "w", encoding="utf-8") as f:
