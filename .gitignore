@@ -223,3 +223,13 @@ db.sqlite3-journal
 
 # Jupyter
 .ipynb_checkpoints
+
+# Windows build scaffolding (local only)
+/venv_build/
+/_build_*.bat
+/_py313.exe
+/_diag_*.py
+/_verify_*.py
+/_evtlog.ps1
+/_backup_stare_dane/
+/boot_trace.log
