@@ -342,10 +342,21 @@ def main():
                 print(f"[WARNING] Could not clean dist folder: {e}", flush=True)
         os.makedirs(dist_dir, exist_ok=True)
 
+        bin_babel = os.path.join(CLIENT_API_DIR, "node_modules", ".bin", "babel.cmd" if is_windows else "babel")
         babel_cli_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
         compiled = False
-        if os.path.isfile(babel_cli_js):
+
+        if os.path.isfile(bin_babel):
             try:
+                print(f"[INFO] Compiling using {bin_babel}...", flush=True)
+                _run([bin_babel, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
+                compiled = os.path.isfile(os.path.join(dist_dir, "index.js"))
+            except Exception as e:
+                print(f"[WARNING] Bin babel execution failed: {e}", flush=True)
+
+        if not compiled and os.path.isfile(babel_cli_js):
+            try:
+                print(f"[INFO] Compiling using node {babel_cli_js}...", flush=True)
                 _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
                 compiled = os.path.isfile(os.path.join(dist_dir, "index.js"))
             except Exception as e:
