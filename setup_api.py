@@ -294,11 +294,15 @@ def main():
             
             win_node_exe = os.path.join(win_node_dir, "node.exe")
             win_npm_cli = os.path.join(win_node_dir, "node_modules", "npm", "bin", "npm-cli.js")
+            win_npm_cmd = os.path.join(win_node_dir, "npm.cmd")
             if os.path.isfile(win_node_exe) and os.path.isfile(win_npm_cli):
                 node_cmd = win_node_exe
                 npm_args = [win_node_exe, win_npm_cli]
-            elif os.path.isfile(os.path.join(win_node_dir, "npm.cmd")):
-                npm_args = [os.path.join(win_node_dir, "npm.cmd")]
+            elif os.path.isfile(win_npm_cmd):
+                node_cmd = win_node_exe if os.path.isfile(win_node_exe) else "node"
+                npm_args = ["cmd.exe", "/c", win_npm_cmd]
+            else:
+                npm_args = ["cmd.exe", "/c", "npm"]
 
         # Run npm install
         print("[INFO] Running npm install...", flush=True)
