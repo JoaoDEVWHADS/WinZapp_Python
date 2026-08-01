@@ -42,8 +42,49 @@ import time
 _IS_WINDOWS = sys.platform == "win32"
 
 
+def canonical_dir(path: str) -> str:
+    """Canonical form of a directory path for stable cross-process keying.
+    normcase(realpath(abspath(...))) so that e.g. C:\\Users\\X\\global and
+    c:\\users\\x\\GLOBAL (same dir on Windows) hash to the SAME lock name — a
+    mismatch would let two processes mutate the same JSON under different
+    mutexes (GPT r1-code #2).
+    """
+    try:
+        return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+    except OSError:
+        return os.path.normcase(os.path.abspath(path))
+
+
 class LockTimeout(RuntimeError):
     """Raised when a lock cannot be acquired within the requested timeout."""
+
+
+_kernel32 = None
+
+
+def _win_kernel32():
+    """Return a cached kernel32 WinDLL with correct 64-bit signatures.
+    Without explicit restype/argtypes, ctypes defaults every result to c_int,
+    which TRUNCATES a 64-bit HANDLE on Windows x64 (GPT r1-code #1) — the
+    handle would be corrupt and ReleaseMutex/CloseHandle would fail silently.
+    use_last_error=True lets us surface real Win32 errors via WinError.
+    """
+    global _kernel32
+    if _kernel32 is not None:
+        return _kernel32
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexW.restype = wintypes.HANDLE
+    k.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k.ReleaseMutex.restype = wintypes.BOOL
+    k.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    k.CloseHandle.restype = wintypes.BOOL
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32 = k
+    return k
 
 
 class NamedLock:
@@ -111,6 +152,7 @@ class NamedLock:
             if st.depth == 0:
                 remaining = max(0.0, deadline - time.monotonic())
                 self._os_acquire(remaining)
+                st.owner_thread = threading.get_ident()
             st.depth += 1
         except BaseException:
             st.rlock.release()
@@ -118,13 +160,16 @@ class NamedLock:
 
     def release(self) -> None:
         st = self._state
-        if st.depth <= 0:
-            # Defensive: unbalanced release. Still drop the rlock if we hold it.
-            raise RuntimeError(f"Releasing un-held lock '{self.name}'")
+        # Guard: only the owning thread may release (GPT r1-code #8). Touching
+        # depth / OS handle / flock from a foreign thread could unlock an flock
+        # another thread relies on. Verify ownership BEFORE mutating anything.
+        if st.owner_thread != threading.get_ident() or st.depth <= 0:
+            raise RuntimeError(f"Releasing un-held lock '{self.name}' from wrong thread")
         st.depth -= 1
         try:
             if st.depth == 0:
                 self._os_release()
+                st.owner_thread = None
         finally:
             st.rlock.release()
 
@@ -146,17 +191,17 @@ class NamedLock:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _win_kernel32()
         full_name = f"Global\\{self.name}"
         handle = kernel32.CreateMutexW(None, False, full_name)
         if not handle:
-            raise OSError(f"CreateMutexW failed for '{full_name}' (err {kernel32.GetLastError()})")
+            raise ctypes.WinError(ctypes.get_last_error())
 
         ms = 0xFFFFFFFF if timeout is None else max(0, int(timeout * 1000))
         WAIT_OBJECT_0 = 0x0
         WAIT_ABANDONED = 0x80
         WAIT_TIMEOUT = 0x102
-        rc = kernel32.WaitForSingleObject(wintypes.HANDLE(handle), wintypes.DWORD(ms))
+        rc = kernel32.WaitForSingleObject(handle, ms)
         if rc == WAIT_TIMEOUT:
             kernel32.CloseHandle(handle)
             raise LockTimeout(f"Timed out acquiring OS mutex '{full_name}'")
@@ -169,12 +214,13 @@ class NamedLock:
 
     def _win_release(self) -> None:
         import ctypes
-        from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _win_kernel32()
         handle = self._state.win_handle
         if handle:
-            kernel32.ReleaseMutex(wintypes.HANDLE(handle))
+            if not kernel32.ReleaseMutex(handle):
+                # Log-worthy but don't mask the primary flow; close anyway.
+                pass
             kernel32.CloseHandle(handle)
             self._state.win_handle = None
 
@@ -211,13 +257,14 @@ class NamedLock:
 class _LockState:
     """Per-process shared state for one logical lock name."""
 
-    __slots__ = ("rlock", "depth", "win_handle", "flock_fd")
+    __slots__ = ("rlock", "depth", "win_handle", "flock_fd", "owner_thread")
 
     def __init__(self) -> None:
         self.rlock = threading.RLock()
         self.depth = 0
         self.win_handle = None
         self.flock_fd = None
+        self.owner_thread = None
 
 
 # ── Lock factories (one per global critical section) ─────────────────────────
@@ -227,7 +274,7 @@ class _LockState:
 def _hash_dir(global_dir: str) -> str:
     import hashlib
 
-    return hashlib.md5(os.path.abspath(global_dir).encode("utf-8")).hexdigest()[:16]
+    return hashlib.md5(canonical_dir(global_dir).encode("utf-8")).hexdigest()[:16]
 
 
 def registry_lock(global_dir: str, timeout: float = 10.0) -> NamedLock:

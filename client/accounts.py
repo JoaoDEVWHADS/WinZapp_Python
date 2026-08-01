@@ -39,6 +39,12 @@ from coord_locks import registry_lock
 VALID_STATES = ("pending", "paired", "deleting", "archived")
 _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _SCHEMA = 1
+_RECOVERY_MARKER = "accounts.recovery"
+
+
+def is_valid_account_id(account_id) -> bool:
+    """True iff account_id is a canonical 32-hex uuid (fullmatch, no trailing \\n)."""
+    return isinstance(account_id, str) and _ID_RE.fullmatch(account_id) is not None
 
 
 class RegistryCorruptError(RuntimeError):
@@ -49,55 +55,103 @@ class AccountRegistry:
     def __init__(self, global_dir: str, lock_factory=registry_lock):
         self.global_dir = os.path.abspath(global_dir)
         self._path = os.path.join(self.global_dir, "accounts.json")
+        self._marker = os.path.join(self.global_dir, _RECOVERY_MARKER)
         self._lock_factory = lock_factory
         self._recovery = False
         os.makedirs(self.global_dir, exist_ok=True)
-        # Probe once so is_recovery_mode() is meaningful right after construction.
-        self._read()
+        # Probe once (under lock) so is_recovery_mode() is meaningful right away.
+        with self._lock_factory(self.global_dir):
+            self._read_locked()
 
     # ── recovery flag ────────────────────────────────────────────────────
     def is_recovery_mode(self) -> bool:
         return self._recovery
 
-    # ── low-level read (no lock; callers hold it for RMW) ─────────────────
-    def _read(self) -> dict:
-        # Recovery is sticky for the instance lifetime: once we've seen a
-        # corrupt file we must NOT silently behave as a fresh (empty) registry
-        # just because the corrupt file was moved aside to its .corrupt-* backup.
-        if self._recovery:
-            return {"schema": _SCHEMA, "last_foreground": None, "accounts": []}
+    # ── low-level read — MUST be called while holding registry_lock ───────
+    def _read_locked(self) -> dict:
+        empty = {"schema": _SCHEMA, "last_foreground": None, "accounts": []}
+        # Persistent recovery marker: recovery is sticky ACROSS processes
+        # (GPT r1-code #3), so another instance that starts after the corrupt
+        # file was moved aside never treats the registry as fresh and never
+        # runs first-run/add(). The marker lives beside accounts.json.
+        if os.path.exists(self._marker):
+            self._recovery = True
+            return empty
         if not os.path.isfile(self._path):
             self._recovery = False
-            return {"schema": _SCHEMA, "last_foreground": None, "accounts": []}
+            return empty
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, ValueError, OSError):
-            self._enter_recovery()
-            return {"schema": _SCHEMA, "last_foreground": None, "accounts": []}
+            self._enter_recovery_locked()
+            return empty
 
-        if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
-            self._enter_recovery()
-            return {"schema": _SCHEMA, "last_foreground": None, "accounts": []}
+        if not self._validate_model(data):
+            self._enter_recovery_locked()
+            return empty
 
-        # Drop entries with an invalid id (path-traversal / corruption guard).
-        clean = [a for a in data["accounts"]
-                 if isinstance(a, dict) and isinstance(a.get("id"), str)
-                 and _ID_RE.match(a["id"])]
-        data["accounts"] = clean
         self._recovery = False
         return data
 
-    def _enter_recovery(self) -> None:
+    def _validate_model(self, data) -> bool:
+        """Validate the WHOLE model, not just ids (GPT r1-code #5).
+
+        Any invariant violation -> caller enters recovery instead of trusting a
+        half-broken registry. Checks: dict shape, schema not newer than ours,
+        each account has valid id/state/order/autostart, unique ids & orders,
+        last_foreground (if set) references an existing account.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
+            return False
+        schema = data.get("schema", _SCHEMA)
+        if not isinstance(schema, int) or schema > _SCHEMA:
+            return False  # newer schema: refuse to downgrade-overwrite it
+        ids, orders = set(), set()
+        for a in data["accounts"]:
+            if not isinstance(a, dict):
+                return False
+            if not is_valid_account_id(a.get("id")):
+                return False
+            if a.get("state") not in VALID_STATES:
+                return False
+            if not isinstance(a.get("order"), int) or isinstance(a.get("order"), bool):
+                return False
+            if not isinstance(a.get("autostart"), bool):
+                return False
+            if a["id"] in ids or a["order"] in orders:
+                return False  # duplicate id / order
+            ids.add(a["id"])
+            orders.add(a["order"])
+        lf = data.get("last_foreground")
+        if lf is not None and lf not in ids:
+            return False
+        return True
+
+    def _enter_recovery_locked(self) -> None:
+        """Enter read-only recovery. Caller holds registry_lock.
+
+        COPY the corrupt file to a .corrupt-<ts> backup (don't move it), and
+        drop a persistent recovery marker so every process — including ones
+        that started earlier — refuses mutations/first-run until an operator
+        restores a good accounts.json and removes the marker.
+        """
         self._recovery = True
         try:
-            backup = f"{self._path}.corrupt-{int(time.time())}"
-            if os.path.isfile(self._path) and not os.path.exists(backup):
-                os.replace(self._path, backup)
+            if os.path.isfile(self._path):
+                backup = f"{self._path}.corrupt-{int(time.time())}"
+                if not os.path.exists(backup):
+                    import shutil
+                    shutil.copy2(self._path, backup)
+        except OSError:
+            pass
+        try:
+            with open(self._marker, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
         except OSError:
             pass
 
-    # ── low-level atomic write ───────────────────────────────────────────
+    # ── low-level atomic write (caller holds lock) ───────────────────────
     def _write(self, data: dict) -> None:
         data["schema"] = _SCHEMA
         tmp = f"{self._path}.tmp"
@@ -107,18 +161,11 @@ class AccountRegistry:
             os.fsync(f.fileno())
         os.replace(tmp, self._path)
 
-    def _guard_mutation(self) -> None:
-        # Re-read to catch a file that became corrupt after construction.
-        if self._recovery:
-            raise RegistryCorruptError(
-                "accounts.json is corrupt — registry is in read-only recovery mode"
-            )
-
     # ── transaction helper ───────────────────────────────────────────────
     def _txn(self, fn):
         """Run fn(data)->result under registry_lock as one RMW transaction."""
         with self._lock_factory(self.global_dir):
-            data = self._read()
+            data = self._read_locked()
             if self._recovery:
                 raise RegistryCorruptError(
                     "accounts.json is corrupt — registry is in read-only recovery mode"
@@ -127,6 +174,13 @@ class AccountRegistry:
             if changed:
                 self._write(data)
             return result
+
+    def _read(self) -> dict:
+        """Locked read for public accessors (GPT r1-code #4: reads must hold
+        the lock so a concurrent os.replace() can't be observed half-written,
+        and so recovery detection is serialized)."""
+        with self._lock_factory(self.global_dir):
+            return self._read_locked()
 
     # ── reads ────────────────────────────────────────────────────────────
     def list(self) -> list[dict]:
@@ -152,6 +206,10 @@ class AccountRegistry:
 
     def data_dir_for(self, account_id: str) -> str:
         # accounts/<id> lives as a SIBLING of global/, never inside it.
+        # Validate the id regardless of origin (GPT r1-code #6) so a crafted
+        # value can never escape the accounts/ root via path traversal.
+        if not is_valid_account_id(account_id):
+            raise ValueError(f"invalid account id {account_id!r}")
         accounts_root = os.path.join(os.path.dirname(self.global_dir), "accounts")
         return os.path.join(accounts_root, account_id)
 
@@ -221,7 +279,12 @@ class AccountRegistry:
         self._txn(_fn)
 
     def set_last_foreground(self, account_id: Optional[str]) -> None:
+        # GPT r1-code #6: never store an arbitrary/nonexistent id. None is
+        # allowed (clears the field); any other value must reference a real
+        # account, else the model invariant (validated on read) breaks.
         def _fn(data):
+            if account_id is not None and not any(a["id"] == account_id for a in data["accounts"]):
+                raise ValueError(f"last_foreground references unknown account {account_id!r}")
             data["last_foreground"] = account_id
             return None, True
 
@@ -271,8 +334,14 @@ class AccountRegistry:
         def _fn(data):
             before = len(data["accounts"])
             data["accounts"] = [a for a in data["accounts"] if a["id"] != account_id]
+            removed = len(data["accounts"]) != before
+            # GPT r1-code #7: clearing last_foreground is ALSO a change, even
+            # when the account entry was already gone — otherwise the dangling
+            # last_foreground would never be persisted away.
+            cleared_lf = False
             if data.get("last_foreground") == account_id:
                 data["last_foreground"] = None
-            return None, len(data["accounts"]) != before
+                cleared_lf = True
+            return None, (removed or cleared_lf)
 
         self._txn(_fn)

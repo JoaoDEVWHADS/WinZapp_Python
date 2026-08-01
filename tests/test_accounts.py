@@ -107,10 +107,10 @@ def test_pending_excluded_from_paired(tmp_path):
 
 # ── security / robustness ────────────────────────────────────────────────
 def test_invalid_id_rejected_on_read(tmp_path):
-    """An id that isn't 32-hex (path traversal attempt) is skipped on load."""
+    """An id that isn't 32-hex (path traversal attempt) fails model validation
+    and drops the registry into recovery (safer than trusting a tampered file)."""
     reg = _reg(tmp_path)
-    good = reg.add("Good")
-    # Inject a malicious entry directly into the JSON
+    reg.add("Good")
     path = reg._path
     data = json.loads(open(path).read())
     data["accounts"].append(
@@ -119,9 +119,45 @@ def test_invalid_id_rejected_on_read(tmp_path):
     )
     open(path, "w").write(json.dumps(data))
     reg2 = _reg(tmp_path)
-    ids = [a["id"] for a in reg2.list()]
-    assert good["id"] in ids
-    assert "../../etc" not in ids
+    assert reg2.is_recovery_mode() is True
+    assert reg2.list() == []
+
+
+def test_data_dir_for_rejects_bad_id(tmp_path):
+    reg = _reg(tmp_path)
+    with pytest.raises(ValueError):
+        reg.data_dir_for("../../etc")
+    with pytest.raises(ValueError):
+        reg.data_dir_for("a" * 32 + "\n")  # trailing newline must fail fullmatch
+
+
+def test_set_last_foreground_unknown_rejected(tmp_path):
+    reg = _reg(tmp_path)
+    with pytest.raises(ValueError):
+        reg.set_last_foreground("f" * 32)
+    reg.set_last_foreground(None)  # None always allowed
+    assert reg.last_foreground() is None
+
+
+def test_remove_clears_dangling_last_foreground(tmp_path):
+    reg = _reg(tmp_path)
+    a = reg.add("A")
+    reg.set_last_foreground(a["id"])
+    reg.remove(a["id"])
+    assert reg.last_foreground() is None
+
+
+def test_recovery_marker_persists_across_instances(tmp_path):
+    reg = _reg(tmp_path)
+    reg.add("A")
+    open(reg._path, "w").write("{ broken ")
+    _reg(tmp_path)  # first instance detects corruption + drops marker
+    # A fresh instance (another process) must ALSO be in recovery and refuse
+    # first-run/add, even though the corrupt file was copied aside.
+    reg3 = _reg(tmp_path)
+    assert reg3.is_recovery_mode() is True
+    with pytest.raises(RegistryCorruptError):
+        reg3.add("B")
 
 
 def test_corrupt_json_read_only_recovery(tmp_path):
