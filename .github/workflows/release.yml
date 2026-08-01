@@ -170,31 +170,8 @@ jobs:
       - name: Configurar WPPConnect API
         shell: pwsh
         run: |
-          # 1. Clonar a API se não existir
+          $env:PATH = "$(Resolve-Path client/node);$(Resolve-Path client/git/cmd);$env:PATH"
           python setup_api.py
-          
-          # 2. Configurar caminhos para usar o Node portátil para instalar dependências
-          cd client/api
-          $nodeExe = "../../client/node/node.exe"
-          $npmCli = "../../client/node/node_modules/npm/bin/npm-cli.js"
-          
-          # Adiciona o diretório do node ao PATH temporariamente
-          $env:PATH = "$(Resolve-Path ../../client/node);$env:PATH"
-          
-          # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
-          if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install --legacy-peer-deps --no-audit --no-fund
-          }
-          
-          # Compilar a API
-          &$nodeExe $npmCli run build
-
-          # Pré-instalar o navegador Chrome do Puppeteer no cache local da API
-          $npxCli = "../../client/node/node_modules/npm/bin/npx-cli.js"
-          $cacheDir = Join-Path (Get-Location) ".cache\puppeteer"
-          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
-          $env:PUPPETEER_CACHE_DIR = $cacheDir
-          &$nodeExe $npxCli puppeteer browsers install chrome
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
