@@ -110,21 +110,35 @@ jobs:
             Write-Warning "[WARN] bassopus.dll not found in client/lib — OGG Opus playback will fail"
           }
 
+      - name: Extrair Versão do Node.js do node_download.py
+        id: get-node-ver
+        shell: pwsh
+        run: |
+          $content = Get-Content "client/ui/dialogs/node_download.py" -Raw
+          if ($content -match '_NODE_VERSION\s*=\s*"([^"]+)"') {
+              $nodeVer = $matches[1]
+              echo "NODE_VER=$nodeVer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              Write-Output "[INFO] Versão do Node.js detectada no Python: $nodeVer"
+          } else {
+              throw "Não foi possível extrair _NODE_VERSION do node_download.py"
+          }
+
       - name: Cache Node.js Portátil
         id: cache-node
         uses: actions/cache@v4
         with:
           path: client/node
-          key: node-portable-v24.15.0
+          key: node-portable-v${{ env.NODE_VER }}
 
       - name: Baixar e Extrair Node.js Portátil
         if: steps.cache-node.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          $ver = "${{ env.NODE_VER }}"
           New-Item -ItemType Directory -Force -Path "client/node"
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v24.15.0/node-v24.15.0-win-x64.zip" -OutFile "node-portable.zip"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$ver/node-v$ver-win-x64.zip" -OutFile "node-portable.zip"
           Expand-Archive -Path "node-portable.zip" -DestinationPath "node-temp"
-          Copy-Item -Path "node-temp\node-v24.15.0-win-x64\*" -Destination "client/node" -Recurse -Force
+          Copy-Item -Path "node-temp\node-v$ver-win-x64\*" -Destination "client/node" -Recurse -Force
           Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
 
       - name: Cache MinGit Portátil
