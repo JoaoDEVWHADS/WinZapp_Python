@@ -328,7 +328,22 @@ def main():
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...", flush=True)
-        _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
+        try:
+            _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
+        except Exception as build_err:
+            print(f"[WARNING] 'npm run build' failed: {build_err} — attempting direct babel compilation fallback...", flush=True)
+            _run(npm_args + ["exec", "--", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
+
+        # Re-apply any patches inside dist/ (such as dist/controller/sessionController.js) after Babel build
+        for rel_path in CUSTOM_SRC_FILES:
+            if rel_path.startswith("dist/"):
+                patches_path = os.path.join(API_PATCHES_DIR, rel_path)
+                dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+                if os.path.isfile(patches_path):
+                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                    with open(patches_path, "rb") as sf, open(dest_path, "wb") as df:
+                        df.write(sf.read())
+                    print(f"[INFO] Re-applied dist patch after compilation: {rel_path}", flush=True)
 
         print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
