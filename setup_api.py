@@ -287,6 +287,7 @@ def main():
     os.environ["NODE_ENV"] = "development"
     os.environ["NODE_OPTIONS"] = "--max-old-space-size=8192"
     os.environ["UV_THREADPOOL_SIZE"] = "64"
+    node_cmd = shutil.which("node") or ("node.exe" if is_windows else "node")
     try:
         if is_windows:
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
@@ -296,6 +297,8 @@ def main():
             sys_git_dir = os.path.dirname(sys_git) if sys_git else ""
             os.environ["PATH"] = f"{win_node_dir};{sys_git_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
             npm_args = ["npm.cmd"]
+            if os.path.isfile(os.path.join(win_node_dir, "node.exe")):
+                node_cmd = os.path.join(win_node_dir, "node.exe")
         else:
             npm_args = ["npm"]
 
