@@ -342,28 +342,18 @@ def main():
                 print(f"[WARNING] Could not clean dist folder: {e}", flush=True)
         os.makedirs(dist_dir, exist_ok=True)
 
-        bin_babel = os.path.join(CLIENT_API_DIR, "node_modules", ".bin", "babel.cmd" if is_windows else "babel")
-        babel_cli_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
+        npx_cmd = "npx.cmd" if is_windows else "npx"
         compiled = False
 
-        if os.path.isfile(bin_babel):
-            try:
-                print(f"[INFO] Compiling using {bin_babel}...", flush=True)
-                _run([bin_babel, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
-                compiled = os.path.isfile(os.path.join(dist_dir, "index.js"))
-            except Exception as e:
-                print(f"[WARNING] Bin babel execution failed: {e}", flush=True)
+        print(f"[INFO] Compiling WPPConnect Server using {npx_cmd} babel...", flush=True)
+        _run([npx_cmd, "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
 
-        if not compiled and os.path.isfile(babel_cli_js):
-            try:
-                print(f"[INFO] Compiling using node {babel_cli_js}...", flush=True)
-                _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
-                compiled = os.path.isfile(os.path.join(dist_dir, "index.js"))
-            except Exception as e:
-                print(f"[WARNING] Direct node babel execution failed: {e}", flush=True)
-
-        if not compiled:
-            print("[INFO] Running npm run build...", flush=True)
+        # Check if compilation produced output files in dist/
+        if os.path.isdir(dist_dir) and len(os.listdir(dist_dir)) > 0:
+            compiled = True
+            print("[OK] WPPConnect Server compiled successfully to dist/.", flush=True)
+        else:
+            print("[INFO] Fallback: Running npm run build...", flush=True)
             _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
 
         # Re-apply any patches inside dist/ (such as dist/controller/sessionController.js) after Babel build
