@@ -6126,7 +6126,7 @@ class MainWindow(wx.Frame):
 
                 if persist_full:
                     self.save_data(chats, self.contacts)
-                else:
+                elif db_changed or archive_changed:
                     self._schedule_save()
                 return chats
             except Exception as e:
@@ -6920,7 +6920,7 @@ class MainWindow(wx.Frame):
         # at the old 5-minute cadence a conversation could sit there looking
         # read for minutes after the phone said otherwise.  Contacts change
         # rarely and the fetch is heavy, so it stays on the 5-minute schedule.
-        _CHAT_POLL_SECONDS    = 60
+        _CHAT_POLL_SECONDS    = 180
         _CONTACT_POLL_SECONDS = 300
 
         def _loop():
