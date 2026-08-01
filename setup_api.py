@@ -270,11 +270,18 @@ def main():
         npm_bin = "npm"
         if is_windows:
             win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
+            win_npm_cli = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
+            win_npm_cmd = os.path.join(ROOT_DIR, "client", "node", "npm.cmd")
             if os.path.isfile(win_node):
                 node_bin = win_node
-                win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
-                if os.path.isfile(win_npm):
-                    npm_bin = win_npm
+                if os.path.isfile(win_npm_cli):
+                    npm_bin = win_npm_cli
+                elif os.path.isfile(win_npm_cmd):
+                    npm_bin = win_npm_cmd
+                else:
+                    npm_bin = shutil.which("npm.cmd") or "npm.cmd"
+            else:
+                npm_bin = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
 
             win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
             win_node_dir = os.path.join(ROOT_DIR, "client", "node")
@@ -284,6 +291,8 @@ def main():
         print("[INFO] Running npm install...")
         if npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+        elif is_windows and not npm_bin.endswith(".exe"):
+            _run([node_bin, win_npm_cli, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"] if os.path.isfile(win_npm_cli) else [npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
 
