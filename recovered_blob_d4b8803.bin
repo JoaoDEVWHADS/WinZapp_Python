@@ -1,0 +1,34 @@
+{
+    "name": "Padrão",
+    "events": {
+        "startup": "startup.ogg",
+        "error": "error.ogg",
+        "qrcode_loaded": "qrcode_loaded.ogg",
+        "waiting_pairing": "waiting_pairing.ogg",
+        "pairing_code_updated": "pairing_code_updated.ogg",
+        "connected": "connected.ogg",
+        "synchronizing": "synchronizing.ogg",
+        "sync_complete": "sync_complete.ogg",
+        "offline_mode": "offline_mode.ogg",
+        "voicemsg_startrecording": "voicemsg_startrecording.ogg",
+        "voicemsg_pauserecording": "voicemsg_pauserecording.ogg",
+        "voicemsg_discard": "voicemsg_discard.ogg",
+        "voicemsg_send": "voicemsg_send.ogg",
+        "message_current": "message_current.ogg",
+        "message_foreground": "message_foreground.ogg",
+        "message_sent": "message_sent.ogg",
+        "message_background": "message_background.ogg"
+    },
+    "alerts": {
+        "alert_1": "alerts/Alert-01.ogg",
+        "alert_2": "alerts/Alert-02.ogg",
+        "alert_3": "alerts/Alert-03.ogg",
+        "alert_4": "alerts/Alert-04.ogg",
+        "alert_5": "alerts/Alert-05.ogg",
+        "alert_6": "alerts/Alert-06.ogg",
+        "alert_7": "alerts/Alert-07.ogg",
+        "alert_8": "alerts/Alert-08.ogg",
+        "alert_9": "alerts/Alert-09.ogg",
+        "alert_10": "alerts/Alert-10.ogg"
+    }
+}
