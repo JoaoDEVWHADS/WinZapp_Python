@@ -188,3 +188,29 @@ def test_ct_unknown_sentinel_is_alive():
     # unknown create_time (sentinel 0.0) must count as alive (fail-closed)
     assert uc.lease_alive(123, 5.0, proc_create_time=lambda pid: 0.0) is True
     assert uc.lease_alive(123, 5.0, proc_create_time=lambda pid: None) is False
+
+
+# ── GPT r5 hardening ─────────────────────────────────────────────────────────
+def test_valid_ct_rejects_negative_and_huge():
+    assert uc._valid_ct(-1.0) is False
+    assert uc._valid_ct(float("inf")) is False
+    assert uc._valid_ct(10 ** 400) is False  # would OverflowError in isfinite
+    assert uc._valid_ct(0) is True
+    assert uc._valid_ct(123.5) is True
+
+
+def test_release_lease_rejects_path_traversal(tmp_path):
+    gd = _gd(tmp_path)
+    tok = uc.try_begin_update(gd, pid=10, create_time=1.0, is_alive=ALIVE)
+    assert tok is not None
+    uc.release_runtime_lease(gd, "../update_state.json")
+    uc.release_runtime_lease(gd, "/etc/passwd")
+    uc.release_runtime_lease(gd, "a/b")
+    # state file survived the traversal attempts
+    assert uc.is_update_in_progress(gd, is_alive=ALIVE) is True
+
+
+def test_state_dir_instead_of_file_is_corrupt(tmp_path):
+    gd = _gd(tmp_path)
+    os.mkdir(os.path.join(gd, "update_state.json"))  # a directory, not a file
+    assert uc.is_update_in_progress(gd) is True  # corrupt -> fail-closed

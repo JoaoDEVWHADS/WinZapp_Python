@@ -196,6 +196,15 @@ def test_schema_bool_is_corrupt(tmp_path):
     assert reg2.is_recovery_mode() is True
 
 
+def test_accounts_json_as_dir_is_recovery(tmp_path):
+    """A directory where accounts.json should be is corrupt, not empty (GPT r5 #4)."""
+    import os
+    gd = str(tmp_path / "global")
+    os.makedirs(os.path.join(gd, "accounts.json"))  # a dir, not a file
+    reg = AccountRegistry(gd)
+    assert reg.is_recovery_mode() is True
+
+
 def test_corrupt_json_read_only_recovery(tmp_path):
     reg = _reg(tmp_path)
     reg.add("A")

@@ -41,13 +41,26 @@ _STATE_FILE = "update_state.json"
 _CORRUPT = object()
 
 
-# ── strict scalar validation (fail-closed on anything odd) ───────────────────
+# ── strict scalar validation (total; fail-closed on anything odd) ────────────
+_MAX_PID = 2 ** 31  # comfortably above any real OS pid
+
+
 def _valid_pid(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+    try:
+        return isinstance(v, int) and not isinstance(v, bool) and 0 < v < _MAX_PID
+    except Exception:
+        return False
 
 
 def _valid_ct(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    # Must be a finite, NON-NEGATIVE number. Total: never raises (a huge JSON
+    # int can make math.isfinite raise OverflowError — caught here). GPT r5 #1.
+    try:
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return False
+        return math.isfinite(v) and v >= 0
+    except (OverflowError, ValueError, TypeError):
+        return False
 
 
 # ── process liveness (pid + create_time, guards against PID reuse) ───────────
@@ -148,9 +161,19 @@ def try_create_runtime_lease(global_dir: str, pid: Optional[int] = None,
 
 
 def release_runtime_lease(global_dir: str, lease_name: str) -> None:
+    # Guard against path traversal / absolute paths (GPT r5 #3): a lease name
+    # must be a plain filename in the runtime dir, nothing else.
+    if (not lease_name or os.path.basename(lease_name) != lease_name
+            or lease_name in (os.curdir, os.pardir)):
+        return
     with updater_lock(global_dir):
+        path = os.path.join(global_dir, _RUNTIME_DIR, lease_name)
+        # Confirm the resolved path really stays inside the runtime dir.
+        rt = os.path.realpath(_runtime_dir(global_dir))
+        if os.path.dirname(os.path.realpath(path)) != rt:
+            return
         try:
-            os.remove(os.path.join(global_dir, _RUNTIME_DIR, lease_name))
+            os.remove(path)
         except OSError:
             pass
 
@@ -204,9 +227,14 @@ def _read_state(global_dir: str):
     """Return the state dict, or _CORRUPT if the file exists but is unreadable
     or fails strict validation (callers fail closed)."""
     path = _state_path(global_dir)
-    if not os.path.isfile(path):
+    if not os.path.lexists(path):
+        # Truly absent -> initial state. A dir / broken symlink / other
+        # non-regular file existing here is NOT "no update" — it's corrupt,
+        # so fail closed (GPT r5 #4).
         return {"update_in_progress": False, "owner_pid": None,
                 "owner_create_time": None, "owner_token": None}
+    if not os.path.isfile(path):
+        return _CORRUPT
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)

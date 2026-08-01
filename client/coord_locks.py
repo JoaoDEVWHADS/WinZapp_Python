@@ -320,19 +320,24 @@ def _reset_locks_after_fork() -> None:
     flock FD WITHOUT LOCK_UN (releasing would unlock the parent's still-held
     lock on the same open file description) and rebuild fresh per-name state.
     """
-    with NamedLock._process_state_lock:
-        for st in NamedLock._process_state.values():
-            fd = st.flock_fd
-            if fd is not None:
-                try:
-                    os.close(fd)  # close only; do NOT fcntl.LOCK_UN
-                except OSError:
-                    pass
-            st.flock_fd = None
-            st.win_handle = None
-            st.depth = 0
-            st.owner_thread = None
-            st.rlock = threading.RLock()
+    # Do NOT acquire _process_state_lock here (GPT r5 #2): it may have been
+    # inherited in a LOCKED state from a thread that doesn't exist in the child,
+    # which would deadlock. Replace it with a fresh lock unconditionally — the
+    # child is single-threaded at this point (right after fork), so no other
+    # thread can be touching the registry.
+    NamedLock._process_state_lock = threading.Lock()
+    for st in NamedLock._process_state.values():
+        fd = st.flock_fd
+        if fd is not None:
+            try:
+                os.close(fd)  # close only; do NOT fcntl.LOCK_UN
+            except OSError:
+                pass
+        st.flock_fd = None
+        st.win_handle = None
+        st.depth = 0
+        st.owner_thread = None
+        st.rlock = threading.RLock()
 
 
 if hasattr(os, "register_at_fork"):

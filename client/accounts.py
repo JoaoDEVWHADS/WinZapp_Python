@@ -82,8 +82,13 @@ class AccountRegistry:
         if os.path.exists(self._marker):
             self._recovery = True
             return empty
-        if not os.path.isfile(self._path):
+        if not os.path.lexists(self._path):
             self._recovery = False
+            return empty
+        if not os.path.isfile(self._path):
+            # A dir / broken symlink / other non-regular file where accounts.json
+            # should be is NOT an empty registry — it's corrupt (GPT r5 #4).
+            self._enter_recovery_locked()
             return empty
         try:
             with open(self._path, "r", encoding="utf-8") as f:
