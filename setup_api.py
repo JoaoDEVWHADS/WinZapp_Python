@@ -332,10 +332,10 @@ def main():
         print("[INFO] Downloading Chromium (Puppeteer)...", flush=True)
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
-            _run([node_cmd, install_js], cwd=CLIENT_API_DIR)
+            _run([node_cmd, install_js], cwd=CLIENT_API_DIR, check=False)
         else:
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...", flush=True)
-            _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR)
+            _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
 
         # Run Babel compilation directly using node.exe / node
         print("[INFO] Compiling WPPConnect Server with Babel...", flush=True)
