@@ -360,7 +360,24 @@ def main():
             print("[OK] WPPConnect Server compiled successfully to dist/.", flush=True)
         else:
             print("[INFO] Fallback: Running npm run build...", flush=True)
-            _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
+            _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR, check=False)
+            if os.path.isdir(dist_dir) and len(os.listdir(dist_dir)) > 0:
+                compiled = True
+
+        # Guarenteed Fallback: if dist is still empty, copy pre-built dist from api_patches
+        if not compiled or not os.path.isdir(dist_dir) or len(os.listdir(dist_dir)) == 0:
+            print("[WARNING] Dist folder empty after build. Restoring pre-built dist from api_patches...", flush=True)
+            patches_dist = os.path.join(API_PATCHES_DIR, "dist")
+            if os.path.isdir(patches_dist):
+                import shutil as _shutil
+                os.makedirs(dist_dir, exist_ok=True)
+                for root, dirs, files in os.walk(patches_dist):
+                    rel_root = os.path.relpath(root, patches_dist)
+                    target_root = os.path.join(dist_dir, rel_root) if rel_root != "." else dist_dir
+                    os.makedirs(target_root, exist_ok=True)
+                    for f in files:
+                        _shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
+                print("[OK] Restored pre-built dist from api_patches successfully.", flush=True)
 
         # Re-apply any patches inside dist/ (such as dist/controller/sessionController.js) after Babel build
         for rel_path in CUSTOM_SRC_FILES:
