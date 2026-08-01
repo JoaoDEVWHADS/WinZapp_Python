@@ -58,6 +58,7 @@ from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
 from status_panel import StatusPanel
 from version import __version__
+from window_title import format_window_title
 import json
 from traceback import format_exc, format_exception
 import pyperclip
@@ -476,11 +477,20 @@ def is_countable_message(msg: dict) -> bool:
 
 
 class MainWindow(wx.Frame):
-    def __init__(self):
+    def __init__(self, account_id=None, account_name=None, startup_source="user",
+                 resume_pending=False, registry=None, global_dir=None):
         import time as _time
         self._t_app_start = _time.perf_counter()
         logging.info("[STARTUP_TIMING] T+0.000s — MainWindow __init__ started")
         super().__init__(None)
+        # Multi-account context (plan Zad 2.2). account_id is None only in
+        # legacy/single-account fallback; new startup always passes it.
+        self.account_id = account_id
+        self.account_name = account_name or "WinZapp"
+        self.startup_source = startup_source
+        self.resume_pending = resume_pending
+        self.registry = registry
+        self.global_dir = global_dir
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
         self._save_lock = threading.Lock()
         self._save_timer = None
@@ -497,7 +507,9 @@ class MainWindow(wx.Frame):
         self._notification_sound_cache = {}
 
         self.app_name = "WinZapp"
-        self.SetTitle(self.app_name)
+        # Per-account window title so each account is distinguishable to the
+        # screen reader and to IPC/activation (plan Zad 2.2 / 4.2).
+        self.SetTitle(self._format_title())
 
         # Detect no-UI background mode (started via --background flag by Windows
         # autostart).  When True: no dialogs, no sounds, no visible window.
@@ -992,6 +1004,15 @@ class MainWindow(wx.Frame):
         app.MainLoop()
 
     # ── Menu bar ─────────────────────────────────────────────────────────────
+
+    def _format_title(self, unread=0):
+        """Window title including the account name (plan Zad 2.2/4.2).
+
+        Single/legacy account -> plain 'WinZapp'; multi-account -> 'WinZapp — <name>'.
+        Kept as a pure helper so it's unit-testable and reused by tray/refresh.
+        """
+        return format_window_title("WinZapp", self.account_name, unread,
+                                   is_multi=bool(self.account_id))
 
     def _build_menubar(self):
         """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
@@ -13076,28 +13097,101 @@ def setup_logging():
 
 if __name__ == "__main__":
     try:
-        from autostart import acquire_single_instance_mutex, activate_existing_window
+        import app_paths
+        from account_bootstrap import resolve_startup, parse_startup_source
+        from account_migration import migrate_if_needed
+        from accounts import AccountRegistry
+        import update_coord
 
         background = "--background" in sys.argv
-        first_instance = acquire_single_instance_mutex()
+        startup_source = parse_startup_source(sys.argv)
+        gd = app_paths.global_dir()
 
+        # 1) Updater coordination FIRST (before migration): if an install is in
+        #    progress, don't start into a file-swap; otherwise claim a runtime
+        #    lease so the updater won't swap files under us (plan Zad 2.2/2.-1).
+        os.makedirs(gd, exist_ok=True)
+        if update_coord.is_update_in_progress(gd):
+            sys.exit(0)
+        _runtime_lease = update_coord.try_create_runtime_lease(gd)
+        if _runtime_lease is None:
+            sys.exit(0)  # an update slipped in between the check and the claim
+        atexit.register(update_coord.release_runtime_lease, gd, _runtime_lease)
+
+        # 2) One-time legacy flat-data migration, then resolve which account.
+        migrate_if_needed(gd)
+        _registry = AccountRegistry(gd)
+        _startup = resolve_startup(sys.argv, _registry)
+
+        _mode = _startup["mode"]
+        if _mode == "error":
+            ctypes.windll.user32.MessageBoxW(
+                0, f"WinZapp: {_startup.get('reason', 'nieprawidłowe konto')}",
+                "WinZapp", 0x10)
+            sys.exit(2)
+        elif _mode == "manager":
+            # Global manager mode: no account/data_path, no Node (plan sekcja F).
+            # TODO(Zad 4.5/4.6): show the account manager. For now, inform+exit.
+            ctypes.windll.user32.MessageBoxW(
+                0, "WinZapp: brak kont do uruchomienia (menedżer kont w budowie).",
+                "WinZapp", 0x40)
+            sys.exit(0)
+        elif _mode == "first_run":
+            _acc = _registry.add("default", state="pending")
+            _account_id = _acc["id"]
+            _resume_pending = True
+        elif _mode == "autostart_boot":
+            # Boot launcher: open foreground here, spawn the rest in background.
+            from account_launcher import build_launch_command
+            _account_id = _startup["foreground"]
+            for _bg_id in _startup.get("background", []):
+                try:
+                    subprocess.Popen(build_launch_command(
+                        sys.argv[0], sys.executable, _bg_id,
+                        getattr(sys, "frozen", False),
+                        startup_source="autostart", background=True))
+                except Exception:
+                    logging.exception("[autostart-boot] failed to spawn %s", _bg_id)
+            startup_source = "autostart"
+            _resume_pending = (_registry.get(_account_id) or {}).get("state") == "pending"
+        else:  # "account"
+            _account_id = _startup["account_id"]
+            _resume_pending = _startup.get("resume_pending", False)
+
+        # 3) Bind this process to its account BEFORE mutex/AppUserModelID/window.
+        app_paths.set_active_account(_account_id)
+        _account = _registry.get(_account_id) or {}
+        _account_name = _account.get("name", "WinZapp")
+
+        # Per-account AUMID so Windows groups toasts per account (GPT r4 #8).
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                f"WinZapp.{_account_id}")
+        except Exception:
+            pass
+
+        from autostart import acquire_single_instance_mutex
+        first_instance = acquire_single_instance_mutex()  # keyed on per-account data_path()
         if not first_instance:
-            # Deliberately BEFORE setup_logging(): the log file is truncated
-            # on open so it only ever holds the current run, which means a
-            # second launch must not touch it — the instance that owns it is
-            # still running and writing to it.
+            # Another process already runs THIS account: ask it to come to the
+            # foreground via account-scoped IPC (not a title match), then exit.
             if not background:
-                # A normal launch while WinZapp is already running in the background:
-                # bring the existing window to the foreground and exit.
-                activate_existing_window()
-            # If --background and already running: nothing to do — exit silently.
+                try:
+                    import ipc
+                    ipc.request_activate(gd, _account_id, source=startup_source)
+                except Exception:
+                    pass
             sys.exit(0)
 
         setup_logging()
-        logging.info("Instance lock acquired.")
+        logging.info("Instance lock acquired for account %s (%s).", _account_id, _account_name)
         logging.info("Creating wx.App...")
         app = wx.App()
-        frame = MainWindow()
+        frame = MainWindow(account_id=_account_id, account_name=_account_name,
+                           startup_source=startup_source, resume_pending=_resume_pending,
+                           registry=_registry, global_dir=gd)
+    except SystemExit:
+        raise
     except Exception:
         tb = format_exc()
         try:
