@@ -69,11 +69,16 @@ def _load_env() -> dict:
 
 def _run(cmd: list, cwd: str = None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
+    cmd_args = [str(c) for c in cmd]
     if sys.platform == "win32":
-        cmd_str = subprocess.list2cmdline([str(c) for c in cmd])
-        result = subprocess.run(cmd_str, cwd=cwd, shell=True)
+        first = cmd_args[0].lower()
+        if first.endswith(".cmd") or first.endswith(".bat") or first in ("npm", "npx", "yarn"):
+            cmd_input = subprocess.list2cmdline(cmd_args)
+            result = subprocess.run(cmd_input, cwd=cwd, shell=True)
+        else:
+            result = subprocess.run(cmd_args, cwd=cwd)
     else:
-        result = subprocess.run(cmd, cwd=cwd)
+        result = subprocess.run(cmd_args, cwd=cwd)
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
