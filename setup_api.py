@@ -282,7 +282,12 @@ def main():
             win_git_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
             win_git_bin = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "bin"))
             os.environ["PATH"] = f"{win_node_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
-            npm_bin = "npm.cmd"
+            
+            full_npm_cmd = os.path.join(win_node_dir, "npm.cmd")
+            if os.path.isfile(full_npm_cmd):
+                npm_bin = full_npm_cmd
+            else:
+                npm_bin = "npm.cmd"
         else:
             npm_bin = "npm"
 
