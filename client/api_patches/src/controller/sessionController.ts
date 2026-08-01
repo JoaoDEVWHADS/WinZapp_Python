@@ -531,20 +531,35 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
+    // Ensure client browser context is alive
+    if (client.page && client.page.isClosed()) {
+      req.logger.warn(`Browser page is closed for session when downloading media ${messageId}`);
+      return res.status(503).json({
+        status: 'error',
+        message: 'Browser session is closed or re-connecting',
+      });
+    }
+
     // Ensure it contains media properties or has mimetype
     const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
     if (!mediaUrl) {
-      if (typeof (client as any).downloadMedia === 'function') {
-        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
+      if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
+        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia with 5s timeout...`);
         try {
           let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+          const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
+            req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
+            return null;
+          }).finally(() => {
             if (timer) clearTimeout(timer);
           });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
+          const timeoutPromise = new Promise<null>((resolve) => {
+            timer = setTimeout(() => {
+              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              resolve(null);
+            }, 5000);
           });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
+          let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
             let mimetype = message.mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
@@ -576,19 +591,21 @@ export async function getMediaByMessage(req: Request, res: Response) {
       
       // Attempt browser-side recovery: fetch the message fresh from WhatsApp Web to get updated CDN URLs
       let freshMessage: any = null;
-      try {
-        freshMessage = await client.getMessageById(messageId);
-      } catch (err) {}
+      if (client.page && !client.page.isClosed()) {
+        try {
+          freshMessage = await client.getMessageById(messageId);
+        } catch (err) {}
 
-      if (!freshMessage && messageId) {
-        const parts = messageId.split('_');
-        if (parts.length >= 2) {
-          const chatId = parts[1];
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
-            try {
-              await client.loadEarlierMessages(chatId);
-              freshMessage = await client.getMessageById(messageId);
-            } catch (err) {}
+        if (!freshMessage && messageId) {
+          const parts = messageId.split('_');
+          if (parts.length >= 2) {
+            const chatId = parts[1];
+            if (chatId && typeof client.loadEarlierMessages === 'function') {
+              try {
+                await client.loadEarlierMessages(chatId);
+                freshMessage = await client.getMessageById(messageId);
+              } catch (err) {}
+            }
           }
         }
       }
@@ -607,16 +624,22 @@ export async function getMediaByMessage(req: Request, res: Response) {
       }
 
       // Final fallback to WPPConnect's downloadMedia
-      if (typeof (client as any).downloadMedia === 'function') {
+      if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
         try {
           let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+          const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
+            req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
+            return null;
+          }).finally(() => {
             if (timer) clearTimeout(timer);
           });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
+          const timeoutPromise = new Promise<null>((resolve) => {
+            timer = setTimeout(() => {
+              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              resolve(null);
+            }, 5000);
           });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
+          let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
             let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
