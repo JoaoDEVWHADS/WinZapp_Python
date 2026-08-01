@@ -84,8 +84,7 @@ def _run(cmd: list, cwd: str = None, check: bool = True):
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).", flush=True)
         if check:
-            sys.exit(result.returncode)
-        raise subprocess.CalledProcessError(result.returncode, cmd)
+            raise subprocess.CalledProcessError(result.returncode, cmd)
 
 
 def ensure_portable_git():
