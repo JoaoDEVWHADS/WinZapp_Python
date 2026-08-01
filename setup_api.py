@@ -74,12 +74,16 @@ def _run(cmd: list, cwd: str = None):
         first = cmd_args[0].lower()
         if first.endswith(".cmd") or first.endswith(".bat") or first in ("npm", "npx", "yarn"):
             cmd_input = subprocess.list2cmdline(cmd_args)
-            result = subprocess.run(cmd_input, cwd=cwd, shell=True)
+            result = subprocess.run(cmd_input, cwd=cwd, shell=True, capture_output=True, text=True)
         else:
-            result = subprocess.run(cmd_args, cwd=cwd)
+            result = subprocess.run(cmd_args, cwd=cwd, capture_output=True, text=True)
     else:
-        result = subprocess.run(cmd_args, cwd=cwd)
+        result = subprocess.run(cmd_args, cwd=cwd, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout)
     if result.returncode != 0:
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
 
@@ -292,9 +296,10 @@ def main():
             else:
                 npm_bin = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
 
-            win_git = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
+            win_git_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
+            win_git_bin = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "bin"))
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
-            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{win_git_cmd};{win_git_bin};{win_node_dir};" + os.environ.get("PATH", "")
 
         # Run npm install
         print("[INFO] Running npm install...")
