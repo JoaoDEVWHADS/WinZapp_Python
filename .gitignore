@@ -28,6 +28,8 @@ client/logs/
 !/client/api/package.json
 !/client/api/config.json
 !/client/api/decrypt.js
+!/client/api/tsconfig.json
+!/client/api/babel.config.js
 
 
 # Custom patches on top of upstream wppconnect-server — setup_api.py stashes
