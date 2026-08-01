@@ -106,7 +106,6 @@ API_EXCLUDE_DIRS  = {
     "wppconnect_tokens", "userDataDir", ".git", "__pycache__",
     ".github", ".husky", ".vscode", "src", "log", "tokens", "uploads",
     "WhatsAppImages", "tests", "coverage",
-    ".cache",
 }
 API_EXCLUDE_FILES = {
     ".gitignore", "README-SETUP.md", ".babelrc", ".eslintignore", ".eslintrc.js",
