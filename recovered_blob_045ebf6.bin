@@ -1,0 +1,9 @@
+/.env
+/dist
+/node_modules
+/swagger-docs
+/*.png
+/log
+/WhatsAppImages
+/upload
+/tokens
