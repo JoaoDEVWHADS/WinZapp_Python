@@ -792,6 +792,16 @@ class MainWindow(wx.Frame):
                 # websocket" block below for why this used to cause the
                 # pairing session to crash.
                 self._just_paired = True
+                # Multi-account: pairing succeeded → promote this account from
+                # pending to paired in the registry, so it appears in the
+                # switcher/autostart (plan Zad 3.2/GPT r7 #1). last_foreground is
+                # set later, only after the window is ready and for source=user.
+                if getattr(self, "account_id", None) and getattr(self, "registry", None):
+                    try:
+                        self.registry.set_state(self.account_id, "paired")
+                        self.resume_pending = False
+                    except Exception:
+                        logging.exception("[accounts] pending→paired transition failed")
 
         logging.info("MainWindow: Retrieving token...")
         self.retrieve_token()
@@ -888,6 +898,15 @@ class MainWindow(wx.Frame):
                         self.connect.show_connection_dial()
                     wx.CallAfter(_gui_failed)
                 self._just_paired = True
+                # Multi-account: re-pairing after a logout also promotes the
+                # account back to paired if it had fallen to pending (Zad 3.2).
+                if getattr(self, "account_id", None) and getattr(self, "registry", None):
+                    try:
+                        acc = self.registry.get(self.account_id)
+                        if acc and acc.get("state") == "pending":
+                            self.registry.set_state(self.account_id, "paired")
+                    except Exception:
+                        logging.exception("[accounts] re-pair pending→paired failed")
 
         threading.Thread(target=_connect_bg, daemon=True).start()
         
