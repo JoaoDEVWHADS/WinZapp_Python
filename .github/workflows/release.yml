@@ -191,7 +191,9 @@ jobs:
 
           # Pré-instalar o navegador Chrome do Puppeteer no cache local da API
           $npxCli = "../../client/node/node_modules/npm/bin/npx-cli.js"
-          $env:PUPPETEER_CACHE_DIR = "$(Resolve-Path .cache/puppeteer)"
+          $cacheDir = Join-Path (Get-Location) ".cache\puppeteer"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+          $env:PUPPETEER_CACHE_DIR = $cacheDir
           &$nodeExe $npxCli puppeteer browsers install chrome
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
