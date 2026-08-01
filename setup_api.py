@@ -273,9 +273,9 @@ def main():
         node_bin = "node"
         npm_bin = "npm"
         if is_windows:
-            win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
-            win_npm_cli = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
-            win_npm_cmd = os.path.join(ROOT_DIR, "client", "node", "npm.cmd")
+            win_node = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node.exe"))
+            win_npm_cli = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js"))
+            win_npm_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "npm.cmd"))
             if os.path.isfile(win_node):
                 node_bin = win_node
                 if os.path.isfile(win_npm_cli):
@@ -287,8 +287,8 @@ def main():
             else:
                 npm_bin = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
 
-            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
-            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
+            win_git = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
+            win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
             os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
 
         # Run npm install
