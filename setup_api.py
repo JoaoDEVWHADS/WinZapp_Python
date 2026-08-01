@@ -286,11 +286,14 @@ def main():
     try:
         node_cmd = "node"
         npm_args = ["npm"]
+        os.environ["GIT_TERMINAL_PROMPT"] = "0"
         if is_windows:
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
             win_git_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
-            win_git_bin = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "bin"))
-            os.environ["PATH"] = f"{win_node_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
+            win_git_bin = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "mingw64", "bin"))
+            sys_git = shutil.which("git")
+            sys_git_dir = os.path.dirname(sys_git) if sys_git else ""
+            os.environ["PATH"] = f"{win_node_dir};{sys_git_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
             
             win_node_exe = os.path.join(win_node_dir, "node.exe")
             win_npm_cli = os.path.join(win_node_dir, "node_modules", "npm", "bin", "npm-cli.js")
