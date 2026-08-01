@@ -321,7 +321,7 @@ def main():
         print("[INFO] Downloading Chromium (Puppeteer)...", flush=True)
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
-            _run(["node", install_js], cwd=CLIENT_API_DIR)
+            _run([node_cmd, install_js], cwd=CLIENT_API_DIR)
         else:
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...", flush=True)
             _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR)
@@ -338,10 +338,16 @@ def main():
         os.makedirs(dist_dir, exist_ok=True)
 
         babel_cli_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
+        compiled = False
         if os.path.isfile(babel_cli_js):
-            _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
-        else:
-            print("[INFO] @babel/cli/bin/babel.js not found — running npm run build...", flush=True)
+            try:
+                _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
+                compiled = True
+            except Exception as e:
+                print(f"[WARNING] Direct node babel execution failed: {e}", flush=True)
+
+        if not compiled:
+            print("[INFO] Running npm run build...", flush=True)
             _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
 
         # Re-apply any patches inside dist/ (such as dist/controller/sessionController.js) after Babel build
