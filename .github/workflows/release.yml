@@ -26,7 +26,6 @@ jobs:
       UV_THREADPOOL_SIZE: "64"
       MAKEFLAGS: "-j4"
       PYTHONOPTIMIZE: "1"
-      PIP_NO_CACHE_DIR: "0"
 
     steps:
       - name: Checkout Código-Fonte
