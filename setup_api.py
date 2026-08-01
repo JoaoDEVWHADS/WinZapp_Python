@@ -347,7 +347,7 @@ def main():
         if os.path.isfile(babel_cli_js):
             try:
                 _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
-                compiled = True
+                compiled = os.path.isfile(os.path.join(dist_dir, "index.js"))
             except Exception as e:
                 print(f"[WARNING] Direct node babel execution failed: {e}", flush=True)
 

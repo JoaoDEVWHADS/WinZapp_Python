@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build:types": "tsc --skipLibCheck || exit 0",
-    "build:js": "rimraf dist && babel src --out-dir dist --extensions \".ts,.tsx\" --source-maps inline --copy-files",
+    "build:js": "babel src --out-dir dist --extensions \".ts,.tsx\" --source-maps inline --copy-files",
     "build": "npm run build:js",
     "changelog:last": "conventional-changelog -p angular -r 2",
     "changelog:preview": "conventional-changelog -p angular -u",
