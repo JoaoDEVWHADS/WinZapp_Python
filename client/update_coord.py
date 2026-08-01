@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import time
 import uuid
 from typing import Callable, Optional
@@ -84,6 +85,34 @@ def _default_proc_create_time(pid: int):
             return _CT_UNKNOWN  # exists-but-unknown / access denied -> live
     except ImportError:
         pass
+    # No psutil. On Windows, os.kill(pid, 0) is NOT a liveness probe — it calls
+    # TerminateProcess and would KILL the process (including our own). Use
+    # OpenProcess via ctypes instead (GPT-review class bug found on real Win run).
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            # Could be "no such process" (dead) or access-denied (alive-but-ours-not).
+            err = ctypes.get_last_error()
+            ERROR_INVALID_PARAMETER = 87  # pid doesn't exist
+            if err == ERROR_INVALID_PARAMETER:
+                return None
+            return _CT_UNKNOWN  # access denied etc. -> fail closed (treat as live)
+        # Process handle opened: it's alive. Check whether it already exited.
+        try:
+            STILL_ACTIVE = 259
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                if code.value != STILL_ACTIVE:
+                    return None  # already exited
+            return _CT_UNKNOWN  # alive, unknown create_time
+        finally:
+            kernel32.CloseHandle(h)
     try:
         os.kill(pid, 0)
         return _CT_UNKNOWN  # alive, unknown create_time

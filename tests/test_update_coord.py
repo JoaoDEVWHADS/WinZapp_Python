@@ -18,6 +18,33 @@ def _gd(tmp_path):
 ALIVE = lambda pid, ct: True
 
 
+def test_default_proc_create_time_never_uses_os_kill_on_windows(monkeypatch):
+    """REGRESSION (real Windows run): on win32, os.kill(pid, 0) calls
+    TerminateProcess and would kill the process itself. The fallback must use
+    OpenProcess, never os.kill, when psutil is absent and platform is win32."""
+    import sys as _sys
+    # Force the no-psutil path.
+    monkeypatch.setitem(__import__("sys").modules, "psutil", None)
+    called = {"os_kill": False}
+    real_os_kill = os.kill
+
+    def _guard(*a, **k):
+        called["os_kill"] = True
+        return real_os_kill(*a, **k)
+
+    monkeypatch.setattr(os, "kill", _guard)
+    monkeypatch.setattr(_sys, "platform", "win32", raising=False)
+    # ctypes.WinDLL doesn't exist off-Windows; only assert the branch avoids
+    # os.kill. On a real win32 host this exercises OpenProcess for real.
+    try:
+        uc._default_proc_create_time(os.getpid())
+    except (AttributeError, OSError, FileNotFoundError):
+        # WinDLL/kernel32 unavailable on this non-Windows CI host — acceptable;
+        # the point is that os.kill was NOT the path taken.
+        pass
+    assert called["os_kill"] is False, "os.kill must never run on win32 (kills self)"
+
+
 def test_runtime_lease_create_and_list(tmp_path):
     gd = _gd(tmp_path)
     alive = lambda pid, ct: pid == 1111 and ct == 5.0
