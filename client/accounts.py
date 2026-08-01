@@ -65,6 +65,11 @@ class AccountRegistry:
 
     # ── recovery flag ────────────────────────────────────────────────────
     def is_recovery_mode(self) -> bool:
+        # Re-check under the lock (GPT r3 #6): another process may have entered
+        # recovery after this instance was constructed, so a cached flag would
+        # be stale. _read_locked() refreshes self._recovery from the marker.
+        with self._lock_factory(self.global_dir):
+            self._read_locked()
         return self._recovery
 
     # ── low-level read — MUST be called while holding registry_lock ───────
@@ -346,6 +351,11 @@ class AccountRegistry:
         def _fn(data):
             changed = False
             ids = {a["id"] for a in data["accounts"]}
+            # The target account must exist BEFORE we touch anything (GPT r3 #5):
+            # otherwise e.g. archiving an already-removed account with
+            # last_foreground=None would wrongly clear the CURRENT foreground.
+            if account_id not in ids:
+                raise KeyError(f"account {account_id} not found")
             # last_foreground must reference an existing account (or None).
             if new_lf is not lf_sentinel and new_lf is not None:
                 if not is_valid_account_id(new_lf) or new_lf not in ids:

@@ -2,30 +2,33 @@
 Updater coordination for WinZapp multi-account (client/update_coord.py)
 =======================================================================
 
-Closes the updater TOCTOU (plan Zad. 2.-1, GPT r5 #1 / r6 #1). Sits UNDER the
-dedicated ``updater_lock`` (never the registry lock — see coord_locks) so the
-updater's state file can't be corrupted by a registry write racing on a
-different lock.
+Closes the updater TOCTOU (plan Zad. 2.-1). Everything runs UNDER the dedicated
+``updater_lock`` (never the registry lock).
 
 Two coordinated pieces:
 
-  * runtime-lease — a per-process marker file ``global/runtime/<pid>_<ct>``.
-    Each WinZapp process creates one VERY EARLY in bootstrap (before migration),
-    under ``updater_lock``. The updater refuses to install while any *other*
-    live runtime-lease exists, so files are never swapped under a running
-    account process. Leases are keyed by (pid, process_create_time) so a reused
-    PID from a long-dead process is never mistaken for a live holder.
+  * runtime-lease — a per-process marker file ``global/runtime/<pid>_<ct>_<id>``.
+    Created VERY EARLY in bootstrap via ``try_create_runtime_lease`` (refuses if
+    an update is in progress). The updater refuses to install while any *other*
+    live runtime-lease exists. Leases key on (pid, process_create_time) so a
+    reused PID from a dead process is never mistaken for a live holder.
 
-  * update_state.json — ``{update_in_progress, owner_pid, owner_create_time}``
-    in ``global/`` guarded ONLY by ``updater_lock``. Bootstrap consults it (also
-    under the lock) and refuses to start while an install is in progress, so a
-    new process can't spin up mid file-swap. A crashed updater (dead owner) is
-    auto-recovered: the flag reads as not-in-progress.
+  * update_state.json — ``{update_in_progress, owner_pid, owner_create_time,
+    owner_token}`` guarded ONLY by ``updater_lock``. ``try_begin_update`` claims
+    it atomically (refusing a live owner or any live account lease) and returns
+    an owner-token; only the matching token may ``end_update``. Bootstrap
+    consults it and refuses to start mid-install. A crashed owner (dead pid) is
+    auto-recovered; an unreadable/invalid state file fails CLOSED (blocks).
+
+Hardening (GPT code review r2/r3): all writes are atomic (tmp+fsync+os.replace);
+all persisted ints/floats are strictly validated so a crafted value can't raise
+mid-scan or be mis-swept; owner_token (uuid4) identifies a specific install run.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import uuid
@@ -35,15 +38,20 @@ from coord_locks import updater_lock
 
 _RUNTIME_DIR = "runtime"
 _STATE_FILE = "update_state.json"
+_CORRUPT = object()
+
+
+# ── strict scalar validation (fail-closed on anything odd) ───────────────────
+def _valid_pid(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def _valid_ct(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 # ── process liveness (pid + create_time, guards against PID reuse) ───────────
 def _default_proc_create_time(pid: int) -> Optional[float]:
-    """Return the process creation time for pid, or None if it doesn't exist.
-
-    Uses psutil when available; otherwise falls back to a best-effort check
-    (existence only) — on the real Windows target psutil ships with the app.
-    """
     try:
         import psutil  # type: ignore
 
@@ -51,10 +59,9 @@ def _default_proc_create_time(pid: int) -> Optional[float]:
             return None
         return psutil.Process(pid).create_time()
     except Exception:
-        # Fallback: can't verify create_time -> report existence via os.kill(0).
         try:
             os.kill(pid, 0)
-            return 0.0  # sentinel "alive, unknown create_time"
+            return 0.0  # sentinel: alive, unknown create_time
         except (OSError, ProcessLookupError):
             return None
         except Exception:
@@ -64,18 +71,23 @@ def _default_proc_create_time(pid: int) -> Optional[float]:
 def lease_alive(pid: int, create_time: float,
                 proc_create_time: Callable[[int], Optional[float]] = _default_proc_create_time) -> bool:
     """True iff a process with this pid AND matching create_time is alive.
-
-    The create_time match defends against PID reuse: a new process that happens
-    to get the same PID as a dead lease holder has a different create_time.
-    The 0.0 sentinel (fallback path, unknown create_time) matches leases whose
-    create_time was also recorded as 0.0.
-    """
+    The 0.0 sentinel (unknown create_time) matches leases recorded as 0.0."""
     ct = proc_create_time(pid)
     if ct is None:
         return False
     if ct == 0.0 or create_time == 0.0:
-        return True  # fallback path: existence-only match
+        return True
     return abs(ct - create_time) < 1e-6
+
+
+# ── atomic json write ────────────────────────────────────────────────────────
+def _atomic_write(path: str, payload: dict) -> None:
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 # ── runtime leases ───────────────────────────────────────────────────────────
@@ -85,52 +97,35 @@ def _runtime_dir(global_dir: str) -> str:
     return d
 
 
-def create_runtime_lease(global_dir: str, pid: Optional[int] = None,
-                         create_time: Optional[float] = None) -> str:
-    """Create a runtime-lease for this process. Returns the lease filename.
-
-    Held under updater_lock so it's atomic w.r.t. the updater's live-lease scan.
-    Prefer ``try_create_runtime_lease`` in bootstrap: it refuses to create a
-    lease while an update is in progress, closing the start-vs-install race.
-    """
+def _resolve_identity(pid, create_time):
     if pid is None:
         pid = os.getpid()
     if create_time is None:
         ct = _default_proc_create_time(pid)
         create_time = ct if ct is not None else 0.0
-    with updater_lock(global_dir):
-        d = _runtime_dir(global_dir)
-        lease_id = uuid.uuid4().hex[:8]
-        fname = f"{pid}_{create_time}_{lease_id}"
-        path = os.path.join(d, fname)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"pid": pid, "create_time": create_time,
-                       "lease_id": lease_id, "started_at": int(time.time())}, f)
-        return fname
+    return pid, create_time
+
+
+def _write_lease(d: str, pid: int, create_time: float) -> str:
+    lease_id = uuid.uuid4().hex[:8]
+    fname = f"{pid}_{create_time}_{lease_id}"
+    _atomic_write(os.path.join(d, fname),
+                  {"pid": pid, "create_time": create_time,
+                   "lease_id": lease_id, "started_at": int(time.time())})
+    return fname
 
 
 def try_create_runtime_lease(global_dir: str, pid: Optional[int] = None,
                              create_time: Optional[float] = None,
                              is_alive: Callable[[int, float], bool] = lease_alive):
-    """Atomically: if no update is in progress, create + return a lease name;
-    else return None. The whole check+write runs under ONE updater_lock so a
-    process can't slip a lease in after the updater scanned but before it set
-    the in-progress flag (GPT r2-code #1)."""
-    if pid is None:
-        pid = os.getpid()
-    if create_time is None:
-        ct = _default_proc_create_time(pid)
-        create_time = ct if ct is not None else 0.0
+    """Atomically create a runtime-lease unless an update is in progress.
+    Returns the lease filename, or None if blocked. Whole check+write under one
+    updater_lock (GPT r2 #1)."""
+    pid, create_time = _resolve_identity(pid, create_time)
     with updater_lock(global_dir):
         if _is_update_in_progress_locked(global_dir, is_alive):
             return None
-        d = _runtime_dir(global_dir)
-        lease_id = uuid.uuid4().hex[:8]
-        fname = f"{pid}_{create_time}_{lease_id}"
-        with open(os.path.join(d, fname), "w", encoding="utf-8") as f:
-            json.dump({"pid": pid, "create_time": create_time,
-                       "lease_id": lease_id, "started_at": int(time.time())}, f)
-        return fname
+        return _write_lease(_runtime_dir(global_dir), pid, create_time)
 
 
 def release_runtime_lease(global_dir: str, lease_name: str) -> None:
@@ -142,24 +137,30 @@ def release_runtime_lease(global_dir: str, lease_name: str) -> None:
 
 
 def _live_leases_locked(global_dir: str, is_alive: Callable[[int, float], bool]) -> list[dict]:
-    """Scan leases. Caller MUST hold updater_lock. A lease file that is
-    unreadable or missing pid/create_time is treated as a LIVE unknown holder
-    (fail-closed, GPT r2-code #5) — it blocks updates rather than being swept,
-    because we cannot prove the owning process is dead."""
+    """Scan leases; caller holds updater_lock. Unreadable OR type-invalid lease
+    (can't prove dead) -> treated as a LIVE unknown holder, blocking updates
+    (fail-closed, GPT r2 #5 / r3 #3). Leftover *.tmp files are ignored/removed."""
     d = _runtime_dir(global_dir)
     live: list[dict] = []
     for fname in os.listdir(d):
+        if fname.endswith(".tmp"):
+            try:
+                os.remove(os.path.join(d, fname))
+            except OSError:
+                pass
+            continue
         path = os.path.join(d, fname)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 lease = json.load(f)
-            pid = int(lease["pid"])
-            ct = float(lease["create_time"])
+            pid, ct = lease["pid"], lease["create_time"]
         except (OSError, ValueError, KeyError, TypeError):
-            # Corrupt/incomplete lease: cannot prove dead -> treat as live.
             live.append({"pid": None, "create_time": None, "_name": fname, "_corrupt": True})
             continue
-        if is_alive(pid, ct):
+        if not _valid_pid(pid) or not _valid_ct(ct):
+            live.append({"pid": None, "create_time": None, "_name": fname, "_corrupt": True})
+            continue
+        if is_alive(pid, float(ct)):
             lease["_name"] = fname
             live.append(lease)
         else:
@@ -171,7 +172,6 @@ def _live_leases_locked(global_dir: str, is_alive: Callable[[int, float], bool])
 
 
 def live_runtime_leases(global_dir: str, is_alive: Callable[[int, float], bool] = lease_alive) -> list[dict]:
-    """Return live leases; sweep away provably-dead ones."""
     with updater_lock(global_dir):
         return _live_leases_locked(global_dir, is_alive)
 
@@ -181,48 +181,46 @@ def _state_path(global_dir: str) -> str:
     return os.path.join(global_dir, _STATE_FILE)
 
 
-_CORRUPT_STATE = object()
-
-
 def _read_state(global_dir: str):
-    """Return the parsed state dict, or _CORRUPT_STATE if the file exists but is
-    unreadable/invalid (fail-closed handling by callers, GPT r2-code #5)."""
+    """Return the state dict, or _CORRUPT if the file exists but is unreadable
+    or fails strict validation (callers fail closed)."""
     path = _state_path(global_dir)
     if not os.path.isfile(path):
-        return {"update_in_progress": False, "owner_pid": None, "owner_create_time": None}
+        return {"update_in_progress": False, "owner_pid": None,
+                "owner_create_time": None, "owner_token": None}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict) or "update_in_progress" not in data:
-            return _CORRUPT_STATE
-        return data
     except (OSError, ValueError):
-        return _CORRUPT_STATE
+        return _CORRUPT
+    if not isinstance(data, dict) or not isinstance(data.get("update_in_progress"), bool):
+        return _CORRUPT
+    if data["update_in_progress"]:
+        # An in-progress record MUST carry a strictly-valid owner (GPT r3 #3).
+        if not _valid_pid(data.get("owner_pid")) or not _valid_ct(data.get("owner_create_time")):
+            return _CORRUPT
+    return data
 
 
 def _write_state(global_dir: str, state: dict) -> None:
-    tmp = _state_path(global_dir) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, _state_path(global_dir))
+    _atomic_write(_state_path(global_dir), state)
+
+
+def _clear_state(global_dir: str) -> None:
+    _write_state(global_dir, {"update_in_progress": False, "owner_pid": None,
+                              "owner_create_time": None, "owner_token": None})
 
 
 def _is_update_in_progress_locked(global_dir: str,
                                   is_alive: Callable[[int, float], bool] = lease_alive) -> bool:
     """Caller holds updater_lock. Corrupt state -> True (fail-closed)."""
     state = _read_state(global_dir)
-    if state is _CORRUPT_STATE:
-        return True  # unknown -> block, don't fail-open
+    if state is _CORRUPT:
+        return True
     if not state.get("update_in_progress"):
         return False
-    pid = state.get("owner_pid")
-    ct = state.get("owner_create_time")
-    if pid is None or not is_alive(int(pid), float(ct if ct is not None else 0.0)):
-        # dead owner -> recover the stale flag
-        _write_state(global_dir, {"update_in_progress": False,
-                                  "owner_pid": None, "owner_create_time": None})
+    if not is_alive(int(state["owner_pid"]), float(state["owner_create_time"])):
+        _clear_state(global_dir)  # dead owner -> recover
         return False
     return True
 
@@ -231,50 +229,35 @@ def try_begin_update(global_dir: str, pid: Optional[int] = None,
                      create_time: Optional[float] = None,
                      is_alive: Callable[[int, float], bool] = lease_alive):
     """Atomically claim the update slot. Returns an owner-token dict on success,
-    or None if another live updater owns it OR any account process is still
-    running. All check+write under ONE updater_lock (GPT r2-code #1,#2)."""
-    if pid is None:
-        pid = os.getpid()
-    if create_time is None:
-        ct = _default_proc_create_time(pid)
-        create_time = ct if ct is not None else 0.0
+    or None if a live updater owns it OR any account lease is live. The token
+    carries a random owner_token so only THIS install run can end it
+    (GPT r2 #2 / r3 #2). All check+write under one updater_lock."""
+    pid, create_time = _resolve_identity(pid, create_time)
     with updater_lock(global_dir):
         if _is_update_in_progress_locked(global_dir, is_alive):
-            return None  # another live updater owns the slot
+            return None
         if _live_leases_locked(global_dir, is_alive):
-            return None  # accounts still running -> refuse install
-        token = {"owner_pid": pid, "owner_create_time": create_time}
+            return None
+        token = {"owner_pid": pid, "owner_create_time": create_time,
+                 "owner_token": uuid.uuid4().hex}
         _write_state(global_dir, {"update_in_progress": True, **token})
         return token
 
 
-def begin_update(global_dir: str, pid: Optional[int] = None,
-                 create_time: Optional[float] = None) -> None:
-    """Unconditional begin (test/back-compat). Prefer try_begin_update."""
-    if pid is None:
-        pid = os.getpid()
-    if create_time is None:
-        ct = _default_proc_create_time(pid)
-        create_time = ct if ct is not None else 0.0
-    with updater_lock(global_dir):
-        _write_state(global_dir, {"update_in_progress": True,
-                                  "owner_pid": pid, "owner_create_time": create_time})
-
-
-def end_update(global_dir: str, token: Optional[dict] = None) -> bool:
-    """Clear the update slot. If a token is given, only the matching owner may
-    clear it (GPT r2-code #2), so a stale updater can't wipe a newer one's
-    state. Returns True if cleared."""
+def end_update(global_dir: str, token: dict) -> bool:
+    """Clear the update slot. ``token`` is REQUIRED (GPT r3 #1): only the owner
+    that holds the matching owner_token may clear it, so a stale updater (even
+    the same PID on a later run) can't wipe a newer one's state. Returns True if
+    cleared."""
+    if not isinstance(token, dict) or not token.get("owner_token"):
+        raise ValueError("end_update requires the owner-token from try_begin_update")
     with updater_lock(global_dir):
         state = _read_state(global_dir)
-        if state is _CORRUPT_STATE:
+        if state is _CORRUPT:
             state = {}
-        if token is not None:
-            if (state.get("owner_pid") != token.get("owner_pid")
-                    or state.get("owner_create_time") != token.get("owner_create_time")):
-                return False
-        _write_state(global_dir, {"update_in_progress": False,
-                                  "owner_pid": None, "owner_create_time": None})
+        if state.get("owner_token") != token["owner_token"]:
+            return False
+        _clear_state(global_dir)
         return True
 
 

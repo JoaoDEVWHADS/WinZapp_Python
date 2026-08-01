@@ -160,6 +160,31 @@ def test_recovery_marker_persists_across_instances(tmp_path):
         reg3.add("B")
 
 
+def test_is_recovery_mode_refreshes_under_lock(tmp_path):
+    """An instance built BEFORE corruption must still report recovery once
+    another 'process' has entered it (GPT r3 #6)."""
+    reg_early = _reg(tmp_path)   # constructed while healthy
+    reg_early.add("A")
+    assert reg_early.is_recovery_mode() is False
+    # Another process corrupts + enters recovery (drops the marker):
+    open(reg_early._path, "w").write("{ broken")
+    _reg(tmp_path)
+    # The early instance must now see recovery on re-check (not a stale flag).
+    assert reg_early.is_recovery_mode() is True
+
+
+def test_update_fields_unknown_account_raises_and_keeps_lf(tmp_path):
+    """Archiving an already-removed account must NOT clear the current
+    last_foreground (GPT r3 #5)."""
+    reg = _reg(tmp_path)
+    a = reg.add("A")
+    reg.set_last_foreground(a["id"])
+    ghost = "e" * 32
+    with pytest.raises(KeyError):
+        reg.update_fields(ghost, state="archived", autostart=False, last_foreground=None)
+    assert reg.last_foreground() == a["id"]  # unchanged
+
+
 def test_corrupt_json_read_only_recovery(tmp_path):
     reg = _reg(tmp_path)
     reg.add("A")
