@@ -285,6 +285,8 @@ def main():
     # 1. Automating Node dependency installation and build
     print("[INFO] Automating Node.js dependency installation and compilation...")
     os.environ["NODE_ENV"] = "development"
+    os.environ["NODE_OPTIONS"] = "--max-old-space-size=8192"
+    os.environ["UV_THREADPOOL_SIZE"] = "64"
     try:
         if is_windows:
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
