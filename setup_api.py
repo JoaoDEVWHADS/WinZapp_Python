@@ -304,13 +304,13 @@ def main():
 
         # Run npm install
         print("[INFO] Running npm install...", flush=True)
-        _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev"], cwd=CLIENT_API_DIR)
+        _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev"], cwd=CLIENT_API_DIR, check=False)
 
         # Ensure Babel dependencies are explicitly present (in case node_modules was restored from a partial cache)
         babel_dir = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli")
         if not os.path.isdir(babel_dir):
             print("[INFO] @babel/cli missing in node_modules. Installing Babel packages...", flush=True)
-            _run(npm_args + ["install", "@babel/cli@^7.28.6", "@babel/core@^7.29.0", "@babel/preset-env@^7.29.2", "@babel/preset-typescript@^7.28.5", "--no-audit", "--no-fund", "--legacy-peer-deps", "--save-dev"], cwd=CLIENT_API_DIR)
+            _run(npm_args + ["install", "@babel/cli@^7.28.6", "@babel/core@^7.29.0", "@babel/preset-env@^7.29.2", "@babel/preset-typescript@^7.28.5", "--no-audit", "--no-fund", "--legacy-peer-deps", "--save-dev"], cwd=CLIENT_API_DIR, check=False)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
