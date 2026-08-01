@@ -119,7 +119,7 @@ API_EXCLUDE_FILES = {
     "Dockerfile", "docker-compose.yml", "requests.http",
     "swagger-backup.json",
 }
-API_EXCLUDE_SUB_DIRS = {"tests", "types"}
+API_EXCLUDE_SUB_DIRS = {"tests"}
 
 # WinZapp's own patches on top of upstream wppconnect-server (same list as
 # setup_api.py's custom_files). API_EXCLUDE_DIRS skips all of src/ wholesale
