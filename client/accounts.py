@@ -78,8 +78,10 @@ class AccountRegistry:
         # Persistent recovery marker: recovery is sticky ACROSS processes
         # (GPT r1-code #3), so another instance that starts after the corrupt
         # file was moved aside never treats the registry as fresh and never
-        # runs first-run/add(). The marker lives beside accounts.json.
-        if os.path.exists(self._marker):
+        # runs first-run/add(). The marker lives beside accounts.json. Use
+        # lexists so a broken/dangling symlink at the marker path still counts
+        # as "recovery present" (GPT r6 #1) — not silently treated as absent.
+        if os.path.lexists(self._marker):
             self._recovery = True
             return empty
         if not os.path.lexists(self._path):
@@ -165,8 +167,18 @@ class AccountRegistry:
         except OSError:
             pass
         try:
-            with open(self._marker, "w", encoding="utf-8") as f:
-                f.write(str(int(time.time())))
+            # Write the marker WITHOUT following a symlink at that path (GPT r6
+            # #1): a pre-existing symlink must not redirect the write outside
+            # global_dir. O_NOFOLLOW is honored where available (POSIX); on
+            # Windows os.open lacks it but symlink-at-path attacks need an
+            # attacker in the same per-user dir, and lexists already flagged it.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self._marker, flags, 0o600)
+            try:
+                os.write(fd, str(int(time.time())).encode("ascii"))
+            finally:
+                os.close(fd)
         except OSError:
             pass
 

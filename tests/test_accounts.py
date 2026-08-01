@@ -247,3 +247,22 @@ def test_locked_writes_no_lost_update(tmp_path):
     # orders are unique 1..6
     orders = sorted(a["order"] for a in final.list())
     assert orders == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "symlink"), reason="needs symlink")
+def test_broken_symlink_marker_counts_as_recovery(tmp_path):
+    """A dangling symlink at the recovery-marker path must be treated as
+    recovery present, not silently absent (GPT r6 #1: lexists, not exists)."""
+    import os
+    gd = str(tmp_path / "global")
+    os.makedirs(gd, exist_ok=True)
+    marker = os.path.join(gd, "accounts.recovery")
+    try:
+        os.symlink(os.path.join(gd, "nonexistent-target"), marker)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not permitted on this host")
+    assert not os.path.exists(marker)   # dangling -> exists() is False
+    assert os.path.lexists(marker)      # ...but lexists() is True
+    reg = AccountRegistry(gd)
+    assert reg.is_recovery_mode() is True
+
