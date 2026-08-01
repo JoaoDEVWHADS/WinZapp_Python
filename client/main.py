@@ -7095,22 +7095,14 @@ class MainWindow(wx.Frame):
             is_group = jid.endswith("@g.us")
             resolved_name = ""
             msg_push = ""
-            # Resolve the contact name BEFORE deciding whether to drop the chat.
-            # This used to happen ~30 lines below the skip, so a chat whose name
-            # was perfectly resolvable through self.contacts was still judged
-            # "no identity" on the raw dict alone and dropped before the lookup
-            # ever ran.  On a real account that silently hid 218 of 539
-            # conversations — every individual chat that WhatsApp Web had not
-            # yet loaded messages for (list-chats returns `msgs: null`, so
-            # lastMessage is empty for all of them) and that had no unread
-            # count, even though all 263 had a matching contact record.
             if not is_group:
                 resolved_name = self._resolve_contact_name(chat)
 
             name_hint    = (chat.get("name") or chat.get("pushName") or resolved_name or
                             self._group_name_from_chat_dict(chat)).strip()
             has_identity = bool(name_hint and not name_hint.isdigit() and len(name_hint) > 1)
-            if not has_content and not has_identity:
+            # Skip chats that have no content (no messages, no unread, not pinned/cleared)
+            if not has_content:
                 continue
 
             def get_valid_name(val):
@@ -7135,7 +7127,7 @@ class MainWindow(wx.Frame):
                             chat["name"] = fetched
                             name = fetched
             else:
-                # Chat individual: resolved_name já foi calculado acima, antes
+                # Chat individual: resolved_name já foi calculated acima, antes
                 # do descarte — reaproveitado aqui em vez de resolver de novo.
                 chat_push = get_valid_name(chat.get("pushName", ""))
                 name = resolved_name or chat_push
@@ -7199,16 +7191,8 @@ class MainWindow(wx.Frame):
                 main_chats.append(chat)
                 main_names.append(name)
 
-        # Pinned chats float to the top; within each group sort by most-recent
-        # message timestamp descending (newest first), then alphabetically.
-        #
-        # Only counts is_countable_message() records — a system event (group
-        # join/leave, settings change, revoke, ...) stored in this chat's
-        # records must never push it back to the top of the list just
-        # because its timestamp is the newest one on file. chat["t"]/
-        # lastMessage are already never set from a non-countable message
-        # (see on_new_message()/on_historical_message()), but this also
-        # scans every raw record directly, so it needs the same filter.
+        # Pinned chats float to the top; within each group sort by pinned timestamp/order
+        # if available, then by most-recent message timestamp descending (newest first), then alphabetically.
         def _chat_last_ts(c):
             # Fallback to chat's own last activity timestamp (t)
             chat_ts = int(c.get("t", 0) or 0)
@@ -7231,13 +7215,6 @@ class MainWindow(wx.Frame):
                     records_copy = list(inner_wrapper.get("records") or [])
                     if records_copy:
                         for m in records_copy:
-                            # Only records the preview would show may move a chat
-                            # — see _counts_as_last_message(), which is stricter
-                            # than is_countable_message() and rejects non-dicts
-                            # itself. Counting silent bookkeeping here (a
-                            # groupNotification for someone joining) floated
-                            # week-old groups above live ones while they still
-                            # displayed their old preview.
                             if not self._counts_as_last_message(m):
                                 continue
                             t = int(m.get("timestamp", 0) or m.get("messageTimestamp", 0) or m.get("t", 0) or 0)
@@ -7251,8 +7228,16 @@ class MainWindow(wx.Frame):
         def _sort_key(pair):
             c, n = pair
             j   = c.get("remoteJid", "")
-            pin = 0 if j in pinned else 1
-            return (pin, -_chat_last_ts(c), n.lower())
+            is_pin = j in pinned
+            pin_group = 0 if is_pin else 1
+            pin_ts = 0
+            if is_pin:
+                raw_pin = c.get("pin") or c.get("pinTimestamp") or 0
+                if isinstance(raw_pin, (int, float)):
+                    pin_ts = int(raw_pin)
+                elif isinstance(raw_pin, str) and raw_pin.isdigit():
+                    pin_ts = int(raw_pin)
+            return (pin_group, -pin_ts, -_chat_last_ts(c), n.lower())
 
         pairs = sorted(zip(main_chats, main_names), key=_sort_key)
         main_chats = [c for c, _ in pairs]
