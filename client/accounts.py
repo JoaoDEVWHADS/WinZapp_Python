@@ -110,8 +110,11 @@ class AccountRegistry:
         if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
             return False
         schema = data.get("schema", _SCHEMA)
-        if not isinstance(schema, int) or schema > _SCHEMA:
-            return False  # newer schema: refuse to downgrade-overwrite it
+        # bool is an int subclass in Python, so exclude it explicitly (GPT r4 #4);
+        # also reject anything below our minimum supported schema.
+        if (not isinstance(schema, int) or isinstance(schema, bool)
+                or schema < 1 or schema > _SCHEMA):
+            return False
         ids, orders = set(), set()
         for a in data["accounts"]:
             if not isinstance(a, dict):

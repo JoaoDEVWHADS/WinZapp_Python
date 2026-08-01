@@ -309,3 +309,31 @@ def updater_lock(global_dir: str, timeout: float = 10.0) -> NamedLock:
         os.path.join(global_dir, "updater.lock"),
         timeout=timeout,
     )
+
+
+# ── fork safety (POSIX) ──────────────────────────────────────────────────────
+def _reset_locks_after_fork() -> None:
+    """Reset all inherited lock state in a forked child (GPT r4 #5).
+    A child inherits the parent's _LockState objects (RLock, depth, owner,
+    flock FD). If the parent forked while holding a lock, the child would either
+    look like a re-entrant owner or hold a phantom lock. We drop every inherited
+    flock FD WITHOUT LOCK_UN (releasing would unlock the parent's still-held
+    lock on the same open file description) and rebuild fresh per-name state.
+    """
+    with NamedLock._process_state_lock:
+        for st in NamedLock._process_state.values():
+            fd = st.flock_fd
+            if fd is not None:
+                try:
+                    os.close(fd)  # close only; do NOT fcntl.LOCK_UN
+                except OSError:
+                    pass
+            st.flock_fd = None
+            st.win_handle = None
+            st.depth = 0
+            st.owner_thread = None
+            st.rlock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_locks_after_fork)

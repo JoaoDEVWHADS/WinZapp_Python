@@ -185,6 +185,17 @@ def test_update_fields_unknown_account_raises_and_keeps_lf(tmp_path):
     assert reg.last_foreground() == a["id"]  # unchanged
 
 
+def test_schema_bool_is_corrupt(tmp_path):
+    """schema:true must not pass validation (bool is an int subclass) — GPT r4 #4."""
+    reg = _reg(tmp_path)
+    reg.add("A")
+    data = json.loads(open(reg._path).read())
+    data["schema"] = True
+    open(reg._path, "w").write(json.dumps(data))
+    reg2 = _reg(tmp_path)
+    assert reg2.is_recovery_mode() is True
+
+
 def test_corrupt_json_read_only_recovery(tmp_path):
     reg = _reg(tmp_path)
     reg.add("A")

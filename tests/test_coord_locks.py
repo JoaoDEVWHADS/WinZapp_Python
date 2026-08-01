@@ -133,3 +133,34 @@ def test_same_global_dir_same_name(tmp_path):
     """Same global dir must map to the same lock name (cross-process key)."""
     gd = str(tmp_path)
     assert registry_lock(gd).name == registry_lock(gd).name
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
+def test_fork_child_does_not_inherit_lock_ownership(tmp_path):
+    """A child forked while the parent holds the lock must NOT look like a
+    re-entrant owner (depth reset to 0) AND must be correctly blocked at the OS
+    level by the parent's still-held flock — never falsely allowed in
+    (GPT r4 #5)."""
+    gd = str(tmp_path)
+    lock = registry_lock(gd, timeout=2.0)
+    with lock:  # parent holds it across the fork
+        pid = os.fork()
+        if pid == 0:  # child
+            rc = 0
+            try:
+                child_lock = registry_lock(gd, timeout=0.5)
+                if child_lock._state.depth != 0:
+                    rc = 3  # phantom inherited re-entrancy -> bug
+                else:
+                    try:
+                        child_lock.acquire()
+                        rc = 5  # should have been blocked by parent's flock
+                        child_lock.release()
+                    except LockTimeout:
+                        rc = 0  # correct: parent genuinely holds it
+            except Exception:
+                rc = 4
+            os._exit(rc)
+        else:
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0

@@ -162,3 +162,29 @@ def test_leftover_tmp_ignored(tmp_path):
     open(os.path.join(d, "x.tmp"), "w").write("partial")
     live = uc.live_runtime_leases(gd, is_alive=ALIVE)
     assert live == []
+
+
+# ── GPT r4 hardening ─────────────────────────────────────────────────────────
+def test_try_ops_reject_invalid_identity(tmp_path):
+    gd = _gd(tmp_path)
+    for bad_pid, bad_ct in [(0, 1.0), (-1, 1.0), (True, 1.0), (10, float("nan")), (10, -1.0)]:
+        with pytest.raises(ValueError):
+            uc.try_create_runtime_lease(gd, pid=bad_pid, create_time=bad_ct, is_alive=ALIVE)
+        with pytest.raises(ValueError):
+            uc.try_begin_update(gd, pid=bad_pid, create_time=bad_ct, is_alive=ALIVE)
+
+
+def test_state_missing_owner_token_is_corrupt(tmp_path):
+    gd = _gd(tmp_path)
+    import json
+    open(os.path.join(gd, "update_state.json"), "w").write(
+        json.dumps({"update_in_progress": True, "owner_pid": 5, "owner_create_time": 1.0})
+    )
+    # in-progress without a valid owner_token -> corrupt -> fail-closed
+    assert uc.is_update_in_progress(gd) is True
+
+
+def test_ct_unknown_sentinel_is_alive():
+    # unknown create_time (sentinel 0.0) must count as alive (fail-closed)
+    assert uc.lease_alive(123, 5.0, proc_create_time=lambda pid: 0.0) is True
+    assert uc.lease_alive(123, 5.0, proc_create_time=lambda pid: None) is False

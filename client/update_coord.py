@@ -51,21 +51,35 @@ def _valid_ct(v) -> bool:
 
 
 # ── process liveness (pid + create_time, guards against PID reuse) ───────────
-def _default_proc_create_time(pid: int) -> Optional[float]:
+# Sentinel meaning "process exists but its create_time can't be determined".
+_CT_UNKNOWN = 0.0
+
+
+def _default_proc_create_time(pid: int):
+    """Return the process create_time, the _CT_UNKNOWN sentinel if it exists but
+    can't be measured, or None ONLY when the process provably does NOT exist.
+    A transient error (AccessDenied, etc.) must NOT be reported as death
+    (GPT r4 #2) — we return the sentinel so callers fail CLOSED (treat as live).
+    """
     try:
         import psutil  # type: ignore
-
-        if not psutil.pid_exists(pid):
-            return None
-        return psutil.Process(pid).create_time()
-    except Exception:
         try:
-            os.kill(pid, 0)
-            return 0.0  # sentinel: alive, unknown create_time
-        except (OSError, ProcessLookupError):
+            return psutil.Process(pid).create_time()
+        except psutil.NoSuchProcess:
             return None
-        except Exception:
-            return None
+        except psutil.Error:
+            return _CT_UNKNOWN  # exists-but-unknown / access denied -> live
+    except ImportError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return _CT_UNKNOWN  # alive, unknown create_time
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        return _CT_UNKNOWN  # exists but not ours -> treat as live
+    except OSError:
+        return _CT_UNKNOWN  # unknown -> fail closed
 
 
 def lease_alive(pid: int, create_time: float,
@@ -103,6 +117,11 @@ def _resolve_identity(pid, create_time):
     if create_time is None:
         ct = _default_proc_create_time(pid)
         create_time = ct if ct is not None else 0.0
+    # Validate the resolved identity (GPT r4 #1) so a bad caller value can't
+    # write a permanently-corrupt lease / update_state. create_time must be
+    # finite and >= 0.
+    if not _valid_pid(pid) or not _valid_ct(create_time) or create_time < 0:
+        raise ValueError(f"invalid process identity pid={pid!r} create_time={create_time!r}")
     return pid, create_time
 
 
@@ -198,6 +217,10 @@ def _read_state(global_dir: str):
     if data["update_in_progress"]:
         # An in-progress record MUST carry a strictly-valid owner (GPT r3 #3).
         if not _valid_pid(data.get("owner_pid")) or not _valid_ct(data.get("owner_create_time")):
+            return _CORRUPT
+        # ...and a well-formed owner_token (GPT r4 #3): 32-hex uuid, else corrupt.
+        tok = data.get("owner_token")
+        if not isinstance(tok, str) or len(tok) != 32 or not all(c in "0123456789abcdef" for c in tok):
             return _CORRUPT
     return data
 
