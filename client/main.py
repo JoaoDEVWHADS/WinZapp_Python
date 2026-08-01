@@ -1118,12 +1118,24 @@ class MainWindow(wx.Frame):
             accounts_menu = wx.Menu()
             try:
                 import account_ui
+                # Keep the WindowIDRef objects ALIVE: wx.NewIdRef() reserves an id
+                # only for as long as the ref object exists. Casting to int() and
+                # dropping the ref frees the reservation, so AppendRadioItem then
+                # trips "id should first be reserved" (wxAssertionError) and the
+                # whole Accounts menu silently fails to build. Store the refs.
+                self._accounts_menu_id_refs = []
+
+                def _new_account_menu_id():
+                    ref = wx.NewIdRef()
+                    self._accounts_menu_id_refs.append(ref)
+                    return ref
+
                 self._accounts_menu_id_map = account_ui.build_accounts_menu(
                     accounts_menu, self.registry.list(), self.account_id,
-                    self.i18n, lambda: int(wx.NewIdRef()))
+                    self.i18n, _new_account_menu_id)
                 for wid, action in self._accounts_menu_id_map.items():
                     self.Bind(wx.EVT_MENU,
-                              lambda e, a=action: self._on_accounts_menu(a), id=wid)
+                              lambda e, a=action: self._on_accounts_menu(a), id=int(wid))
                 menubar.Append(accounts_menu, self.i18n.t("acc_menu_title"))
             except Exception:
                 logging.exception("[menu] building Accounts menu failed (non-fatal)")

@@ -6,6 +6,7 @@ from account_ui import (
     manager_rows,
     can_archive,
     can_hard_delete,
+    build_accounts_menu,
 )
 
 
@@ -55,6 +56,54 @@ def test_can_hard_delete_rules():
     acc = _acc(A, "paired")
     assert can_hard_delete(acc, current_account_id=B)[0] is True
     assert can_hard_delete(acc, current_account_id=A)[0] is False
+
+
+def test_build_accounts_menu_uses_factory_ids_verbatim(monkeypatch):
+    """REGRESSION: the menu must use the EXACT id object the factory returns
+    (e.g. wx.WindowIDRef), never a cast. Casting a reserved WindowIDRef to int()
+    drops the reservation and AppendRadioItem then trips 'id should first be
+    reserved' (wxAssertionError) — the whole Accounts menu fails to build and
+    the user never sees it (real bug hit on Windows)."""
+    import account_ui
+
+    class _Item:
+        def Check(self, *a):
+            pass
+
+    recorded = []
+
+    class _FakeMenu:
+        def AppendRadioItem(self, item_id, label):
+            recorded.append(item_id)
+            return _Item()
+
+        def Append(self, item_id, label):
+            recorded.append(item_id)
+            return _Item()
+
+        def AppendSeparator(self):
+            pass
+
+    monkeypatch.setattr(account_ui, "_wx", lambda: object())
+
+    class _Ref:  # non-int sentinel; a cast would change identity
+        pass
+
+    made = []
+
+    def factory():
+        r = _Ref()
+        made.append(r)
+        return r
+
+    class _I18n:
+        def t(self, k):
+            return k
+
+    accts = [_acc(A, "paired", 1), _acc(B, "paired", 2)]
+    id_map = build_accounts_menu(_FakeMenu(), accts, A, _I18n(), factory)
+    assert all(any(rid is r for r in made) for rid in recorded)
+    assert all(isinstance(k, _Ref) for k in id_map)
 
 
 def test_hard_delete_removes_dir_and_entry(tmp_path):
