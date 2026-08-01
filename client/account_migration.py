@@ -176,6 +176,37 @@ def _backup_legacy(data_root: str) -> None:
                 pass
 
 
+def _split_global_settings(global_dir: str, account_dir: str) -> None:
+    """Extract global keys from the migrated account's settings.json into
+    global/app.json, and rewrite the account settings.json without them.
+    Best-effort: any error is swallowed so migration never fails on this."""
+    try:
+        from app_settings import AppSettings, split_legacy_settings
+
+        sp = os.path.join(account_dir, "settings.json")
+        if not os.path.isfile(sp):
+            return
+        with open(sp, "r", encoding="utf-8") as f:
+            legacy = json.load(f)
+        if not isinstance(legacy, dict):
+            return
+        glob, per = split_legacy_settings(legacy)
+        app = AppSettings(global_dir)
+        for k, v in glob.items():
+            try:
+                app.set(k, v)
+            except KeyError:
+                pass
+        tmp = sp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(per, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, sp)
+    except Exception:
+        pass
+
+
 def migrate_if_needed(global_dir: str):
     """Perform migration if a legacy flat data/ dir exists and no registry yet.
 
@@ -243,6 +274,11 @@ def migrate_if_needed(global_dir: str):
                 acc_id = acc["id"]
             if state == "paired":
                 reg.set_last_foreground(acc_id)
+
+            # Split global settings (language/updates/tray/connection) out of the
+            # migrated account's settings.json into global/app.json (Zad 2.3), so
+            # they're shared across accounts. Best-effort: never fail migration.
+            _split_global_settings(global_dir, reg.data_dir_for(acc_id))
 
             _write_journal(global_dir, {"stage": "committed", "target_id": acc_id})
             _backup_legacy(data_root)

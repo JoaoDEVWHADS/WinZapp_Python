@@ -98,6 +98,22 @@ def test_does_not_migrate_new_layout_dirs(tmp_path):
     assert not (dest / "global").exists()
 
 
+def test_migration_splits_global_settings_to_app_json(tmp_path):
+    """Global keys (language/updates/connection) land in global/app.json and are
+    removed from the migrated account's settings.json (Zad 2.3)."""
+    import app_settings
+    _make_legacy(tmp_path, with_token=True)
+    gd = _gd(tmp_path)
+    acc_id = mig.migrate_if_needed(gd)
+    app = app_settings.AppSettings(gd)
+    assert app.get("language") == "pl"
+    # per-account settings.json no longer carries the global 'language'
+    sp = tmp_path / "data" / "accounts" / acc_id / "settings.json"
+    per = json.loads(sp.read_text())
+    assert "language" not in per.get("general", {})
+    assert "connection" not in per
+
+
 def test_resume_after_commit_before_backup(tmp_path):
     """If the registry was committed but backup not done, a rerun completes it
     (journal handled before the accounts-exist no-op)."""
