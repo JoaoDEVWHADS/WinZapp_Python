@@ -113,6 +113,8 @@ class AccountRegistry:
                 return False
             if not is_valid_account_id(a.get("id")):
                 return False
+            if not isinstance(a.get("name"), str):
+                return False  # a nameless account would break the UI
             if a.get("state") not in VALID_STATES:
                 return False
             if not isinstance(a.get("order"), int) or isinstance(a.get("order"), bool):
@@ -124,8 +126,12 @@ class AccountRegistry:
             ids.add(a["id"])
             orders.add(a["order"])
         lf = data.get("last_foreground")
-        if lf is not None and lf not in ids:
-            return False
+        # last_foreground must be None or a valid id referencing an account.
+        # Guard the type first so a list/dict value can't raise TypeError here
+        # (GPT r2-code #4) — an invalid value means the model is corrupt.
+        if lf is not None:
+            if not is_valid_account_id(lf) or lf not in ids:
+                return False
         return True
 
     def _enter_recovery_locked(self) -> None:
@@ -172,6 +178,12 @@ class AccountRegistry:
                 )
             result, changed = fn(data)
             if changed:
+                # Defensive: never persist a model that our own read would
+                # reject as corrupt (GPT r2-code #3). A failing invariant here
+                # is a programming error, surfaced loudly rather than silently
+                # tripping recovery on the next launch.
+                if not self._validate_model(data):
+                    raise ValueError("refusing to write invalid registry model")
                 self._write(data)
             return result
 
@@ -269,7 +281,13 @@ class AccountRegistry:
         self._txn(_fn)
 
     def set_order(self, account_id: str, order: int) -> None:
+        if not isinstance(order, int) or isinstance(order, bool):
+            raise ValueError("order must be an int")
         def _fn(data):
+            # Reject a duplicate order up-front (GPT r2-code #3) so we never
+            # persist a model that the next read would reject as corrupt.
+            if any(a["order"] == order and a["id"] != account_id for a in data["accounts"]):
+                raise ValueError(f"order {order} already in use")
             for a in data["accounts"]:
                 if a["id"] == account_id:
                     a["order"] = int(order)
@@ -315,9 +333,29 @@ class AccountRegistry:
             raise ValueError(f"unknown fields {bad}")
         if "state" in fields and fields["state"] not in VALID_STATES:
             raise ValueError(f"invalid state {fields['state']!r}")
+        # Validate field TYPES up-front (GPT r2-code #3) so update_fields can
+        # never persist a model the next read would reject as corrupt.
+        if "name" in fields and not isinstance(fields["name"], str):
+            raise ValueError("name must be a string")
+        if "autostart" in fields and not isinstance(fields["autostart"], bool):
+            raise ValueError("autostart must be a bool")
+        if "order" in fields and (not isinstance(fields["order"], int)
+                                   or isinstance(fields["order"], bool)):
+            raise ValueError("order must be an int")
 
         def _fn(data):
             changed = False
+            ids = {a["id"] for a in data["accounts"]}
+            # last_foreground must reference an existing account (or None).
+            if new_lf is not lf_sentinel and new_lf is not None:
+                if not is_valid_account_id(new_lf) or new_lf not in ids:
+                    raise ValueError(f"last_foreground references unknown account {new_lf!r}")
+            # a new order must stay unique
+            if "order" in fields and any(
+                a["order"] == fields["order"] and a["id"] != account_id
+                for a in data["accounts"]
+            ):
+                raise ValueError(f"order {fields['order']} already in use")
             for a in data["accounts"]:
                 if a["id"] == account_id:
                     a.update(fields)

@@ -90,6 +90,8 @@ def create_runtime_lease(global_dir: str, pid: Optional[int] = None,
     """Create a runtime-lease for this process. Returns the lease filename.
 
     Held under updater_lock so it's atomic w.r.t. the updater's live-lease scan.
+    Prefer ``try_create_runtime_lease`` in bootstrap: it refuses to create a
+    lease while an update is in progress, closing the start-vs-install race.
     """
     if pid is None:
         pid = os.getpid()
@@ -107,6 +109,30 @@ def create_runtime_lease(global_dir: str, pid: Optional[int] = None,
         return fname
 
 
+def try_create_runtime_lease(global_dir: str, pid: Optional[int] = None,
+                             create_time: Optional[float] = None,
+                             is_alive: Callable[[int, float], bool] = lease_alive):
+    """Atomically: if no update is in progress, create + return a lease name;
+    else return None. The whole check+write runs under ONE updater_lock so a
+    process can't slip a lease in after the updater scanned but before it set
+    the in-progress flag (GPT r2-code #1)."""
+    if pid is None:
+        pid = os.getpid()
+    if create_time is None:
+        ct = _default_proc_create_time(pid)
+        create_time = ct if ct is not None else 0.0
+    with updater_lock(global_dir):
+        if _is_update_in_progress_locked(global_dir, is_alive):
+            return None
+        d = _runtime_dir(global_dir)
+        lease_id = uuid.uuid4().hex[:8]
+        fname = f"{pid}_{create_time}_{lease_id}"
+        with open(os.path.join(d, fname), "w", encoding="utf-8") as f:
+            json.dump({"pid": pid, "create_time": create_time,
+                       "lease_id": lease_id, "started_at": int(time.time())}, f)
+        return fname
+
+
 def release_runtime_lease(global_dir: str, lease_name: str) -> None:
     with updater_lock(global_dir):
         try:
@@ -115,32 +141,39 @@ def release_runtime_lease(global_dir: str, lease_name: str) -> None:
             pass
 
 
-def live_runtime_leases(global_dir: str, is_alive: Callable[[int, float], bool] = lease_alive) -> list[dict]:
-    """Return live leases; sweep away dead ones (crashed processes)."""
+def _live_leases_locked(global_dir: str, is_alive: Callable[[int, float], bool]) -> list[dict]:
+    """Scan leases. Caller MUST hold updater_lock. A lease file that is
+    unreadable or missing pid/create_time is treated as a LIVE unknown holder
+    (fail-closed, GPT r2-code #5) — it blocks updates rather than being swept,
+    because we cannot prove the owning process is dead."""
     d = _runtime_dir(global_dir)
     live: list[dict] = []
-    with updater_lock(global_dir):
-        for fname in os.listdir(d):
-            path = os.path.join(d, fname)
+    for fname in os.listdir(d):
+        path = os.path.join(d, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lease = json.load(f)
+            pid = int(lease["pid"])
+            ct = float(lease["create_time"])
+        except (OSError, ValueError, KeyError, TypeError):
+            # Corrupt/incomplete lease: cannot prove dead -> treat as live.
+            live.append({"pid": None, "create_time": None, "_name": fname, "_corrupt": True})
+            continue
+        if is_alive(pid, ct):
+            lease["_name"] = fname
+            live.append(lease)
+        else:
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    lease = json.load(f)
-            except (OSError, ValueError):
-                # unreadable lease -> remove
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-                continue
-            if is_alive(int(lease["pid"]), float(lease["create_time"])):
-                lease["_name"] = fname
-                live.append(lease)
-            else:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+                os.remove(path)
+            except OSError:
+                pass
     return live
+
+
+def live_runtime_leases(global_dir: str, is_alive: Callable[[int, float], bool] = lease_alive) -> list[dict]:
+    """Return live leases; sweep away provably-dead ones."""
+    with updater_lock(global_dir):
+        return _live_leases_locked(global_dir, is_alive)
 
 
 # ── update_state.json ────────────────────────────────────────────────────────
@@ -148,12 +181,23 @@ def _state_path(global_dir: str) -> str:
     return os.path.join(global_dir, _STATE_FILE)
 
 
-def _read_state(global_dir: str) -> dict:
-    try:
-        with open(_state_path(global_dir), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
+_CORRUPT_STATE = object()
+
+
+def _read_state(global_dir: str):
+    """Return the parsed state dict, or _CORRUPT_STATE if the file exists but is
+    unreadable/invalid (fail-closed handling by callers, GPT r2-code #5)."""
+    path = _state_path(global_dir)
+    if not os.path.isfile(path):
         return {"update_in_progress": False, "owner_pid": None, "owner_create_time": None}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "update_in_progress" not in data:
+            return _CORRUPT_STATE
+        return data
+    except (OSError, ValueError):
+        return _CORRUPT_STATE
 
 
 def _write_state(global_dir: str, state: dict) -> None:
@@ -165,51 +209,81 @@ def _write_state(global_dir: str, state: dict) -> None:
     os.replace(tmp, _state_path(global_dir))
 
 
-def begin_update(global_dir: str, pid: Optional[int] = None,
-                 create_time: Optional[float] = None) -> None:
+def _is_update_in_progress_locked(global_dir: str,
+                                  is_alive: Callable[[int, float], bool] = lease_alive) -> bool:
+    """Caller holds updater_lock. Corrupt state -> True (fail-closed)."""
+    state = _read_state(global_dir)
+    if state is _CORRUPT_STATE:
+        return True  # unknown -> block, don't fail-open
+    if not state.get("update_in_progress"):
+        return False
+    pid = state.get("owner_pid")
+    ct = state.get("owner_create_time")
+    if pid is None or not is_alive(int(pid), float(ct if ct is not None else 0.0)):
+        # dead owner -> recover the stale flag
+        _write_state(global_dir, {"update_in_progress": False,
+                                  "owner_pid": None, "owner_create_time": None})
+        return False
+    return True
+
+
+def try_begin_update(global_dir: str, pid: Optional[int] = None,
+                     create_time: Optional[float] = None,
+                     is_alive: Callable[[int, float], bool] = lease_alive):
+    """Atomically claim the update slot. Returns an owner-token dict on success,
+    or None if another live updater owns it OR any account process is still
+    running. All check+write under ONE updater_lock (GPT r2-code #1,#2)."""
     if pid is None:
         pid = os.getpid()
     if create_time is None:
         ct = _default_proc_create_time(pid)
         create_time = ct if ct is not None else 0.0
     with updater_lock(global_dir):
-        _write_state(global_dir, {
-            "update_in_progress": True,
-            "owner_pid": pid,
-            "owner_create_time": create_time,
-        })
+        if _is_update_in_progress_locked(global_dir, is_alive):
+            return None  # another live updater owns the slot
+        if _live_leases_locked(global_dir, is_alive):
+            return None  # accounts still running -> refuse install
+        token = {"owner_pid": pid, "owner_create_time": create_time}
+        _write_state(global_dir, {"update_in_progress": True, **token})
+        return token
 
 
-def end_update(global_dir: str) -> None:
+def begin_update(global_dir: str, pid: Optional[int] = None,
+                 create_time: Optional[float] = None) -> None:
+    """Unconditional begin (test/back-compat). Prefer try_begin_update."""
+    if pid is None:
+        pid = os.getpid()
+    if create_time is None:
+        ct = _default_proc_create_time(pid)
+        create_time = ct if ct is not None else 0.0
     with updater_lock(global_dir):
-        _write_state(global_dir, {
-            "update_in_progress": False,
-            "owner_pid": None,
-            "owner_create_time": None,
-        })
+        _write_state(global_dir, {"update_in_progress": True,
+                                  "owner_pid": pid, "owner_create_time": create_time})
+
+
+def end_update(global_dir: str, token: Optional[dict] = None) -> bool:
+    """Clear the update slot. If a token is given, only the matching owner may
+    clear it (GPT r2-code #2), so a stale updater can't wipe a newer one's
+    state. Returns True if cleared."""
+    with updater_lock(global_dir):
+        state = _read_state(global_dir)
+        if state is _CORRUPT_STATE:
+            state = {}
+        if token is not None:
+            if (state.get("owner_pid") != token.get("owner_pid")
+                    or state.get("owner_create_time") != token.get("owner_create_time")):
+                return False
+        _write_state(global_dir, {"update_in_progress": False,
+                                  "owner_pid": None, "owner_create_time": None})
+        return True
 
 
 def is_update_in_progress(global_dir: str,
                           is_alive: Callable[[int, float], bool] = lease_alive) -> bool:
-    """True iff an update is in progress AND its owner process is still alive.
-
-    A crashed updater (dead owner) is auto-recovered: the stale flag is cleared
-    and False is returned, so a dead install never permanently blocks startup.
-    """
+    """True iff an update is in progress AND its owner is alive (crashed owner
+    auto-recovered). Corrupt state file -> True (fail-closed)."""
     with updater_lock(global_dir):
-        state = _read_state(global_dir)
-        if not state.get("update_in_progress"):
-            return False
-        pid = state.get("owner_pid")
-        ct = state.get("owner_create_time")
-        if pid is None or not is_alive(int(pid), float(ct if ct is not None else 0.0)):
-            # dead owner -> recover
-            _write_state(global_dir, {
-                "update_in_progress": False,
-                "owner_pid": None, "owner_create_time": None,
-            })
-            return False
-        return True
+        return _is_update_in_progress_locked(global_dir, is_alive)
 
 
 # ── pure decision helpers (unit-tested) ──────────────────────────────────────

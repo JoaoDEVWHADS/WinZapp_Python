@@ -69,3 +69,52 @@ def test_should_block_start(tmp_path):
 def test_should_block_update_with_live_leases():
     assert uc.should_block_update([{"pid": 1}]) is True
     assert uc.should_block_update([]) is False
+
+
+# ── atomic try_-operations + fail-closed (GPT r2-code) ───────────────────────
+def test_try_create_lease_blocked_during_update(tmp_path):
+    gd = _gd(tmp_path)
+    alive = lambda pid, ct: True
+    tok = uc.try_begin_update(gd, pid=500, create_time=1.0, is_alive=alive)
+    assert tok is not None
+    assert uc.try_create_runtime_lease(gd, pid=501, create_time=2.0, is_alive=alive) is None
+
+
+def test_try_begin_update_refuses_when_accounts_live(tmp_path):
+    gd = _gd(tmp_path)
+    alive = lambda pid, ct: True
+    uc.create_runtime_lease(gd, pid=600, create_time=1.0)
+    assert uc.try_begin_update(gd, pid=601, create_time=2.0, is_alive=alive) is None
+
+
+def test_try_begin_update_refuses_second_live_updater(tmp_path):
+    gd = _gd(tmp_path)
+    alive = lambda pid, ct: True
+    tok = uc.try_begin_update(gd, pid=700, create_time=1.0, is_alive=alive)
+    assert tok is not None
+    assert uc.try_begin_update(gd, pid=701, create_time=2.0, is_alive=alive) is None
+
+
+def test_end_update_token_mismatch_refused(tmp_path):
+    gd = _gd(tmp_path)
+    alive = lambda pid, ct: True
+    tok = uc.try_begin_update(gd, pid=800, create_time=1.0, is_alive=alive)
+    assert uc.end_update(gd, token={"owner_pid": 999, "owner_create_time": 9.0}) is False
+    assert uc.is_update_in_progress(gd, is_alive=alive) is True
+    assert uc.end_update(gd, token=tok) is True
+    assert uc.is_update_in_progress(gd, is_alive=alive) is False
+
+
+def test_corrupt_update_state_fails_closed(tmp_path):
+    gd = _gd(tmp_path)
+    open(os.path.join(gd, "update_state.json"), "w").write("{ broken")
+    assert uc.is_update_in_progress(gd) is True
+
+
+def test_corrupt_lease_counts_as_live(tmp_path):
+    gd = _gd(tmp_path)
+    d = os.path.join(gd, "runtime")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "garbage"), "w").write("{ not json")
+    live = uc.live_runtime_leases(gd, is_alive=lambda pid, ct: False)
+    assert len(live) == 1 and live[0].get("_corrupt") is True

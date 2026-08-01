@@ -218,10 +218,17 @@ class NamedLock:
         kernel32 = _win_kernel32()
         handle = self._state.win_handle
         if handle:
+            import logging
+            # GPT r1/r2-code #6: don't swallow release/close failures — capture
+            # the Win32 error and log it. We still clear our handle reference so
+            # the object isn't wedged, but a failure here is a real anomaly
+            # (the OS didn't confirm we released the mutex).
             if not kernel32.ReleaseMutex(handle):
-                # Log-worthy but don't mask the primary flow; close anyway.
-                pass
-            kernel32.CloseHandle(handle)
+                logging.error("[coord_locks] ReleaseMutex failed for '%s' (err %s)",
+                              self.name, ctypes.get_last_error())
+            if not kernel32.CloseHandle(handle):
+                logging.error("[coord_locks] CloseHandle failed for '%s' (err %s)",
+                              self.name, ctypes.get_last_error())
             self._state.win_handle = None
 
     # ── POSIX flock fallback ─────────────────────────────────────────────
