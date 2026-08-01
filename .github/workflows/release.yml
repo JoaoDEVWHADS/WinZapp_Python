@@ -183,7 +183,7 @@ jobs:
           
           # Se o cache de node_modules falhar ou não existir, faz a instalação limpa
           if ("${{ steps.cache-api-modules.outputs.cache-hit }}" -ne "true") {
-              &$nodeExe $npmCli install --no-audit --no-fund
+              &$nodeExe $npmCli install --legacy-peer-deps --no-audit --no-fund
           }
           
           # Compilar a API
