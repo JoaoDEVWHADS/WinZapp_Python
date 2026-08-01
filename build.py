@@ -103,7 +103,7 @@ AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {
-    "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
+    "wppconnect_tokens", "userDataDir", ".git", "__pycache__",
     ".github", ".husky", ".vscode", "src", "log", "tokens", "uploads",
     "WhatsAppImages", "tests", "coverage",
     ".cache",
