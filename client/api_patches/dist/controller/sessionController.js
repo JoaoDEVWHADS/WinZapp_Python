@@ -644,6 +644,14 @@ async function getMediaByMessage(req, res) {
       message.directPath = message.directPath || effectiveUrl;
     }
 
+    if (client.page && client.page.isClosed()) {
+      req.logger.warn(`Browser page is closed for session when downloading media ${messageId}`);
+      return res.status(503).json({
+        status: 'error',
+        message: 'Browser session is closed or re-connecting',
+      });
+    }
+
     // Fast path: Try direct file decryption first if mediaKey and effectiveUrl are available
     if (message.mediaKey && effectiveUrl) {
       try {
@@ -658,15 +666,18 @@ async function getMediaByMessage(req, res) {
     }
 
     // Primary approach: Try WPPConnect's downloadMedia using active browser context with short 2.5s timeout
-    if (typeof client.downloadMedia === 'function') {
+    if (typeof client.downloadMedia === 'function' && client.page && !client.page.isClosed()) {
       try {
         let timer;
         const downloadPromise = (client.downloadMedia(lookupId).catch(() => null)
                              || client.downloadMedia(messageId).catch(() => null)).finally(() => {
           if (timer) clearTimeout(timer);
         });
-        const timeoutPromise = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 2500);
+        const timeoutPromise = new Promise((resolve) => {
+          timer = setTimeout(() => {
+            req.logger.warn(`Timeout 2500ms downloading media via Puppeteer for ${messageId}`);
+            resolve(null);
+          }, 2500);
         });
         let base64 = await Promise.race([downloadPromise, timeoutPromise]);
         if (base64) {
