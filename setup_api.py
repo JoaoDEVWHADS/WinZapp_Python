@@ -284,24 +284,25 @@ def main():
     # 1. Automating Node dependency installation and build
     print("[INFO] Automating Node.js dependency installation and compilation...")
     try:
-        # Determine node/npm command
+        node_cmd = "node"
+        npm_args = ["npm"]
         if is_windows:
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
             win_git_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
             win_git_bin = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "bin"))
             os.environ["PATH"] = f"{win_node_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
             
-            full_npm_cmd = os.path.join(win_node_dir, "npm.cmd")
-            if os.path.isfile(full_npm_cmd):
-                npm_bin = full_npm_cmd
-            else:
-                npm_bin = "npm.cmd"
-        else:
-            npm_bin = "npm"
+            win_node_exe = os.path.join(win_node_dir, "node.exe")
+            win_npm_cli = os.path.join(win_node_dir, "node_modules", "npm", "bin", "npm-cli.js")
+            if os.path.isfile(win_node_exe) and os.path.isfile(win_npm_cli):
+                node_cmd = win_node_exe
+                npm_args = [win_node_exe, win_npm_cli]
+            elif os.path.isfile(os.path.join(win_node_dir, "npm.cmd")):
+                npm_args = [os.path.join(win_node_dir, "npm.cmd")]
 
         # Run npm install
-        print("[INFO] Running npm install...")
-        _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+        print("[INFO] Running npm install...", flush=True)
+        _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
@@ -309,33 +310,28 @@ def main():
             custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
             decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
             if os.path.isfile(custom_decrypt):
-                print("[INFO] Copying custom decrypt.js patch to node_modules...")
+                print("[INFO] Copying custom decrypt.js patch to node_modules...", flush=True)
                 # Ensure the destination directory exists (should exist due to npm install)
                 os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
                 _shutil.copy2(custom_decrypt, decrypt_js_path)
-                print("[OK] Copied decrypt.js patch successfully.")
+                print("[OK] Copied decrypt.js patch successfully.", flush=True)
             else:
-                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
+                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.", flush=True)
         except Exception as e:
-            print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
-
-
+            print(f"[WARNING] Failed to copy decrypt.js patch: {e}", flush=True)
 
         # Download Chromium (Puppeteer postinstall)
-        print("[INFO] Downloading Chromium (Puppeteer)...")
+        print("[INFO] Downloading Chromium (Puppeteer)...", flush=True)
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
-            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+            _run([node_cmd, install_js], cwd=CLIENT_API_DIR)
         else:
-            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
-            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...", flush=True)
+            _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR)
 
         # Run npm run build
-        print("[INFO] Compiling WPPConnect Server...")
-        if npm_bin.endswith("npm-cli.js"):
-            _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
-        else:
-            _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+        print("[INFO] Compiling WPPConnect Server...", flush=True)
+        _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
 
         print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
