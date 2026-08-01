@@ -67,9 +67,8 @@ def _load_env() -> dict:
     return result
 
 
-def _run(cmd: list, cwd: str = None):
-    print(f"  $ {' '.join(str(c) for c in cmd)}")
-    sys.stdout.flush()
+def _run(cmd: list, cwd: str = None, check: bool = True):
+    print(f"  $ {' '.join(str(c) for c in cmd)}", flush=True)
     cmd_args = [str(c) for c in cmd]
     if sys.platform == "win32":
         first = cmd_args[0].lower()
@@ -83,8 +82,10 @@ def _run(cmd: list, cwd: str = None):
     sys.stdout.flush()
     sys.stderr.flush()
     if result.returncode != 0:
-        print(f"\n[ERROR] Command failed (exit {result.returncode}).")
-        sys.exit(result.returncode)
+        print(f"\n[ERROR] Command failed (exit {result.returncode}).", flush=True)
+        if check:
+            sys.exit(result.returncode)
+        raise subprocess.CalledProcessError(result.returncode, cmd)
 
 
 def ensure_portable_git():
@@ -190,30 +191,37 @@ def main():
                 print(f"[WARNING] Failed to remove client/api: {e}")
         os.makedirs(os.path.dirname(CLIENT_API_DIR), exist_ok=True)
 
-        has_git = shutil.which("git") is not None
-        if has_git:
-            _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR])
-        else:
-            print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
+        cloned = False
+        if shutil.which("git") is not None:
+            try:
+                _run(["git", "clone", WPPCONNECT_REPO, CLIENT_API_DIR], check=True)
+                cloned = True
+            except Exception as git_err:
+                print(f"[WARNING] git clone failed: {git_err} — falling back to ZIP download...", flush=True)
+
+        if not cloned:
+            print("[INFO] Downloading WPPConnect Server ZIP from GitHub...", flush=True)
             import urllib.request
             import zipfile
             zip_url = f"https://github.com/wppconnect-team/wppconnect-server/archive/refs/tags/{tag}.zip" if tag else "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
             zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
             extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
             try:
-                print(f"  Downloading {zip_url} ...")
+                print(f"  Downloading {zip_url} ...", flush=True)
                 urllib.request.urlretrieve(zip_url, zip_tmp)
-                print("  Extracting ZIP archive...")
+                print("  Extracting ZIP archive...", flush=True)
                 with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
                     zip_ref.extractall(extract_tmp)
                 
                 # Find extracted root folder (e.g. wppconnect-server-main)
                 extracted_subdirs = [os.path.join(extract_tmp, d) for d in os.listdir(extract_tmp) if os.path.isdir(os.path.join(extract_tmp, d))]
                 source_folder = extracted_subdirs[0] if extracted_subdirs else extract_tmp
+                if os.path.exists(CLIENT_API_DIR):
+                    shutil.rmtree(CLIENT_API_DIR)
                 shutil.move(source_folder, CLIENT_API_DIR)
-                print("[INFO] WPPConnect Server ZIP extracted to client/api successfully.")
+                print("[INFO] WPPConnect Server ZIP extracted to client/api successfully.", flush=True)
             except Exception as zip_err:
-                print(f"[ERROR] Failed to download or extract WPPConnect Server ZIP: {zip_err}")
+                print(f"[ERROR] Failed to download or extract WPPConnect Server ZIP: {zip_err}", flush=True)
                 sys.exit(1)
             finally:
                 if os.path.exists(zip_tmp):
