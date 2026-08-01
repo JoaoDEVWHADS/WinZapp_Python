@@ -466,7 +466,16 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         )
 
     prefix = _build_notif_prefix(msg, main_window, i18n)
-    return f"{prefix} {base}" if prefix else base
+    title = f"{prefix} {base}" if prefix else base
+
+    # Multi-account: a toast is an ASYNC alert whose source (which account) is
+    # otherwise ambiguous, so lead with the account name (plan Zad 4.4 / GPT r4
+    # #10 — prefix async alerts, NOT every message). Single/legacy account has
+    # account_name == "WinZapp" (or unset) → no prefix.
+    acc_name = getattr(main_window, "account_name", None)
+    if acc_name and acc_name != "WinZapp":
+        title = f"[{acc_name}] {title}"
+    return title
 
 
 class NotificationManager:

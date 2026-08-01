@@ -35,6 +35,7 @@ import socketio
 import atexit
 import ctypes
 import ctypes.wintypes
+import uuid
 from accessible_output2 import outputs
 from core.sound_system import (
     SoundSystem, Sound, load_sound, SOUND_EVENTS,
@@ -995,6 +996,25 @@ class MainWindow(wx.Frame):
         # sync thread that was waiting for the UI to be ready.
         self._ui_ready_event.set()
 
+        # ── Multi-account: window is ready → start IPC + flush queued requests,
+        # and record this as the foreground account for a conscious user start
+        # (plan Zad 2.0/4.1; GPT r5 #2: autostart-boot does NOT move it).
+        self._window_ready = True
+        self._ipc_released = False
+        self._start_ipc_listener()
+        try:
+            if getattr(self, "_ipc_listener", None) is not None:
+                self._ipc_listener.flush_queue()
+        except Exception:
+            pass
+        if (getattr(self, "account_id", None) and getattr(self, "registry", None)
+                and getattr(self, "startup_source", "user") == "user"
+                and not self.background_mode):
+            try:
+                self.registry.set_last_foreground(self.account_id)
+            except Exception:
+                logging.exception("[accounts] set_last_foreground failed (non-fatal)")
+
         # ── Quick tip after first pairing ─────────────────────────────────────
         if not self.background_mode and self._just_paired:
             wx.CallAfter(self._check_quick_tip)
@@ -1071,6 +1091,24 @@ class MainWindow(wx.Frame):
         self._sync_offline_menu_item.Check(bool(self.offline_mode))
         menubar.Append(sync_menu, self.i18n.t("menu_sync"))
 
+        # ── Konta (multi-account) ─────────────────────────────────────────────
+        # Only shown when this process runs under the account system (account_id
+        # set). Populated dynamically from the registry (plan Zad 4.2).
+        self._accounts_menu_id_map = {}
+        if getattr(self, "account_id", None) and getattr(self, "registry", None):
+            accounts_menu = wx.Menu()
+            try:
+                import account_ui
+                self._accounts_menu_id_map = account_ui.build_accounts_menu(
+                    accounts_menu, self.registry.list(), self.account_id,
+                    self.i18n, lambda: int(wx.NewIdRef()))
+                for wid, action in self._accounts_menu_id_map.items():
+                    self.Bind(wx.EVT_MENU,
+                              lambda e, a=action: self._on_accounts_menu(a), id=wid)
+                menubar.Append(accounts_menu, self.i18n.t("acc_menu_title"))
+            except Exception:
+                logging.exception("[menu] building Accounts menu failed (non-fatal)")
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -1098,6 +1136,89 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_wpp, id=self._ID_FORCE_REINSTALL_WPP)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
+
+    def _on_accounts_menu(self, action: dict):
+        """Handle a click in the Accounts menu (plan Zad 4.2-4.5)."""
+        try:
+            import account_ui
+            if action.get("switch"):
+                self._switch_to_account(action["switch"])
+            elif action.get("open_switch"):
+                dlg = account_ui.SwitchAccountDialog(
+                    self, self.registry.list(), self.account_id, self.i18n)
+                chosen = dlg.show()
+                if chosen and chosen != self.account_id:
+                    self._switch_to_account(chosen)
+            elif action.get("open_manager"):
+                account_ui.AccountManagerDialog(
+                    self, self.registry, self.account_id, self.i18n,
+                    self.global_dir).show()
+                self._rebuild_accounts_menu()
+        except Exception:
+            logging.exception("[accounts] menu action failed")
+
+    def _switch_to_account(self, account_id: str):
+        """Activation-first switch (plan Zad 4.1): bring the target account's
+        running process to the foreground via IPC, or spawn it. This window
+        stays open (accounts run in the background, choice 1b)."""
+        try:
+            from account_launcher import switch_to_account
+            switch_to_account(self.global_dir, account_id)
+        except Exception:
+            logging.exception("[accounts] switch to %s failed", account_id)
+
+    def _rebuild_accounts_menu(self):
+        """Rebuild the whole menu bar so the Accounts list reflects registry
+        changes (add/rename/archive/delete)."""
+        try:
+            self._build_menubar()
+        except Exception:
+            logging.exception("[accounts] menu rebuild failed")
+
+    def _start_ipc_listener(self):
+        """Start the account-scoped IPC listener so other WinZapp processes can
+        ask THIS one to foreground / quit (plan Zad 2.0/4.1). Callbacks marshal
+        onto the wx thread via wx.CallAfter. Safe no-op without an account."""
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if not (gd and acc_id):
+            return
+        try:
+            import ipc
+            self._ipc_listener = ipc.IpcListener(
+                gd, acc_id,
+                on_activate=lambda source: wx.CallAfter(self._ipc_activate, source),
+                on_quit=lambda: wx.CallAfter(self._ipc_quit),
+                released_predicate=lambda: getattr(self, "_ipc_released", False),
+                window_ready_predicate=lambda: getattr(self, "_window_ready", False),
+            )
+            self._ipc_listener.start()
+        except Exception:
+            logging.exception("[ipc] listener start failed (non-fatal)")
+
+    def _ipc_activate(self, source: str):
+        """Bring this window to the foreground on an IPC activate request."""
+        try:
+            if self.IsIconized():
+                self.Iconize(False)
+            self.Show()
+            self.Raise()
+            # A conscious user switch updates last_foreground; an autostart-boot
+            # activation does not (plan / GPT r5 #2).
+            if source == "user" and getattr(self, "registry", None):
+                try:
+                    self.registry.set_last_foreground(self.account_id)
+                except Exception:
+                    pass
+        except Exception:
+            logging.exception("[ipc] activate failed")
+
+    def _ipc_quit(self):
+        """Handle an IPC quit request: shut down, then flag released."""
+        try:
+            self.real_exit()
+        finally:
+            self._ipc_released = True
 
     def _refresh_menubar(self):
         """Retranslate the menu bar labels after a language change."""
@@ -3462,6 +3583,20 @@ class MainWindow(wx.Frame):
             os.environ["PORT"] = str(self.wpp_port)
             os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache", "puppeteer")
 
+            # Multi-account: expose OUR identity to the Node instance so any
+            # WinZapp process can verify (via GET /winzapp/identity) that the
+            # server on the port is the one we started, and recover its pid
+            # (plan Zad 3.0/3.1b). Best-effort — never blocks a legacy start.
+            try:
+                import node_coord
+                gd = getattr(self, "global_dir", None)
+                if gd:
+                    self._node_instance_id = getattr(self, "_node_instance_id", None) or uuid.uuid4().hex
+                    os.environ["WINZAPP_INSTALLATION_ID"] = node_coord.installation_id(gd)
+                    os.environ["WINZAPP_INSTANCE_ID"] = self._node_instance_id
+            except Exception:
+                logging.exception("[startup] node identity env injection failed (non-fatal)")
+
             # Ensure dist/config.js has useChrome:false so WPPConnect always uses
             # Puppeteer's own bundled Chrome/Chromium instead of searching for a
             # system Chrome installation. Patched here at runtime so existing users
@@ -3506,6 +3641,20 @@ class MainWindow(wx.Frame):
             log_fh.close()
             self._wpp_log_fh = None
             atexit.register(self._stop_wpp_server)
+
+            # Register our per-account node-lease so shutdown coordination knows
+            # this account is a live client of the shared Node (plan Zad 3.1b).
+            try:
+                import node_coord
+                import update_coord
+                gd = getattr(self, "global_dir", None)
+                acc_id = getattr(self, "account_id", None)
+                if gd and acc_id:
+                    _pid = os.getpid()
+                    _ct = update_coord._default_proc_create_time(_pid) or 0.0
+                    node_coord.add_node_lease(gd, acc_id, pid=_pid, create_time=_ct)
+            except Exception:
+                logging.exception("[startup] node-lease registration failed (non-fatal)")
         except Exception:
             pass
 
@@ -3555,7 +3704,28 @@ class MainWindow(wx.Frame):
 
         Calls /close-session first so WPPConnect asks Puppeteer to
         browser.close() Chrome gracefully, preventing stale Chrome windows.
+
+        Multi-account: the shared Node is only torn down when OUR node-lease is
+        the last live one (plan Zad 3.1b). If another account still holds a live
+        lease we just release ours and leave the server running for them.
         """
+        # Multi-account guard: don't kill a Node other live accounts still need.
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if gd and acc_id:
+            try:
+                import node_coord
+                node_coord.release_node_lease(gd, acc_id)
+                live = [l.get("account_id") for l in node_coord.live_node_leases(
+                    gd, is_alive=node_coord.lease_alive) if not l.get("_corrupt")]
+                other_live = [a for a in live if a and a != acc_id]
+                if other_live:
+                    logging.info("[shutdown] leaving WPPConnect up for other live "
+                                 "accounts: %s", other_live)
+                    return
+            except Exception:
+                logging.exception("[shutdown] node-lease coordination failed; "
+                                  "falling through to stop (best-effort)")
         token = getattr(self, "token", "")
         if token:
             try:
@@ -4174,6 +4344,47 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
             sys.exit()
         self._migrate_settings()
+        self._apply_global_settings()
+
+    def _apply_global_settings(self):
+        """Overlay install-wide settings from global/app.json onto self.settings
+        (plan Zad 2.3b). Keeps the hundreds of existing self.settings[...] reads
+        working unchanged while language/updates/tray/connection are SHARED
+        across accounts. Best-effort: no global_dir (legacy) -> leave as-is."""
+        gd = getattr(self, "global_dir", None)
+        if not gd:
+            return
+        try:
+            from app_settings import AppSettings, _GENERAL_GLOBAL, _CONNECTION_GLOBAL
+            app = AppSettings(gd)
+            general = self.settings.setdefault("general", {})
+            for k in _GENERAL_GLOBAL:
+                general[k] = app.get(k)
+            connection = self.settings.setdefault("connection", {})
+            for k in _CONNECTION_GLOBAL:
+                connection[k] = app.get(k)
+            self._app_settings = app
+        except Exception:
+            logging.exception("[settings] applying global app.json failed (non-fatal)")
+
+    def _persist_global_settings(self):
+        """Mirror the global keys of self.settings back into global/app.json so a
+        change made by this account is seen by the others (plan Zad 2.3b)."""
+        app = getattr(self, "_app_settings", None)
+        if app is None:
+            return
+        try:
+            from app_settings import _GENERAL_GLOBAL, _CONNECTION_GLOBAL
+            general = self.settings.get("general", {})
+            for k in _GENERAL_GLOBAL:
+                if k in general:
+                    app.set(k, general[k])
+            connection = self.settings.get("connection", {})
+            for k in _CONNECTION_GLOBAL:
+                if k in connection:
+                    app.set(k, connection[k])
+        except Exception:
+            logging.exception("[settings] persisting global app.json failed (non-fatal)")
 
     def _migrate_settings(self):
         """Migrate settings from old section names to current ones."""
@@ -4221,6 +4432,9 @@ class MainWindow(wx.Frame):
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=4)
             os.replace(tmp, target)
+            # Mirror install-wide keys to global/app.json so other accounts see
+            # the change (plan Zad 2.3b). Best-effort; never blocks the save.
+            self._persist_global_settings()
         except Exception:
             self.error_sound.play()
             # save_settings() is called from many places, including several

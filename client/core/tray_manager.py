@@ -129,7 +129,12 @@ class TrayIcon(wx.adv.TaskBarIcon):
         Truncated to 127 characters (Windows NOTIFYICONDATA.szTip limit).
         """
         i18n   = self.i18n
-        parts  = ["WinZapp"]
+        # Multi-account: lead with the account name so the screen reader and the
+        # tray tooltip make clear WHICH account this icon is (plan Zad 4.4).
+        app_label = getattr(self.main_window, "account_name", None) or "WinZapp"
+        if app_label != "WinZapp":
+            app_label = f"WinZapp — {app_label}"
+        parts  = [app_label]
         if getattr(self.main_window, "offline_mode", False):
             parts.append(i18n.t("tray_offline_mode"))
         status = getattr(self.main_window, "_tray_status", "")
