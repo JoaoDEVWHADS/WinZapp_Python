@@ -345,8 +345,8 @@ def main():
         npx_cmd = "npx.cmd" if is_windows else "npx"
         compiled = False
 
-        print(f"[INFO] Compiling WPPConnect Server using {npx_cmd} babel...", flush=True)
-        _run([npx_cmd, "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+        print(f"[INFO] Compiling WPPConnect Server using {npx_cmd} --yes babel...", flush=True)
+        _run([npx_cmd, "--yes", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
 
         # Check if compilation produced output files in dist/
         if os.path.isdir(dist_dir) and len(os.listdir(dist_dir)) > 0:
