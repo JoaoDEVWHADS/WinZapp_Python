@@ -34,7 +34,7 @@ WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 # reported live as every patch silently regressing to whatever old snapshot
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
-CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json", "tsconfig.json", "babel.config.js"]
 CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",

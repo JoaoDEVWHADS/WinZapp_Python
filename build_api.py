@@ -21,20 +21,31 @@ def main():
 
     print("[INFO] Running build inside client/api...")
     try:
+        env = dict(os.environ)
+        node_modules_dir = os.path.join(api_dir, "node_modules")
+        bin_dir = os.path.join(node_modules_dir, ".bin")
+        
+        npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+
+        if not os.path.isdir(node_modules_dir):
+            print("[INFO] node_modules missing in client/api — running npm install...")
+            if node_exe and npm_cli:
+                cmd_inst = [node_exe, npm_cli, "install", "--legacy-peer-deps"]
+                subprocess.run(cmd_inst, cwd=api_dir, env=env, check=True)
+            else:
+                subprocess.run([npm_cmd, "install", "--legacy-peer-deps"], cwd=api_dir, env=env, shell=True if sys.platform == "win32" else False, check=True)
+
+        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+
         if node_exe and npm_cli:
             # Usa o node portátil para executar o npm run build
             cmd = [node_exe, npm_cli, "run", "build"]
-            
-            # Adiciona o diretório do node portátil ao PATH para que scripts do npm funcionem
-            env = dict(os.environ)
             node_dir = os.path.dirname(node_exe)
-            env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
-            
+            env["PATH"] = node_dir + os.pathsep + env["PATH"]
             subprocess.run(cmd, cwd=api_dir, env=env, check=True)
         else:
             # Caso contrário, usa o npm do sistema
-            npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
-            subprocess.run([npm_cmd, "run", "build"], cwd=api_dir, shell=True if sys.platform == "win32" else False, check=True)
+            subprocess.run([npm_cmd, "run", "build"], cwd=api_dir, env=env, shell=True if sys.platform == "win32" else False, check=True)
             
         print("[OK] WPPConnect Server built successfully.")
     except Exception as e:
