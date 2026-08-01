@@ -1,0 +1,15 @@
+#include "resource.h"
+#include <windows.h>
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "installer.manifest"
+
+IDD_UNINSTALL DIALOGEX 0, 0, 230, 80
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Desinstalar WinZapp"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Tem certeza que deseja desinstalar o WinZapp?",
+                    -1, 7, 10, 216, 18
+    DEFPUSHBUTTON   "Desinstalar", IDC_INSTALL, 114, 58, 55, 14
+    PUSHBUTTON      "Cancelar",    IDC_CANCEL,  170, 58, 55, 14
+END
