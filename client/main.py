@@ -8883,6 +8883,11 @@ class MainWindow(wx.Frame):
             if response.status_code == 404 and isinstance(body, dict):
                 if str(body.get("status", "")).lower() == "disconnected":
                     disconnected = True
+            if response.status_code in (500, 502, 503) and isinstance(body, dict):
+                err_obj = body.get("error", {})
+                err_name = str(err_obj.get("name", "")) if isinstance(err_obj, dict) else ""
+                if "TargetCloseError" in err_name or "ProtocolError" in err_name or "TargetCloseError" in str(body):
+                    disconnected = True
             if isinstance(body, dict):
                 messages = body.get("response", {})
                 messages = messages.get("message", []) if isinstance(messages, dict) else []
@@ -8891,8 +8896,10 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
         if disconnected:
-            logging.warning("[send] WhatsApp reported Disconnected — pausing queue until reconnect")
-            self._set_wa_connected(False, "API answered Disconnected")
+            logging.warning("[send] WhatsApp reported Disconnected or TargetCloseError — pausing queue and triggering session recovery")
+            self._set_wa_connected(False, "API answered Disconnected or TargetCloseError")
+            # Proactively schedule connection check to auto-recover session via HTTP
+            wx.CallAfter(self.check_wa_connection_http)
         return disconnected
 
     def _classify_send_exception(self, exc, where: str) -> dict:
