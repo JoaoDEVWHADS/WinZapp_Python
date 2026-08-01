@@ -284,6 +284,7 @@ def main():
 
     # 1. Automating Node dependency installation and build
     print("[INFO] Automating Node.js dependency installation and compilation...")
+    os.environ["NODE_ENV"] = "development"
     try:
         if is_windows:
             win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
@@ -298,7 +299,7 @@ def main():
 
         # Run npm install
         print("[INFO] Running npm install...", flush=True)
-        _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+        _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev"], cwd=CLIENT_API_DIR)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
