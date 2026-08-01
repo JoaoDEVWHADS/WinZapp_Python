@@ -170,7 +170,6 @@ jobs:
       - name: Configurar WPPConnect API
         shell: pwsh
         run: |
-          $env:PATH = "$(Resolve-Path client/node);$(Resolve-Path client/git/cmd);$env:PATH"
           python setup_api.py
 
       - name: Compilar WinZapp com PyInstaller e Gerar Instalador
