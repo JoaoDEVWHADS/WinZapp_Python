@@ -326,13 +326,23 @@ def main():
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...", flush=True)
             _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR)
 
-        # Run npm run build
-        print("[INFO] Compiling WPPConnect Server...", flush=True)
-        try:
+        # Run Babel compilation directly using node.exe / node
+        print("[INFO] Compiling WPPConnect Server with Babel...", flush=True)
+        dist_dir = os.path.join(CLIENT_API_DIR, "dist")
+        if os.path.isdir(dist_dir):
+            try:
+                import shutil as _shutil
+                _shutil.rmtree(dist_dir)
+            except Exception as e:
+                print(f"[WARNING] Could not clean dist folder: {e}", flush=True)
+        os.makedirs(dist_dir, exist_ok=True)
+
+        babel_cli_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
+        if os.path.isfile(babel_cli_js):
+            _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
+        else:
+            print("[INFO] @babel/cli/bin/babel.js not found — running npm run build...", flush=True)
             _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR)
-        except Exception as build_err:
-            print(f"[WARNING] 'npm run build' failed: {build_err} — attempting direct babel compilation fallback...", flush=True)
-            _run(npm_args + ["exec", "--", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
 
         # Re-apply any patches inside dist/ (such as dist/controller/sessionController.js) after Babel build
         for rel_path in CUSTOM_SRC_FILES:
