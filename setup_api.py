@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 """
 WinZapp — WPPConnect Server setup script.
 
@@ -69,21 +69,20 @@ def _load_env() -> dict:
 
 def _run(cmd: list, cwd: str = None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
+    sys.stdout.flush()
     cmd_args = [str(c) for c in cmd]
     if sys.platform == "win32":
         first = cmd_args[0].lower()
         if first.endswith(".cmd") or first.endswith(".bat") or first in ("npm", "npx", "yarn"):
             cmd_input = subprocess.list2cmdline(cmd_args)
-            result = subprocess.run(cmd_input, cwd=cwd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(cmd_input, cwd=cwd, shell=True)
         else:
-            result = subprocess.run(cmd_args, cwd=cwd, capture_output=True, text=True)
+            result = subprocess.run(cmd_args, cwd=cwd)
     else:
-        result = subprocess.run(cmd_args, cwd=cwd, capture_output=True, text=True)
-    if result.stdout:
-        print(result.stdout)
+        result = subprocess.run(cmd_args, cwd=cwd)
+    sys.stdout.flush()
+    sys.stderr.flush()
     if result.returncode != 0:
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
 
@@ -278,37 +277,18 @@ def main():
     print("[INFO] Automating Node.js dependency installation and compilation...")
     try:
         # Determine node/npm command
-        # On Windows, check if portable node exists in client/node/node.exe
-        node_bin = "node"
-        npm_bin = "npm"
         if is_windows:
-            win_node = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node.exe"))
-            win_npm_cli = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js"))
-            win_npm_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "npm.cmd"))
-            if os.path.isfile(win_node):
-                node_bin = win_node
-                if os.path.isfile(win_npm_cli):
-                    npm_bin = win_npm_cli
-                elif os.path.isfile(win_npm_cmd):
-                    npm_bin = win_npm_cmd
-                else:
-                    npm_bin = shutil.which("npm.cmd") or "npm.cmd"
-            else:
-                npm_bin = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
-
+            win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
             win_git_cmd = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
             win_git_bin = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "bin"))
-            win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
-            os.environ["PATH"] = f"{win_git_cmd};{win_git_bin};{win_node_dir};" + os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{win_node_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
+            npm_bin = "npm.cmd"
+        else:
+            npm_bin = "npm"
 
         # Run npm install
         print("[INFO] Running npm install...")
-        if npm_bin.endswith("npm-cli.js"):
-            _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
-        elif is_windows and not npm_bin.endswith(".exe"):
-            _run([node_bin, win_npm_cli, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"] if os.path.isfile(win_npm_cli) else [npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
-        else:
-            _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+        _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
