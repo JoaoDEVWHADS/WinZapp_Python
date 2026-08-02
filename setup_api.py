@@ -303,13 +303,14 @@ def main():
             npm_args = ["npm"]
 
         # Run npm install
-        print("[INFO] Running npm install...", flush=True)
+        print("[INFO] Running npm install in client/api...", flush=True)
         _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev"], cwd=CLIENT_API_DIR, check=False)
 
-        # Ensure Babel dependencies are explicitly present (in case node_modules was restored from a partial cache)
-        babel_dir = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli")
-        if not os.path.isdir(babel_dir):
-            print("[INFO] @babel/cli missing in node_modules. Installing Babel packages...", flush=True)
+        # Ensure @babel/cli AND @babel/core are present (in case node_modules was restored from a partial cache)
+        babel_core_dir = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "core")
+        babel_cli_dir = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli")
+        if not os.path.isdir(babel_core_dir) or not os.path.isdir(babel_cli_dir):
+            print("[INFO] Installing missing @babel core & cli packages...", flush=True)
             _run(npm_args + ["install", "@babel/cli@^7.28.6", "@babel/core@^7.29.0", "@babel/preset-env@^7.29.2", "@babel/preset-typescript@^7.28.5", "--no-audit", "--no-fund", "--legacy-peer-deps", "--save-dev"], cwd=CLIENT_API_DIR, check=False)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
@@ -319,12 +320,9 @@ def main():
             decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
             if os.path.isfile(custom_decrypt):
                 print("[INFO] Copying custom decrypt.js patch to node_modules...", flush=True)
-                # Ensure the destination directory exists (should exist due to npm install)
                 os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
                 _shutil.copy2(custom_decrypt, decrypt_js_path)
                 print("[OK] Copied decrypt.js patch successfully.", flush=True)
-            else:
-                print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.", flush=True)
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}", flush=True)
 
@@ -334,10 +332,9 @@ def main():
         if os.path.isfile(install_js):
             _run([node_cmd, install_js], cwd=CLIENT_API_DIR, check=False)
         else:
-            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...", flush=True)
             _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
 
-        # Run Babel compilation directly using node.exe / node
+        # Run Babel compilation
         print("[INFO] Compiling WPPConnect Server with Babel...", flush=True)
         dist_dir = os.path.join(CLIENT_API_DIR, "dist")
         if os.path.isdir(dist_dir):
@@ -349,28 +346,22 @@ def main():
         os.makedirs(dist_dir, exist_ok=True)
 
         npx_cmd = "npx.cmd" if is_windows else "npx"
-        compiled = False
-
-        print(f"[INFO] Compiling WPPConnect Server using {npx_cmd} --yes babel...", flush=True)
         _run([npx_cmd, "--yes", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
 
-        # Check if compilation produced output files in dist/
-        if os.path.isdir(dist_dir) and len(os.listdir(dist_dir)) > 0:
-            compiled = True
-            print("[OK] WPPConnect Server compiled successfully to dist/.", flush=True)
-        else:
-            print("[INFO] Fallback: Running npm run build...", flush=True)
-            _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR, check=False)
-            if os.path.isdir(dist_dir) and len(os.listdir(dist_dir)) > 0:
-                compiled = True
+        # Fallback compilation via direct node if npx failed
+        api_server_js = os.path.join(dist_dir, "server.js")
+        if not os.path.isfile(api_server_js):
+            babel_cli_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
+            if os.path.isfile(babel_cli_js):
+                print("[INFO] Direct node Babel compilation fallback...", flush=True)
+                _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
 
-        # Guarenteed Fallback: if dist is still empty, copy pre-built dist from api_patches
-        if not compiled or not os.path.isdir(dist_dir) or len(os.listdir(dist_dir)) == 0:
-            print("[WARNING] Dist folder empty after build. Restoring pre-built dist from api_patches...", flush=True)
+        # Guaranteed Fallback: if dist/server.js is still missing, restore pre-built dist files
+        if not os.path.isfile(api_server_js):
+            print("[WARNING] dist/server.js missing after build. Restoring pre-built dist from api_patches...", flush=True)
             patches_dist = os.path.join(API_PATCHES_DIR, "dist")
             if os.path.isdir(patches_dist):
                 import shutil as _shutil
-                os.makedirs(dist_dir, exist_ok=True)
                 for root, dirs, files in os.walk(patches_dist):
                     rel_root = os.path.relpath(root, patches_dist)
                     target_root = os.path.join(dist_dir, rel_root) if rel_root != "." else dist_dir
