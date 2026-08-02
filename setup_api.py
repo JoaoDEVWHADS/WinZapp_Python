@@ -303,16 +303,9 @@ def main():
         else:
             npm_args = ["npm"]
 
-        # Run npm install
+        # Run npm install (installs all dependencies from package.json and triggers postinstall for puppeteer)
         print("[INFO] Running npm install in client/api...", flush=True)
         _run(npm_args + ["install", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev"], cwd=CLIENT_API_DIR, check=False)
-
-        # Ensure @babel/cli AND @babel/core are present (in case node_modules was restored from a partial cache)
-        babel_core_dir = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "core")
-        babel_cli_dir = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli")
-        if not os.path.isdir(babel_core_dir) or not os.path.isdir(babel_cli_dir):
-            print("[INFO] Installing missing @babel core & cli packages...", flush=True)
-            _run(npm_args + ["install", "@babel/cli@^7.28.6", "@babel/core@^7.29.0", "@babel/preset-env@^7.29.2", "@babel/preset-typescript@^7.28.5", "--no-audit", "--no-fund", "--legacy-peer-deps", "--save-dev"], cwd=CLIENT_API_DIR, check=False)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
@@ -327,37 +320,11 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}", flush=True)
 
-        # Download Chromium (Puppeteer)
-        print("[INFO] Downloading Chromium (Puppeteer)...", flush=True)
-        npx_cmd = "npx.cmd" if is_windows else "npx"
-        _run([npx_cmd, "--yes", "puppeteer", "browsers", "install", "chrome"], cwd=CLIENT_API_DIR, check=False)
-        install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
-        if os.path.isfile(install_js):
-            _run([node_cmd, install_js], cwd=CLIENT_API_DIR, check=False)
-        else:
-            _run(npm_args + ["run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
-
-        # Run Babel compilation
-        print("[INFO] Compiling WPPConnect Server with Babel...", flush=True)
+        # Run npm run build
+        print("[INFO] Compiling WPPConnect Server with npm run build...", flush=True)
         dist_dir = os.path.join(CLIENT_API_DIR, "dist")
-        if os.path.isdir(dist_dir):
-            try:
-                import shutil as _shutil
-                _shutil.rmtree(dist_dir)
-            except Exception as e:
-                print(f"[WARNING] Could not clean dist folder: {e}", flush=True)
         os.makedirs(dist_dir, exist_ok=True)
-
-        npx_cmd = "npx.cmd" if is_windows else "npx"
-        _run([npx_cmd, "--yes", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
-
-        # Fallback compilation via direct node if npx failed
-        api_server_js = os.path.join(dist_dir, "server.js")
-        if not os.path.isfile(api_server_js):
-            babel_cli_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
-            if os.path.isfile(babel_cli_js):
-                print("[INFO] Direct node Babel compilation fallback...", flush=True)
-                _run([node_cmd, babel_cli_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+        _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR, check=False)
 
         # Guaranteed Fallback: if dist/server.js is still missing, restore pre-built dist files
         if not os.path.isfile(api_server_js):
