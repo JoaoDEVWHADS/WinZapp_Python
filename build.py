@@ -138,6 +138,7 @@ API_CUSTOM_SRC_FILES = [
     "src/controller/sessionController.ts",
     "src/routes/index.ts",
     "dist/controller/sessionController.js",
+    "dist/index.js",
     "decrypt.js",
 ]
 
