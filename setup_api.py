@@ -68,10 +68,10 @@ def _load_env() -> dict:
     return result
 
 
-def _run(cmd: list, cwd: str = None):
+def _run(cmd: list, cwd: str = None, check: bool = True):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"))
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
 
@@ -317,10 +317,10 @@ def main():
         print("[INFO] Downloading Chromium (Puppeteer)...")
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
-            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+            _run([node_bin, install_js], cwd=CLIENT_API_DIR, check=False)
         else:
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
-            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
