@@ -9668,11 +9668,23 @@ class MainWindow(wx.Frame):
         else:
             chat = _format_1on1_chat(raw_remote)
 
-        # Group messages always carry the sender's JID in the serialized id,
-        # even for our own messages (fromMe=True). 1-on-1 keys have no
-        # participant.
+        # Group messages — and status updates (status@broadcast is a shared
+        # "chat" the same way a group is: WPPConnect/Baileys need the actual
+        # poster's JID as the trailing participant segment to look up a
+        # specific status in Store, exactly like a specific group message) —
+        # always carry the sender's JID in the serialized id, even for our
+        # own (fromMe=True). 1-on-1 keys have no participant.
+        #
+        # Dropping this segment for @broadcast used to make every status
+        # video/audio silently fail to play and every status "like" fail
+        # with a generic server error: WPPConnect's getMessageById() (media
+        # download) and its reaction endpoint both look up
+        # status@broadcast messages by <chat>_<id>_<participant> — the
+        # 2-segment id this produced without a participant never matched
+        # anything in Store, so both requests failed on a status update that
+        # was otherwise perfectly available.
         participant = ""
-        if chat.endswith("@g.us"):
+        if chat.endswith(("@g.us", "@broadcast")):
             if from_me:
                 raw = (
                     getattr(self, "my_lid", "")
