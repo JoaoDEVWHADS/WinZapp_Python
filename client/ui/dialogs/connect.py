@@ -332,19 +332,33 @@ class Connect:
     # ── Connection dialog ──────────────────────────────────────────────────
 
     def show_connection_dial(self):
-        self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_phone").format(app_name=self.main_window.app_name), size=(400, 500))
+        # Wide enough to fit the instructions/QR-CODE side by side (like the
+        # official WhatsApp Web/Desktop layout) — users coming from there are
+        # used to finding the QR-CODE on the right, with instructions on the
+        # left, rather than centered below the text.
+        self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_phone").format(app_name=self.main_window.app_name), size=(640, 480))
 
         # QR-CODE Panel
         self.qrcode_panel = wx.Panel(self.connection_dial)
-        self.qrcode_instructions = wx.StaticText(self.qrcode_panel, label=self.i18n.t("qrcode_instructions"))
+        self.qrcode_instructions = wx.StaticText(
+            self.qrcode_panel, label=self.i18n.t("qrcode_instructions"), style=wx.ST_NO_AUTORESIZE,
+        )
+        self.qrcode_instructions.Wrap(260)
         self.qrcode_image = wx.StaticBitmap(self.qrcode_panel, size=(300, 300))
         self.switch_to_phone_btn = wx.Button(self.qrcode_panel, label=self.i18n.t("connect_with_phone"))
         self.switch_to_phone_btn.Bind(wx.EVT_BUTTON, self.on_switch_to_phone)
 
-        qrcode_sizer = wx.BoxSizer(wx.VERTICAL)
-        qrcode_sizer.Add(self.qrcode_instructions, 0, wx.ALL | wx.CENTER, 10)
-        qrcode_sizer.Add(self.qrcode_image, 0, wx.ALL | wx.CENTER, 10)
-        qrcode_sizer.Add(self.switch_to_phone_btn, 0, wx.ALL | wx.CENTER, 10)
+        # Left column: instructions text, then the phone-number fallback
+        # button — mirrors the official layout's text column, but keeps
+        # switch_to_phone_btn as our own addition (WhatsApp Web doesn't need
+        # one; WinZapp does).
+        qrcode_left_sizer = wx.BoxSizer(wx.VERTICAL)
+        qrcode_left_sizer.Add(self.qrcode_instructions, 0, wx.ALL | wx.EXPAND, 10)
+        qrcode_left_sizer.Add(self.switch_to_phone_btn, 0, wx.ALL, 10)
+
+        qrcode_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        qrcode_sizer.Add(qrcode_left_sizer, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL, 10)
+        qrcode_sizer.Add(self.qrcode_image, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         self.qrcode_panel.SetSizer(qrcode_sizer)
 
         # Hide QR-CODE panel by default

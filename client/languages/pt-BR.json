@@ -13,7 +13,7 @@
     "connecting": "Conectando...",
     "qrcode_updated": "O código de pareamento foi atualizado.",
     "qrcode_image_updated": "O QR-CODE foi atualizado.",
-    "qrcode_instructions": "Aponte seu celular para o QR-CODE exibido logo abaixo desta mensagem, centralizado na tela.",
+    "qrcode_instructions": "Aponte seu celular para o QR-CODE exibido do lado direito da tela.",
     "connect_with_phone": "Conectar com número de &telefone",
     "connect_with_qrcode": "Conectar com &QR-CODE",
     "cancel_pairing": "&Cancelar pareamento",
