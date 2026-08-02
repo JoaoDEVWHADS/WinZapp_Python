@@ -581,12 +581,15 @@ class MainWindow(wx.Frame):
 
         conn = self.settings.get("connection", {})
         self.wpp_server    = conn.get("wpp_server",    "http://127.0.0.1")
-        self.wpp_port      = conn.get("wpp_port",      6300)
-        if self.wpp_port == 3417:
-            self.wpp_port = 6300
         self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
         self.wpp_api_key   = conn.get("wpp_api_key",   "wz-local-api-key")
         self.wpp_custom_api = conn.get("wpp_custom_api", False)
+        # Per-account Node port (revised multi-account architecture): each
+        # account runs its OWN WPPConnect Node on its OWN port so sessions never
+        # share a server and can't race/kill each other. The port is resolved
+        # once here, persisted, and stable across launches. A user-configured
+        # custom API keeps whatever port they set (we don't manage their server).
+        self.wpp_port = self._resolve_wpp_port(conn)
         logging.info("MainWindow: WPPConnect config - server=%s, port=%s, custom_api=%s", self.wpp_server, self.wpp_port, self.wpp_custom_api)
 
         #Set basic variables
@@ -783,6 +786,15 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             logging.info("MainWindow: Checking WhatsApp connection status...")
             if not self.connect.check_connection_status():
+                # This account is unpaired (session lost, or pairing never
+                # finished). If OTHER paired accounts exist, do NOT trap the
+                # user in this dead account's pairing dialog with no way to
+                # reach a working account or the menu (reported live: after an
+                # overnight session loss, launch showed only the connect dialog
+                # of the logged-out account — no way to switch to the healthy
+                # one). Offer connect-this / switch-to-other / quit first.
+                if self._offer_switch_when_unpaired():
+                    return  # switching away; this process is shutting down
                 logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
                 self.connect.show_connection_dial()
                 if not self.connect.check_connection_status():
@@ -1147,6 +1159,11 @@ class MainWindow(wx.Frame):
                     slot: acc["id"] for slot, acc in
                     account_ui.accelerator_slots(account_ui.switchable_accounts(self.registry.list()))
                 }
+                # Remember what the menu was built from, so focus-gain can tell
+                # whether a live registry change made it stale (see
+                # _refresh_accounts_menu_if_stale).
+                self._accounts_menu_signature = account_ui.accounts_menu_signature(
+                    self.registry.list())
                 if not getattr(self, "_account_hotkey_hook_bound", False):
                     self.Bind(wx.EVT_CHAR_HOOK, self._on_account_hotkey_char)
                     self._account_hotkey_hook_bound = True
@@ -1171,7 +1188,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
         self.Bind(wx.EVT_MENU, self._on_menu_disconnect, id=self._ID_DISCONNECT)
-        self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
+        self.Bind(wx.EVT_MENU, lambda e: self.quit_all_accounts(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
         self.Bind(wx.EVT_MENU, self._on_menu_sync_media, id=self._ID_SYNC_MEDIA)
         self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
@@ -1248,6 +1265,71 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[accounts] menu rebuild failed")
 
+    def _refresh_accounts_menu_if_stale(self):
+        """Rebuild the menu bar iff the live registry no longer matches what the
+        Accounts menu was built from (another process paired/renamed/archived an
+        account, or one was still coming up when this menu was first built).
+
+        Fixes the reported bug: an account vanished from the menu and only came
+        back after opening 'Switch account'. Cheap: compares a signature and
+        no-ops when nothing menu-visible changed, so focus-gain doesn't cause
+        menu flicker or screen-reader churn."""
+        registry = getattr(self, "registry", None)
+        if not (getattr(self, "account_id", None) and registry):
+            return
+        try:
+            import account_ui
+            current = account_ui.accounts_menu_signature(registry.list())
+            if current != getattr(self, "_accounts_menu_signature", None):
+                logging.info("[accounts] menu stale on focus — rebuilding "
+                             "(was=%s now=%s)",
+                             getattr(self, "_accounts_menu_signature", None), current)
+                self._build_menubar()  # rebuilds menu + hotkey slots + signature
+        except Exception:
+            logging.exception("[accounts] stale-menu refresh failed (non-fatal)")
+
+    def _offer_switch_when_unpaired(self) -> bool:
+        """Startup helper: the current account is unpaired. If other paired
+        accounts exist, offer connect-this / switch-to-other / quit instead of
+        dropping straight into this account's pairing dialog (which left the
+        user with no way to reach a working account or the menu).
+
+        Returns True if this process should stop __init__ and shut down (the
+        user chose to switch to another account, or to quit); False to fall
+        through to the normal pairing dialog (no other account to switch to, or
+        the user chose to connect this one). Best-effort: any failure returns
+        False so startup degrades to the existing pairing flow.
+        """
+        registry = getattr(self, "registry", None)
+        acc_id = getattr(self, "account_id", None)
+        if not (registry and acc_id):
+            return False
+        try:
+            import account_ui
+            accounts = registry.list()
+            if not account_ui.unpaired_start_options(accounts, acc_id):
+                return False  # no other paired account — normal pairing flow
+            acc = registry.get(acc_id) or {}
+            name = acc.get("name", acc_id)
+            dlg = account_ui.UnpairedStartDialog(
+                None, accounts, acc_id, name, self.i18n)
+            result = dlg.show()
+            if result == account_ui.UnpairedStartDialog.RESULT_SWITCH and dlg.chosen_account_id:
+                logging.info("[accounts] unpaired start: switching to %s", dlg.chosen_account_id)
+                from account_launcher import switch_to_account
+                switch_to_account(self.global_dir, dlg.chosen_account_id)
+                wx.CallAfter(self.real_exit)
+                return True
+            if result == account_ui.UnpairedStartDialog.RESULT_QUIT:
+                logging.info("[accounts] unpaired start: user chose to quit")
+                wx.CallAfter(self.real_exit)
+                return True
+            # RESULT_PAIR — fall through to the normal pairing dialog.
+            return False
+        except Exception:
+            logging.exception("[accounts] unpaired-start switch offer failed (non-fatal)")
+            return False
+
     def _start_ipc_listener(self):
         """Start the account-scoped IPC listener so other WinZapp processes can
         ask THIS one to foreground / quit (plan Zad 2.0/4.1). Callbacks marshal
@@ -1301,6 +1383,41 @@ class MainWindow(wx.Frame):
         finally:
             self._ipc_released = True
 
+    def quit_all_accounts(self):
+        """Quit the WHOLE app: gracefully stop every OTHER account's background
+        process, then exit this one. Bound to the 'Exit' menu item and the tray
+        'Exit' — the user expects 'quit' to close WinZapp entirely, not leave
+        other accounts running invisibly in the tray (reported live: closing one
+        window left another account alive, and the teardown order then hard-
+        killed its session into a re-pair).
+
+        Each other process handles its own IPC quit by closing its WhatsApp
+        session gracefully first (see real_exit → _stop_wpp_server STEP 1), so
+        no session is ever hard-killed by the shared-Node taskkill. We ask them
+        sequentially and wait for each to confirm RELEASED before we exit, so
+        the last-one-out Node teardown happens only after every session is
+        cleanly closed. Best-effort: an unresponsive peer never blocks our exit.
+        """
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if gd and acc_id:
+            try:
+                import ipc
+                import node_coord
+                import update_coord
+                others = [l.get("account_id") for l in node_coord.live_node_leases(
+                    gd, is_alive=update_coord.lease_alive) if not l.get("_corrupt")]
+                others = [a for a in others if a and a != acc_id]
+                for other in others:
+                    try:
+                        logging.info("[quit-all] asking account %s to quit", other)
+                        ipc.request_quit(gd, other, timeout=10.0)
+                    except Exception:
+                        logging.exception("[quit-all] request_quit failed for %s", other)
+            except Exception:
+                logging.exception("[quit-all] enumerating peers failed (non-fatal)")
+        self.real_exit()
+
     def _refresh_menubar(self):
         """Retranslate the menu bar labels after a language change."""
         mb = self.GetMenuBar()
@@ -1330,22 +1447,37 @@ class MainWindow(wx.Frame):
         mb.GetMenu(1).FindItemById(self._ID_OFFLINE_MENU).SetItemLabel(
             f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O"
         )
-        mb.SetMenuLabel(2, self.i18n.t("menu_help"))
-        mb.GetMenu(2).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
-            f"{self.i18n.t('menu_shortcuts')}\tF1"
-        )
-        mb.GetMenu(2).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
-            self.i18n.t("menu_force_update")
-        )
-        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
-            self.i18n.t("menu_force_reinstall_zip")
-        )
-        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
-            self.i18n.t("menu_force_reinstall_wpp")
-        )
-        mb.GetMenu(2).FindItemById(self._ID_ABOUT).SetItemLabel(
-            self.i18n.t("menu_about")
-        )
+        # The Help menu is NOT at a fixed index: with multi-account a "Konta"
+        # menu sits between Sync and Help (File=0, Sync=1, Konta=2, Help=3),
+        # without it Help is at index 2. Locate it by the item it owns rather
+        # than hard-coding index 2 — otherwise a language change would relabel
+        # the "Konta" menu as "Help" and retranslate the wrong menu.
+        help_idx = mb.FindMenu(self.i18n.t("menu_help"))
+        if help_idx == wx.NOT_FOUND:
+            help_menu = None
+            for i in range(mb.GetMenuCount()):
+                if mb.GetMenu(i).FindItemById(self._ID_ABOUT) is not None:
+                    help_idx, help_menu = i, mb.GetMenu(i)
+                    break
+        else:
+            help_menu = mb.GetMenu(help_idx)
+        if help_menu is not None:
+            mb.SetMenuLabel(help_idx, self.i18n.t("menu_help"))
+            help_menu.FindItemById(self._ID_SHORTCUTS).SetItemLabel(
+                f"{self.i18n.t('menu_shortcuts')}\tF1"
+            )
+            help_menu.FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
+                self.i18n.t("menu_force_update")
+            )
+            help_menu.FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
+                self.i18n.t("menu_force_reinstall_zip")
+            )
+            help_menu.FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
+                self.i18n.t("menu_force_reinstall_wpp")
+            )
+            help_menu.FindItemById(self._ID_ABOUT).SetItemLabel(
+                self.i18n.t("menu_about")
+            )
 
     def _on_about(self, event=None):
         """Show application authorship, version and license information."""
@@ -1402,8 +1534,16 @@ class MainWindow(wx.Frame):
         ) == wx.YES:
             self._on_disconnect()
 
-    def _on_disconnect(self, event=None):
-        """Disconnect from WhatsApp: wipe credentials, stop WebSocket and show pairing dialog."""
+    def _on_disconnect(self, event=None, wipe=True):
+        """Disconnect from WhatsApp: drop credentials, stop WebSocket and show
+        the pairing dialog.
+
+        ``wipe`` (default True) also clears the local database/media — the right
+        thing on a *confirmed* logout. Pass wipe=False for a session that simply
+        could not be resumed (long QRCODE at startup with no prior connect this
+        run): the user needs the pairing dialog, but their history must survive,
+        because a failed resume is NOT proof the device was unlinked (a real log
+        showed the server logging back in the same second the client wiped)."""
         old_token = self._get_wa_token()
         pi = self.settings.setdefault("privateinfo", {})
         self._set_wa_token("")
@@ -1412,7 +1552,11 @@ class MainWindow(wx.Frame):
         self.messages_set_completed = False
         self.token = ""
         self.save_settings()
-        self.clear_local_data()
+        if wipe:
+            self.clear_local_data()
+        else:
+            logging.warning("[_on_disconnect] resume failed — showing pairing "
+                            "dialog WITHOUT wiping local data (history preserved).")
         # Reset the connection state as if this were a fresh app launch, not
         # just a fresh WebSocket. Without this, _wa_connect_announced stayed
         # True from the connection that just ended, which permanently
@@ -1491,14 +1635,16 @@ class MainWindow(wx.Frame):
 
     def _update_title(self):
         """
-        Rebuild the frame title from the app name, the number of conversations
-        with unread messages and the current status, e.g.:
+        Rebuild the frame title from the app name, the account name (multi-
+        account), the number of conversations with unread messages and the
+        current status, e.g.:
           "WinZapp"
-          "WinZapp (2)"
-          "WinZapp (2) | modo offline"
-          "WinZapp (3) | baixando mídias"
+          "WinZapp — Midzi"
+          "WinZapp — Midzi (2)"
+          "WinZapp — Midzi (2) | modo offline"
+          "WinZapp — Midzi (3) | baixando mídias"
         """
-        title   = self.i18n.t("app_name")
+        unread_chats = 0
         if not getattr(self, "_initial_sync_running", False):
             deleted = self._deleted_chats
             # Archived conversations are intentionally excluded here — they
@@ -1513,8 +1659,12 @@ class MainWindow(wx.Frame):
                 and not self.is_chat_archived(jid)
                 and effective_unread_count(chat) > 0
             )
-            if unread_chats:
-                title += f" ({unread_chats})"
+        # Base title carries the account name (multi-account) + unread count,
+        # so the user/screen reader can always tell which account this window
+        # is — _format_title is the single source of that logic (previously
+        # this method rebuilt the title from scratch and dropped the account
+        # name on every refresh).
+        title = self._format_title(unread_chats)
         if hasattr(self, "navigation_panel"):
             self.navigation_panel.refresh_archived_label()
         if self.offline_mode:
@@ -2062,6 +2212,15 @@ class MainWindow(wx.Frame):
             return
         if event.GetActive():
             self._last_activation_time = time.time()
+            # The Accounts menu is built once at startup from a registry
+            # snapshot and shows only 'paired' accounts. If another account's
+            # process paired / changed state after this menu was built (or its
+            # process was still coming up), this window's menu goes stale and an
+            # account "disappears" from it until 'Switch account' is opened.
+            # Rebuilding on focus-gain keeps the menu (and the Ctrl+Shift+1..9
+            # hotkey slot map, rebuilt inside _build_menubar) in sync with the
+            # live registry — this is the moment the user returns to the window.
+            self._refresh_accounts_menu_if_stale()
             threading.Thread(
                 target=self._send_presence, args=("available",), daemon=True
             ).start()
@@ -3648,6 +3807,72 @@ class MainWindow(wx.Frame):
 
     # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
+    def _peer_node_ports(self) -> list[int]:
+        """Node ports OTHER accounts have persisted, so this account allocates a
+        distinct one. Best-effort: reads each peer account's settings.json
+        connection.wpp_port via the registry; any unreadable peer is skipped."""
+        ports: list[int] = []
+        registry = getattr(self, "registry", None)
+        acc_id = getattr(self, "account_id", None)
+        if registry is None:
+            return ports
+        try:
+            import json as _json
+            import node_ports
+            for acc in registry.list():
+                aid = acc.get("id")
+                if not aid or aid == acc_id:
+                    continue
+                try:
+                    sp = os.path.join(registry.data_dir_for(aid), "settings.json")
+                    with open(sp, "r", encoding="utf-8") as f:
+                        p = _json.load(f).get("connection", {}).get("wpp_port")
+                    p = node_ports.sanitize_saved_port(p)
+                    if p is not None:
+                        ports.append(p)
+                except Exception:
+                    continue
+        except Exception:
+            logging.exception("[node-port] peer port enumeration failed (non-fatal)")
+        return ports
+
+    def _resolve_wpp_port(self, conn: dict) -> int:
+        """Resolve THIS account's stable WPPConnect Node port.
+
+        Custom API: honour the user's configured port untouched. Otherwise keep
+        a valid saved port (stable Node/userDataDir across launches), or allocate
+        the lowest free port not used by a peer on first run — then persist it so
+        it never drifts. This is what gives each account its own isolated Node.
+        """
+        import node_ports
+        if conn.get("wpp_custom_api"):
+            saved = conn.get("wpp_port")
+            return saved if isinstance(saved, int) and not isinstance(saved, bool) else node_ports.BASE_PORT
+        # Single-account / legacy fallback (no registry context): behave as before.
+        if getattr(self, "registry", None) is None or getattr(self, "account_id", None) is None:
+            return node_ports.sanitize_saved_port(conn.get("wpp_port")) or node_ports.BASE_PORT
+
+        def _is_free(port: int) -> bool:
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                    s.settimeout(0.3)
+                    return s.connect_ex(("127.0.0.1", port)) != 0
+            except OSError:
+                return True
+
+        port = node_ports.resolve_account_port(
+            self.account_id, conn.get("wpp_port"), self._peer_node_ports(), is_free=_is_free)
+        # Persist so the choice is stable next launch.
+        if conn.get("wpp_port") != port:
+            self.settings.setdefault("connection", {})["wpp_port"] = port
+            try:
+                self.save_settings()
+            except Exception:
+                logging.exception("[node-port] persisting resolved port failed (non-fatal)")
+        logging.info("[node-port] account %s → WPPConnect port %s",
+                     getattr(self, "account_id", None), port)
+        return port
+
     def _is_wpp_running(self):
         """Return True if the WPPConnect is already listening on the configured server/port."""
         import urllib.parse
@@ -3764,19 +3989,35 @@ class MainWindow(wx.Frame):
 
             # Register our per-account node-lease so shutdown coordination knows
             # this account is a live client of the shared Node (plan Zad 3.1b).
-            try:
-                import node_coord
-                import update_coord
-                gd = getattr(self, "global_dir", None)
-                acc_id = getattr(self, "account_id", None)
-                if gd and acc_id:
-                    _pid = os.getpid()
-                    _ct = update_coord._default_proc_create_time(_pid) or 0.0
-                    node_coord.add_node_lease(gd, acc_id, pid=_pid, create_time=_ct)
-            except Exception:
-                logging.exception("[startup] node-lease registration failed (non-fatal)")
+            self._register_node_lease()
         except Exception:
             pass
+
+    def _register_node_lease(self):
+        """Register this account's node-lease on the shared WPPConnect Node.
+
+        A node-lease is the marker "this account still needs the shared Node";
+        _stop_wpp_server() only kills the Node when no OTHER account holds a live
+        lease. This MUST run on BOTH startup paths — the one that spawns the Node
+        AND the one that adopts an already-running Node (ensure_wpp_running()
+        early-returns when the port is already open). Registering only on spawn
+        left every adopting account leaseless, so when the account that spawned
+        the Node exited, the shutdown guard saw no other live lease and tree-killed
+        the shared server out from under the still-running account — which then
+        polled QRCODE and wiped its own database. Idempotent (atomic overwrite).
+        """
+        try:
+            import node_coord
+            import update_coord
+            gd = getattr(self, "global_dir", None)
+            acc_id = getattr(self, "account_id", None)
+            if gd and acc_id:
+                _pid = os.getpid()
+                _ct = update_coord._default_proc_create_time(_pid) or 0.0
+                node_coord.add_node_lease(gd, acc_id, pid=_pid, create_time=_ct)
+                logging.info("[node-lease] registered lease for account %s (pid=%s)", acc_id, _pid)
+        except Exception:
+            logging.exception("[node-lease] registration failed (non-fatal)")
 
     # Emitted by WPPConnect (controllers/browser.js) when the WhatsApp Web build it
     # pins is not present in the installed @wppconnect/wa-version package. It is a
@@ -3822,31 +4063,24 @@ class MainWindow(wx.Frame):
     def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
 
-        Calls /close-session first so WPPConnect asks Puppeteer to
-        browser.close() Chrome gracefully, preventing stale Chrome windows.
+        Ordering matters (multi-account): FIRST gracefully close THIS account's
+        own WhatsApp session (browser.close() → WhatsApp Web flushes its session
+        state to userDataDir), THEN decide the shared Node's fate. Previously the
+        node-lease guard returned BEFORE close-session, so a process that left
+        the shared Node up for other accounts never closed its own session
+        gracefully — and when the LAST account later killed the Node with
+        `taskkill /F /T`, every still-open Chrome (including sessions that were
+        CONNECTED) was hard-killed mid-flight. WhatsApp Web treats that abrupt
+        kill as a broken link, so the account came back to a pairing screen on
+        next launch (reported live: closed both windows seconds apart, one
+        account then demanded re-pairing).
 
-        Multi-account: the shared Node is only torn down when OUR node-lease is
-        the last live one (plan Zad 3.1b). If another account still holds a live
-        lease we just release ours and leave the server running for them.
+        The shared Node is only torn down when OUR node-lease is the last live
+        one (plan Zad 3.1b); otherwise we release ours and leave it running.
         """
-        # Multi-account guard: don't kill a Node other live accounts still need.
-        gd = getattr(self, "global_dir", None)
-        acc_id = getattr(self, "account_id", None)
-        if gd and acc_id:
-            try:
-                import node_coord
-                import update_coord
-                node_coord.release_node_lease(gd, acc_id)
-                live = [l.get("account_id") for l in node_coord.live_node_leases(
-                    gd, is_alive=update_coord.lease_alive) if not l.get("_corrupt")]
-                other_live = [a for a in live if a and a != acc_id]
-                if other_live:
-                    logging.info("[shutdown] leaving WPPConnect up for other live "
-                                 "accounts: %s", other_live)
-                    return
-            except Exception:
-                logging.exception("[shutdown] node-lease coordination failed; "
-                                  "falling through to stop (best-effort)")
+        # STEP 1: gracefully close our own session so its state is persisted,
+        # regardless of whether we go on to stop the Node or leave it up. This
+        # must happen for EVERY closing process, not just the last one.
         token = getattr(self, "token", "")
         if token:
             try:
@@ -3859,9 +4093,25 @@ class MainWindow(wx.Frame):
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=5,
                 )
+                logging.info("[shutdown] gracefully closed own WPP session")
                 time.sleep(2)
             except Exception:
-                pass
+                logging.info("[shutdown] own close-session failed (non-fatal)")
+
+        # STEP 2: stop OUR OWN Node. Each account now runs its own Node on its
+        # own port (revised architecture), so there is no shared server to spare
+        # and no cross-account lease to check — we only ever kill the Node on
+        # THIS account's port. Release our lease (kept purely for diagnostics /
+        # orphan attribution) and tear our Node down.
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if gd and acc_id:
+            try:
+                import node_coord
+                node_coord.release_node_lease(gd, acc_id)
+                logging.info("[node-lease] released lease for account %s", acc_id)
+            except Exception:
+                logging.exception("[shutdown] lease release failed (non-fatal)")
 
         proc = getattr(self, "wpp_process", None)
         pid = None
@@ -3952,6 +4202,14 @@ class MainWindow(wx.Frame):
         budget below.
         """
         if self._is_wpp_running():
+            # ADOPT path: the shared Node is already listening (spawned by another
+            # account, or left running from a previous session). We won't spawn it,
+            # but we MUST still register our node-lease — otherwise the shutdown
+            # guard in _stop_wpp_server() can't see that this account needs the
+            # Node and will tree-kill it when the spawning account exits, wiping
+            # our live WhatsApp session (root cause of the multi-account session
+            # loss). Registering only on the spawn path was the bug.
+            self._register_node_lease()
             return  # Already up (e.g. left running from a previous session)
 
         import sys
@@ -5058,49 +5316,16 @@ class MainWindow(wx.Frame):
 
     # Consecutive notLogged/QRCODE readings required before believing the device
     # was really unlinked.  The health checker polls every ~30 s, so a genuine
-    # logout is still noticed inside a minute — cheap insurance against a
-    # transient reading costing the user their entire local history.
-    _LOGOUT_CONFIRM_STRIKES = 2
+    # logout is still noticed inside a couple of minutes — cheap insurance
+    # against a transient reading costing the user their entire local history.
+    _LOGOUT_CONFIRM_STRIKES = 4
 
-    def _logout_confirmed(self, status: str) -> bool:
-        """True when an unlinked status has been seen often enough to act on it.
-
-        Acting means _on_disconnect(), which drops the token AND calls
-        clear_local_data() — the whole local database, irreversibly. A single
-        status read is far too little to justify that: WhatsApp Web reports
-        QRCODE transiently while a session is still restoring (a real log shows
-        INITIALIZING 30 s before the QRCODE that wiped everything), and two
-        callers can observe the same reading inside the same second, so the wipe
-        used to fire twice over.
-
-        Requires _LOGOUT_CONFIRM_STRIKES consecutive unlinked readings — the
-        counter is reset by any other status in check_wa_connection_http() — and
-        returns True at most once per session.
-
-        Only consulted on the *destructive* path, i.e. when the account was
-        actually paired and there is local history to lose. An account that was
-        never paired has an empty database and needs the pairing dialog now, not
-        a poll cycle later, so that path is never gated on this.
-        """
-        if status not in ("notLogged", "QRCODE"):
-            self._logout_strikes = 0
-            return False
-        self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
-        if self._logout_strikes < self._LOGOUT_CONFIRM_STRIKES:
-            logging.warning(
-                "[check_wa_connection_http] Saw unlinked state '%s' (strike %d/%d) — "
-                "waiting for confirmation before wiping local data.",
-                status, self._logout_strikes, self._LOGOUT_CONFIRM_STRIKES,
-            )
-            return False
-        if getattr(self, "_logout_handled", False):
-            return False
-        self._logout_handled = True
-        logging.warning(
-            "[check_wa_connection_http] Confirmed unlinked/logged out state: %s after "
-            "%d consecutive readings. Triggering disconnect.", status, self._logout_strikes,
-        )
-        return True
+    # How many consecutive unlinked readings to tolerate while a paired session
+    # is still trying to resume (never connected yet this run) before offering
+    # the pairing dialog WITHOUT wiping data. The health checker polls ~30 s, so
+    # 20 ≈ 10 minutes — long enough for a slow WhatsApp Web resume, short enough
+    # that a genuinely dead session eventually surfaces a QR the user can scan.
+    _RESUME_FAIL_STRIKES = 20
 
     def _probe_whatsapp_host(self) -> bool:
         """True if WhatsApp's own servers answer over the network.
@@ -5243,6 +5468,7 @@ class MainWindow(wx.Frame):
                 # see _LOGOUT_CONFIRM_STRIKES.
                 if status not in ("notLogged", "QRCODE"):
                     self._logout_strikes = 0
+                    self._resume_fail_strikes = 0
 
                 # Robust check: Only call start-session if the instance is explicitly CLOSED, DESTROYED, or completely inactive.
                 # WPPConnect status values include: CONNECTED, open, INITIALIZING, QRCODE, PHONECODE, notLogged, inChat, PAIRED, etc.
@@ -5327,12 +5553,49 @@ class MainWindow(wx.Frame):
                             self._on_disconnect()
 
                         if self.settings.get("privateinfo", {}).get("paired"):
-                            # Destructive path: _on_disconnect() wipes the whole
-                            # local database, so an unlinked reading has to be
-                            # confirmed first — see _logout_confirmed().
-                            if not self._logout_confirmed(status):
-                                return
-                            wx.CallAfter(_logout_with_warning)
+                            # Destructive decisions go through the pure classifier
+                            # (connection_state.classify_unlinked) so the "logout
+                            # vs still-resuming vs resume-failed" rule is one
+                            # tested place. The key invariant: never wipe a
+                            # session that has not been connected THIS run — it's
+                            # resuming from its saved profile, and a transient
+                            # QRCODE during resume is NOT a logout (the bug that
+                            # kept wiping accounts; a real log showed the server
+                            # reaching 'inChat' the same second the client wiped).
+                            import connection_state as cs
+                            ever = bool(getattr(self, "_wa_connect_announced", False))
+                            if ever:
+                                self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
+                            else:
+                                self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
+                            decision = cs.classify_unlinked(
+                                status,
+                                ever_connected=ever,
+                                logout_strikes=getattr(self, "_logout_strikes", 0),
+                                resume_strikes=getattr(self, "_resume_fail_strikes", 0),
+                                logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
+                                resume_fail_strikes=self._RESUME_FAIL_STRIKES,
+                            )
+                            if decision == cs.LOGOUT and not getattr(self, "_logout_handled", False):
+                                self._logout_handled = True
+                                logging.warning(
+                                    "[check_wa_connection_http] Confirmed logout (%s, "
+                                    "%d strikes) — disconnecting and wiping.",
+                                    status, self._logout_strikes)
+                                wx.CallAfter(_logout_with_warning)
+                            elif decision == cs.RESUME_FAILED and not getattr(self, "_logout_handled", False):
+                                self._logout_handled = True
+                                logging.warning(
+                                    "[check_wa_connection_http] Session did not resume "
+                                    "after %d readings — pairing dialog WITHOUT wiping.",
+                                    self._resume_fail_strikes)
+                                wx.CallAfter(lambda: self._on_disconnect(wipe=False))
+                            else:
+                                logging.info(
+                                    "[check_wa_connection_http] Unlinked '%s' → %s "
+                                    "(ever_connected=%s) — data preserved.",
+                                    status, decision, ever)
+                            return
                         else:
                             # Not paired: there is nothing to lose (the database
                             # is empty by definition) and _on_disconnect() is

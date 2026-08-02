@@ -651,5 +651,10 @@
     "acc_btn_pair": "Conectar",
     "acc_pair_now_prompt": "Conta \"{name}\" criada. Deseja conectá-la agora (parear)?",
     "acc_err_pair_current": "Esta é a conta atual — já está em uso.",
-    "acc_err_pair_not_pending": "Só é possível conectar contas aguardando pareamento."
+    "acc_err_pair_not_pending": "Só é possível conectar contas aguardando pareamento.",
+    "acc_unpaired_title": "Conta não conectada",
+    "acc_unpaired_label": "A conta \"{name}\" não está conectada. O que deseja fazer?",
+    "acc_unpaired_pair": "Conectar esta conta",
+    "acc_unpaired_switch": "Alternar para a conta selecionada",
+    "acc_unpaired_quit": "Sair"
 }

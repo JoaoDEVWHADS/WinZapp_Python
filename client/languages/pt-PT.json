@@ -651,5 +651,10 @@
     "acc_btn_pair": "Ligar",
     "acc_pair_now_prompt": "Conta \"{name}\" criada. Pretende ligá-la agora (emparelhar)?",
     "acc_err_pair_current": "Esta é a conta atual — já está em utilização.",
-    "acc_err_pair_not_pending": "Só é possível ligar contas a aguardar emparelhamento."
+    "acc_err_pair_not_pending": "Só é possível ligar contas a aguardar emparelhamento.",
+    "acc_unpaired_title": "Conta não ligada",
+    "acc_unpaired_label": "A conta \"{name}\" não está ligada. O que pretende fazer?",
+    "acc_unpaired_pair": "Ligar esta conta",
+    "acc_unpaired_switch": "Mudar para a conta selecionada",
+    "acc_unpaired_quit": "Sair"
 }

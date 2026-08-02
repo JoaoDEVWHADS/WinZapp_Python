@@ -3,6 +3,8 @@
 from account_ui import (
     accelerator_slots,
     switchable_accounts,
+    unpaired_start_options,
+    accounts_menu_signature,
     manager_rows,
     can_archive,
     can_hard_delete,
@@ -35,6 +37,48 @@ def test_switchable_only_paired_ordered():
             _acc(C, "pending", 3)]
     ids = [a["id"] for a in switchable_accounts(accs)]
     assert ids == [A]  # only paired
+
+
+def test_unpaired_start_options_excludes_current_and_nonpaired():
+    # current account (A) is the unpaired one starting up; only OTHER paired
+    # accounts are offered as switch targets. B paired -> offered; C pending
+    # and D archived -> not offered; A itself -> excluded.
+    accs = [_acc(A, "paired", 1), _acc(B, "paired", 2),
+            _acc(C, "pending", 3), _acc("d" * 32, "archived", 4)]
+    ids = [a["id"] for a in unpaired_start_options(accs, current_account_id=A)]
+    assert ids == [B]
+
+
+def test_unpaired_start_options_empty_when_no_other_paired():
+    # Only the current account is paired -> nothing to switch to, caller must
+    # fall through to the normal pairing dialog.
+    accs = [_acc(A, "paired", 1), _acc(C, "pending", 2)]
+    assert unpaired_start_options(accs, current_account_id=A) == []
+
+
+def test_accounts_menu_signature_changes_when_account_becomes_paired():
+    # The reported "account disappears from the menu" bug: menu built while B
+    # was still pending, then B pairs. Signature must differ so a focus-gain
+    # rebuild is triggered.
+    before = [_acc(A, "paired", 1), _acc(B, "pending", 2)]
+    after = [_acc(A, "paired", 1), _acc(B, "paired", 2)]
+    assert accounts_menu_signature(before) != accounts_menu_signature(after)
+    # B now visible in the menu signature
+    assert B in [row[0] for row in accounts_menu_signature(after)]
+
+
+def test_accounts_menu_signature_stable_when_nothing_menu_visible_changed():
+    # A non-menu field changing (last_used_at) must NOT change the signature,
+    # so focus-gain does not needlessly rebuild the menu (no flicker).
+    a1 = [{"id": A, "state": "paired", "order": 1, "name": "midzi", "last_used_at": 1}]
+    a2 = [{"id": A, "state": "paired", "order": 1, "name": "midzi", "last_used_at": 999}]
+    assert accounts_menu_signature(a1) == accounts_menu_signature(a2)
+
+
+def test_accounts_menu_signature_changes_on_rename():
+    before = [_acc(A, "paired", 1, name="midzi")]
+    after = [_acc(A, "paired", 1, name="tyflopodcast")]
+    assert accounts_menu_signature(before) != accounts_menu_signature(after)
 
 
 def test_manager_rows_hides_deleting():

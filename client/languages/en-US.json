@@ -651,5 +651,10 @@
     "acc_btn_pair": "Connect",
     "acc_pair_now_prompt": "Account \"{name}\" created. Connect it now (pair)?",
     "acc_err_pair_current": "This is the current account — it's already in use.",
-    "acc_err_pair_not_pending": "Only accounts awaiting pairing can be connected."
+    "acc_err_pair_not_pending": "Only accounts awaiting pairing can be connected.",
+    "acc_unpaired_title": "Account not connected",
+    "acc_unpaired_label": "The account \"{name}\" is not connected. What would you like to do?",
+    "acc_unpaired_pair": "Connect this account",
+    "acc_unpaired_switch": "Switch to selected account",
+    "acc_unpaired_quit": "Quit"
 }

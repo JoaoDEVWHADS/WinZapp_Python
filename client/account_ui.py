@@ -44,6 +44,30 @@ def switchable_accounts(accounts: list[dict]) -> list[dict]:
                   key=lambda a: a.get("order", 0))
 
 
+def unpaired_start_options(accounts: list[dict], current_account_id: str) -> list[dict]:
+    """Other paired accounts the user could switch to when the CURRENT account
+    starts up unpaired (its saved session was lost / never completed).
+
+    When this is non-empty, startup must NOT trap the user in the pairing dialog
+    of the dead account with no way out: it should first offer 'connect this
+    account / switch to a working one / quit'. Excludes the current account
+    itself. Pure/wx-free so the decision is unit-tested."""
+    return [a for a in switchable_accounts(accounts) if a.get("id") != current_account_id]
+
+
+def accounts_menu_signature(accounts: list[dict]) -> tuple:
+    """Stable fingerprint of what the Accounts menu renders, so a window can
+    tell whether a live registry change means its menu is stale and must be
+    rebuilt. Captures exactly the fields the menu shows for each switchable
+    (paired, ordered) account: id, display name and slot order. Two registries
+    with the same signature produce an identical menu, so rebuilding is a no-op
+    and can be skipped (avoids needless menu flicker / screen-reader churn)."""
+    return tuple(
+        (a.get("id"), a.get("name", a.get("id")), a.get("order", 0))
+        for a in switchable_accounts(accounts)
+    )
+
+
 def manager_rows(accounts: list[dict]) -> list[dict]:
     """Rows for the manager list: every non-deleting account, ordered, with a
     display state. 'deleting' accounts are hidden (mid-removal)."""
@@ -155,6 +179,94 @@ class SwitchAccountDialog:
                 return None
             acc = self.listbox.GetClientData(sel)
             return acc.get("id") if acc else None
+        finally:
+            self.dlg.Destroy()
+
+
+class UnpairedStartDialog:
+    """Shown at startup when the CURRENT account is unpaired but OTHER paired
+    accounts exist (plan: don't trap the user in the dead account's pairing
+    dialog with no way to reach a working account or the menu).
+
+    Three accessible choices: connect (pair) THIS account, switch to another
+    account, or quit. Returns one of: 'pair' | 'switch' | 'quit'. When 'switch',
+    .chosen_account_id holds the picked account id. All buttons share the panel
+    parent (mixing dialog/panel parents trips wxAssertionError CheckExpectedParentIs
+    and the dialog silently fails to open — see SwitchAccountDialog)."""
+
+    RESULT_PAIR = "pair"
+    RESULT_SWITCH = "switch"
+    RESULT_QUIT = "quit"
+
+    def __init__(self, parent, accounts, current_account_id, current_account_name, i18n):
+        wx = _wx()
+        self.i18n = i18n
+        self._options = unpaired_start_options(accounts, current_account_id)
+        self.chosen_account_id = None
+        self._result = self.RESULT_QUIT
+        self.dlg = wx.Dialog(parent, title=i18n.t("acc_unpaired_title"),
+                             style=wx.DEFAULT_DIALOG_STYLE)
+        panel = wx.Panel(self.dlg)
+        vbox = wx.BoxSizer(wx.VERTICAL)
+        label = wx.StaticText(
+            panel,
+            label=i18n.t("acc_unpaired_label").format(name=current_account_name),
+        )
+        vbox.Add(label, 0, wx.ALL, 8)
+        self.listbox = wx.ListBox(panel, style=wx.LB_SINGLE)
+        for acc in self._options:
+            self.listbox.Append(acc.get("name", acc["id"]), acc)
+        if self.listbox.GetCount():
+            self.listbox.SetSelection(0)
+        vbox.Add(self.listbox, 1, wx.EXPAND | wx.ALL, 8)
+
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_pair = wx.Button(panel, label=i18n.t("acc_unpaired_pair"))
+        self.btn_switch = wx.Button(panel, label=i18n.t("acc_unpaired_switch"))
+        self.btn_quit = wx.Button(panel, wx.ID_CANCEL, i18n.t("acc_unpaired_quit"))
+        btns.Add(self.btn_pair, 0, wx.ALL, 4)
+        btns.Add(self.btn_switch, 0, wx.ALL, 4)
+        btns.Add(self.btn_quit, 0, wx.ALL, 4)
+        vbox.Add(btns, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        panel.SetSizer(vbox)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(panel, 1, wx.EXPAND)
+        self.dlg.SetSizer(outer)
+        self.dlg.SetSize((380, 340))
+
+        self.btn_pair.Bind(wx.EVT_BUTTON, self._on_pair)
+        self.btn_switch.Bind(wx.EVT_BUTTON, self._on_switch)
+        self.btn_quit.Bind(wx.EVT_BUTTON, lambda e: self.dlg.EndModal(wx.ID_CANCEL))
+        self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self._on_switch)
+        # Enter connects this account (most common intent for the account the
+        # user actually launched); Esc quits.
+        self.dlg.SetAffirmativeId(self.btn_pair.GetId())
+        self.dlg.SetEscapeId(wx.ID_CANCEL)
+        self.btn_pair.SetFocus()
+
+    def _on_pair(self, event):
+        wx = _wx()
+        self._result = self.RESULT_PAIR
+        self.dlg.EndModal(wx.ID_OK)
+
+    def _on_switch(self, event):
+        wx = _wx()
+        sel = self.listbox.GetSelection()
+        if sel == wx.NOT_FOUND:
+            return
+        acc = self.listbox.GetClientData(sel)
+        self.chosen_account_id = acc.get("id") if acc else None
+        if not self.chosen_account_id:
+            return
+        self._result = self.RESULT_SWITCH
+        self.dlg.EndModal(wx.ID_OK)
+
+    def show(self):
+        """Return 'pair' | 'switch' | 'quit'. On 'switch', read
+        .chosen_account_id for the picked account."""
+        try:
+            self.dlg.ShowModal()
+            return self._result
         finally:
             self.dlg.Destroy()
 

@@ -123,3 +123,43 @@ def test_installation_id_stable(tmp_path):
     a = nc.installation_id(gd)
     b = nc.installation_id(gd)
     assert a == b and len(a) >= 8
+
+
+# ── regression: adopt-path must register a lease (multi-account session loss) ──
+def test_adopting_account_lease_keeps_node_alive_for_spawner_shutdown(tmp_path):
+    """Reproduces the real multi-account session-loss incident.
+
+    Account A spawns the shared Node and registers its lease. Account B starts
+    later, finds the port already open (ADOPT path) and — with the fix — also
+    registers its lease. When A shuts down it releases its own lease and applies
+    the same guard _stop_wpp_server() uses: stop the Node only when no OTHER live
+    lease remains. Because B registered on adopt, A must see B and leave the Node
+    running. Before the fix B never registered, so A tree-killed the shared Node
+    out from under B, whose session then polled QRCODE and wiped its database.
+    """
+    gd = _gd(tmp_path)
+    A, B = "a" * 32, "b" * 32
+    nc.add_node_lease(gd, A, pid=100, create_time=1.0)   # A spawns
+    nc.add_node_lease(gd, B, pid=200, create_time=2.0)   # B adopts (the fix)
+
+    # A shuts down: release own lease, recompute live, decide.
+    nc.release_node_lease(gd, A)
+    live = [l["account_id"] for l in nc.live_node_leases(gd, is_alive=lambda p, c: True)
+            if not l.get("_corrupt")]
+    other_live = [a for a in live if a and a != A]
+    assert other_live == [B]           # A sees B still needs the Node
+    assert nc.should_stop_node(live, releasing=A) is False  # so A must NOT kill it
+
+
+def test_without_adopt_lease_node_is_killed_under_spawner(tmp_path):
+    """The pre-fix failure mode: only the spawner (A) holds a lease, so when A
+    exits the guard sees no other live lease and stops the Node — killing B's
+    live session. This documents exactly what the adopt-path registration fixes.
+    """
+    gd = _gd(tmp_path)
+    A = "a" * 32
+    nc.add_node_lease(gd, A, pid=100, create_time=1.0)   # only A (B never registered)
+    nc.release_node_lease(gd, A)
+    live = [l["account_id"] for l in nc.live_node_leases(gd, is_alive=lambda p, c: True)
+            if not l.get("_corrupt")]
+    assert [a for a in live if a and a != A] == []   # nothing stops the kill

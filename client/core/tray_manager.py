@@ -198,7 +198,7 @@ class TrayIcon(wx.adv.TaskBarIcon):
         wx.CallAfter(self.main_window.toggle_offline_mode)
 
     def _on_exit(self, event):
-        wx.CallAfter(self.main_window.real_exit)
+        wx.CallAfter(self.main_window.quit_all_accounts)
 
     # ── Language refresh ──────────────────────────────────────────────────────
 

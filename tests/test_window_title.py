@@ -22,3 +22,10 @@ def test_multi_but_name_equals_app():
 
 def test_single_account_ignores_name():
     assert format_window_title("WinZapp", "Praca", 0, is_multi=False) == "WinZapp"
+
+
+def test_multi_account_keeps_name_with_unread():
+    # Regression guard: _update_title() builds its base title via this helper,
+    # so a positive unread count must NOT drop the account name (the earlier
+    # bug: the window title lost the profile name on every unread refresh).
+    assert format_window_title("WinZapp", "Midzi", 3, is_multi=True) == "WinZapp — Midzi (3)"
