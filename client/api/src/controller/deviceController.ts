@@ -1613,18 +1613,57 @@ export async function getMessages(req: Request, res: Response) {
         return result;
       }, { chatId: phone, targetCount, id: id as string });
     } else {
-      if (phone && phone.endsWith('@lid')) {
-        // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
-        response = await req.client.page.evaluate(({ chatId, params }) => {
-          return (window as any).WAPI.getMessages(chatId, params);
-        }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
-      } else {
-        response = await req.client.getMessages(`${phone}`, {
-          count: targetCount,
-          direction: direction.toString() as any,
-          id: id as string,
-        });
-      }
+      // WinZapp patch: no anchor id — this is the plain "give me up to
+      // `count` messages" call sync_chat_messages() makes for every chat on
+      // every sync. getMessages()/WAPI.getMessages() only ever returns what
+      // WhatsApp Web's in-browser Store already has loaded for that chat —
+      // for a chat that hasn't been opened inside this Chrome session
+      // recently, that can be a small number (WhatsApp Web itself only
+      // keeps a short initial window in memory per chat until something
+      // scrolls/asks for more) — e.g. `count=200` silently coming back with
+      // only ~15 messages, regardless of how much real history the account
+      // actually has. WPP.chat.loadEarlierMessages() is what the walkback
+      // branch above already uses to pull more history from the server
+      // into Store on demand; do the same here in a loop until either
+      // `count` is satisfied or a pass brings back no additional messages
+      // (real end of history).
+      response = await req.client.page.evaluate(async ({ chatId, targetCount }) => {
+        const isLid = typeof chatId === 'string' && chatId.endsWith('@lid');
+        const fetchBatch = async () =>
+          isLid
+            ? await (window as any).WAPI.getMessages(chatId, { count: targetCount })
+            : await (window as any).WPP.chat.getMessages(chatId, { count: targetCount });
+
+        try {
+          if ((window as any).WPP?.chat?.find) {
+            await (window as any).WPP.chat.find(chatId);
+          }
+        } catch (e) {
+          // Ignore — fetchBatch() below still works against whatever Store
+          // already has for this chat if find() fails for any reason.
+        }
+
+        let result = await fetchBatch();
+        let attempts = 0;
+        const maxAttempts = 10;
+        while (
+          result && result.length < targetCount &&
+          (window as any).WPP?.chat?.loadEarlierMessages &&
+          attempts < maxAttempts
+        ) {
+          const before = result.length;
+          try {
+            await (window as any).WPP.chat.loadEarlierMessages(chatId);
+          } catch (e) {
+            break;
+          }
+          const next = await fetchBatch();
+          if (!next || next.length <= before) break; // no more history available
+          result = next;
+          attempts++;
+        }
+        return result;
+      }, { chatId: phone, targetCount });
     }
     res.status(200).json({ status: 'success', response: response });
   } catch (e: any) {
