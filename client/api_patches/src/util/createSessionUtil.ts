@@ -281,9 +281,10 @@ export default class CreateSessionUtil {
       if (client.page) {
         client.page.on('console', (msg: any) => {
           const text = msg.text();
-          if (text.includes('[browser-evaluate]')) {
-            req.logger.info(text);
-          }
+          req.logger.info(`[${session} Browser Console] ${msg.type()}: ${text}`);
+        });
+        client.page.on('pageerror', (err: any) => {
+          req.logger.error(`[${session} Browser PageError] ${err?.message || err}`);
         });
         // The shim lives on a prototype inside the page, so it dies with every
         // WhatsApp Web reload (and wa-js is re-injected fresh each time).
