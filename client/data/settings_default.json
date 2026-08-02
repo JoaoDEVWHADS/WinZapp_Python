@@ -26,5 +26,10 @@
     },
     "audio_playback": {
         "audio_default_speed": 1.0
+    },
+    "audio_devices": {
+        "voice_input": "",
+        "voice_output": "",
+        "effects_output": ""
     }
 }

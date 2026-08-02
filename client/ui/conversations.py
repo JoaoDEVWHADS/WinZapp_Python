@@ -1638,6 +1638,17 @@ class ConversationsPanel(wx.Panel):
                 logging.error("[audio] Failed to initialize PyAudio: %s", exc)
                 return
         pa = self._recording_pa
+        # Per-account microphone selection: resolve the saved device name to a
+        # PortAudio index (None = system default). Best-effort — a missing
+        # device falls back to default rather than failing to record.
+        mic_index = None
+        try:
+            import audio_devices as ad
+            devs = ad.normalize_audio_devices(
+                self.main_window.settings.get("audio_devices", {}))
+            mic_index = ad.input_device_index(devs.get(ad.VOICE_INPUT, ""))
+        except Exception:
+            mic_index = None
         for rate, ch in _configs:
             try:
                 stream = pa.open(
@@ -1645,6 +1656,7 @@ class ConversationsPanel(wx.Panel):
                     channels=ch,
                     format=pyaudio.paInt16,
                     input=True,
+                    input_device_index=mic_index,
                     # Larger buffer (~85 ms at 48 kHz) so the Python callback
                     # can tolerate scheduling delays from background sync/media
                     # threads without PortAudio dropping samples (choppy audio).
@@ -4067,6 +4079,11 @@ class ConversationsPanel(wx.Panel):
         )
         try:
             playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            # Route to the account's chosen voice output device before playing.
+            try:
+                self.main_window.sound_system.route_voice_channel(playback_ctrl)
+            except Exception:
+                pass
             # Restore saved position (e.g. when another audio preempted this one)
             saved_pos = self._audio_positions.pop(msg_id, None)
             if saved_pos:

@@ -701,6 +701,11 @@ class StatusPanel(wx.Panel):
         try:
             self._audio_stream    = sl_stream.FileStream(file=path, decode=True)
             self._audio_temp_file = path
+            # Route status audio to the account's chosen voice output device.
+            try:
+                self.main_window.sound_system.route_voice_channel(self._audio_stream)
+            except Exception:
+                pass
             self._audio_stream.play()
             self._is_playing  = True
             self._audio_timer.Start(500)

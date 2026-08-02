@@ -1,4 +1,5 @@
 import ctypes
+import logging
 import os
 import wx
 from core.i18n import LANGUAGE_NAMES
@@ -514,6 +515,40 @@ class SettingsDialog(wx.Dialog):
         self._audio_page.SetSizer(audio_sizer)
         self._notebook.AddPage(self._audio_page, i18n.t("tab_audio_playback"))
 
+        # ── Audio devices tab (per-account device selection) ─────────────────
+        import audio_devices as _ad
+        self._audio_dev_page = wx.Panel(self._notebook)
+        dev_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Enumerate once; "" system-default entry always first. ClientData holds
+        # the stored value ("" = default, otherwise the device name).
+        self._audio_input_names = _ad.enumerate_input_devices()
+        self._audio_output_names = _ad.enumerate_output_devices()
+        default_label = i18n.t("audio_device_default")
+
+        def _add_device_combo(label_key):
+            lbl = wx.StaticText(self._audio_dev_page, label=i18n.t(label_key))
+            dev_sizer.Add(lbl, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+            combo = wx.ComboBox(self._audio_dev_page, style=wx.CB_READONLY)
+            dev_sizer.Add(combo, 0, wx.EXPAND | wx.ALL, 8)
+            return combo
+
+        self._voice_input_combo = _add_device_combo("audio_device_voice_input")
+        self._voice_output_combo = _add_device_combo("audio_device_voice_output")
+        self._effects_output_combo = _add_device_combo("audio_device_effects_output")
+
+        def _fill_combo(combo, names):
+            combo.Clear()
+            combo.Append(default_label, "")           # "" = system default
+            for n in names:
+                combo.Append(n, n)
+        _fill_combo(self._voice_input_combo, self._audio_input_names)
+        _fill_combo(self._voice_output_combo, self._audio_output_names)
+        _fill_combo(self._effects_output_combo, self._audio_output_names)
+
+        self._audio_dev_page.SetSizer(dev_sizer)
+        self._notebook.AddPage(self._audio_dev_page, i18n.t("tab_audio_devices"))
+
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("ok"))
@@ -646,6 +681,21 @@ class SettingsDialog(wx.Dialog):
         self._set_alert_combo(self._alert_group_combo, tones.get("group", "default"))
         self._alert_group_custom_field.SetValue(tones.get("group_custom_path", ""))
         self._update_alert_custom_field_state()
+
+        # Audio devices: select the saved device by ClientData ("" = default).
+        import audio_devices as _ad
+        devs = _ad.normalize_audio_devices(
+            self.main_window.settings.get("audio_devices", {}))
+
+        def _select_device(combo, value):
+            for i in range(combo.GetCount()):
+                if combo.GetClientData(i) == value:
+                    combo.SetSelection(i)
+                    return
+            combo.SetSelection(0)  # fall back to system default
+        _select_device(self._voice_input_combo, devs[_ad.VOICE_INPUT])
+        _select_device(self._voice_output_combo, devs[_ad.VOICE_OUTPUT])
+        _select_device(self._effects_output_combo, devs[_ad.EFFECTS_OUTPUT])
 
     def _set_alert_combo(self, combo, choice_key: str):
         try:
@@ -1151,6 +1201,27 @@ class SettingsDialog(wx.Dialog):
                 except Exception:
                     pass
 
+        # Audio devices (per-account). Store by name ("" = system default) and
+        # apply the output routing immediately via the sound system; the mic
+        # selection is read on the next recording. Change is instant — no
+        # restart needed (plan choice 3).
+        import audio_devices as _ad
+
+        def _combo_value(combo):
+            sel = combo.GetSelection()
+            return combo.GetClientData(sel) if sel != wx.NOT_FOUND else ""
+        self.main_window.settings["audio_devices"] = {
+            _ad.VOICE_INPUT: _combo_value(self._voice_input_combo),
+            _ad.VOICE_OUTPUT: _combo_value(self._voice_output_combo),
+            _ad.EFFECTS_OUTPUT: _combo_value(self._effects_output_combo),
+        }
+        ss = getattr(self.main_window, "sound_system", None)
+        if ss is not None:
+            try:
+                ss.apply_devices(self.main_window.settings["audio_devices"])
+            except Exception:
+                logging.exception("[settings] applying audio devices failed")
+
         # Global hotkey
         self.main_window.set_global_hotkey(self._hotkey_field._vk, self._hotkey_field._mod)
 
@@ -1229,6 +1300,7 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(4, i18n.t("tab_sound_events"))
         self._notebook.SetPageText(5, i18n.t("tab_alert_tones"))
         self._notebook.SetPageText(6, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(7, i18n.t("tab_audio_devices"))
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))

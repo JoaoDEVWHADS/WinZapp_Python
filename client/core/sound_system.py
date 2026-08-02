@@ -30,6 +30,13 @@ class SoundSystem:
         self.enabled = False
         self.main_window = main_window
         self.sound_dir = sound_dir
+        # BASS device numbers currently in use for each output path. -1 = the
+        # default device BASS init'd on start(). Set by apply_devices(); every
+        # Sound (effect) channel is routed to effects_device on play, and voice
+        # playback (ui/conversations, status_panel) reads voice_device.
+        self.effects_device = -1
+        self.voice_device = -1
+        self._inited_devices = set()   # BASS device numbers already BASS_Init'd
         logging.info("[sound_system] sound_dir = %s (exists=%s)", sound_dir, os.path.isdir(sound_dir))
 
     def _load_bass_plugin(self, dll_name: str) -> bool:
@@ -159,6 +166,92 @@ class SoundSystem:
             logging.warning("[sound_system] bassopus.dll not loaded — OGG Opus playback will fail")
         if not (self._load_bass_plugin('bass_aac.dll') or self._load_bass_plugin('bassaac.dll')):
             logging.warning("[sound_system] bass_aac.dll not loaded")
+        # Device 1 (the one Output() just initialised as our default) is ready.
+        # Capture its real BASS device number so "system default" can always be
+        # resolved to a concrete number and every channel routed EXPLICITLY —
+        # leaving a channel on the "current" device is unsafe once we BASS_Init a
+        # second device (the current device shifts to whichever was init'd last,
+        # so effect sounds would leak onto the voice-output device).
+        try:
+            self._default_device_num = self.output.get_device()
+        except Exception:
+            self._default_device_num = 1
+        self._inited_devices = {self._default_device_num}
+        # Apply any per-account device selection saved in settings.
+        try:
+            self.apply_devices(self.main_window.settings.get("audio_devices", {}))
+        except Exception:
+            logging.exception("[sound_system] initial apply_devices failed (non-fatal)")
+
+    def _ensure_device_inited(self, device: int) -> bool:
+        """BASS_Init an extra output device on demand so a channel can be routed
+        to it (the default device from start() is always ready). Returns True if
+        the device is usable. Idempotent: a device is init'd at most once, and
+        'already initialised' (BASS error 14) is treated as success."""
+        if device in self._inited_devices:
+            return True
+        try:
+            from sound_lib.external.pybass import BASS_Init
+            from sound_lib.main import bass_call
+            bass_call(BASS_Init, device, 44100, 0, 0, None)
+            self._inited_devices.add(device)
+            logging.info("[sound_system] BASS_Init OK for device %s", device)
+            return True
+        except Exception as exc:
+            # BASS_ERROR_ALREADY (14): device already initialised — fine.
+            if "14" in str(exc) or "already" in str(exc).lower():
+                self._inited_devices.add(device)
+                return True
+            logging.warning("[sound_system] BASS_Init failed for device %s: %s", device, exc)
+            return False
+
+    def apply_devices(self, devices: dict):
+        """Resolve the per-account audio-device selection to BASS device numbers
+        and make them live immediately (plan: apply instantly, no restart).
+
+        Effects and voice outputs can be different physical devices: each is
+        BASS_Init'd on demand and stored in self.effects_device / voice_device.
+        Sound.play() routes effect channels to effects_device; voice playback
+        code reads voice_device. Input (mic) selection is handled separately in
+        the recording path (PyAudio). Falls back to the default device when a
+        saved device is missing."""
+        import audio_devices as ad
+        norm = ad.normalize_audio_devices(devices)
+        available = ad.enumerate_output_devices()
+
+        def _dev(name_key):
+            chosen = ad.resolve_device_choice(norm[name_key], available)
+            num = ad.bass_output_device(chosen)  # -1 for "default"
+            if num == -1:
+                # Resolve "system default" to the concrete device BASS init'd at
+                # start(), so effects and voice are ALWAYS routed to an explicit
+                # number and never inherit the other's device.
+                return self._default_device_num
+            if not self._ensure_device_inited(num):
+                return self._default_device_num
+            return num
+
+        self.effects_device = _dev(ad.EFFECTS_OUTPUT)
+        self.voice_device = _dev(ad.VOICE_OUTPUT)
+        logging.info("[sound_system] apply_devices → effects=%s voice=%s "
+                     "(default=%s)", self.effects_device, self.voice_device,
+                     self._default_device_num)
+
+    def route_voice_channel(self, channel):
+        """Route a voice-message playback channel (a sound_lib stream/FX) to the
+        account's chosen voice output device. voice_device is always a concrete
+        BASS device number (system-default resolved to the real one), so we
+        route explicitly and never let a channel inherit whichever device was
+        BASS_Init'd last. Best-effort: a routing failure must never break
+        playback. Called by the conversation and status voice players right
+        before .play()."""
+        dev = getattr(self, "voice_device", None)
+        if channel is None or not dev:
+            return
+        try:
+            channel.set_device(dev)
+        except Exception as exc:
+            logging.debug("[sound_system] voice set_device(%s) failed: %s", dev, exc)
 
 
 
@@ -411,6 +504,19 @@ class Sound(stream.FileStream):
             pack_events = events.get(self.pack_id, {})
             if not pack_events.get(self.event_key, {}).get("enabled", True):
                 return
+        # Route this effect channel to the account's chosen effects output
+        # device. effects_device is always a concrete BASS device number
+        # (system-default resolved to the real one at apply_devices), so we
+        # route EXPLICITLY every time — never leave the channel on the "current"
+        # device, which shifts to whichever was BASS_Init'd last and made effect
+        # sounds leak onto the voice-output device (reported live). Best-effort:
+        # a routing failure must never silence the sound.
+        dev = getattr(self.sound_system, "effects_device", None)
+        if dev:
+            try:
+                self.set_device(dev)
+            except Exception as exc:
+                logging.debug("[sound_system] effect set_device(%s) failed: %s", dev, exc)
         super().play()
 
 
