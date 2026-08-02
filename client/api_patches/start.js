@@ -202,14 +202,14 @@ const optimizedBrowserArgs = [
 function requireWaVersion() {
   const path = require('path');
   try {
-    return require('@wppconnect/wa-version');
+    return require('@wppconnect-team/wa-version');
   } catch (e1) {
     try {
-      return require('@wppconnect-team/wa-version');
+      return require('@wppconnect/wa-version');
     } catch (e2) {
       try {
         const wppEntry = require.resolve('@wppconnect-team/wppconnect/package.json');
-        return require(require.resolve('@wppconnect/wa-version', {
+        return require(require.resolve('@wppconnect-team/wa-version', {
           paths: [path.dirname(wppEntry)],
         }));
       } catch (e3) {
