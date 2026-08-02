@@ -6,7 +6,6 @@ const fs = require('fs');
 // por uma pasta não-vazia: um antivírus pode ter removido/colocado em
 // quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
 // checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
-const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
 
 function findChromeExecutable(dir, depth) {
   if (depth > 6) return null;
