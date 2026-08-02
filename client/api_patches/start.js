@@ -134,7 +134,33 @@ if (!hasChrome) {
       });
       console.log('[chrome-install] Fallback para chrome-headless-shell concluído com sucesso!');
     }
-    // Re-resolve chromeExecutable após o download ser concluído
+    // Auto-extrai qualquer arquivo .zip retido se chrome.exe não tiver sido extraído
+    const autoExtractZips = (dir) => {
+      if (!fs.existsSync(dir)) return;
+      try {
+        const files = fs.readdirSync(dir, { withFileTypes: true });
+        for (const file of files) {
+          const fullPath = path.join(dir, file.name);
+          if (file.isDirectory()) {
+            autoExtractZips(fullPath);
+          } else if (file.name.endsWith('.zip')) {
+            console.log(`[chrome-install] Extraindo arquivo ZIP do Chrome automaticamente: ${fullPath}`);
+            if (process.platform === 'win32') {
+              execSync(`powershell -Command "Expand-Archive -Path '${fullPath}' -DestinationPath '${dir}' -Force"`, { stdio: 'inherit' });
+            } else {
+              execSync(`unzip -o "${fullPath}" -d "${dir}"`, { stdio: 'inherit' });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[chrome-install] Aviso ao descompactar ZIP: ${e && e.message ? e.message : e}`);
+      }
+    };
+
+    autoExtractZips(puppeteerCacheDir);
+    autoExtractZips(directChromeDir);
+
+    // Re-resolve chromeExecutable após o download/extração ser concluído
     chromeExecutable = resolveChromeExecutable();
     console.log(`[WinZapp Debug] Post-install Chrome executable resolution: ${chromeExecutable ? chromeExecutable : 'STILL NOT FOUND'}`);
   } catch (err) {
