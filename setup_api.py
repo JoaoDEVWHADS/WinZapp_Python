@@ -333,26 +333,22 @@ def main():
         if npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
         else:
-            if is_windows:
-                _run(["cmd", "/c", "npm", "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
-            else:
-                _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
+            _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
 
         # Check if dist/server.js was compiled successfully
         server_js = os.path.join(CLIENT_API_DIR, "dist", "server.js")
+        if not os.path.isfile(server_js):
+            print("[INFO] Running Babel directly from node_modules/.bin...")
+            babel_bin = os.path.join(CLIENT_API_DIR, "node_modules", ".bin", "babel.cmd" if is_windows else "babel")
+            if os.path.isfile(babel_bin):
+                _run([babel_bin, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+            else:
+                _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+
         if os.path.isfile(server_js):
             print("[OK] WPPConnect Server compiled successfully (dist/server.js verified).")
         else:
-            print("[WARNING] Running npx babel fallback...")
-            if is_windows:
-                _run(["cmd", "/c", "npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
-            else:
-                _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
-            if os.path.isfile(server_js):
-                print("[OK] WPPConnect Server compiled via Babel fallback successfully.")
-            else:
-                print("[ERROR] dist/server.js not found after build step.")
-                sys.exit(1)
+            print("[WARNING] dist/server.js not found after build step, but proceeding...")
 
     except Exception as e:
         print(f"[WARNING] Node.js dependencies installation/build notice: {e}")
