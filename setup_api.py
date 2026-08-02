@@ -329,16 +329,21 @@ def main():
 
         # Run npm run build (using build:js to run Babel transpilation)
         print("[INFO] Compiling WPPConnect Server...")
-        if npm_bin.endswith("npm-cli.js"):
-            _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
-        else:
-            # On Windows runner when using system npm, run npm via npx/npm command cleanly
-            build_res = subprocess.run(["npm", "run", "build:js"], cwd=CLIENT_API_DIR, shell=True)
-            if build_res.returncode != 0:
-                print("[WARNING] 'npm run build:js' exited with error, running npx babel fallback...")
-                _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
+        try:
+            if npm_bin.endswith("npm-cli.js"):
+                _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
+            else:
+                _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
+        except Exception as build_err:
+            print(f"[WARNING] npm run build:js failed ({build_err}), trying npx babel fallback...")
+            _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
 
-        print("[OK] WPPConnect Server dependencies installed and built successfully.")
+        # Check if dist/server.js was compiled successfully
+        server_js = os.path.join(CLIENT_API_DIR, "dist", "server.js")
+        if os.path.isfile(server_js):
+            print("[OK] WPPConnect Server compiled successfully (dist/server.js verified).")
+        else:
+            print("[WARNING] dist/server.js not found after build step, but proceeding...")
 
     except Exception as e:
         print(f"[ERROR] Node.js dependencies installation/build failed: {e}")
