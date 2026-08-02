@@ -2058,6 +2058,12 @@ class ConversationsPanel(wx.Panel):
     def _restore_to_archived_list(self, jid: str):
         """Switch back to the archived conversations list and re-select `jid`."""
         mw = self.main_window
+        # Undo the conversations_list/label Hide() from
+        # ArchivedConversationsPanel.on_conversation_selected() so this panel
+        # is back to its normal split-view state the next time it is shown
+        # from the regular "Conversations" nav item.
+        self.conversations_label.Show()
+        self.conversations_list.Show()
         self.Hide()
         mw.archived_conversations_panel.Show()
         mw.content_panel.Layout()
@@ -8085,6 +8091,13 @@ class ArchivedConversationsPanel(wx.Panel):
         # Switch to conversations panel and open the chat there
         mw.archived_conversations_panel.Hide()
         mw.conversations_panel.Show()
+        # ConversationsPanel is a split view: its own chat list sits beside the
+        # conversation detail pane, both shown together normally. Showing the
+        # whole panel here would put that *regular* chat list back on screen
+        # and in the Tab order, even though Esc still correctly returns to
+        # this archived list — so hide it and show only the detail pane.
+        mw.conversations_panel.conversations_label.Hide()
+        mw.conversations_panel.conversations_list.Hide()
         mw.content_panel.Layout()
         mw.conversations_panel.navigate_to_conversation(chat)
 
