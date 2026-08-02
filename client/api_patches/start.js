@@ -34,9 +34,16 @@ function findChromeExecutable(dir, depth) {
   return null;
 }
 
-const chromeExecutable = fs.existsSync(puppeteerCacheDir)
-  ? findChromeExecutable(puppeteerCacheDir, 0)
-  : null;
+const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+const nodeModulesCacheDir = path.join(__dirname, 'node_modules', '.cache', 'puppeteer');
+
+let chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
+if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
+  chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
+}
+if (!chromeExecutable) {
+  chromeExecutable = findChromeExecutable(__dirname, 0);
+}
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
