@@ -567,7 +567,10 @@ class MainWindow(wx.Frame):
         self.ws = None
 
         conn = self.settings.get("connection", {})
-        self.wpp_server    = conn.get("wpp_server",    "http://127.0.0.1")
+        server_val = str(conn.get("wpp_server", "http://127.0.0.1")).strip()
+        if not server_val.startswith(("http://", "https://")):
+            server_val = "http://127.0.0.1"
+        self.wpp_server    = server_val
         self.wpp_port      = conn.get("wpp_port",      6300)
         if self.wpp_port == 3417:
             self.wpp_port = 6300
