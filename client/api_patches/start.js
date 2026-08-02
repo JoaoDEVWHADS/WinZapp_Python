@@ -24,6 +24,8 @@ function findChromeExecutable(dir, depth) {
     } else if (
       entry.name === 'chrome.exe' ||
       entry.name === 'chrome' ||
+      entry.name === 'chrome-headless-shell.exe' ||
+      entry.name === 'chrome-headless-shell' ||
       entry.name === 'Chromium'
     ) {
       return full;
