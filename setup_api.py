@@ -270,16 +270,21 @@ def main():
         node_bin = "node"
         npm_bin = "npm"
         if is_windows:
-            win_node = os.path.join(ROOT_DIR, "client", "node", "node.exe")
+            win_node = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node.exe"))
             if os.path.isfile(win_node):
                 node_bin = win_node
-                win_npm = os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js")
+                win_npm = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js"))
                 if os.path.isfile(win_npm):
                     npm_bin = win_npm
+            else:
+                node_bin = shutil.which("node") or "node"
+                npm_bin = shutil.which("npm") or "npm"
 
-            win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
-            win_node_dir = os.path.join(ROOT_DIR, "client", "node")
-            os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+            win_git = os.path.abspath(os.path.join(ROOT_DIR, "client", "git", "cmd"))
+            win_node_dir = os.path.abspath(os.path.join(ROOT_DIR, "client", "node"))
+            sys_git = shutil.which("git")
+            sys_git_dir = os.path.dirname(sys_git) if sys_git else ""
+            os.environ["PATH"] = f"{win_node_dir};{sys_git_dir};{win_git};" + os.environ.get("PATH", "")
 
         # Always copy custom patch files to client/api before building
         for rel_path, content in custom_contents.items():
