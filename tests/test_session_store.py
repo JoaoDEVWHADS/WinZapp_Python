@@ -91,3 +91,24 @@ def test_migrate_legacy_token(tmp_path):
     sess = st.ensure_from_legacy_token("winzapp_default", "winzapp_default:LEGACY")
     assert sess["status"] == "active"
     assert st.get("winzapp_default")["token"] == "winzapp_default:LEGACY"
+
+
+def test_second_account_cleanup_never_touches_first_accounts_session(tmp_path):
+    """REGRESSION (real multi-account bug): pairing/cleaning account B must
+    NEVER close account A's live session. Ownership is proven per-account from
+    each account's OWN sessions.json — B's store has no knowledge of A's
+    session 'sessA', so it can never appear in B's sessions_to_close()."""
+    a_dir = str(tmp_path / "accounts" / ("a" * 32))
+    b_dir = str(tmp_path / "accounts" / ("b" * 32))
+    os.makedirs(a_dir, exist_ok=True)
+    os.makedirs(b_dir, exist_ok=True)
+    store_a = ss.SessionStore(a_dir, crypto=FakeCrypto())
+    store_b = ss.SessionStore(b_dir, crypto=FakeCrypto())
+    store_a.register("sessA", token="sessA:H", status="active")
+    # B pairs a new session, superseding its own old one.
+    store_b.register("sessB_old", token="sessB_old:H", status="abandoned")
+    store_b.register("sessB_new", token="sessB_new:H", status="active")
+    closable = ss.sessions_to_close(store_b.list(), current_session="sessB_new")
+    names = {s["name"] for s in closable}
+    assert names == {"sessB_old"}          # only B's own abandoned one
+    assert "sessA" not in names            # A's live session is untouchable

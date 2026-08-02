@@ -93,58 +93,60 @@ class Connect:
         return True
 
     def _cleanup_orphan_sessions(self, keep_token: str = "") -> None:
-        """Close all WPPConnect browser sessions except *keep_token*.
+        """Close ONLY this account's own, explicitly-abandoned WPPConnect
+        sessions (plan Zad 3.2, GPT r2/r5). Never touches another account's
+        session, never the current/active one, never one mid-pairing.
 
-        Each failed / abandoned pairing attempt leaves a headless Chromium
-        process running (visible in wppconnect.log as
-        '[session:client] Auto close remain: Xs').  Having two or more
-        browsers initialising simultaneously eats CPU/RAM and causes the
-        new session to miss the 60 s Auto Close window → ReadTimeout.
-
-        We enumerate the userDataDir sub-folders (one per session) and
-        call /close-session for every entry that is NOT keep_token.
-        Errors are silently swallowed — this is best-effort cleanup.
+        This replaces the old "close every session on the server except one"
+        behaviour, which was catastrophic under multi-account: pairing a second
+        account would tear down the FIRST account's live session (its Chrome
+        page / WhatsApp Web link), disconnecting a working account. The set of
+        closable sessions now comes exclusively from THIS account's
+        sessions.json via session_store.sessions_to_close() — a session whose
+        ownership can't be proven from our own store is left strictly alone.
         """
-        import os
-        api_dir = resource_path("api")
-        udd = os.path.join(api_dir, "userDataDir")
-        if not os.path.isdir(udd):
+        import session_store
+        mw = self.main_window
+        store = None
+        try:
+            store = mw._get_session_store()
+        except Exception:
+            store = None
+        if store is None:
+            # Legacy single-account mode: no per-account store, so there is no
+            # provable ownership. Do NOT blast every session (that's the bug).
             return
 
-        # Keep only the first component of the token (before the colon).
-        keep_raw = keep_token.split(":")[0] if keep_token else ""
+        current = (mw.token or "").split(":")[0]
+        try:
+            closable = session_store.sessions_to_close(store.list(), current)
+        except Exception:
+            logging.exception("[cleanup_orphan_sessions] listing sessions failed")
+            return
 
-        for entry in os.listdir(udd):
-            if entry == keep_raw:
-                continue
-            session_id = entry
-            
-            # Spawn a daemon thread to clean up this session in parallel
-            def _clean_single(sid):
+        for sess in closable:
+            full_token = sess.get("token") or sess["name"]
+            sess_name = sess["name"]
+
+            def _clean_single(tok, name):
                 try:
-                    gen_url = (
-                        f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{sid}"
-                        f"/{self.main_window.wpp_api_key}/generate-token"
+                    url = (
+                        f"{mw.wpp_server}:{mw.wpp_port}/api/{tok}/close-session"
                     )
-                    res = requests.post(gen_url, timeout=5)
-                    if res.status_code in (200, 201):
-                        hash_token = res.json().get("token")
-                        token = f"{sid}:{hash_token}"
-                        url = (
-                            f"{self.main_window.wpp_server}"
-                            f":{self.main_window.wpp_port}/api/{token}/close-session"
-                        )
-                        requests.post(
-                            url,
-                            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                            timeout=5,
-                        )
-                        logging.info("[cleanup_orphan_sessions] Closed orphan session: %s", sid)
+                    requests.post(
+                        url,
+                        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                        timeout=5,
+                    )
+                    logging.info("[cleanup_orphan_sessions] Closed own abandoned session: %s", name)
+                    try:
+                        store.remove(name)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
-            threading.Thread(target=_clean_single, args=(session_id,), daemon=True).start()
+            threading.Thread(target=_clean_single, args=(full_token, sess_name), daemon=True).start()
 
 
 

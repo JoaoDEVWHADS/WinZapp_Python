@@ -4690,6 +4690,58 @@ class MainWindow(wx.Frame):
             logging.warning("[_set_wa_token] Token protection failed, falling back to plaintext: %s", e)
             pi["WA_token"] = token
             self.save_settings()
+        # Track the committed session in this account's SessionStore: the new
+        # token becomes our ACTIVE session; any previously-active session of
+        # OURS that differs is superseded → abandoned (safe for us to close
+        # later). This never touches other accounts' sessions (plan Zad 3.2).
+        try:
+            store = self._get_session_store()
+            if store is not None:
+                new_name = token.replace("/", "_").replace("+", "-").split(":")[0]
+                for s in store.list():
+                    if s.get("status") == "active" and s.get("name") != new_name:
+                        store.set_status(s["name"], "abandoned")
+                store.register(new_name, token=token.replace("/", "_").replace("+", "-"),
+                               status="active")
+        except Exception:
+            logging.exception("[sessions] registering active session failed (non-fatal)")
+
+    def _session_crypto(self):
+        """Adapter exposing .encrypt/.decrypt over token_vault + this account's
+        secret.key, for SessionStore (per-account WPPConnect session isolation)."""
+        key = self._token_key()
+
+        class _C:
+            def encrypt(self, s: str) -> str:
+                return token_vault.protect_token(s, key)
+
+            def decrypt(self, s: str) -> str:
+                v = token_vault.unprotect_token(s, key)
+                if not v:
+                    raise ValueError("decrypt failed")
+                return v
+
+        return _C()
+
+    def _get_session_store(self):
+        """Return this account's SessionStore (per-account sessions.json),
+        creating it lazily. None in legacy single-account mode (no account dir).
+
+        This is the backbone of session isolation (plan Zad 3.2): each account
+        only ever closes WPPConnect sessions it can PROVE are its own AND
+        abandoned — never another account's live session, never the current one.
+        """
+        store = getattr(self, "_session_store", None)
+        if store is not None:
+            return store
+        try:
+            import session_store
+            acc_dir = os.path.dirname(data_path("settings.json"))
+            self._session_store = session_store.SessionStore(acc_dir, self._session_crypto())
+            return self._session_store
+        except Exception:
+            logging.exception("[sessions] SessionStore init failed (non-fatal)")
+            return None
 
     def retrieve_token(self):
         token = self._get_wa_token()
@@ -4724,6 +4776,14 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
         self.token = token.replace("/", "_").replace("+", "-")
+        # Seed this account's SessionStore with the current (migrated/existing)
+        # session so isolation logic knows it's ACTIVE and ours (plan Zad 3.2).
+        try:
+            store = self._get_session_store()
+            if store is not None and self.token:
+                store.ensure_from_legacy_token(self.token.split(":")[0], self.token)
+        except Exception:
+            logging.exception("[sessions] seeding session store failed (non-fatal)")
 
     def prepare_sync(self):
         # Diagnostic breadcrumbs: prepare_sync() runs synchronously on the
