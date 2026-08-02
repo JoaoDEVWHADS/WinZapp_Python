@@ -332,7 +332,11 @@ def main():
         if npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
         else:
-            _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
+            # On Windows runner when using system npm, run npm via npx/npm command cleanly
+            build_res = subprocess.run(["npm", "run", "build:js"], cwd=CLIENT_API_DIR, shell=True)
+            if build_res.returncode != 0:
+                print("[WARNING] 'npm run build:js' exited with error, running npx babel fallback...")
+                _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR)
 
         print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
