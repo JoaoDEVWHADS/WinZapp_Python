@@ -51,7 +51,16 @@ if (!hasChrome) {
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    execSync('npx puppeteer browsers install chrome', {
+    // Prefer invoking npm's own npx-cli.js with the Node binary we are already
+    // running under. WinZapp ships a portable Node in client/node/, and on a
+    // machine with no system-wide Node the bare `npx` command simply does not
+    // resolve — prepending nodeDir to PATH above is not enough, because there
+    // is no npx.cmd shim inside the portable extraction on every layout.
+    const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
+    const npxCmd = fs.existsSync(npxCli)
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome`
+      : 'npx puppeteer browsers install chrome';
+    execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',
       env: env
