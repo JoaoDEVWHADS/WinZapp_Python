@@ -285,7 +285,11 @@ def main():
             sys_git = shutil.which("git")
             sys_git_dir = os.path.dirname(sys_git) if sys_git else ""
             os.environ["PATH"] = f"{win_node_dir};{sys_git_dir};{win_git_cmd};{win_git_bin};" + os.environ.get("PATH", "")
-            npm_args = ["npm.cmd"]
+            win_npm_cli = os.path.abspath(os.path.join(ROOT_DIR, "client", "node", "node_modules", "npm", "bin", "npm-cli.js"))
+            if os.path.isfile(win_npm_cli):
+                npm_args = [node_cmd, win_npm_cli]
+            else:
+                npm_args = ["npm.cmd"]
             if os.path.isfile(os.path.join(win_node_dir, "node.exe")):
                 node_cmd = os.path.join(win_node_dir, "node.exe")
         else:
