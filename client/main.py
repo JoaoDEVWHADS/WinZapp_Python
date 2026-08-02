@@ -4988,14 +4988,28 @@ class MainWindow(wx.Frame):
         """Recreate the WPPConnect Chrome session in place (close-session +
         start-session), without touching the Node process or WinZapp itself.
 
-        Used when the Puppeteer page has structurally died (detached frame
-        after a suspend/resume cycle — see _nudge_whatsapp_socket_stream());
-        a dead page can never satisfy isConnected() again on its own, no
-        matter how many times the health check retries it. start-session on
-        a session with a stored, valid token silently restores the existing
-        WhatsApp session (no new QR code) — this is exactly what already
-        happens on every normal app restart, just without restarting the
-        whole app or Node process.
+        NEVER call this automatically/unattended — see check_wa_connection_http()'s
+        dead-browser-strikes branch, which deliberately only logs instead of
+        calling this. Reported live from the one time this WAS wired up to
+        fire automatically: the stored token had already gone bad for an
+        unrelated reason, so start-session's create() came back needing a
+        fresh QR scan instead of silently restoring the session — with
+        nobody there to scan it. The pre-existing (and, on its own, entirely
+        correct) "confirmed logout" detection further down
+        check_wa_connection_http() then saw that QRCODE state hold for its
+        normal confirm-strikes threshold and treated it exactly like a real
+        phone-side unlink, calling _on_disconnect() — which wipes the
+        *entire* local database via clear_local_data(). This function can
+        only ever safely run with a human present to notice/handle a fresh
+        QR code appearing, i.e. triggered explicitly by the user, never as
+        an automatic reaction to a health-check failure.
+
+        When it IS safe to use (a stored, valid token — the normal case
+        after a mere dead browser page, as opposed to an already-invalid
+        token): start-session silently restores the existing WhatsApp
+        session with no new QR code, exactly what already happens on every
+        normal app restart, just without restarting the whole app or Node
+        process.
         """
         if getattr(self, "_restarting_wpp_session", False):
             return
@@ -5164,14 +5178,32 @@ class MainWindow(wx.Frame):
                         else:
                             # The nudge request itself failed — not just "no
                             # trigger fired", but the page/frame Puppeteer
-                            # holds is gone. No amount of retrying this same
-                            # nudge can ever succeed on a dead page; escalate
-                            # to a full session restart after enough
-                            # consecutive failures. See _restart_wpp_session().
+                            # holds is gone. _restart_wpp_session() (below)
+                            # exists for exactly this case but must NEVER be
+                            # triggered automatically/unattended — see its
+                            # own docstring: reported live, it silently put
+                            # the session into a fresh-QR pairing state (the
+                            # stored token had gone bad for an unrelated
+                            # reason) with nobody there to scan it, and the
+                            # pre-existing "confirmed logout" detection
+                            # further down this same function then treated
+                            # that as a real phone-side unlink after its
+                            # normal confirm-strikes threshold — wiping the
+                            # entire local database via _on_disconnect().
+                            # Surfacing this to the user (so a manual restart
+                            # — already safe, see forceKillSession's own fix
+                            # — can recover it) is the only currently-safe
+                            # reaction; only log it here.
                             self._dead_browser_strikes = getattr(self, "_dead_browser_strikes", 0) + 1
                             if self._dead_browser_strikes >= self._DEAD_BROWSER_RESTART_STRIKES:
                                 self._dead_browser_strikes = 0
-                                threading.Thread(target=self._restart_wpp_session, daemon=True).start()
+                                logging.warning(
+                                    "[check_wa_connection_http] Browser page appears dead "
+                                    "(detached frame) and the socket-stream nudge cannot "
+                                    "recover it. Not auto-restarting the WPPConnect session "
+                                    "— see _restart_wpp_session()'s docstring. A manual "
+                                    "restart of WinZapp is currently the safe way to recover."
+                                )
                         self._set_wa_connected(False, "status-session CONNECTED but isConnected() false")
                         return
                     self._dead_browser_strikes = 0
