@@ -15,21 +15,63 @@ function findChromeExecutable(dir, depth) {
   } catch (e) {
     return null;
   }
-  // First pass: search strictly for full Chrome / Chromium executable
+  // Pass 1: Check files in the current directory first
   for (const entry of entries) {
-    const full = path.join(dir, entry.name);
+    if (!entry.isDirectory()) {
+      const lower = entry.name.toLowerCase();
+      if (
+        lower === 'chrome.exe' ||
+        lower === 'chrome' ||
+        lower === 'chromium.exe' ||
+        lower === 'chromium' ||
+        lower === 'chrome-headless-shell.exe' ||
+        lower === 'chrome-headless-shell'
+      ) {
+        return path.join(dir, entry.name);
+      }
+    }
+  }
+  // Pass 2: Recurse into subdirectories
+  for (const entry of entries) {
     if (entry.isDirectory()) {
-      const found = findChromeExecutable(full, depth + 1);
+      const found = findChromeExecutable(path.join(dir, entry.name), depth + 1);
       if (found) return found;
-    } else if (
-      entry.name === 'chrome.exe' ||
-      entry.name === 'chrome' ||
-      entry.name === 'Chromium'
-    ) {
-      return full;
     }
   }
   return null;
+}
+
+function resolveChromeExecutable() {
+  const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+  const nodeModulesCacheDir = path.join(__dirname, 'node_modules', '.cache', 'puppeteer');
+  const directChromeDir = path.join(__dirname, 'chrome');
+  const directHeadlessShellDir = path.join(__dirname, 'chrome-headless-shell');
+
+  let exe = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
+  if (!exe && fs.existsSync(nodeModulesCacheDir)) {
+    exe = findChromeExecutable(nodeModulesCacheDir, 0);
+  }
+  if (!exe && fs.existsSync(directChromeDir)) {
+    exe = findChromeExecutable(directChromeDir, 0);
+  }
+  if (!exe && fs.existsSync(directHeadlessShellDir)) {
+    exe = findChromeExecutable(directHeadlessShellDir, 0);
+  }
+  if (!exe) {
+    exe = findChromeExecutable(__dirname, 0);
+  }
+  if (!exe) {
+    try {
+      const puppeteer = require('puppeteer');
+      if (typeof puppeteer.executablePath === 'function') {
+        const pExe = puppeteer.executablePath();
+        if (pExe && fs.existsSync(pExe)) {
+          exe = pExe;
+        }
+      }
+    } catch (e) {}
+  }
+  return exe;
 }
 
 const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
@@ -37,19 +79,7 @@ const nodeModulesCacheDir = path.join(__dirname, 'node_modules', '.cache', 'pupp
 const directChromeDir = path.join(__dirname, 'chrome');
 const directHeadlessShellDir = path.join(__dirname, 'chrome-headless-shell');
 
-let chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
-if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
-  chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
-}
-if (!chromeExecutable && fs.existsSync(directChromeDir)) {
-  chromeExecutable = findChromeExecutable(directChromeDir, 0);
-}
-if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
-  chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
-}
-if (!chromeExecutable) {
-  chromeExecutable = findChromeExecutable(__dirname, 0);
-}
+let chromeExecutable = resolveChromeExecutable();
 const hasChrome = !!chromeExecutable;
 console.log(`[WinZapp Debug] Chrome executable resolution: ${chromeExecutable ? chromeExecutable : 'NOT FOUND (will use default Puppeteer)'}`);
 console.log(`[WinZapp Debug] Platform: ${process.platform}, Node version: ${process.version}`);
@@ -105,19 +135,7 @@ if (!hasChrome) {
       console.log('[chrome-install] Fallback para chrome-headless-shell concluído com sucesso!');
     }
     // Re-resolve chromeExecutable após o download ser concluído
-    chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
-    if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
-      chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
-    }
-    if (!chromeExecutable && fs.existsSync(directChromeDir)) {
-      chromeExecutable = findChromeExecutable(directChromeDir, 0);
-    }
-    if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
-      chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
-    }
-    if (!chromeExecutable) {
-      chromeExecutable = findChromeExecutable(__dirname, 0);
-    }
+    chromeExecutable = resolveChromeExecutable();
     console.log(`[WinZapp Debug] Post-install Chrome executable resolution: ${chromeExecutable ? chromeExecutable : 'STILL NOT FOUND'}`);
   } catch (err) {
     console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err && err.message ? err.message : err);
