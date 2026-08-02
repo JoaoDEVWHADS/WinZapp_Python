@@ -115,17 +115,27 @@ _PRESERVE = {"start.js", ".env", "config.json"}
 _CUSTOM_ROOT_FILES = ["start.js", "config.json"]
 
 # Only these keys are copied from api_patches/package.json onto whatever the
-# downloaded ZIP produced. Same list, and the same reasoning, as setup_api.py's
-# _PATCHED_DEPENDENCY_KEYS: merging the whole "dependencies" block would also
+# downloaded ZIP produced — same list, and same reasoning, as setup_api.py's
+# _PATCHED_DEPENDENCY_KEYS. Merging the whole "dependencies" block would also
 # roll every OTHER dependency back to whatever was frozen in api_patches/ at
 # some earlier point, and overwriting the file wholesale would freeze
 # WPPConnect's own "version" field — which is what WppUpdateChecker compares
 # against the latest GitHub release — at a value that has nothing to do with
 # the tag actually downloaded here.
+#
+# @wppconnect-team/wppconnect is deliberately NOT in this list. It used to be,
+# pinned to an exact version that went stale within days — this dependency
+# releases multiple times a week, and wppconnect-server's own package.json can
+# (and did) move on to requiring a newer one than whatever WinZapp had frozen,
+# silently running an incompatible pairing with no error anywhere. Leaving it
+# out means upstream's own declared range wins, same as every other unpinned
+# dependency — and @wppconnect/wa-js / @wppconnect/wa-version, which WinZapp
+# never pins directly either, come along transitively at whichever paired
+# version @wppconnect-team/wppconnect itself resolves to.
 _PATCHED_DEPENDENCY_KEYS = [
-    "@wppconnect-team/wppconnect",
-    "@ffmpeg-installer/ffmpeg",
-    "fluent-ffmpeg",
+    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary — WinZapp's own
+                                  # Python side shells out to it directly to
+                                  # encode voice messages to OGG/Opus.
 ]
 
 # Runtime state dirs/files that should survive a re-download.
@@ -372,11 +382,10 @@ class ApiSetupDialog(wx.Dialog):
 
         Port of setup_api.py's function of the same name — until this existed,
         an install done through this dialog (i.e. every end-user install) kept
-        the vanilla upstream package.json, so `npm install` below resolved
-        @wppconnect-team/wppconnect to upstream's own range instead of the
-        version WinZapp pins against, and never installed
-        @ffmpeg-installer/ffmpeg or fluent-ffmpeg at all. Only setup_api.py —
-        a developer tool nobody but us runs — applied them.
+        the vanilla upstream package.json, so `npm install` below never
+        installed @ffmpeg-installer/ffmpeg at all (upstream wppconnect-server
+        does not declare it). Only setup_api.py — a developer tool nobody but
+        us runs — applied it.
 
         Deliberately a merge and not an overwrite; see _PATCHED_DEPENDENCY_KEYS.
         Never fatal: a missing or unreadable package.json is left exactly as it

@@ -93,11 +93,30 @@ def _run(cmd: list, cwd: str = None):
 # api_patches/ at some earlier point, undoing legitimate upstream bumps on
 # every future tag this script prepares.
 _PATCHED_DEPENDENCY_KEYS = [
-    "@wppconnect-team/wppconnect",  # pinned instead of upstream's own range —
-                                     # see client/api_patches/package.json
-    "@ffmpeg-installer/ffmpeg",     # needed for local audio conversion;
-    "fluent-ffmpeg",                # not always present upstream.
+    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary via npm — WinZapp's
+                                  # own Python side shells out to it directly
+                                  # (main.py: _find_api_ffmpeg/_convert_wav_to_ogg)
+                                  # to encode voice messages to OGG/Opus; upstream
+                                  # wppconnect-server does not declare it at all.
 ]
+
+# @wppconnect-team/wppconnect used to be pinned here too, to an exact version
+# ("2.2.4") that predated this comment. That went stale fast: this dependency
+# releases new patch versions multiple times a week, and wppconnect-server's
+# own main branch had already moved on to requiring "^2.2.6" — meaning a fresh
+# clone/build was running WPPConnect Server against an @wppconnect-team/wppconnect
+# release two patches behind what it was actually written and tested against,
+# silently, with no error anywhere.
+#
+# The fix is to not patch it at all: leave upstream's own declared range in
+# package.json exactly as the clone/checkout produced it, the same way every
+# OTHER unpinned dependency already works here. @wppconnect/wa-js and
+# @wppconnect/wa-version are never pinned by WinZapp either — they are pulled
+# in transitively through whatever @wppconnect-team/wppconnect version resolves,
+# so they now track the paired version automatically instead of needing to be
+# kept in sync by hand. This mirrors start.js's own resolveWhatsappVersion(),
+# which resolves the WhatsApp Web build version dynamically for exactly the
+# same reason ("Rather than hardcoding a version — which rots...").
 
 
 def _merge_package_json_dependencies():
