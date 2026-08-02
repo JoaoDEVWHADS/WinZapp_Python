@@ -104,6 +104,21 @@ if (!hasChrome) {
       });
       console.log('[chrome-install] Fallback para chrome-headless-shell concluído com sucesso!');
     }
+    // Re-resolve chromeExecutable após o download ser concluído
+    chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
+    if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
+      chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
+    }
+    if (!chromeExecutable && fs.existsSync(directChromeDir)) {
+      chromeExecutable = findChromeExecutable(directChromeDir, 0);
+    }
+    if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
+      chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
+    }
+    if (!chromeExecutable) {
+      chromeExecutable = findChromeExecutable(__dirname, 0);
+    }
+    console.log(`[WinZapp Debug] Post-install Chrome executable resolution: ${chromeExecutable ? chromeExecutable : 'STILL NOT FOUND'}`);
   } catch (err) {
     console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err && err.message ? err.message : err);
   }
