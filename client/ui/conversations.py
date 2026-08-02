@@ -7841,6 +7841,7 @@ class ArchivedConversationsPanel(wx.Panel):
         self.chats_list: list = []
         self.chat_names: list = []
         self._init_ui()
+        self.create_accelerator_table()
 
     def restore_selection(self):
         """Select, focus and give keyboard focus to the first archived
@@ -7905,6 +7906,146 @@ class ArchivedConversationsPanel(wx.Panel):
 
         self.SetSizer(sizer)
 
+    # ── Accelerators ─────────────────────────────────────────────────────────
+
+    def create_accelerator_table(self):
+        """Same key combos as ConversationsPanel.create_accelerator_table(),
+        applied to this panel instead. The archived list used to have none of
+        these at all — Delete and Ctrl+Shift+L (clear) worked in the normal
+        list but silently did nothing here, and the row context menu was
+        missing everything except unarchive/clear/delete. Ctrl+F (search) and
+        Ctrl+N (new conversation) are left out: this panel has no search field
+        of its own, and Ctrl+W (close conversation) doesn't apply — there is no
+        split conversation view to close from this list. Ctrl+Q always means
+        "unarchive" here rather than toggling, since every row is archived by
+        definition.
+        """
+        self.ID_DELETE_CONV      = wx.NewIdRef()
+        self.ID_ALT_SHIFT_C_LIST = wx.NewIdRef()
+        self.ID_CONV_DATA_LIST   = wx.NewIdRef()
+        self.ID_TOGGLE_READ_LIST = wx.NewIdRef()
+        self.ID_MUTE_LIST        = wx.NewIdRef()
+        self.ID_BLOCK_LIST       = wx.NewIdRef()
+        self.ID_CLEAR_LIST       = wx.NewIdRef()
+        self.ID_UNARCHIVE_LIST   = wx.NewIdRef()
+        self.ID_PIN_LIST         = wx.NewIdRef()
+        CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
+        AS = wx.ACCEL_ALT | wx.ACCEL_SHIFT
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_NORMAL, wx.WXK_DELETE, self.ID_DELETE_CONV),
+            (AS,              ord("C"),      self.ID_ALT_SHIFT_C_LIST),
+            (CS,              ord("D"),      self.ID_CONV_DATA_LIST),
+            (CS,              ord("M"),      self.ID_TOGGLE_READ_LIST),
+            (AS,              ord("S"),      self.ID_MUTE_LIST),
+            (CS,              ord("B"),      self.ID_BLOCK_LIST),
+            (CS,              ord("L"),      self.ID_CLEAR_LIST),
+            (wx.ACCEL_CTRL,   ord("Q"),      self.ID_UNARCHIVE_LIST),
+            (wx.ACCEL_CTRL,   ord("P"),      self.ID_PIN_LIST),
+        ])
+        self.SetAcceleratorTable(accel_tbl)
+        self.Bind(wx.EVT_MENU, self._on_accel_delete,             id=self.ID_DELETE_CONV)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_number,        id=self.ID_ALT_SHIFT_C_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_conversation_data,  id=self.ID_CONV_DATA_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_toggle_read,        id=self.ID_TOGGLE_READ_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_mute,               id=self.ID_MUTE_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_block,              id=self.ID_BLOCK_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_clear,              id=self.ID_CLEAR_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_unarchive,          id=self.ID_UNARCHIVE_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_pin,                id=self.ID_PIN_LIST)
+
+    def _selected_chat_from_list(self):
+        """Mirrors ConversationsPanel._selected_chat_from_list()."""
+        selected = self.conversations_list.GetFirstSelected()
+        if selected < 0:
+            selected = self.conversations_list.GetFocusedItem()
+        if 0 <= selected < len(self.chats_list):
+            return self.chats_list[selected]
+        return None
+
+    def _on_accel_delete(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_delete(jid)
+
+    def _on_accel_copy_number(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid and not jid.endswith("@g.us"):
+                self._on_copy_number(jid)
+
+    def _on_accel_conversation_data(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            self.main_window.conversations_panel._show_conversation_data(chat=chat)
+
+    def _on_accel_toggle_read(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if int(chat.get("unreadCount") or 0) > 0:
+            self._on_mark_read(jid)
+        else:
+            self._on_mark_unread(jid)
+
+    def _on_accel_mute(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_muted(jid):
+            self._on_unmute(jid)
+        else:
+            i18n = self.main_window.i18n
+            menu = wx.Menu(i18n.t("mute_chat_menu_title"))
+            for key, secs in ConversationsPanel.MUTE_PRESETS:
+                item = menu.Append(wx.ID_ANY, i18n.t(key))
+                self.Bind(wx.EVT_MENU, lambda e, j=jid, s=secs: self._on_mute(j, s), item)
+            self.PopupMenu(menu)
+            menu.Destroy()
+
+    def _on_accel_block(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid or jid.endswith("@g.us") or self.main_window._is_self_jid(jid):
+            return
+        self._on_block(chat, jid, self.main_window.is_contact_blocked(jid))
+
+    def _on_accel_clear(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_clear(jid)
+
+    def _on_accel_unarchive(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_unarchive(jid)
+
+    def _on_accel_pin(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_pinned(jid):
+            self._on_unpin(jid)
+        else:
+            self._on_pin(jid)
+
     # ── Events ────────────────────────────────────────────────────────────────
 
     def _on_filter_changed(self, event):
@@ -7948,34 +8089,177 @@ class ArchivedConversationsPanel(wx.Panel):
         mw.conversations_panel.navigate_to_conversation(chat)
 
     def on_context_menu(self, event):
+        """Same menu, in the same order, as ConversationsPanel.on_conversations_context_menu() —
+        this used to offer only Unarchive/Clear/Delete, missing everything
+        else the normal list's row menu already had (data, read/unread, mute,
+        block, copy number, pin, leave group, add member). Two differences
+        from the normal menu: Archive/Unarchive always shows "Desarquivar"
+        (every row here is archived by definition, nothing to toggle), and
+        "Close conversation" is left out — there is no split conversation view
+        to close from this list, unlike the normal one.
+        """
         selected = self.conversations_list.GetFirstSelected()
         if selected < 0 or selected >= len(self.chats_list):
             return
         chat = self.chats_list[selected]
         jid  = chat.get("remoteJid", "")
-        i18n = self.main_window.i18n
+        is_group = jid.endswith("@g.us")
+        mw   = self.main_window
+        is_self = mw._is_self_jid(jid)
+        i18n = mw.i18n
         menu = wx.Menu()
 
-        unarch_item = menu.Append(wx.ID_ANY, i18n.t("unarchive_chat"))
+        # ── Conversation / group data ─────────────────────────────────────
+        data_label = i18n.t("group_data") if is_group else i18n.t("conversation_data")
+        data_item = menu.Append(wx.ID_ANY, f"{data_label}\tCtrl+Shift+D")
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, c=chat: mw.conversations_panel._show_conversation_data(chat=c),
+            data_item,
+        )
+
+        menu.AppendSeparator()
+
+        # ── Read / Unread ───────────────────────────────────────────────────
+        has_unread = int(chat.get("unreadCount") or 0) > 0
+        if has_unread:
+            read_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_read')}\tCtrl+Shift+M")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_mark_read(j), read_item)
+        else:
+            unread_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_unread')}\tCtrl+Shift+M")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_mark_unread(j), unread_item)
+
+        menu.AppendSeparator()
+
+        # ── Mute ──────────────────────────────────────────────────────────
+        if mw.is_chat_muted(jid):
+            unmute_item = menu.Append(wx.ID_ANY, f"{i18n.t('unmute_chat')}\tAlt+Shift+S")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unmute(j), unmute_item)
+        else:
+            mute_sub = wx.Menu()
+            for key, secs in ConversationsPanel.MUTE_PRESETS:
+                item = mute_sub.Append(wx.ID_ANY, i18n.t(key))
+                self.Bind(wx.EVT_MENU, lambda e, j=jid, s=secs: self._on_mute(j, s), item)
+            menu.AppendSubMenu(mute_sub, f"{i18n.t('mute_chat')}\tAlt+Shift+S")
+
+        if not is_group:
+            menu.AppendSeparator()
+            if not is_self:
+                is_blocked = mw.is_contact_blocked(jid)
+                label = "unblock_contact" if is_blocked else "block_contact"
+                block_item = menu.Append(wx.ID_ANY, f"{i18n.t(label)}\tCtrl+Shift+B")
+                self.Bind(
+                    wx.EVT_MENU,
+                    lambda e, c=chat, j=jid, b=is_blocked: self._on_block(c, j, b),
+                    block_item,
+                )
+            copy_num_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_number')}\tAlt+Shift+C")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_copy_number(j), copy_num_item)
+
+        menu.AppendSeparator()
+
+        # ── Unarchive — always, every row here is already archived ─────────
+        unarch_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unarchive(j), unarch_item)
 
+        # ── Pin / Unpin ───────────────────────────────────────────────────
+        if mw.is_chat_pinned(jid):
+            unpin_item = menu.Append(wx.ID_ANY, f"{i18n.t('unpin_chat')}\tCtrl+P")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unpin(j), unpin_item)
+        else:
+            pin_item = menu.Append(wx.ID_ANY, f"{i18n.t('pin_chat')}\tCtrl+P")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_pin(j), pin_item)
+
+        menu.AppendSeparator()
+
+        # ── Clear / Delete / Leave ────────────────────────────────────────
         # Clearing an archived conversation used to require opening it first
         # (there was no direct action here) — unlike the main conversations
         # list, whose row context menu can clear a chat in a single step.
         # Offering the same action directly on the archived row removes that
         # extra "open it, then clear it" round trip.
-        clear_item = menu.Append(wx.ID_ANY, i18n.t("clear_chat"))
+        clear_item = menu.Append(wx.ID_ANY, f"{i18n.t('clear_chat')}\tCtrl+Shift+L")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_clear(j), clear_item)
 
-        del_item = menu.Append(wx.ID_ANY, i18n.t("delete_chat"))
-        self.Bind(
-            wx.EVT_MENU,
-            lambda e, j=jid: self._on_delete(j),
-            del_item,
-        )
+        del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_chat')}\tDelete")
+        self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_delete(j), del_item)
+
+        if is_group:
+            leave_item = menu.Append(wx.ID_ANY, i18n.t("leave_group"))
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_leave_group(j), leave_item)
+            add_member_item = menu.Append(wx.ID_ANY, i18n.t("add_member"))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, j=jid: mw.conversations_panel._on_menu_add_member(j),
+                add_member_item,
+            )
 
         self.PopupMenu(menu)
         menu.Destroy()
+
+    # ── Context menu / accelerator handlers ─────────────────────────────────
+    # Mirrors ConversationsPanel's own _on_menu_* handlers. Reimplemented here
+    # (rather than delegated to mw.conversations_panel's methods) specifically
+    # because several of them show a wx.MessageBox parented on `self` — that
+    # has to be THIS visible panel, not the hidden ConversationsPanel a plain
+    # delegate call would bind confirmation dialogs to.
+
+    def _on_mark_read(self, jid: str):
+        threading.Thread(
+            target=self.main_window.mark_conversation_as_read,
+            args=(jid,),
+            daemon=True,
+        ).start()
+
+    def _on_mark_unread(self, jid: str):
+        self.main_window.mark_conversation_as_unread(jid)
+
+    def _on_mute(self, jid: str, duration_secs: int):
+        self.main_window.mute_chat(jid, duration_secs)
+
+    def _on_unmute(self, jid: str):
+        self.main_window.unmute_chat(jid)
+
+    def _on_block(self, chat: dict, jid: str, currently_blocked: bool = False):
+        mw = self.main_window
+        name = (
+            mw._resolve_contact_name(chat)
+            or mw.find_name_through_messages(chat)
+            or format_number(jid)
+        )
+        action = "unblock" if currently_blocked else "block"
+        msg_key = "unblock_confirm_msg" if currently_blocked else "block_confirm_msg"
+        title_key = "unblock_contact" if currently_blocked else "block_contact"
+        msg = mw.i18n.t(msg_key).format(name=name)
+        if wx.MessageBox(
+            msg, mw.i18n.t(title_key), wx.YES_NO | wx.ICON_QUESTION, self,
+        ) == wx.YES:
+            threading.Thread(
+                target=mw.block_contact, args=(jid, action), daemon=True,
+            ).start()
+
+    def _on_copy_number(self, jid: str):
+        try:
+            pyperclip.copy(format_number(jid))
+        except Exception:
+            pass
+
+    def _on_pin(self, jid: str):
+        self.main_window.pin_chat(jid)
+
+    def _on_unpin(self, jid: str):
+        self.main_window.unpin_chat(jid)
+
+    def _on_leave_group(self, jid: str):
+        i18n = self.main_window.i18n
+        if wx.MessageBox(
+            i18n.t("leave_group_confirm_msg"), i18n.t("leave_group"),
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
+            return
+        threading.Thread(
+            target=self.main_window.leave_group, args=(jid,), daemon=True,
+        ).start()
 
     def _on_unarchive(self, jid: str):
         self.main_window.unarchive_chat(jid)
