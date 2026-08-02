@@ -5597,10 +5597,22 @@ class MainWindow(wx.Frame):
                     target=self._backfill_empty_chats, daemon=True, name="chat-backfill")
                 self._backfill_thread.start()
 
-        # ── Phase 2: download media (disabled on startup, media is loaded on-demand) ──────
-        # Skip bulk media auto-download on startup so the app opens instantly and doesn't stress the API.
-        # Media/Audio files will download on-demand when opened or played by the user.
-        logging.info("[start_sync] Phase 2 media auto-download on startup bypassed (on-demand mode active).")
+        # ── Phase 2: download media ──────────────────────────────────────────
+        # Opt-out via Settings > Armazenamento > "Baixar mídias automaticamente
+        # ao sincronizar" (on by default). Runs on this same background sync
+        # thread — the window is already open and responsive by this point
+        # (UI init finished long before _run_sync), so this only delays when
+        # "sync complete" fires, not startup itself. sync_if_media() still
+        # applies the day/size caps from the same settings tab per message.
+        if self.settings.get("storage", {}).get("auto_download_media", True):
+            logging.info("[start_sync] Phase 2 media auto-download starting.")
+            try:
+                self.sync_media_for_all_chats()
+            except Exception:
+                logging.exception("[start_sync] Phase 2 media auto-download failed")
+            logging.info("[start_sync] Phase 2 media auto-download finished.")
+        else:
+            logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
         # _initial_sync_running is reset by start_sync()'s finally block.
@@ -8926,7 +8938,28 @@ class MainWindow(wx.Frame):
     # machine. The user can still explicitly open/download an oversized file
     # from the conversation view (_on_action_open/_on_action_download in
     # conversations.py) — only the unattended background pass is capped.
-    _MEDIA_AUTO_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024   # 100 MB
+    _MEDIA_AUTO_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024   # 100 MB — fallback only,
+                                                          # see _media_max_download_bytes()
+
+    def _media_max_download_days(self) -> int:
+        """User-configurable cap (Settings > Armazenamento) on how old a
+        message can be and still have its media auto-downloaded. 0 means
+        unlimited (still subject to the hard _MEDIA_MAX_AGE_SECONDS CDN-TTL
+        floor above, which is not user-configurable — downloading past that
+        point fails regardless of what the user asked for)."""
+        try:
+            return int(self.settings.get("storage", {}).get("media_max_days", 30))
+        except (TypeError, ValueError):
+            return 30
+
+    def _media_max_download_bytes(self) -> int:
+        """User-configurable cap (Settings > Armazenamento) on individual
+        media file size for auto-download. 0 means unlimited."""
+        try:
+            mb = int(self.settings.get("storage", {}).get("media_max_mb", 100))
+        except (TypeError, ValueError):
+            mb = 100
+        return mb * 1024 * 1024 if mb > 0 else 0
 
     def _load_media_failed_ids(self) -> dict:
         """Load {message_id: failed_at_timestamp} for media whose CDN URL has
@@ -8995,6 +9028,13 @@ class MainWindow(wx.Frame):
         if ts and (time.time() - ts) > self._MEDIA_MAX_AGE_SECONDS:
             return
 
+        # User-configurable age cap (Settings > Armazenamento > "Baixar
+        # mídias de até (dias)"). 0 means unlimited — falls back to whatever
+        # the CDN-TTL check above already allows.
+        max_days = self._media_max_download_days()
+        if ts and max_days > 0 and (time.time() - ts) > max_days * 86400:
+            return
+
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id or "-" in msg_id or msg.get("_local_pending"):
             return
@@ -9004,7 +9044,9 @@ class MainWindow(wx.Frame):
             return
 
         # Skip oversized files during the automatic background sync — see
-        # _MEDIA_AUTO_DOWNLOAD_MAX_BYTES.
+        # _media_max_download_bytes() (Settings > Armazenamento > "Baixar
+        # mídias de até no máximo (mb)"; 0 = unlimited).
+        max_bytes = self._media_max_download_bytes()
         msg_inner = msg.get("message")
         if isinstance(msg_inner, str):
             try:
@@ -9012,16 +9054,16 @@ class MainWindow(wx.Frame):
             except Exception:
                 msg_inner = None
         inner = msg_inner.get(message_type) if isinstance(msg_inner, dict) else None
-        if isinstance(inner, dict):
+        if max_bytes and isinstance(inner, dict):
             try:
                 file_length = int(inner.get("fileLength") or 0)
             except (TypeError, ValueError):
                 file_length = 0
-            if file_length > self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES:
+            if file_length > max_bytes:
                 logging.info(
                     "[sync_if_media] Skipping auto-download of %s (%s, %.1f MB > %.0f MB limit)",
                     msg_id, message_type, file_length / (1024 * 1024),
-                    self._MEDIA_AUTO_DOWNLOAD_MAX_BYTES / (1024 * 1024),
+                    max_bytes / (1024 * 1024),
                 )
                 return
 

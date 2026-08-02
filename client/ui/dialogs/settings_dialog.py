@@ -479,6 +479,32 @@ class SettingsDialog(wx.Dialog):
         self._alert_page.SetSizer(alert_sizer)
         self._notebook.AddPage(self._alert_page, i18n.t("tab_alert_tones"))
 
+        # ── Storage tab ──────────────────────────────────────────────────────
+        self._storage_page = wx.Panel(self._notebook)
+        storage_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._auto_download_media_check = wx.CheckBox(
+            self._storage_page, label=i18n.t("auto_download_media_label")
+        )
+        storage_sizer.Add(self._auto_download_media_check, 0, wx.ALL, 8)
+
+        self._media_max_days_label = wx.StaticText(
+            self._storage_page, label=i18n.t("media_max_days_label")
+        )
+        storage_sizer.Add(self._media_max_days_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._media_max_days_field = wx.TextCtrl(self._storage_page, style=wx.TE_DONTWRAP)
+        storage_sizer.Add(self._media_max_days_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._media_max_mb_label = wx.StaticText(
+            self._storage_page, label=i18n.t("media_max_mb_label")
+        )
+        storage_sizer.Add(self._media_max_mb_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._media_max_mb_field = wx.TextCtrl(self._storage_page, style=wx.TE_DONTWRAP)
+        storage_sizer.Add(self._media_max_mb_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._storage_page.SetSizer(storage_sizer)
+        self._notebook.AddPage(self._storage_page, i18n.t("tab_storage"))
+
         self._alert_private_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
         self._alert_group_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
 
@@ -646,6 +672,12 @@ class SettingsDialog(wx.Dialog):
         self._set_alert_combo(self._alert_group_combo, tones.get("group", "default"))
         self._alert_group_custom_field.SetValue(tones.get("group_custom_path", ""))
         self._update_alert_custom_field_state()
+
+        # Storage
+        storage = self.main_window.settings.get("storage", {})
+        self._auto_download_media_check.SetValue(storage.get("auto_download_media", True))
+        self._media_max_days_field.SetValue(str(storage.get("media_max_days", 30)))
+        self._media_max_mb_field.SetValue(str(storage.get("media_max_mb", 100)))
 
     def _set_alert_combo(self, combo, choice_key: str):
         try:
@@ -939,6 +971,41 @@ class SettingsDialog(wx.Dialog):
                 self._ws_server_field.SetFocus()
                 return False
 
+        # Storage: media download day/size limits — 0 is the documented
+        # "unlimited" sentinel, so only negative or non-integer values are
+        # rejected.
+        max_days_str = self._media_max_days_field.GetValue().strip()
+        try:
+            max_days = int(max_days_str)
+            if max_days < 0:
+                raise ValueError
+        except ValueError:
+            self._notebook.SetSelection(6)
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_media_max_days"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._media_max_days_field.SetFocus()
+            return False
+
+        max_mb_str = self._media_max_mb_field.GetValue().strip()
+        try:
+            max_mb = int(max_mb_str)
+            if max_mb < 0:
+                raise ValueError
+        except ValueError:
+            self._notebook.SetSelection(6)
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_media_max_mb"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._media_max_mb_field.SetFocus()
+            return False
+
         # Sound events: an ENABLED event's override path, if the user set one,
         # must point to a real file. An empty override is always fine — it
         # just means "use the sound pack's own file for this event" (with a
@@ -1175,6 +1242,13 @@ class SettingsDialog(wx.Dialog):
         if cache is not None:
             cache.clear()
 
+        # Storage
+        self.main_window.settings.setdefault("storage", {}).update({
+            "auto_download_media": self._auto_download_media_check.GetValue(),
+            "media_max_days": int(self._media_max_days_field.GetValue().strip()),
+            "media_max_mb": int(self._media_max_mb_field.GetValue().strip()),
+        })
+
         # Persist and propagate
         self.main_window.save_settings()
         # Reload sound objects so per-event enabled/path changes (and the new
@@ -1228,7 +1302,8 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(3, i18n.t("tab_connection"))
         self._notebook.SetPageText(4, i18n.t("tab_sound_events"))
         self._notebook.SetPageText(5, i18n.t("tab_alert_tones"))
-        self._notebook.SetPageText(6, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(6, i18n.t("tab_storage"))
+        self._notebook.SetPageText(7, i18n.t("tab_audio_playback"))
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
@@ -1300,6 +1375,11 @@ class SettingsDialog(wx.Dialog):
         grp_sel = self._alert_group_combo.GetSelection()
         self._alert_group_combo.Set(alert_choice_labels)
         self._alert_group_combo.SetSelection(grp_sel if grp_sel != wx.NOT_FOUND else 0)
+
+        # Storage tab
+        self._auto_download_media_check.SetLabel(i18n.t("auto_download_media_label"))
+        self._media_max_days_label.SetLabel(i18n.t("media_max_days_label"))
+        self._media_max_mb_label.SetLabel(i18n.t("media_max_mb_label"))
         self._alert_private_preview.refresh_label()
         self._alert_group_preview.refresh_label()
 

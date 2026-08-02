@@ -26,5 +26,10 @@
     },
     "audio_playback": {
         "audio_default_speed": 1.0
+    },
+    "storage": {
+        "auto_download_media": true,
+        "media_max_days": 30,
+        "media_max_mb": 100
     }
 }
