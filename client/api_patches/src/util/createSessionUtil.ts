@@ -26,7 +26,12 @@ import Factory from './tokenStore/factory';
 
 function forceKillByUserDataDir(userDataDir: string) {
   if (!userDataDir) return;
-  exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  if (process.platform === 'win32') {
+    // Windows force kill Chromium processes matching userDataDir if needed
+    exec(`wmic process where "commandline like '%${userDataDir.replace(/\\/g, '\\\\')}%'" call terminate`, () => {});
+  } else {
+    exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  }
 }
 
 /**
