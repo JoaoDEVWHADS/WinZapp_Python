@@ -90,7 +90,6 @@ def _run(cmd: list, cwd: str = None, check: bool = True):
 
 
 def ensure_portable_git():
-    import shutil
     import urllib.request
     import zipfile
 
@@ -141,19 +140,6 @@ def main():
     git_dir = os.path.join(CLIENT_API_DIR, ".git")
     already_cloned = os.path.isdir(git_dir)
 
-    # Gather the content to restore for every patched file, preferring
-    # client/api_patches/ (permanent, always-tracked) over whatever
-    # happens to still be sitting in client/api/ right now — the latter
-    # is worthless as a source the moment client/api/ has already been
-    # deleted, which is exactly when this restore matters most.
-    #
-    # Loaded up front, before the clone branch, because BOTH consumers need it:
-    # the post-clone restore below and the post-`git checkout <tag>` restore
-    # further down. It used to be populated only on the clone path, so checking
-    # out a tag against an existing client/api/ raised NameError — and had that
-    # line been reached with an empty dict instead, it would have been worse:
-    # `git checkout -f` overwrites the patched files with upstream's, and
-    # nothing would have put ours back.
     custom_contents = {}
     for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
         patches_path = os.path.join(API_PATCHES_DIR, rel_path)
@@ -171,7 +157,6 @@ def main():
         print(f"[INFO] client/api/ already exists — skipping clone.")
     else:
         print(f"[INFO] Cloning WPPConnect Server …")
-        import shutil
         temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
         node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
         has_node_modules = os.path.isdir(node_modules_path)
