@@ -2115,6 +2115,44 @@ class MainWindow(wx.Frame):
             elif active_jid == phone_jid:
                 wx.CallAfter(self.conversations_panel.refresh_messages_if_changed)
 
+    def _apply_remote_revoke(self, existing: dict, incoming: dict, remote_jid: str) -> bool:
+        """Detect a "delete for everyone" (protocolMessage type 3/REVOKE)
+        re-delivered under the same key.id as an already-stored message, and
+        mark the original revoked in place — instead of leaving its
+        original content (playable audio/video included) on screen until
+        the next periodic _mirror_remote_deletions() poll, which only
+        removes the row outright rather than marking it deleted, and can
+        take a while to even run. The official client reflects a remote
+        delete instantly; this is the live-event equivalent of that.
+
+        Returns True if `incoming` was a revoke (handled or already
+        applied), so the caller's edit-detection logic is skipped either way.
+        """
+        if incoming.get("messageType") != "protocolMessage":
+            return False
+        protocol = (incoming.get("message") or {}).get("protocolMessage") or {}
+        if protocol.get("type") not in (3, "REVOKE", "revoke"):
+            return False
+        if existing.get("messageType") == "protocolMessage":
+            return True  # already applied (e.g. re-delivered echo) — nothing to do
+
+        msg_id = existing.get("key", {}).get("id", "")
+        existing["message"]     = incoming.get("message")
+        existing["messageType"] = "protocolMessage"
+        existing.pop("_edited", None)
+
+        def _bg_persist():
+            try:
+                self.db.insert_message(remote_jid, existing)
+            except Exception as e:
+                logging.error(f"[_apply_remote_revoke] Failed to persist revoked message: {e}")
+        self._msg_bg_executor.submit(_bg_persist)
+
+        if hasattr(self, "conversations_panel"):
+            wx.CallAfter(self.conversations_panel.on_message_revoked, msg_id)
+        self._schedule_set_chats()
+        return True
+
     def _apply_possible_edit(self, existing: dict, incoming: dict, remote_jid: str):
         """Detect and apply a text-message edit re-delivered under the same key.id.
 
@@ -2131,6 +2169,9 @@ class MainWindow(wx.Frame):
         "extendedTextMessage" text is a reliable, format-agnostic signal —
         it never fires for a plain re-sync of an unrelated message type.
         """
+        if self._apply_remote_revoke(existing, incoming, remote_jid):
+            return
+
         def _text_of(m):
             mo = m.get("message") or {}
             if not isinstance(mo, dict):

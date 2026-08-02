@@ -4233,6 +4233,27 @@ class ConversationsPanel(wx.Panel):
                 pass
             self._audio_temp_file = None
 
+    def on_message_revoked(self, msg_id: str):
+        """A message was deleted for everyone by its sender, detected live
+        (see MainWindow._apply_remote_revoke()). The official client swaps
+        it for "Mensagem apagada" instantly, including stopping playback if
+        you were mid-listen — WinZapp used to leave the original audio/text/
+        media on screen (and audio still playing) until the next periodic
+        remote-deletion poll, which only removes the row outright rather
+        than marking it deleted, and can take a while to even notice.
+
+        Video has no in-app player to stop — "abrir" launches the OS's own
+        default video player as a separate process WinZapp has no handle
+        to, so an already-open video keeps playing there regardless; only
+        the row/controls in WinZapp's own UI are updated here.
+        """
+        if msg_id and self._current_audio_id == msg_id and self._audio_stream is not None:
+            self._stop_audio()
+            self._hide_audio_controls()
+        if msg_id and self._focused_msg_id() == msg_id:
+            self._hide_all_media_controls()
+        self.refresh_active_conversation_messages()
+
     def on_audio_timer(self, event):
         if self._audio_stream is None:
             return
