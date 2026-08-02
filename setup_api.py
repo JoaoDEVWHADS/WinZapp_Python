@@ -224,13 +224,14 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-        # Restore every patched file after cloning/extracting
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Restored custom file: {rel_path}")
+    # Restore every patched file unconditionally on every setup_api.py execution
+    os.makedirs(CLIENT_API_DIR, exist_ok=True)
+    for rel_path, content in custom_contents.items():
+        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        print(f"[INFO] Restored custom file: {rel_path}")
 
     if tag and shutil.which("git") and os.path.isdir(os.path.join(CLIENT_API_DIR, ".git")):
         print(f"[INFO] Checking out tag: {tag}")
