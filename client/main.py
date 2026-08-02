@@ -1971,7 +1971,16 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self.add_chats_to_ui)
 
     def real_exit(self):
-        """Completely close WinZapp, removing the tray icon and stopping all threads."""
+        """Completely close WinZapp, removing the tray icon and stopping all threads.
+
+        _stop_wpp_server() waits for WPPConnect to close Chrome gracefully
+        (see its own docstring for why that wait matters) and used to run
+        right here, synchronously, on the wx main thread — which means the
+        message loop stopped pumping for however long that took. Windows
+        marks any window whose message loop goes quiet for a few seconds as
+        "Not Responding", so quitting looked exactly like a hang, every time,
+        for as long as the graceful-stop budget.
+        """
         # Set FIRST, before anything else: _stop_wpp_server() below closes
         # the WPPConnect session itself, which — while our WebSocket is
         # still connected — arrives as an ordinary "connection closed" event
@@ -1995,18 +2004,34 @@ class MainWindow(wx.Frame):
             self._update_checker.stop()
         if getattr(self, "_wpp_update_checker", None) is not None:
             self._wpp_update_checker.stop()
-        self._stop_wpp_server()
-        if hasattr(self, "db") and self.db is not None:
-            try:
-                self.db.close()
-            except Exception:
-                pass
+
+        # Hide immediately so quitting still feels instant to the user — the
+        # actual shutdown work below (which can legitimately take a few
+        # seconds) now happens off the main thread instead, so there is no
+        # window left for Windows to watch go quiet.
         try:
-            wx.GetApp().ExitMainLoop()
+            self.Hide()
         except Exception:
             pass
-        import os
-        os._exit(0)
+
+        def _finish_exit():
+            # Neither of these touches any wx object — DatabaseBridge.close()
+            # is plain threading/asyncio, and _stop_wpp_server() is HTTP +
+            # subprocess — so both are safe to run off the main thread.
+            self._stop_wpp_server()
+            if hasattr(self, "db") and self.db is not None:
+                try:
+                    self.db.close()
+                except Exception:
+                    pass
+            try:
+                wx.GetApp().ExitMainLoop()
+            except Exception:
+                pass
+            import os
+            os._exit(0)
+
+        threading.Thread(target=_finish_exit, daemon=True).start()
 
     # ── Navigate to conversation by JID ──────────────────────────────────────
 
@@ -3575,7 +3600,8 @@ class MainWindow(wx.Frame):
             pass
         event.Skip()
 
-    # How long to let WPPConnect finish closing Chrome on its own before
+    # Total time to let WPPConnect finish closing Chrome on its own — covering
+    # BOTH the /close-session request and the poll that follows it — before
     # resorting to taskkill /F /T.
     #
     # This used to be a flat 2-second sleep, and that is very likely how a
@@ -3590,10 +3616,15 @@ class MainWindow(wx.Frame):
     # anything, keeps listing the session as active. That is precisely the
     # reported symptom.
     #
-    # browser.close() on a WhatsApp Web tab with a large message store routinely
-    # needs more than two seconds, so wait for the process to actually exit and
-    # only force-kill what is still standing after this budget.
-    _WPP_GRACEFUL_STOP_SECONDS = 25
+    # A first fix gave the HTTP request and the poll loop AFTER it 25s each —
+    # 50s worst case, and since _stop_wpp_server() ran on the wx main thread
+    # at the time, that made every "Sair" look and feel exactly like a hang
+    # (Windows marks a quiet message loop "Not Responding" after a few
+    # seconds). _stop_wpp_server() now always runs off the main thread (see
+    # real_exit()), which fixes the "Not Responding" symptom on its own — but
+    # a 50s wait to actually quit is still bad on its own merits. Both stages
+    # now share ONE budget instead of getting their own back to back.
+    _WPP_GRACEFUL_STOP_SECONDS = 10
 
     def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
@@ -3601,11 +3632,14 @@ class MainWindow(wx.Frame):
         Calls /close-session first so WPPConnect asks Puppeteer to
         browser.close() Chrome gracefully, then *waits* for the Node process to
         exit on its own before force-killing anything — see
-        _WPP_GRACEFUL_STOP_SECONDS for why the wait is not optional.
+        _WPP_GRACEFUL_STOP_SECONDS for why the wait is not optional. Must not
+        be called on the wx main thread: this can legitimately block for the
+        whole budget above.
         """
         proc = getattr(self, "wpp_process", None)
         token = getattr(self, "token", "")
         if token:
+            deadline = time.time() + self._WPP_GRACEFUL_STOP_SECONDS
             try:
                 url = (
                     f"{self.wpp_server}:{self.wpp_port}"
@@ -3614,16 +3648,18 @@ class MainWindow(wx.Frame):
                 requests.post(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
-                    # Generous: this request only returns once WPPConnect has
-                    # actually awaited client.close(), i.e. once Chrome is down.
-                    timeout=self._WPP_GRACEFUL_STOP_SECONDS,
+                    # This request only returns once WPPConnect has actually
+                    # awaited client.close(), i.e. once Chrome is down — but it
+                    # shares the overall budget with the poll loop below rather
+                    # than getting its own on top, so a slow/hung response here
+                    # can't by itself double the total wait.
+                    timeout=max(1, deadline - time.time()),
                 )
             except Exception:
                 pass
 
             # /close-session returning is not proof Node itself is finished
-            # writing; give it the rest of the budget to exit cleanly.
-            deadline = time.time() + self._WPP_GRACEFUL_STOP_SECONDS
+            # writing; use whatever's left of the shared budget to confirm it.
             while time.time() < deadline:
                 if proc is not None:
                     if proc.poll() is not None:
