@@ -665,7 +665,7 @@ class ApiSetupDialog(wx.Dialog):
             # ── Step 4.5: download chrome if using modern puppeteer ───────
             self._set_stage("Baixando executável do Chrome (puppeteer)...", *stages["chrome"])
             ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
                 cwd=api_dir,
                 env=npm_env,
             )
