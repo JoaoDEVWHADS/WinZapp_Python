@@ -27,6 +27,8 @@ client/logs/
 #  api/.env anyway; see ensure_api_modules_installed() in client/main.py.)
 !/client/api/package.json
 !/client/api/config.json
+!/client/api/tsconfig.json
+!/client/api/babel.config.js
 !/client/api/decrypt.js
 
 
