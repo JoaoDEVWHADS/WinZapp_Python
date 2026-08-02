@@ -43,11 +43,12 @@ class TestNudgeWhatsappSocketStream:
             calls.append((url, headers, timeout))
             class _Resp:
                 status_code = 200
+                text = "{}"
             return _Resp()
 
         monkeypatch.setattr("main.requests.post", _fake_post)
         s = _Stub()
-        s._nudge_whatsapp_socket_stream()
+        assert s._nudge_whatsapp_socket_stream() is True
 
         assert len(calls) == 1
         url, headers, timeout = calls[0]
@@ -61,4 +62,19 @@ class TestNudgeWhatsappSocketStream:
 
         monkeypatch.setattr("main.requests.post", _fake_post)
         s = _Stub()
-        s._nudge_whatsapp_socket_stream()  # must not raise
+        assert s._nudge_whatsapp_socket_stream() is False  # must not raise
+
+    def test_returns_false_on_a_non_2xx_response(self, monkeypatch):
+        """The server-side symptom that led here: a detached-Frame error
+        makes page.evaluate() throw, and the endpoint answers with a 500 —
+        that has to be distinguishable from a real success so the caller can
+        escalate to _restart_wpp_session()."""
+        def _fake_post(*a, **kw):
+            class _Resp:
+                status_code = 500
+                text = '{"status":"error","message":"Attempted to use detached Frame"}'
+            return _Resp()
+
+        monkeypatch.setattr("main.requests.post", _fake_post)
+        s = _Stub()
+        assert s._nudge_whatsapp_socket_stream() is False

@@ -1461,6 +1461,7 @@ class MainWindow(wx.Frame):
             # online; only a real transition should force anything below).
             was_offline = not was
             self._wa_offline_strikes = 0
+            self._dead_browser_strikes = 0
             self._auto_offline = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
@@ -4935,30 +4936,96 @@ class MainWindow(wx.Frame):
             # something — do not call that an outage.
             return True
 
-    def _nudge_whatsapp_socket_stream(self):
+    def _nudge_whatsapp_socket_stream(self) -> bool:
         """Ask WPPConnect to fire WPP.whatsapp.Cmd.openSocketStream() inside
         the page — the same internal trigger a real, focused browser tab
         fires on its own via visibility/focus/online DOM events after the OS
         resumes from sleep.
 
         This session's Chrome runs headless and is never focused, so nothing
-        ever fires that trigger by itself — reported live as: suspend the
-        machine, resume it, and the app is stuck offline (isConnected() never
-        comes back true again) until the whole program is restarted, even
-        though WPPConnect's own cached session status keeps saying CONNECTED
-        the entire time. Best-effort only: failures are logged, never raised,
-        since this is called from the connection health-check path and must
-        not itself become a new way to get stuck.
+        ever fires that trigger by itself. That alone was the first symptom
+        reported: stuck offline forever after a suspend/resume cycle, even
+        though WPPConnect's own cached session status keeps saying CONNECTED.
+
+        Returns False when the request itself fails (network) or the server
+        reports a non-2xx status — which turned out to mean something worse
+        than "no trigger fired": WPPConnect's log showed
+        ``Attempted to use detached Frame '<id>'`` from Puppeteer every time
+        this endpoint was hit after a suspend/resume cycle. The Chrome tab's
+        page/frame had structurally died (crashed or been replaced) during
+        sleep, and Puppeteer's cached Page/Frame handle for it is now
+        permanently unusable — no in-page command can ever succeed again on
+        it, by definition. See _restart_wpp_session(), which the caller
+        escalates to after enough consecutive failures here.
         """
         try:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/reconnect-socket-stream"
-            requests.post(
+            resp = requests.post(
                 url,
                 headers={"Authorization": f"Bearer {self.token}"},
                 timeout=10,
             )
+            if resp.status_code not in (200, 201):
+                logging.warning(
+                    "[_nudge_whatsapp_socket_stream] HTTP %s: %s",
+                    resp.status_code, resp.text[:300],
+                )
+                return False
+            return True
         except Exception as exc:
             logging.warning("[_nudge_whatsapp_socket_stream] request failed: %s", exc)
+            return False
+
+    # How many *consecutive* failed nudges (see _nudge_whatsapp_socket_stream)
+    # before assuming the browser page itself is structurally dead — rather
+    # than a transient blip — and restarting the WPPConnect session.
+    _DEAD_BROWSER_RESTART_STRIKES = 3
+    # Minimum time between automatic session restarts, so a persistently
+    # broken state can't retrigger this every health-check cycle forever.
+    _WPP_SESSION_RESTART_COOLDOWN = 120
+
+    def _restart_wpp_session(self):
+        """Recreate the WPPConnect Chrome session in place (close-session +
+        start-session), without touching the Node process or WinZapp itself.
+
+        Used when the Puppeteer page has structurally died (detached frame
+        after a suspend/resume cycle — see _nudge_whatsapp_socket_stream());
+        a dead page can never satisfy isConnected() again on its own, no
+        matter how many times the health check retries it. start-session on
+        a session with a stored, valid token silently restores the existing
+        WhatsApp session (no new QR code) — this is exactly what already
+        happens on every normal app restart, just without restarting the
+        whole app or Node process.
+        """
+        if getattr(self, "_restarting_wpp_session", False):
+            return
+        now = time.time()
+        last = getattr(self, "_last_wpp_session_restart_ts", 0)
+        if now - last < self._WPP_SESSION_RESTART_COOLDOWN:
+            return
+        self._restarting_wpp_session = True
+        self._last_wpp_session_restart_ts = now
+        try:
+            logging.warning(
+                "[_restart_wpp_session] Browser page appears dead (detached "
+                "frame) after suspend/resume — restarting the WPPConnect "
+                "session in place."
+            )
+            headers = {"Authorization": f"Bearer {self.token}"}
+            close_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/close-session"
+            try:
+                requests.post(close_url, headers=headers, timeout=15)
+            except Exception as exc:
+                logging.warning("[_restart_wpp_session] close-session failed: %s", exc)
+            time.sleep(2)
+            start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
+            try:
+                requests.post(start_url, json={"waitQrCode": False}, headers=headers, timeout=15)
+                logging.info("[_restart_wpp_session] start-session requested.")
+            except Exception as exc:
+                logging.warning("[_restart_wpp_session] start-session failed: %s", exc)
+        finally:
+            self._restarting_wpp_session = False
 
     def check_whatsapp_reachable(self) -> bool:
         """Decide whether WhatsApp traffic can actually flow right now.
@@ -5092,9 +5159,22 @@ class MainWindow(wx.Frame):
                         # suspend/resume cycle — without this, this branch
                         # (and therefore offline mode) can persist forever,
                         # since nothing else ever pokes the page to retry.
-                        self._nudge_whatsapp_socket_stream()
+                        if self._nudge_whatsapp_socket_stream():
+                            self._dead_browser_strikes = 0
+                        else:
+                            # The nudge request itself failed — not just "no
+                            # trigger fired", but the page/frame Puppeteer
+                            # holds is gone. No amount of retrying this same
+                            # nudge can ever succeed on a dead page; escalate
+                            # to a full session restart after enough
+                            # consecutive failures. See _restart_wpp_session().
+                            self._dead_browser_strikes = getattr(self, "_dead_browser_strikes", 0) + 1
+                            if self._dead_browser_strikes >= self._DEAD_BROWSER_RESTART_STRIKES:
+                                self._dead_browser_strikes = 0
+                                threading.Thread(target=self._restart_wpp_session, daemon=True).start()
                         self._set_wa_connected(False, "status-session CONNECTED but isConnected() false")
                         return
+                    self._dead_browser_strikes = 0
                     self._set_wa_connected(True, "status-session CONNECTED")
                     try:
                         dev_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/host-device"
