@@ -3183,14 +3183,12 @@ class MainWindow(wx.Frame):
         # normal "node_modules absent" gate never fires. We compare a list of
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
-        ffmpeg_bin = self._find_api_ffmpeg()
         _REQUIRED_MARKERS = [
-            os.path.join(node_modules, "@babel", "runtime"),
+            os.path.join(node_modules, "express"),
+            os.path.join(node_modules, "puppeteer"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
-            if not ffmpeg_bin:
-                missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
@@ -3201,7 +3199,11 @@ class MainWindow(wx.Frame):
                     npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
                     npm_cmd  = [node_exe, npm_cli]
                     node_dir = resource_path("node")
-                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+                    win_git_cmd = resource_path("git", "cmd")
+                    win_git_bin = resource_path("git", "bin")
+                    sys_git = shutil.which("git")
+                    sys_git_dir = os.path.dirname(sys_git) if sys_git else ""
+                    path_env = f"{node_dir};{win_git_cmd};{win_git_bin};{sys_git_dir};" + os.environ.get("PATH", "")
                 else:
                     local_node = resource_path("node", "node")
                     if os.path.isfile(local_node):
