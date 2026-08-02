@@ -327,6 +327,7 @@ def main():
         _run(npm_args + ["run", "build"], cwd=CLIENT_API_DIR, check=False)
 
         # Guaranteed Fallback: if dist/server.js is still missing, restore pre-built dist files
+        api_server_js = os.path.join(dist_dir, "server.js")
         if not os.path.isfile(api_server_js):
             print("[WARNING] dist/server.js missing after build. Restoring pre-built dist from api_patches...", flush=True)
             patches_dist = os.path.join(API_PATCHES_DIR, "dist")
