@@ -77,9 +77,15 @@ try {
 
 let initServer;
 try {
-  initServer = require(path.join(distPath, 'index')).initServer || require(path.join(distPath, 'index'));
+  const indexMod = require(path.join(distPath, 'index'));
+  initServer = indexMod.initServer || indexMod.default || indexMod;
 } catch (err) {
-  initServer = require(path.join(distPath, 'server')).initServer || require(path.join(distPath, 'server'));
+  try {
+    const serverMod = require(path.join(distPath, 'server'));
+    initServer = typeof serverMod.initServer === 'function' ? serverMod.initServer : (typeof serverMod === 'function' ? serverMod : null);
+  } catch (e) {
+    console.warn('[WinZapp] Falling back to executing dist/server.js directly');
+  }
 }
 
 // Carrega as configurações personalizadas de config.json
@@ -247,4 +253,9 @@ const finalConfig = {
 };
 
 // Inicializa o servidor
-initServer(finalConfig);
+if (typeof initServer === 'function') {
+  initServer(finalConfig);
+} else {
+  console.log('[WinZapp] Starting server via dist/server.js module...');
+  require(path.join(distPath, 'server'));
+}
