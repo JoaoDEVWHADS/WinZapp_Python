@@ -101,9 +101,24 @@ class SwitchAccountDialog:
         for acc in self._accounts[_MAX_HOTKEY_SLOTS:]:
             self.listbox.Append(acc.get("name", acc["id"]), acc)
         vbox.Add(self.listbox, 1, wx.EXPAND | wx.ALL, 8)
-        btns = self.dlg.CreateButtonSizer(wx.OK | wx.CANCEL)
-        vbox.Add(btns, 0, wx.EXPAND | wx.ALL, 8)
+        # OK/Cancel buttons parented to the panel (same window as the sizer),
+        # not the dialog — mixing parents trips wxAssertionError
+        # CheckExpectedParentIs and the dialog silently fails to open.
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_ok = wx.Button(panel, wx.ID_OK)
+        self.btn_cancel = wx.Button(panel, wx.ID_CANCEL)
+        btns.Add(self.btn_ok, 0, wx.ALL, 4)
+        btns.Add(self.btn_cancel, 0, wx.ALL, 4)
+        vbox.Add(btns, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         panel.SetSizer(vbox)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(panel, 1, wx.EXPAND)
+        self.dlg.SetSizer(outer)
+        self.dlg.SetSize((360, 380))
+        self.btn_ok.Bind(wx.EVT_BUTTON, lambda e: self.dlg.EndModal(wx.ID_OK))
+        self.btn_cancel.Bind(wx.EVT_BUTTON, lambda e: self.dlg.EndModal(wx.ID_CANCEL))
+        self.dlg.SetAffirmativeId(wx.ID_OK)
+        self.dlg.SetEscapeId(wx.ID_CANCEL)
         # initial focus on the current account
         self._select_current()
         self.listbox.SetFocus()
@@ -192,8 +207,20 @@ class AccountManagerDialog:
                   self.btn_restore, self.btn_delete):
             hbox.Add(b, 0, wx.ALL, 4)
         vbox.Add(hbox, 0, wx.ALL, 4)
-        vbox.Add(self.dlg.CreateButtonSizer(wx.CLOSE), 0, wx.EXPAND | wx.ALL, 8)
+        # Close button parented to the SAME panel as the sizer (wx requires the
+        # sizer's managed widgets to share the sizer's window as parent, else
+        # wxAssertionError CheckExpectedParentIs and the dialog never shows).
+        self.btn_close = wx.Button(panel, wx.ID_CLOSE)
+        vbox.Add(self.btn_close, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         panel.SetSizer(vbox)
+        # Panel fills the dialog.
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(panel, 1, wx.EXPAND)
+        self.dlg.SetSizer(outer)
+        self.dlg.SetSize((480, 420))
+        self.btn_close.Bind(wx.EVT_BUTTON, lambda e: self.dlg.EndModal(wx.ID_CLOSE))
+        self.dlg.SetAffirmativeId(wx.ID_CLOSE)
+        self.dlg.SetEscapeId(wx.ID_CLOSE)
         self.btn_add.Bind(wx.EVT_BUTTON, self._on_add)
         self.btn_rename.Bind(wx.EVT_BUTTON, self._on_rename)
         self.btn_archive.Bind(wx.EVT_BUTTON, self._on_archive)
