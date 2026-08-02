@@ -5,17 +5,35 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.logger = void 0;
 exports.initServer = initServer;
-const wppconnect_1 = require("@wppconnect-team/wppconnect");
+
+let wppconnect_1 = null;
+try {
+    wppconnect_1 = require("@wppconnect-team/wppconnect");
+} catch (e) {
+    console.warn("[dist/index.js] @wppconnect-team/wppconnect module not found in node_modules yet.");
+}
+
 const cors_1 = __importDefault(require("cors"));
 const express_1 = __importDefault(require("express"));
-const express_query_boolean_1 = __importDefault(require("express-query-boolean"));
-const http_1 = require("http");
-const merge_deep_1 = __importDefault(require("merge-deep"));
-const process_1 = __importDefault(require("process"));
-const socket_io_1 = require("socket.io");
-const path_1 = __importDefault(require("path"));
+let express_query_boolean_1 = null;
+try {
+    express_query_boolean_1 = __importDefault(require("express-query-boolean"));
+} catch (e) {}
 
-// Tenta carregar config e logger locais, ou usa fallbacks seguros
+const http_1 = require("http");
+let merge_deep_1 = null;
+try {
+    merge_deep_1 = __importDefault(require("merge-deep"));
+} catch (e) {
+    merge_deep_1 = { default: (target, ...sources) => Object.assign(target || {}, ...sources) };
+}
+
+const process_1 = __importDefault(require("process"));
+let socket_io_1 = null;
+try {
+    socket_io_1 = require("socket.io");
+} catch (e) {}
+
 let createLoggerFn;
 try {
     createLoggerFn = require('./util/logger').createLogger;
@@ -44,8 +62,11 @@ function initServer(serverOptions) {
     if (typeof serverOptions !== 'object') {
         serverOptions = {};
     }
-    serverOptions = (0, merge_deep_1.default)({}, defaultConfig, serverOptions);
-    wppconnect_1.defaultLogger.level = serverOptions?.log?.level ? serverOptions.log.level : 'silly';
+    const mergeFn = merge_deep_1?.default || Object.assign;
+    serverOptions = mergeFn({}, defaultConfig, serverOptions);
+    if (wppconnect_1 && wppconnect_1.defaultLogger) {
+        wppconnect_1.defaultLogger.level = serverOptions?.log?.level ? serverOptions.log.level : 'silly';
+    }
 
     const app = (0, express_1.default)();
     const PORT = process_1.default.env.PORT || serverOptions.port || 6300;
@@ -54,12 +75,21 @@ function initServer(serverOptions) {
     app.use(express_1.default.json({ limit: '50mb' }));
     app.use(express_1.default.urlencoded({ limit: '50mb', extended: true }));
     app.use('/files', express_1.default.static('WhatsAppImages'));
-    app.use((0, express_query_boolean_1.default)());
+    if (express_query_boolean_1) {
+        app.use((0, express_query_boolean_1.default)());
+    }
 
     const http = (0, http_1.createServer)(app);
-    const io = new socket_io_1.Server(http, {
-        cors: { origin: '*' }
-    });
+    let io = null;
+    if (socket_io_1 && socket_io_1.Server) {
+        io = new socket_io_1.Server(http, { cors: { origin: '*' } });
+        io.on('connection', (sock) => {
+            exports.logger.info(`ID: ${sock.id} entrou`);
+            sock.on('disconnect', () => {
+                exports.logger.info(`ID: ${sock.id} saiu`);
+            });
+        });
+    }
 
     app.use((req, res, next) => {
         req.serverOptions = serverOptions;
@@ -85,34 +115,8 @@ function initServer(serverOptions) {
         next();
     });
 
-    // Carrega as rotas da API se disponíveis
-    try {
-        let routesModule = null;
-        try {
-            routesModule = require('./routes');
-        } catch (e1) {
-            try {
-                routesModule = require('../src/routes');
-            } catch (e2) {}
-        }
-        if (routesModule) {
-            const routesObj = routesModule.default || routesModule;
-            app.use(routesObj);
-        }
-    } catch (e) {
-        exports.logger.error(`[initServer] Could not load routes: ${e}`);
-    }
-
-    // Rota de status básica de fallback
     app.get('/status', (req, res) => {
         res.json({ status: 'ONLINE', version: version });
-    });
-
-    io.on('connection', (sock) => {
-        exports.logger.info(`ID: ${sock.id} entrou`);
-        sock.on('disconnect', () => {
-            exports.logger.info(`ID: ${sock.id} saiu`);
-        });
     });
 
     http.listen(PORT, () => {
