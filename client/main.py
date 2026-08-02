@@ -1137,6 +1137,19 @@ class MainWindow(wx.Frame):
                     self.Bind(wx.EVT_MENU,
                               lambda e, a=action: self._on_accounts_menu(a), id=int(wid))
                 menubar.Append(accounts_menu, self.i18n.t("acc_menu_title"))
+                # Ctrl+Shift+1..9 → switch to the n-th paired account. Menu-label
+                # accelerators alone don't fire reliably here: focused child
+                # panels (conversation list, message field, …) install their own
+                # wx.AcceleratorTable, which swallows the keystroke before the
+                # menu bar sees it. A frame-level EVT_CHAR_HOOK catches the combo
+                # regardless of which control has focus (bound once).
+                self._account_hotkey_slots = {
+                    slot: acc["id"] for slot, acc in
+                    account_ui.accelerator_slots(account_ui.switchable_accounts(self.registry.list()))
+                }
+                if not getattr(self, "_account_hotkey_hook_bound", False):
+                    self.Bind(wx.EVT_CHAR_HOOK, self._on_account_hotkey_char)
+                    self._account_hotkey_hook_bound = True
             except Exception:
                 logging.exception("[menu] building Accounts menu failed (non-fatal)")
 
@@ -1167,6 +1180,27 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_wpp, id=self._ID_FORCE_REINSTALL_WPP)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
+
+    def _on_account_hotkey_char(self, event):
+        """Frame-level Ctrl+Shift+1..9 → switch to the n-th paired account.
+
+        Bound via EVT_CHAR_HOOK so it fires no matter which child control holds
+        focus (child panels' own AcceleratorTables would otherwise swallow the
+        menu-bar accelerator). Anything that isn't our exact combo is passed
+        through untouched with event.Skip().
+        """
+        try:
+            if (event.GetModifiers() == (wx.MOD_CONTROL | wx.MOD_SHIFT)):
+                code = event.GetKeyCode()
+                if ord("1") <= code <= ord("9"):
+                    slot = code - ord("0")
+                    target = getattr(self, "_account_hotkey_slots", {}).get(slot)
+                    if target and target != getattr(self, "account_id", None):
+                        self._switch_to_account(target)
+                    return  # consume the combo (even a no-op self-switch)
+        except Exception:
+            logging.exception("[accounts] hotkey char handler failed")
+        event.Skip()
 
     def _on_accounts_menu(self, action: dict):
         """Handle a click in the Accounts menu (plan Zad 4.2-4.5)."""
