@@ -184,8 +184,8 @@ jobs:
         id: cache-puppeteer
         uses: actions/cache@v4
         with:
-          path: client/api/node_modules/puppeteer/.local-chromium
-          key: puppeteer-chromium-v1
+          path: client/api/node_modules/.cache/puppeteer
+          key: puppeteer-chromium-v2
 
       - name: Configurar WPPConnect API
         shell: pwsh
