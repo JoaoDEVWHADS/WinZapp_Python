@@ -3452,15 +3452,11 @@ class MainWindow(wx.Frame):
                 if os.path.isfile(_dist_cfg):
                     with open(_dist_cfg, "r", encoding="utf-8") as _f:
                         _cfg_src = _f.read()
-                    if "useChrome" not in _cfg_src:
-                        _cfg_src = _cfg_src.replace(
-                            "createOptions: {",
-                            "createOptions: { useChrome: false,",
-                            1,
-                        )
+                    if "headless: 'shell'" in _cfg_src:
+                        _cfg_src = _cfg_src.replace("headless: 'shell'", "headless: true")
                         with open(_dist_cfg, "w", encoding="utf-8") as _f:
                             _f.write(_cfg_src)
-                        logging.info("[startup] Patched dist/config.js: useChrome → false")
+                        logging.info("[startup] Patched dist/config.js: headless → true")
             except Exception as _e:
                 logging.warning("[startup] Could not patch dist/config.js: %s", _e)
 
