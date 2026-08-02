@@ -504,19 +504,27 @@ class Connect:
             api_key = self.main_window.wpp_api_key
 
             def _generate_hash(raw: str) -> str:
-                """Call generate-token and return 'raw:hash'. Raises on failure."""
+                """Call generate-token and return 'raw:hash'. Retries if server is starting up."""
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
-                res = requests.post(url, timeout=10)
-                if res.status_code in (200, 201):
-                    hash_token = res.json().get("token") or ""
-                    if hash_token:
-                        return f"{raw}:{hash_token}"
-                    raise RuntimeError(
-                        f"generate-token returned empty hash (HTTP {res.status_code})"
-                    )
-                raise RuntimeError(
-                    f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
-                )
+                deadline = time.time() + 15
+                last_exc = None
+                while time.time() < deadline:
+                    try:
+                        res = requests.post(url, timeout=5)
+                        if res.status_code in (200, 201):
+                            hash_token = res.json().get("token") or ""
+                            if hash_token:
+                                return f"{raw}:{hash_token}"
+                            raise RuntimeError(
+                                f"generate-token returned empty hash (HTTP {res.status_code})"
+                            )
+                        last_exc = RuntimeError(
+                            f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
+                        )
+                    except Exception as e:
+                        last_exc = e
+                    time.sleep(1)
+                raise last_exc or RuntimeError("generate-token connection timed out")
 
             if _instance_exists:
                 # Re-generate hash if the stored token has no colon (legacy or corrupt).
