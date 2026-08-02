@@ -51,11 +51,7 @@ if (!hasChrome) {
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
-    const npxCmd = fs.existsSync(npxCli)
-      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome`
-      : 'npx puppeteer browsers install chrome';
-    execSync(npxCmd, {
+    execSync('npx puppeteer browsers install chrome', {
       cwd: __dirname,
       stdio: 'inherit',
       env: env
