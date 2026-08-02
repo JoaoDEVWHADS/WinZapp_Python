@@ -41,6 +41,7 @@ from core.sound_system import (
     alert_tone_choice_keys, resolve_alert_tone_path,
     discover_sound_packs, resolve_sound_event_path, DEFAULT_PACK_ID,
 )
+from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag
@@ -541,6 +542,12 @@ class MainWindow(wx.Frame):
         self.connect = Connect(self)
         self.i18n = I18n(self)
         self.i18n.get_language()
+
+        # Apply the configured output/input audio devices (Settings > Audio
+        # Devices). A device that fails to open here falls back to the
+        # Windows default and warns — settings.json itself is left untouched
+        # so the same device is retried on the next launch.
+        self._apply_configured_audio_devices()
 
         # ── Auto-updater ──────────────────────────────────────────────────────
         # Schedule the update checker on the event loop early (but after i18n
@@ -4432,6 +4439,34 @@ class MainWindow(wx.Frame):
                 # pack is missing this file) — a silent no-op beats a crash.
                 from core.sound_system import NullSound
                 setattr(self, f"{key}_sound", NullSound())
+
+    def _apply_configured_audio_devices(self):
+        """Apply the Settings > Audio Devices output/input device choices.
+
+        Called once at startup (after the sound system is up). A device
+        that isn't found or fails to open falls back to the Windows default
+        and warns — the stored setting is left as-is so the same device is
+        retried on the next launch (see core.sound_system.SoundSystem and
+        the Settings dialog's own validation for the other two points this
+        same policy applies at).
+        """
+        audio_devices = self.settings.get("audio_devices", {})
+
+        output_name = audio_devices.get("output_device_name", "")
+        self.sound_system.apply_output_device(output_name, warn_on_failure=True)
+
+        input_name = audio_devices.get("input_device_name", "")
+        self.effective_input_device_name = ""
+        if input_name:
+            idx = find_input_device_index(input_name)
+            if idx is not None and test_input_device(idx):
+                self.effective_input_device_name = input_name
+            elif not self.background_mode:
+                wx.MessageBox(
+                    self.i18n.t("audio_device_failed_input").format(device=input_name),
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_WARNING,
+                )
 
     def _resolve_message_background_path(self) -> str:
         """Resolve the message_background Sound Events entry: '' if the user

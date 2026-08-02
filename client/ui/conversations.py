@@ -14,6 +14,7 @@ import pyaudio
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
+from core.audio_devices import find_input_device_index
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
@@ -1683,8 +1684,6 @@ class ConversationsPanel(wx.Panel):
             (44100, 1),   # 44.1 kHz mono
             (44100, 2),   # 44.1 kHz stereo
         ]
-        opened = False
-        opened = False
         if self._recording_pa is None:
             try:
                 self._recording_pa = pyaudio.PyAudio()
@@ -1692,30 +1691,57 @@ class ConversationsPanel(wx.Panel):
                 logging.error("[audio] Failed to initialize PyAudio: %s", exc)
                 return
         pa = self._recording_pa
-        for rate, ch in _configs:
-            try:
-                stream = pa.open(
-                    rate=rate,
-                    channels=ch,
-                    format=pyaudio.paInt16,
-                    input=True,
-                    # Larger buffer (~85 ms at 48 kHz) so the Python callback
-                    # can tolerate scheduling delays from background sync/media
-                    # threads without PortAudio dropping samples (choppy audio).
-                    frames_per_buffer=4096,
-                    stream_callback=_callback,
-                )
-                stream.start_stream()
-                self._recording_stream      = stream
-                self._recording_actual_rate = rate
-                self._recording_actual_ch   = ch
-                opened = True
-                break
-            except Exception:
-                self._recording_stream = None
 
-        if not opened:
+        def _try_open(device_index):
+            for rate, ch in _configs:
+                try:
+                    s = pa.open(
+                        rate=rate,
+                        channels=ch,
+                        format=pyaudio.paInt16,
+                        input=True,
+                        input_device_index=device_index,
+                        # Larger buffer (~85 ms at 48 kHz) so the Python callback
+                        # can tolerate scheduling delays from background sync/media
+                        # threads without PortAudio dropping samples (choppy audio).
+                        frames_per_buffer=4096,
+                        stream_callback=_callback,
+                    )
+                    s.start_stream()
+                    return s, rate, ch
+                except Exception:
+                    continue
+            return None, None, None
+
+        # Settings > Audio Devices lets the user pin a specific recording
+        # device (by friendly name — indices aren't stable across reboots).
+        # main_window.effective_input_device_name is "" whenever no device is
+        # configured, or a prior failure this session already fell back to
+        # the system default.
+        configured_name = getattr(self.main_window, "effective_input_device_name", "") or ""
+        input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
+
+        stream, rate, ch = _try_open(input_device_index)
+
+        if stream is None and input_device_index is not None:
+            # The configured device worked earlier this session (at startup,
+            # or since) but just failed to open — e.g. unplugged mid-session.
+            # Keep the stored setting untouched (retried again next launch)
+            # but fall back to the system default for the rest of this run.
+            self.main_window.effective_input_device_name = ""
+            wx.MessageBox(
+                self.main_window.i18n.t("audio_device_failed_input").format(device=configured_name),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_WARNING, self,
+            )
+            stream, rate, ch = _try_open(None)
+
+        if stream is None:
             return
+
+        self._recording_stream      = stream
+        self._recording_actual_rate = rate
+        self._recording_actual_ch   = ch
 
         self._is_recording = True
 
@@ -4197,6 +4223,7 @@ class ConversationsPanel(wx.Panel):
             playback_ctrl.play()
         except Exception as e:
             logging.exception(f"[UI Audio Playback] Error starting playback: {e}")
+            self.main_window.sound_system.handle_playback_failure()
             self._stop_audio()
             return
 

@@ -665,7 +665,7 @@ class StatusPanel(wx.Panel):
                 try:
                     self._audio_stream.play()
                 except Exception:
-                    pass
+                    self.main_window.sound_system.handle_playback_failure()
                 self._is_playing = True
         else:
             self._start_playback()
@@ -705,6 +705,7 @@ class StatusPanel(wx.Panel):
             self._is_playing  = True
             self._audio_timer.Start(500)
         except Exception:
+            self.main_window.sound_system.handle_playback_failure()
             self._stop_playback()
 
     def _stop_playback(self):
