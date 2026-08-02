@@ -51,21 +51,36 @@ if (!hasChrome) {
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    execSync('npx puppeteer browsers install chrome', {
+    execSync('npx --yes @puppeteer/browsers install chrome-headless-shell', {
       cwd: __dirname,
       stdio: 'inherit',
       env: env
     });
     console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
   } catch (err) {
-    console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err);
+    console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err && err.message ? err.message : err);
   }
 }
 
 // Carrega a configuração padrão compilada
 const distPath = path.join(__dirname, 'dist');
-const configDefault = require(path.join(distPath, 'config')).default;
-const { initServer } = require(path.join(distPath, 'index'));
+let configDefault = {};
+try {
+  if (fs.existsSync(path.join(distPath, 'config.js'))) {
+    configDefault = require(path.join(distPath, 'config')).default || require(path.join(distPath, 'config'));
+  } else if (fs.existsSync(path.join(distPath, 'src', 'config.js'))) {
+    configDefault = require(path.join(distPath, 'src', 'config')).default || require(path.join(distPath, 'src', 'config'));
+  }
+} catch (err) {
+  console.warn('[WinZapp] Aviso ao carregar dist/config:', err && err.message ? err.message : err);
+}
+
+let initServer;
+try {
+  initServer = require(path.join(distPath, 'index')).initServer || require(path.join(distPath, 'index'));
+} catch (err) {
+  initServer = require(path.join(distPath, 'server')).initServer || require(path.join(distPath, 'server'));
+}
 
 // Carrega as configurações personalizadas de config.json
 let customConfig = {};
