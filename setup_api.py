@@ -287,7 +287,7 @@ def main():
     os.environ["NODE_ENV"] = "development"
     os.environ["NODE_OPTIONS"] = "--max-old-space-size=8192"
     os.environ["UV_THREADPOOL_SIZE"] = "64"
-    os.environ["PUPPETEER_CACHE_DIR"] = os.path.abspath(os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", ".local-chromium"))
+    os.environ["PUPPETEER_CACHE_DIR"] = os.path.abspath(os.path.join(CLIENT_API_DIR, "node_modules", ".cache", "puppeteer"))
     node_cmd = shutil.which("node") or ("node.exe" if is_windows else "node")
     try:
         if is_windows:
@@ -329,6 +329,8 @@ def main():
 
         # Download Chromium (Puppeteer)
         print("[INFO] Downloading Chromium (Puppeteer)...", flush=True)
+        npx_cmd = "npx.cmd" if is_windows else "npx"
+        _run([npx_cmd, "--yes", "puppeteer", "browsers", "install", "chrome"], cwd=CLIENT_API_DIR, check=False)
         install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
         if os.path.isfile(install_js):
             _run([node_cmd, install_js], cwd=CLIENT_API_DIR, check=False)
