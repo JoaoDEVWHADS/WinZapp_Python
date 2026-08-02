@@ -134,10 +134,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "client/node"
-          python node_download.py
-          $ver = python -c "import node_download; print(node_download.NODE_VERSION)"
+          $nodeVer = "${{ env.NODE_VER }}"
+          if ([string]::IsNullOrWhiteSpace($nodeVer)) {
+              $nodeVer = "18.20.4"
+          }
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVer/node-v$nodeVer-win-x64.zip" -OutFile "node-portable.zip"
           Expand-Archive -Path "node-portable.zip" -DestinationPath "node-temp"
-          Copy-Item -Path "node-temp\node-v$ver-win-x64\*" -Destination "client/node" -Recurse -Force
+          Copy-Item -Path "node-temp\node-v$nodeVer-win-x64\*" -Destination "client/node" -Recurse -Force
           Remove-Item -Recurse -Force "node-temp", "node-portable.zip"
 
       - name: Cache MinGit Portátil
