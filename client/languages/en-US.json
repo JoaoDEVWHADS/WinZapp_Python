@@ -647,5 +647,9 @@
     "acc_err_archive_current": "Can't archive the account in use. Switch to another account first.",
     "acc_err_archive_not_paired": "Only connected accounts can be archived.",
     "acc_err_delete_current": "Can't delete the account in use. Switch to another account first.",
-    "acc_err_delete_failed": "Failed to delete the account."
+    "acc_err_delete_failed": "Failed to delete the account.",
+    "acc_btn_pair": "Connect",
+    "acc_pair_now_prompt": "Account \"{name}\" created. Connect it now (pair)?",
+    "acc_err_pair_current": "This is the current account — it's already in use.",
+    "acc_err_pair_not_pending": "Only accounts awaiting pairing can be connected."
 }

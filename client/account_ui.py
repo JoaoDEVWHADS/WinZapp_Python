@@ -69,6 +69,17 @@ def can_hard_delete(account: dict, current_account_id: str) -> tuple[bool, str]:
     return True, ""
 
 
+def can_pair(account: dict, current_account_id: str) -> tuple[bool, str]:
+    """(allowed, reason_key). 'Connect/Pair' launches a pending account so the
+    user can finish pairing it. Only meaningful for a pending account other than
+    the current process's own (the current one is already being handled here)."""
+    if account.get("id") == current_account_id:
+        return False, "acc_err_pair_current"
+    if account.get("state") != "pending":
+        return False, "acc_err_pair_not_pending"
+    return True, ""
+
+
 # ── wx dialogs (Windows / running wx.App only) ───────────────────────────────
 def _wx():
     import wx
@@ -181,12 +192,16 @@ class AccountManagerDialog:
     Node teardown of the account's userDataDir under node_lock.
     """
 
-    def __init__(self, parent, registry, current_account_id, i18n, global_dir):
+    def __init__(self, parent, registry, current_account_id, i18n, global_dir,
+                 on_pair=None):
         wx = _wx()
         self.registry = registry
         self.current = current_account_id
         self.i18n = i18n
         self.global_dir = global_dir
+        # Callback(account_id) to launch/pair an account (activation-first switch).
+        # Injected by main.py so the manager can start a pending account's pairing.
+        self._pair_cb = on_pair
         self.dlg = wx.Dialog(parent, title=i18n.t("acc_mgr_title"),
                              style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         panel = wx.Panel(self.dlg)
@@ -199,11 +214,12 @@ class AccountManagerDialog:
         # buttons
         hbox = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_add = wx.Button(panel, label=i18n.t("acc_btn_add"))
+        self.btn_pair = wx.Button(panel, label=i18n.t("acc_btn_pair"))
         self.btn_rename = wx.Button(panel, label=i18n.t("acc_btn_rename"))
         self.btn_archive = wx.Button(panel, label=i18n.t("acc_btn_archive"))
         self.btn_restore = wx.Button(panel, label=i18n.t("acc_btn_restore"))
         self.btn_delete = wx.Button(panel, label=i18n.t("acc_btn_delete"))
-        for b in (self.btn_add, self.btn_rename, self.btn_archive,
+        for b in (self.btn_add, self.btn_pair, self.btn_rename, self.btn_archive,
                   self.btn_restore, self.btn_delete):
             hbox.Add(b, 0, wx.ALL, 4)
         vbox.Add(hbox, 0, wx.ALL, 4)
@@ -222,6 +238,7 @@ class AccountManagerDialog:
         self.dlg.SetAffirmativeId(wx.ID_CLOSE)
         self.dlg.SetEscapeId(wx.ID_CLOSE)
         self.btn_add.Bind(wx.EVT_BUTTON, self._on_add)
+        self.btn_pair.Bind(wx.EVT_BUTTON, self._on_pair)
         self.btn_rename.Bind(wx.EVT_BUTTON, self._on_rename)
         self.btn_archive.Bind(wx.EVT_BUTTON, self._on_archive)
         self.btn_restore.Bind(wx.EVT_BUTTON, self._on_restore)
@@ -257,10 +274,31 @@ class AccountManagerDialog:
             if dlg.ShowModal() == wx.ID_OK:
                 name = dlg.GetValue().strip()
                 if name:
-                    self.registry.add(name, state="pending")
+                    acc = self.registry.add(name, state="pending")
                     self._reload()
+                    # Offer to pair the freshly-added account right away, so the
+                    # user isn't stuck with a pending account they can't reach
+                    # (a pending account is not in the switch list by design).
+                    if self._pair_cb and wx.MessageBox(
+                            self.i18n.t("acc_pair_now_prompt").format(name=name),
+                            self.i18n.t("acc_btn_pair"),
+                            wx.YES_NO | wx.ICON_QUESTION) == wx.YES:
+                        self._pair_cb(acc["id"])
+                        self.dlg.EndModal(wx.ID_CLOSE)
         finally:
             dlg.Destroy()
+
+    def _on_pair(self, _e):
+        acc = self._selected()
+        if not acc:
+            return
+        ok, reason = can_pair(acc, self.current)
+        if not ok:
+            self._error(reason)
+            return
+        if self._pair_cb:
+            self._pair_cb(acc["id"])
+            self.dlg.EndModal(_wx().ID_CLOSE)
 
     def _on_rename(self, _e):
         wx = _wx()

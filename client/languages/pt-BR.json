@@ -647,5 +647,9 @@
     "acc_err_archive_current": "Não é possível arquivar a conta em uso. Troque para outra conta primeiro.",
     "acc_err_archive_not_paired": "Só é possível arquivar contas conectadas.",
     "acc_err_delete_current": "Não é possível excluir a conta em uso. Troque para outra conta primeiro.",
-    "acc_err_delete_failed": "Falha ao excluir a conta."
+    "acc_err_delete_failed": "Falha ao excluir a conta.",
+    "acc_btn_pair": "Conectar",
+    "acc_pair_now_prompt": "Conta \"{name}\" criada. Deseja conectá-la agora (parear)?",
+    "acc_err_pair_current": "Esta é a conta atual — já está em uso.",
+    "acc_err_pair_not_pending": "Só é possível conectar contas aguardando pareamento."
 }

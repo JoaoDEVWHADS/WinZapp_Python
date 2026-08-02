@@ -58,6 +58,17 @@ def test_can_hard_delete_rules():
     assert can_hard_delete(acc, current_account_id=A)[0] is False
 
 
+def test_can_pair_rules():
+    from account_ui import can_pair
+    pending = _acc(A, "pending")
+    assert can_pair(pending, current_account_id=B)[0] is True
+    # current account can't be paired via this path
+    assert can_pair(pending, current_account_id=A)[0] is False
+    # paired/archived can't be "connected" (already paired / must restore)
+    assert can_pair(_acc(A, "paired"), current_account_id=B)[0] is False
+    assert can_pair(_acc(A, "archived"), current_account_id=B)[0] is False
+
+
 def test_build_accounts_menu_uses_factory_ids_verbatim(monkeypatch):
     """REGRESSION: the menu must use the EXACT id object the factory returns
     (e.g. wx.WindowIDRef), never a cast. Casting a reserved WindowIDRef to int()

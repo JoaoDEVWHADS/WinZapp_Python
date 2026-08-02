@@ -647,5 +647,9 @@
     "acc_err_archive_current": "Não é possível arquivar a conta em utilização. Mude para outra conta primeiro.",
     "acc_err_archive_not_paired": "Só é possível arquivar contas ligadas.",
     "acc_err_delete_current": "Não é possível eliminar a conta em utilização. Mude para outra conta primeiro.",
-    "acc_err_delete_failed": "Falha ao eliminar a conta."
+    "acc_err_delete_failed": "Falha ao eliminar a conta.",
+    "acc_btn_pair": "Ligar",
+    "acc_pair_now_prompt": "Conta \"{name}\" criada. Pretende ligá-la agora (emparelhar)?",
+    "acc_err_pair_current": "Esta é a conta atual — já está em utilização.",
+    "acc_err_pair_not_pending": "Só é possível ligar contas a aguardar emparelhamento."
 }

@@ -647,5 +647,9 @@
     "acc_err_archive_current": "No se puede archivar la cuenta en uso. Cambie a otra cuenta primero.",
     "acc_err_archive_not_paired": "Solo se pueden archivar cuentas conectadas.",
     "acc_err_delete_current": "No se puede eliminar la cuenta en uso. Cambie a otra cuenta primero.",
-    "acc_err_delete_failed": "No se pudo eliminar la cuenta."
+    "acc_err_delete_failed": "No se pudo eliminar la cuenta.",
+    "acc_btn_pair": "Conectar",
+    "acc_pair_now_prompt": "Cuenta \"{name}\" creada. ¿Conectarla ahora (emparejar)?",
+    "acc_err_pair_current": "Esta es la cuenta actual — ya está en uso.",
+    "acc_err_pair_not_pending": "Solo se pueden conectar cuentas en espera de emparejamiento."
 }

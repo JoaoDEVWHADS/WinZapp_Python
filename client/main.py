@@ -1183,7 +1183,7 @@ class MainWindow(wx.Frame):
             elif action.get("open_manager"):
                 account_ui.AccountManagerDialog(
                     self, self.registry, self.account_id, self.i18n,
-                    self.global_dir).show()
+                    self.global_dir, on_pair=self._switch_to_account).show()
                 self._rebuild_accounts_menu()
         except Exception:
             logging.exception("[accounts] menu action failed")
