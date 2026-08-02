@@ -9724,6 +9724,38 @@ class MainWindow(wx.Frame):
             logging.error("[send_reaction] exception: %s", exc)
             return False
 
+    def pin_message(self, remote_jid: str, msg_key: dict, pin: bool = True) -> bool:
+        """Pin/unpin a single message in a chat via the WPPConnect Server API.
+
+        This is WhatsApp's own message-pin feature (visible to every other
+        participant) — a separate custom `/pin-message` endpoint added in
+        api_patches/, since @wppconnect-team/wppconnect only wraps pinning a
+        whole *chat* (see pin_chat/unpin_chat below), not an individual
+        message within it.
+        """
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/pin-message"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messageId": self._serialize_msg_id(remote_jid, msg_key),
+            "pin": pin,
+        }
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            if response.status_code not in (200, 201):
+                logging.error("[pin_message] HTTP %s: %s",
+                              response.status_code, response.text[:500])
+                return False
+            return True
+        except Exception as exc:
+            logging.error("[pin_message] exception: %s", exc)
+            return False
+
     def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None, remote_jid: str = None):
         """
         Called on the main thread after a queued message is successfully sent.

@@ -2506,6 +2506,20 @@ class ConversationsPanel(wx.Panel):
             star_item,
         )
 
+        # Pin / Unpin in chat (Ctrl+Shift+P) — the real WhatsApp message-pin
+        # feature, visible to every participant, unlike the local-only star
+        # above. Shares its accelerator with the recording pause/resume
+        # shortcut (_on_ctrl_shift_p): only one is ever applicable at a time
+        # (pause/resume only does anything while actively recording audio).
+        is_pinned = bool(msg.get("pinInChat"))
+        pin_msg_label = i18n.t("unpin_message") if is_pinned else i18n.t("pin_message")
+        pin_msg_item = menu.Append(wx.ID_ANY, f"{pin_msg_label}\tCtrl+Shift+P")
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, m=msg: self._on_menu_pin_message(m),
+            pin_msg_item,
+        )
+
         # Save As (media only, only when the file is already cached locally)
         _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
         clean_msg_id = msg_id
@@ -5244,6 +5258,8 @@ class ConversationsPanel(wx.Panel):
             pieces = [f"{header}: {body}"]
         if msg.get("starred"):
             pieces[0] = f"★ {pieces[0]}"
+        if msg.get("pinInChat"):
+            pieces[0] = f"📌 {pieces[0]}"
         if time_str:
             pieces.append(f", {time_str}")
         if status:
@@ -5294,9 +5310,23 @@ class ConversationsPanel(wx.Panel):
             self._show_conversation_data()
 
     def _on_ctrl_shift_p(self, event):
-        """Pause/resume recording when active (no-op otherwise)."""
+        """Pause/resume recording when active; otherwise pin/unpin the
+        currently focused message. Both share this one accelerator — they
+        are mutually exclusive contexts (pause/resume only ever does
+        anything while actively recording audio), so there is no real
+        conflict in practice."""
         if self._is_recording:
             self._toggle_pause_recording(event)
+            return
+        index = self.messages_list.GetFirstSelected()
+        if index < 0:
+            index = self.messages_list.GetFocusedItem()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._on_menu_pin_message(msg)
 
     # ── Conversation / group data ────────────────────────────────────────────
 
@@ -6009,6 +6039,43 @@ class ConversationsPanel(wx.Panel):
         if jid:
             self.main_window._schedule_save()
             self.populate_messages(preserve_focus=True)
+
+    def _on_menu_pin_message(self, msg: dict):
+        """Pin/unpin a message via WhatsApp's own message-pin feature.
+
+        Unlike _on_menu_star (a local-only flag), this is visible to every
+        other participant in the chat, so it goes through the WPPConnect API
+        — applied optimistically like conversation pin/unpin
+        (_sync_pin_to_server), and rolled back if the server rejects it.
+        """
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            return
+        pin = not bool(msg.get("pinInChat"))
+        msg["pinInChat"] = pin
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+
+        msg_key = dict(msg.get("key", {}))
+
+        def _do(m=msg, k=msg_key, j=jid, p=pin):
+            ok = self.main_window.pin_message(j, k, p)
+            if not ok:
+                wx.CallAfter(self._on_pin_message_failed, m, p)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_pin_message_failed(self, msg: dict, attempted_pin: bool):
+        """Roll back an optimistic pin/unpin the server rejected (main thread)."""
+        msg["pinInChat"] = not attempted_pin
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        i18n = self.main_window.i18n
+        wx.MessageBox(
+            i18n.t("pin_message_failed" if attempted_pin else "unpin_message_failed"),
+            i18n.t("pin_message"),
+            wx.OK | wx.ICON_WARNING,
+        )
 
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
@@ -7532,6 +7599,7 @@ class ConversationsPanel(wx.Panel):
                 m.get("messageType", ""),
                 m.get("status", ""),
                 bool(m.get("starred")),
+                bool(m.get("pinInChat")),
                 bool(m.get("_edited")),
                 bool(m.get("_local_pending")),
                 self._extract_timestamp(m) or 0,

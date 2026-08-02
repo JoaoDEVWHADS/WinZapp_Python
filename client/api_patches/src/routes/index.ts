@@ -127,6 +127,12 @@ routes.post(
   MessageController.editMessage
 );
 routes.post(
+  '/api/:session/pin-message',
+  verifyToken,
+  statusConnection,
+  MessageController.pinMessage
+);
+routes.post(
   '/api/:session/send-image',
   upload.single('file'),
   verifyToken,

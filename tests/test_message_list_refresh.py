@@ -122,6 +122,13 @@ class TestRefreshMessagesIfChanged:
         s.refresh_messages_if_changed()
         assert len(s.populate_calls) == 2
 
+    def test_pinning_rebuilds(self):
+        s = _Stub([_msg("a")])
+        s.refresh_messages_if_changed()
+        s._records[0]["pinInChat"] = True
+        s.refresh_messages_if_changed()
+        assert len(s.populate_calls) == 2
+
     def test_the_edited_marker_rebuilds(self):
         s = _Stub([_msg("a")])
         s.refresh_messages_if_changed()

@@ -1146,3 +1146,90 @@ export async function sendPixMessage(req: Request, res: Response) {
     returnError(req, res, error);
   }
 }
+
+// WinZapp patch: pin/unpin an individual message in a chat.
+//
+// @wppconnect-team/wppconnect's controls.layer.ts never wraps this — it only
+// exposes WPP.chat.pin()/pinChat() for pinning a whole CHAT (see
+// deviceController.pinChat), not WPP.chat.pinMsg()/unpinMsg() for pinning
+// one MESSAGE within it. Both exist in the underlying wa-js bundle
+// (window.WPP.chat.pinMsg(msgId, pin)), so this calls it directly through
+// page.evaluate() the same way the patched subscribePresence() does in
+// sessionController.ts, rather than waiting on an upstream wrapper.
+export async function pinMessage(req: Request, res: Response) {
+  /**
+     #swagger.tags = ["Messages"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.requestBody = {
+      required: true,
+      "@content": {
+        "application/json": {
+          schema: {
+            type: "object",
+            properties: {
+              messageId: { type: "string" },
+              pin: { type: "boolean" },
+            }
+          },
+          examples: {
+            "Default": {
+              value: {
+                messageId: "true_5521999999999@c.us_3EB0...",
+                pin: true,
+              }
+            },
+          }
+        }
+      }
+     }
+   */
+  const { messageId, pin = true } = req.body;
+  const page = (req.client as any)?.page;
+
+  if (!page || page.isClosed()) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'The WhatsApp session is not active.',
+    });
+  }
+
+  try {
+    const result = await page.evaluate(
+      async ({ messageId, pin }: { messageId: string; pin: boolean }) => {
+        try {
+          const wpp = (window as any).WPP;
+          const r = await wpp.chat.pinMsg(messageId, pin);
+          return { ok: true, pinned: r?.pinned ?? pin };
+        } catch (err: any) {
+          return { ok: false, error: err?.message || String(err) };
+        }
+      },
+      { messageId, pin }
+    );
+
+    if (!result || !result.ok) {
+      return res.status(500).json({
+        status: 'error',
+        message: (result && result.error) || 'Error on pin message',
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      response: { messageId, pinned: result.pinned },
+    });
+  } catch (error) {
+    req.logger.error(error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on pin message',
+      error,
+    });
+  }
+}
