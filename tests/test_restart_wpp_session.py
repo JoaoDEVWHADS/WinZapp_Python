@@ -23,7 +23,9 @@ from main import MainWindow
 
 class _Stub:
     _restart_wpp_session = MainWindow._restart_wpp_session
+    _auto_restart_grace_active = MainWindow._auto_restart_grace_active
     _WPP_SESSION_RESTART_COOLDOWN = MainWindow._WPP_SESSION_RESTART_COOLDOWN
+    _AUTO_RESTART_LOGOUT_GRACE_SECONDS = MainWindow._AUTO_RESTART_LOGOUT_GRACE_SECONDS
 
     def __init__(self):
         self.wpp_server = "http://127.0.0.1"
@@ -109,3 +111,46 @@ class TestRestartWppSession:
         s._restart_wpp_session()
 
         assert calls == []
+
+
+class TestAutoRestartGraceWindow:
+    """The mechanism that keeps _restart_wpp_session() safe to call
+    automatically: check_wa_connection_http()'s "confirmed logout" path
+    (which wipes the whole local database via _on_disconnect()) must never
+    fire as a side effect of our own restart discovering the stored token
+    had already gone bad — see _restart_wpp_session()'s docstring for the
+    real incident this prevents.
+    """
+
+    def test_no_restart_ever_happened_grace_is_not_active(self, monkeypatch):
+        s = _Stub()
+        assert s._auto_restart_grace_active() is False
+
+    def test_grace_is_active_right_after_a_restart_attempt(self, monkeypatch):
+        monkeypatch.setattr("main.requests.post", lambda *a, **kw: None)
+        s = _Stub()
+        s._restart_wpp_session()
+        assert s._auto_restart_grace_active() is True
+
+    def test_grace_expires_after_the_configured_window(self, monkeypatch):
+        monkeypatch.setattr("main.requests.post", lambda *a, **kw: None)
+        s = _Stub()
+        s._restart_wpp_session()
+        s._auto_session_restart_ts = time.time() - (s._AUTO_RESTART_LOGOUT_GRACE_SECONDS + 1)
+        assert s._auto_restart_grace_active() is False
+
+    def test_grace_is_set_even_when_the_cooldown_blocks_the_actual_restart(self, monkeypatch):
+        """The timestamp is set unconditionally, synchronously, before the
+        cooldown/re-entrancy checks — a health check landing on another
+        thread right after "decided to restart" must see the window active
+        immediately, not after whatever delay the restart's own HTTP calls
+        take."""
+        calls = []
+        monkeypatch.setattr("main.requests.post", lambda url, **kw: calls.append(url))
+        s = _Stub()
+        s._restarting_wpp_session = True  # forces the early-return path
+
+        s._restart_wpp_session()
+
+        assert calls == []
+        assert s._auto_restart_grace_active() is True

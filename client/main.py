@@ -4984,33 +4984,55 @@ class MainWindow(wx.Frame):
     # broken state can't retrigger this every health-check cycle forever.
     _WPP_SESSION_RESTART_COOLDOWN = 120
 
+    # How long after an automatic _restart_wpp_session() the "confirmed
+    # logout" path (below, in check_wa_connection_http) must stay suppressed.
+    # See _restart_wpp_session()'s docstring for why this exists at all.
+    _AUTO_RESTART_LOGOUT_GRACE_SECONDS = 600
+
+    def _auto_restart_grace_active(self) -> bool:
+        """True while an automatic session restart is still settling — see
+        _AUTO_RESTART_LOGOUT_GRACE_SECONDS."""
+        ts = getattr(self, "_auto_session_restart_ts", 0)
+        return bool(ts) and (time.time() - ts) < self._AUTO_RESTART_LOGOUT_GRACE_SECONDS
+
     def _restart_wpp_session(self):
         """Recreate the WPPConnect Chrome session in place (close-session +
         start-session), without touching the Node process or WinZapp itself.
 
-        NEVER call this automatically/unattended — see check_wa_connection_http()'s
-        dead-browser-strikes branch, which deliberately only logs instead of
-        calling this. Reported live from the one time this WAS wired up to
-        fire automatically: the stored token had already gone bad for an
-        unrelated reason, so start-session's create() came back needing a
-        fresh QR scan instead of silently restoring the session — with
-        nobody there to scan it. The pre-existing (and, on its own, entirely
+        Used automatically when the Puppeteer page has structurally died
+        (detached frame after a suspend/resume cycle — see
+        _nudge_whatsapp_socket_stream()); a dead page can never satisfy
+        isConnected() again on its own, no matter how many times the health
+        check retries it. start-session on a session with a stored, valid
+        token silently restores the existing WhatsApp session (no new QR
+        code) — exactly what already happens on every normal app restart,
+        just without restarting the whole app or Node process.
+
+        Reported live the first time this was wired up unguarded: the
+        stored token had already gone bad for an unrelated reason (possibly
+        the very same crash that killed the page), so start-session's
+        create() came back needing a fresh QR scan instead — with nobody
+        there to scan it. The pre-existing (and, on its own, entirely
         correct) "confirmed logout" detection further down
         check_wa_connection_http() then saw that QRCODE state hold for its
         normal confirm-strikes threshold and treated it exactly like a real
         phone-side unlink, calling _on_disconnect() — which wipes the
-        *entire* local database via clear_local_data(). This function can
-        only ever safely run with a human present to notice/handle a fresh
-        QR code appearing, i.e. triggered explicitly by the user, never as
-        an automatic reaction to a health-check failure.
-
-        When it IS safe to use (a stored, valid token — the normal case
-        after a mere dead browser page, as opposed to an already-invalid
-        token): start-session silently restores the existing WhatsApp
-        session with no new QR code, exactly what already happens on every
-        normal app restart, just without restarting the whole app or Node
-        process.
+        *entire* local database via clear_local_data(). _auto_session_restart_ts
+        (set below, checked via _auto_restart_grace_active()) is what now
+        keeps that destructive path from firing as a side effect of this
+        one: for _AUTO_RESTART_LOGOUT_GRACE_SECONDS after a restart, a
+        QRCODE/notLogged reading is treated as "still settling", not "phone
+        confirmed unlinked". A genuine phone-side unlink happening to
+        coincide with that window is only delayed, not missed — trading a
+        possible few extra minutes before a real unlink is detected for
+        never again wiping local data over an artifact of our own restart.
         """
+        # Sets the grace window immediately, synchronously, before the
+        # cooldown/re-entrancy checks below can bail out early — a health
+        # check landing on another thread between "decided to restart" and
+        # this function's body actually running must not see the old,
+        # expired window and treat a QRCODE reading as confirmable.
+        self._auto_session_restart_ts = time.time()
         if getattr(self, "_restarting_wpp_session", False):
             return
         now = time.time()
@@ -5178,32 +5200,17 @@ class MainWindow(wx.Frame):
                         else:
                             # The nudge request itself failed — not just "no
                             # trigger fired", but the page/frame Puppeteer
-                            # holds is gone. _restart_wpp_session() (below)
-                            # exists for exactly this case but must NEVER be
-                            # triggered automatically/unattended — see its
-                            # own docstring: reported live, it silently put
-                            # the session into a fresh-QR pairing state (the
-                            # stored token had gone bad for an unrelated
-                            # reason) with nobody there to scan it, and the
-                            # pre-existing "confirmed logout" detection
-                            # further down this same function then treated
-                            # that as a real phone-side unlink after its
-                            # normal confirm-strikes threshold — wiping the
-                            # entire local database via _on_disconnect().
-                            # Surfacing this to the user (so a manual restart
-                            # — already safe, see forceKillSession's own fix
-                            # — can recover it) is the only currently-safe
-                            # reaction; only log it here.
+                            # holds is gone. Escalate to a full session
+                            # restart after enough consecutive failures — see
+                            # _restart_wpp_session() and
+                            # _auto_restart_grace_active() (checked in the
+                            # confirmed-logout branch further down this same
+                            # function) for why this is safe to do
+                            # automatically now.
                             self._dead_browser_strikes = getattr(self, "_dead_browser_strikes", 0) + 1
                             if self._dead_browser_strikes >= self._DEAD_BROWSER_RESTART_STRIKES:
                                 self._dead_browser_strikes = 0
-                                logging.warning(
-                                    "[check_wa_connection_http] Browser page appears dead "
-                                    "(detached frame) and the socket-stream nudge cannot "
-                                    "recover it. Not auto-restarting the WPPConnect session "
-                                    "— see _restart_wpp_session()'s docstring. A manual "
-                                    "restart of WinZapp is currently the safe way to recover."
-                                )
+                                threading.Thread(target=self._restart_wpp_session, daemon=True).start()
                         self._set_wa_connected(False, "status-session CONNECTED but isConnected() false")
                         return
                     self._dead_browser_strikes = 0
@@ -5281,6 +5288,24 @@ class MainWindow(wx.Frame):
                             # Destructive path: _on_disconnect() wipes the whole
                             # local database, so an unlinked reading has to be
                             # confirmed first — see _logout_confirmed().
+                            #
+                            # An automatic _restart_wpp_session() (dead-browser
+                            # recovery) legitimately re-shows a fresh QR itself
+                            # whenever the stored token turns out to already be
+                            # bad — that is NOT a phone-side unlink, and must
+                            # never be confirmed as one. See
+                            # _auto_restart_grace_active()/_restart_wpp_session()'s
+                            # docstring for the incident this guards against
+                            # (a real one: it wiped a user's local database).
+                            if self._auto_restart_grace_active():
+                                logging.info(
+                                    "[check_wa_connection_http] %s seen while an "
+                                    "automatic session restart is still settling — "
+                                    "not confirming a logout yet.", status,
+                                )
+                                self._logout_strikes = 0
+                                self._logout_first_seen = None
+                                return
                             if not self._logout_confirmed(status):
                                 return
                             wx.CallAfter(_logout_with_warning)
