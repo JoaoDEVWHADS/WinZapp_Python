@@ -13,7 +13,7 @@
     "connecting": "A conectar...",
     "qrcode_updated": "O código de emparelhamento foi atualizado.",
     "qrcode_image_updated": "O código QR foi atualizado.",
-    "qrcode_instructions": "Aponte o telemóvel para o código QR exibido no ecrã.",
+    "qrcode_instructions": "Aponte o telemóvel para o código QR exibido logo abaixo desta mensagem, centrado no ecrã.",
     "connect_with_phone": "Ligar através do número de &telemóvel",
     "connect_with_qrcode": "Ligar-se através do código &QR",
     "cancel_pairing": "&Cancelar emparelhamento",

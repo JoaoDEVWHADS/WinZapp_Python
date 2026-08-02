@@ -13,7 +13,7 @@
     "connecting": "Connecting...",
     "qrcode_updated": "The pairing code has been updated.",
     "qrcode_image_updated": "The QR code has been updated.",
-    "qrcode_instructions": "Point your phone at the QR code displayed on screen.",
+    "qrcode_instructions": "Point your phone at the QR code displayed just below this message, centered on the screen.",
     "connect_with_phone": "Connect with phone &number",
     "connect_with_qrcode": "Connect with &QR code",
     "cancel_pairing": "&Cancel pairing",
