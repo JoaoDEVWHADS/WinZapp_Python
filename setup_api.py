@@ -296,9 +296,9 @@ def main():
         # Run npm install
         print("[INFO] Running npm install...")
         if npm_bin.endswith("npm-cli.js"):
-            _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+            _run([node_bin, npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR, check=False)
         else:
-            _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR)
+            _run([npm_bin, "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=CLIENT_API_DIR, check=False)
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
