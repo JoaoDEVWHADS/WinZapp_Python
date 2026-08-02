@@ -4935,6 +4935,31 @@ class MainWindow(wx.Frame):
             # something — do not call that an outage.
             return True
 
+    def _nudge_whatsapp_socket_stream(self):
+        """Ask WPPConnect to fire WPP.whatsapp.Cmd.openSocketStream() inside
+        the page — the same internal trigger a real, focused browser tab
+        fires on its own via visibility/focus/online DOM events after the OS
+        resumes from sleep.
+
+        This session's Chrome runs headless and is never focused, so nothing
+        ever fires that trigger by itself — reported live as: suspend the
+        machine, resume it, and the app is stuck offline (isConnected() never
+        comes back true again) until the whole program is restarted, even
+        though WPPConnect's own cached session status keeps saying CONNECTED
+        the entire time. Best-effort only: failures are logged, never raised,
+        since this is called from the connection health-check path and must
+        not itself become a new way to get stuck.
+        """
+        try:
+            url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/reconnect-socket-stream"
+            requests.post(
+                url,
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=10,
+            )
+        except Exception as exc:
+            logging.warning("[_nudge_whatsapp_socket_stream] request failed: %s", exc)
+
     def check_whatsapp_reachable(self) -> bool:
         """Decide whether WhatsApp traffic can actually flow right now.
 
@@ -5061,6 +5086,13 @@ class MainWindow(wx.Frame):
                     # otherwise the app plays the "connected" sound, starts a
                     # sync and lets the send queue fire with no connectivity.
                     if not self.check_whatsapp_reachable():
+                        # See _nudge_whatsapp_socket_stream(): a headless,
+                        # never-focused page has no natural trigger left to
+                        # reopen WhatsApp Web's own socket after a
+                        # suspend/resume cycle — without this, this branch
+                        # (and therefore offline mode) can persist forever,
+                        # since nothing else ever pokes the page to retry.
+                        self._nudge_whatsapp_socket_stream()
                         self._set_wa_connected(False, "status-session CONNECTED but isConnected() false")
                         return
                     self._set_wa_connected(True, "status-session CONNECTED")

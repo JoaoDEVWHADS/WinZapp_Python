@@ -56,6 +56,11 @@ routes.get(
   verifyToken,
   SessionController.checkConnectionSession
 );
+routes.post(
+  '/api/:session/reconnect-socket-stream',
+  verifyToken,
+  SessionController.reconnectSocketStream
+);
 routes.get(
   '/api/:session/get-media-by-message/:messageId',
   verifyToken,
