@@ -266,8 +266,10 @@ const finalConfig = {
     ...customConfig.webhook
   },
   log: {
-    ...configDefault.log,
-    ...customConfig.log
+    level: 'silly',
+    logger: ['console', 'file'],
+    ...(configDefault.log || {}),
+    ...(customConfig.log || {})
   },
   createOptions: {
     ...(configDefault.createOptions || {}),
