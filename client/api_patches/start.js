@@ -57,6 +57,25 @@ console.log(`[WinZapp Debug] Platform: ${process.platform}, Node version: ${proc
 if (!hasChrome) {
   console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
+    // Limpa pastas corrompidas de downloads anteriores incompletos do Chrome
+    const cleanCorruptedCache = (baseDir) => {
+      if (!fs.existsSync(baseDir)) return;
+      try {
+        const subdirs = fs.readdirSync(baseDir, { withFileTypes: true });
+        for (const sub of subdirs) {
+          const fullPath = path.join(baseDir, sub.name);
+          if (sub.isDirectory() && !findChromeExecutable(fullPath, 0)) {
+            console.log(`[chrome-install] Removendo diretório de Chrome corrompido/incompleto: ${fullPath}`);
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          }
+        }
+      } catch (e) {}
+    };
+
+    cleanCorruptedCache(puppeteerCacheDir);
+    cleanCorruptedCache(directChromeDir);
+    cleanCorruptedCache(directHeadlessShellDir);
+
     const { execSync } = require('child_process');
     const nodeDir = path.dirname(process.execPath);
     const env = { 
@@ -68,12 +87,23 @@ if (!hasChrome) {
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    execSync('npx --yes @puppeteer/browsers install chrome@stable', {
-      cwd: __dirname,
-      stdio: 'inherit',
-      env: env
-    });
-    console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
+    
+    try {
+      execSync('npx --yes @puppeteer/browsers install chrome@stable', {
+        cwd: __dirname,
+        stdio: 'inherit',
+        env: env
+      });
+      console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
+    } catch (primaryErr) {
+      console.warn('[chrome-install] Falha ao instalar chrome@stable — tentando fallback com chrome-headless-shell...');
+      execSync('npx --yes @puppeteer/browsers install chrome-headless-shell', {
+        cwd: __dirname,
+        stdio: 'inherit',
+        env: env
+      });
+      console.log('[chrome-install] Fallback para chrome-headless-shell concluído com sucesso!');
+    }
   } catch (err) {
     console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err && err.message ? err.message : err);
   }
