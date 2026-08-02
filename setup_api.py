@@ -287,6 +287,7 @@ def main():
     os.environ["NODE_ENV"] = "development"
     os.environ["NODE_OPTIONS"] = "--max-old-space-size=8192"
     os.environ["UV_THREADPOOL_SIZE"] = "64"
+    os.environ["PUPPETEER_CACHE_DIR"] = os.path.abspath(os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", ".local-chromium"))
     node_cmd = shutil.which("node") or ("node.exe" if is_windows else "node")
     try:
         if is_windows:
