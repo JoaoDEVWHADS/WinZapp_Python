@@ -122,6 +122,26 @@ function initServer(serverOptions) {
         next();
     });
 
+    // Tenta carregar as rotas reais do WPPConnect compiladas pelo Babel
+    let routesLoaded = false;
+    const routePaths = ['./routes/index', './routes', '../src/routes/index', '../src/routes'];
+    for (const rPath of routePaths) {
+        try {
+            const routesModule = require(rPath);
+            const routesObj = routesModule?.default || routesModule;
+            if (routesObj && (typeof routesObj === 'function' || typeof routesObj.use === 'function')) {
+                app.use(routesObj);
+                routesLoaded = true;
+                exports.logger.info(`[initServer] Successfully mounted API routes from ${rPath}`);
+                break;
+            }
+        } catch (e) {}
+    }
+
+    if (!routesLoaded) {
+        exports.logger.warn(`[initServer] Could not find compiled routes module in dist/routes. Run: python setup_api.py`);
+    }
+
     app.get('/status', (req, res) => {
         res.json({ status: 'ONLINE', version: version });
     });
