@@ -35,10 +35,18 @@ function findChromeExecutable(dir, depth) {
 
 const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
 const nodeModulesCacheDir = path.join(__dirname, 'node_modules', '.cache', 'puppeteer');
+const directHeadlessShellDir = path.join(__dirname, 'chrome-headless-shell');
+const directChromeDir = path.join(__dirname, 'chrome');
 
 let chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
 if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
   chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
+}
+if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
+  chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
+}
+if (!chromeExecutable && fs.existsSync(directChromeDir)) {
+  chromeExecutable = findChromeExecutable(directChromeDir, 0);
 }
 if (!chromeExecutable) {
   chromeExecutable = findChromeExecutable(__dirname, 0);
@@ -221,13 +229,21 @@ function requireWaVersion() {
 
 function resolveWhatsappVersion() {
   try {
-    const waVersion = requireWaVersion();
+    const waVersionRaw = requireWaVersion();
+    if (!waVersionRaw) return undefined;
+    const waVersion = (typeof waVersionRaw.getAvailableVersions === 'function')
+      ? waVersionRaw
+      : (waVersionRaw.default && typeof waVersionRaw.default.getAvailableVersions === 'function' ? waVersionRaw.default : null);
+    if (!waVersion) return undefined;
+
     const available = waVersion.getAvailableVersions();
     if (!Array.isArray(available) || available.length === 0) return undefined;
     const newest = available[available.length - 1];
     // getPageContent throws when the version cannot be served, so only pin what
     // is known to work: no pin at all beats silently landing in the fallback.
-    waVersion.getPageContent(newest);
+    if (typeof waVersion.getPageContent === 'function') {
+      waVersion.getPageContent(newest);
+    }
     console.log(`[WinZapp] Pinning WhatsApp Web to ${newest} (of ${available.length} available)`);
     return newest;
   } catch (e) {
