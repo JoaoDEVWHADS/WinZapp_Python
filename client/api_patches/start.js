@@ -238,12 +238,11 @@ function resolveWhatsappVersion() {
 
     const available = waVersion.getAvailableVersions();
     if (!Array.isArray(available) || available.length === 0) return undefined;
-    const newest = available[available.length - 1];
-    // getPageContent throws when the version cannot be served, so only pin what
-    // is known to work: no pin at all beats silently landing in the fallback.
-    if (typeof waVersion.getPageContent === 'function') {
-      waVersion.getPageContent(newest);
-    }
+    
+    // Prefer stable releases over alpha builds if available
+    const stables = available.filter(v => typeof v === 'string' && !v.includes('-alpha'));
+    const newest = stables.length > 0 ? stables[stables.length - 1] : available[available.length - 1];
+
     console.log(`[WinZapp] Pinning WhatsApp Web to ${newest} (of ${available.length} available)`);
     return newest;
   } catch (e) {
