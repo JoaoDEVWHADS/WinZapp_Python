@@ -296,13 +296,12 @@ def main():
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
-            import shutil as _shutil
             custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
             decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
             if os.path.isfile(custom_decrypt):
                 print("[INFO] Copying custom decrypt.js patch to node_modules...", flush=True)
                 os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
-                _shutil.copy2(custom_decrypt, decrypt_js_path)
+                shutil.copy2(custom_decrypt, decrypt_js_path)
                 print("[OK] Copied decrypt.js patch successfully.", flush=True)
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}", flush=True)
@@ -319,13 +318,12 @@ def main():
             print("[WARNING] dist/server.js missing after build. Restoring pre-built dist from api_patches...", flush=True)
             patches_dist = os.path.join(API_PATCHES_DIR, "dist")
             if os.path.isdir(patches_dist):
-                import shutil as _shutil
                 for root, dirs, files in os.walk(patches_dist):
                     rel_root = os.path.relpath(root, patches_dist)
                     target_root = os.path.join(dist_dir, rel_root) if rel_root != "." else dist_dir
                     os.makedirs(target_root, exist_ok=True)
                     for f in files:
-                        _shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
+                        shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
                 print("[OK] Restored pre-built dist from api_patches successfully.", flush=True)
 
         # Re-apply any patches inside dist/ (such as dist/controller/sessionController.js) after Babel build
@@ -360,7 +358,6 @@ def main():
     if not is_windows:
         print("\n[INFO] Detecting Linux OS and installing system dependencies for Chromium...")
         # Check if apt-get is available
-        import shutil
         if shutil.which("apt-get"):
             # Check if running as root or has sudo
             try:
