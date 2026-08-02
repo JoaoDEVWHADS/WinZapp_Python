@@ -15,6 +15,7 @@ function findChromeExecutable(dir, depth) {
   } catch (e) {
     return null;
   }
+  // First pass: search strictly for full Chrome / Chromium executable
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -23,8 +24,6 @@ function findChromeExecutable(dir, depth) {
     } else if (
       entry.name === 'chrome.exe' ||
       entry.name === 'chrome' ||
-      entry.name === 'chrome-headless-shell.exe' ||
-      entry.name === 'chrome-headless-shell' ||
       entry.name === 'Chromium'
     ) {
       return full;
@@ -35,18 +34,18 @@ function findChromeExecutable(dir, depth) {
 
 const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
 const nodeModulesCacheDir = path.join(__dirname, 'node_modules', '.cache', 'puppeteer');
-const directHeadlessShellDir = path.join(__dirname, 'chrome-headless-shell');
 const directChromeDir = path.join(__dirname, 'chrome');
+const directHeadlessShellDir = path.join(__dirname, 'chrome-headless-shell');
 
 let chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
 if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
   chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
 }
-if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
-  chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
-}
 if (!chromeExecutable && fs.existsSync(directChromeDir)) {
   chromeExecutable = findChromeExecutable(directChromeDir, 0);
+}
+if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
+  chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
 }
 if (!chromeExecutable) {
   chromeExecutable = findChromeExecutable(__dirname, 0);
@@ -69,7 +68,7 @@ if (!hasChrome) {
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    execSync('npx --yes @puppeteer/browsers install chrome-headless-shell', {
+    execSync('npx --yes @puppeteer/browsers install chrome@stable', {
       cwd: __dirname,
       stdio: 'inherit',
       env: env
