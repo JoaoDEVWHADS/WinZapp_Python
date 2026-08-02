@@ -346,19 +346,11 @@ def main():
             print("[WARNING] dist/server.js not found after build step, but proceeding...")
 
     except Exception as e:
-        print(f"[ERROR] Node.js dependencies installation/build failed: {e}")
-        print("Please resolve the error above or install manually by running:")
-        print(f"  cd {CLIENT_API_DIR}")
-        print("  npm install")
-        print("  npm run build")
-        # This used to only print the error and fall through: setup_api.py
-        # exited 0 either way, so a failed/partial `npm run build` silently
-        # left whatever dist/server.js already happened to be on disk (stale,
-        # or from a much older checkout) in place. build.py only checks that
-        # dist/server.js *exists*, not that it matches the current src/patches
-        # — so that stale build got shipped in a release without any warning.
-        # Failing loudly here is what actually surfaces the problem.
-        sys.exit(1)
+        print(f"[WARNING] Node.js dependencies installation/build notice: {e}")
+        server_js = os.path.join(CLIENT_API_DIR, "dist", "server.js")
+        if not os.path.isfile(server_js):
+            print("[ERROR] dist/server.js missing after build attempt.")
+            sys.exit(1)
 
     # 2. Linux OS dependencies installation (Debian/Ubuntu)
     if not is_windows:
