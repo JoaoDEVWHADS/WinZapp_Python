@@ -112,7 +112,7 @@ def fetch_latest_wpp_tag(timeout: float = 15) -> str:
 
 
 # Root-level files whose pre-included content always takes precedence.
-_PRESERVE = {"start.js", ".env", "config.json"}
+_PRESERVE = {"start.js", ".env", "config.json", "package.json", "tsconfig.json", "babel.config.js"}
 
 # Runtime state dirs/files that should survive a re-download.
 _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}

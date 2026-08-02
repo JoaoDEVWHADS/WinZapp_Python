@@ -15,6 +15,7 @@ Usage:
 """
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -34,7 +35,7 @@ WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 # reported live as every patch silently regressing to whatever old snapshot
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
-CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json", "tsconfig.json", "babel.config.js"]
 CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",
@@ -279,6 +280,13 @@ def main():
             win_git = os.path.join(ROOT_DIR, "client", "git", "cmd")
             win_node_dir = os.path.join(ROOT_DIR, "client", "node")
             os.environ["PATH"] = f"{win_git};{win_node_dir};" + os.environ.get("PATH", "")
+
+        # Always copy custom patch files to client/api before building
+        for rel_path, content in custom_contents.items():
+            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(content)
 
         # Run npm install
         print("[INFO] Running npm install...")
