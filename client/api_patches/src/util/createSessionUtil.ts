@@ -156,6 +156,8 @@ export default class CreateSessionUtil {
         );
       }
 
+      req.logger.info(`[${session}] Starting createSessionUtil. createOptions: ${JSON.stringify(req.serverOptions.createOptions)}`);
+
       const wppClient = await create(
         Object.assign(
           {},
@@ -186,6 +188,7 @@ export default class CreateSessionUtil {
                   'WPPConnect-Server'
                 : undefined,
             catchLinkCode: (code: string) => {
+              req.logger.info(`[${session}] catchLinkCode triggered with code: ${code}`);
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
                 try { wppClient.close(); } catch (e) {}
@@ -201,6 +204,7 @@ export default class CreateSessionUtil {
               attempt: any,
               urlCode: string
             ) => {
+              req.logger.info(`[${session}] catchQR triggered (attempt ${attempt}). urlCode: ${urlCode ? urlCode.substring(0, 30) + '...' : 'none'}`);
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
                 try { wppClient.close(); } catch (e) {}
@@ -211,9 +215,10 @@ export default class CreateSessionUtil {
               this.exportQR(req, base64Qr, urlCode, client, res);
             },
             onLoadingScreen: (percent: string, message: string) => {
-              req.logger.info(`[${session}] ${percent}% - ${message}`);
+              req.logger.info(`[${session}] LoadingScreen: ${percent}% - ${message}`);
             },
             statusFind: (statusFind: StatusFind) => {
+              req.logger.info(`[${session}] statusFind event: ${statusFind}`);
               try {
                 if ((client as any).shouldClose) {
                   req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
@@ -239,8 +244,9 @@ export default class CreateSessionUtil {
                   status: statusFind,
                   session: client.session,
                 });
-                req.logger.info(statusFind + '\n\n');
-              } catch (error) {}
+              } catch (error: any) {
+                req.logger.error(`[${session}] Error in statusFind handler: ${error?.message || error}`);
+              }
             },
           }
         )
