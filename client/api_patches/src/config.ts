@@ -47,7 +47,6 @@ export default {
     autoClose: 0,
     headless: true,
     browserArgs: [
-      '--headless=new',
       '--disable-renderer-accessibility',
       '--disable-web-security',
       '--no-sandbox',

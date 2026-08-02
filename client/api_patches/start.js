@@ -172,7 +172,6 @@ if (process.env.AUTHENTICATION_API_KEY) {
 // well over 1GB) — a real, if higher, ceiling instead of an artificial low
 // one that trades a memory-usage improvement for occasional hard crashes.
 const optimizedBrowserArgs = [
-  '--headless=new',
   '--disable-renderer-accessibility',
   '--disable-web-security',
   '--no-sandbox',
