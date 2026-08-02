@@ -8970,12 +8970,19 @@ class MainWindow(wx.Frame):
             logging.warning(f"[_fetch_remote_message_ids] failed for {remote_jid}: {e}")
             return None
 
+    # Consecutive polls a conversation must look fully cleared server-side
+    # (see _reconcile_active_conversation_with_remote) before it's actually
+    # mirrored locally — a single valid-but-empty read is not enough.
+    _REMOTE_CLEAR_CONFIRM_STRIKES = 3
+
     def _reconcile_active_conversation_with_remote(self):
         """Detect a phone-side clear or individual message deletions in
         whichever conversation is currently open, and mirror them locally.
         Called once per periodic-poll cycle (start_periodic_contacts_sync);
         a no-op — no HTTP call at all — whenever no conversation is open.
         """
+        if not hasattr(self, "_remote_clear_strikes"):
+            self._remote_clear_strikes = {}
         cp = getattr(self, "conversations_panel", None)
         if cp is None or cp.conversation is None:
             return
@@ -9029,12 +9036,33 @@ class MainWindow(wx.Frame):
             return
         missing_ids = local_ids - remote_ids
         if not missing_ids:
+            self._remote_clear_strikes.pop(remote_jid, None)
             return
         if missing_ids == local_ids:
             # Every local message is gone server-side — a clear, not a
-            # handful of individually deleted messages.
+            # handful of individually deleted messages. Require this to hold
+            # for _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls before
+            # actually wiping anything: _fetch_remote_message_ids() returning
+            # a valid-but-empty list (as opposed to None, which already bails
+            # out above) is indistinguishable from a real clear, but can also
+            # come from a transient server-side hiccup — reported live as an
+            # actively-open group conversation briefly clearing to "no
+            # messages available" mid-read, only to "recover" once a new
+            # live message forced a repaint. A single bad read must never be
+            # enough to nuke a conversation's entire visible history.
+            strikes = self._remote_clear_strikes.get(remote_jid, 0) + 1
+            self._remote_clear_strikes[remote_jid] = strikes
+            if strikes < self._REMOTE_CLEAR_CONFIRM_STRIKES:
+                logging.info(
+                    "[_reconcile_active_conversation_with_remote] %s looks fully "
+                    "cleared server-side (strike %d/%d) — waiting for confirmation.",
+                    remote_jid, strikes, self._REMOTE_CLEAR_CONFIRM_STRIKES,
+                )
+                return
+            self._remote_clear_strikes.pop(remote_jid, None)
             wx.CallAfter(self._mirror_remote_clear, remote_jid)
         else:
+            self._remote_clear_strikes.pop(remote_jid, None)
             wx.CallAfter(self._mirror_remote_deletions, remote_jid, missing_ids)
 
     def _mirror_remote_clear(self, remote_jid: str):

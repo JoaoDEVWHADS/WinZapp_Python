@@ -1615,45 +1615,52 @@ export async function getMessages(req: Request, res: Response) {
     } else {
       // WinZapp patch: no anchor id — this is the plain "give me up to
       // `count` messages" call sync_chat_messages() makes for every chat on
-      // every sync. getMessages()/WAPI.getMessages() only ever returns what
-      // WhatsApp Web's in-browser Store already has loaded for that chat —
-      // for a chat that hasn't been opened inside this Chrome session
-      // recently, that can be a small number (WhatsApp Web itself only
-      // keeps a short initial window in memory per chat until something
-      // scrolls/asks for more) — e.g. `count=200` silently coming back with
-      // only ~15 messages, regardless of how much real history the account
-      // actually has. WPP.chat.loadEarlierMessages() is what the walkback
-      // branch above already uses to pull more history from the server
-      // into Store on demand; do the same here in a loop until either
-      // `count` is satisfied or a pass brings back no additional messages
-      // (real end of history).
+      // every sync. WAPI.getMessages() only ever returns what WhatsApp Web's
+      // in-browser Store already has loaded for that chat — for a chat that
+      // hasn't been opened inside this Chrome session recently, that can be
+      // a small number (WhatsApp Web itself only keeps a short initial
+      // window in memory per chat until something scrolls/asks for more) —
+      // e.g. `count=200` silently coming back with only ~15 messages,
+      // regardless of how much real history the account actually has.
+      // WAPI.loadEarlierMessages() (the same call the deprecated
+      // client.loadEarlierMessages() wrapper uses) pulls more history from
+      // the server into Store on demand; do the same here in a loop until
+      // either `count` is satisfied or a pass brings back no additional
+      // messages (real end of history).
+      //
+      // Deliberately WAPI throughout, matching exactly what this branch
+      // called before (client.getMessages() → WAPI.getMessages() — see
+      // wppconnect's own whatsapp.js) and what the @lid page.evaluate below
+      // already called directly. An earlier version of this patch used
+      // WPP.chat.getMessages()/WPP.chat.loadEarlierMessages() instead — a
+      // different, modern API with no relation to the legacy WAPI bridge
+      // this server otherwise runs on — which came back with EMPTY results
+      // for at least one real group chat. That empty (not failed, not
+      // null — a valid but empty array) response is indistinguishable from
+      // "every message was deleted on the phone" to WinZapp's own
+      // _fetch_remote_message_ids()/_reconcile_active_conversation_with_remote(),
+      // and was reported live as a group's entire message history vanishing
+      // from the currently open conversation mid-read, "recovering" only
+      // once a new live message forced a repaint.
       response = await req.client.page.evaluate(async ({ chatId, targetCount }) => {
-        const isLid = typeof chatId === 'string' && chatId.endsWith('@lid');
         const fetchBatch = async () =>
-          isLid
-            ? await (window as any).WAPI.getMessages(chatId, { count: targetCount })
-            : await (window as any).WPP.chat.getMessages(chatId, { count: targetCount });
-
-        try {
-          if ((window as any).WPP?.chat?.find) {
-            await (window as any).WPP.chat.find(chatId);
-          }
-        } catch (e) {
-          // Ignore — fetchBatch() below still works against whatever Store
-          // already has for this chat if find() fails for any reason.
-        }
+          (window as any).WAPI.getMessages(chatId, {
+            count: targetCount,
+            direction: 'before',
+            id: null,
+          });
 
         let result = await fetchBatch();
         let attempts = 0;
         const maxAttempts = 10;
         while (
           result && result.length < targetCount &&
-          (window as any).WPP?.chat?.loadEarlierMessages &&
+          (window as any).WAPI?.loadEarlierMessages &&
           attempts < maxAttempts
         ) {
           const before = result.length;
           try {
-            await (window as any).WPP.chat.loadEarlierMessages(chatId);
+            await (window as any).WAPI.loadEarlierMessages(chatId);
           } catch (e) {
             break;
           }

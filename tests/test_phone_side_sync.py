@@ -204,6 +204,7 @@ class _ReconcileStub:
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions
+    _REMOTE_CLEAR_CONFIRM_STRIKES = MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES
 
     def __init__(self, chats, conversations_panel, remote_ids, messages_set_completed=True):
         self.chats = chats
@@ -264,7 +265,30 @@ class TestReconcileActiveConversation:
         assert stub.clear_calls == []
         assert stub.conversations_panel.removed is None
 
-    def test_all_messages_gone_mirrors_a_clear(self):
+    def test_all_messages_gone_mirrors_a_clear_after_confirm_strikes(self):
+        """A "clear" is only mirrored once it holds for
+        _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls — see
+        test_a_single_empty_read_does_not_immediately_clear below for why."""
+        jid = "j@s.whatsapp.net"
+        stub = _ReconcileStub(
+            chats={jid: _chat_with_records("A", "B", "C")},
+            conversations_panel=_FakeConversationsPanel(jid),
+            remote_ids=set(),
+        )
+        for _ in range(MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES):
+            stub._reconcile_active_conversation_with_remote()
+        assert stub.clear_calls == [(jid, False)]  # record_cutoff=False: mirroring, not a new cutoff
+        assert stub.conversations_panel.populate_called is True
+        assert stub._schedule_set_chats_calls == 1
+
+    def test_a_single_empty_read_does_not_immediately_clear(self):
+        """Regression: a valid-but-empty get-messages response (as opposed
+        to None, which already bails out separately) is indistinguishable
+        from a real phone-side clear, but can also come from a transient
+        server-side hiccup — reported live as an actively open group
+        conversation briefly clearing to "no messages available" mid-read,
+        "recovering" only once a new live message forced a repaint. A single
+        bad read must never be enough to wipe a whole conversation."""
         jid = "j@s.whatsapp.net"
         stub = _ReconcileStub(
             chats={jid: _chat_with_records("A", "B", "C")},
@@ -272,9 +296,24 @@ class TestReconcileActiveConversation:
             remote_ids=set(),
         )
         stub._reconcile_active_conversation_with_remote()
-        assert stub.clear_calls == [(jid, False)]  # record_cutoff=False: mirroring, not a new cutoff
-        assert stub.conversations_panel.populate_called is True
-        assert stub._schedule_set_chats_calls == 1
+        assert stub.clear_calls == []
+        assert stub.conversations_panel.removed is None
+        assert stub.conversations_panel.populate_called is False
+
+    def test_a_good_read_in_between_resets_the_clear_strike_count(self):
+        jid = "j@s.whatsapp.net"
+        stub = _ReconcileStub(
+            chats={jid: _chat_with_records("A", "B", "C")},
+            conversations_panel=_FakeConversationsPanel(jid),
+            remote_ids=set(),
+        )
+        stub._reconcile_active_conversation_with_remote()  # strike 1
+        stub._remote_ids = {"A", "B", "C"}
+        stub._reconcile_active_conversation_with_remote()  # nothing missing — resets
+        stub._remote_ids = set()
+        for _ in range(MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES - 1):
+            stub._reconcile_active_conversation_with_remote()
+        assert stub.clear_calls == [], "the reset strike should not have reached the threshold yet"
 
     def test_some_messages_gone_mirrors_individual_deletions(self):
         jid = "j@s.whatsapp.net"
