@@ -327,12 +327,12 @@ def main():
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
             _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
 
-        # Run npm run build
+        # Run npm run build (using build:js to run Babel transpilation)
         print("[INFO] Compiling WPPConnect Server...")
         if npm_bin.endswith("npm-cli.js"):
-            _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+            _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
         else:
-            _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+            _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR)
 
         print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
