@@ -1462,6 +1462,7 @@ class MainWindow(wx.Frame):
             was_offline = not was
             self._wa_offline_strikes = 0
             self._dead_browser_strikes = 0
+            self._auto_repair_dialog_shown = False
             self._auto_offline = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
