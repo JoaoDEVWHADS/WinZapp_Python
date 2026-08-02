@@ -333,7 +333,10 @@ def main():
         if npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
         else:
-            _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
+            if is_windows:
+                _run(["cmd", "/c", "npm", "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
+            else:
+                _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
 
         # Check if dist/server.js was compiled successfully
         server_js = os.path.join(CLIENT_API_DIR, "dist", "server.js")
@@ -341,7 +344,10 @@ def main():
             print("[OK] WPPConnect Server compiled successfully (dist/server.js verified).")
         else:
             print("[WARNING] Running npx babel fallback...")
-            _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+            if is_windows:
+                _run(["cmd", "/c", "npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+            else:
+                _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
             if os.path.isfile(server_js):
                 print("[OK] WPPConnect Server compiled via Babel fallback successfully.")
             else:
