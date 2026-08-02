@@ -284,10 +284,15 @@ const finalConfig = {
   }
 };
 
-// Inicializa o servidor
-if (typeof initServer === 'function') {
-  initServer(finalConfig);
-} else {
-  console.log('[WinZapp] Starting server via dist/server.js module...');
-  require(path.join(distPath, 'server'));
+// Inicializa o servidor Express na porta 6300
+console.log('[WinZapp] Starting WPPConnect Server via dist/index.js...');
+try {
+  const distIndex = require(path.join(distPath, 'index'));
+  if (typeof distIndex.initServer === 'function') {
+    distIndex.initServer(finalConfig);
+  } else {
+    console.error('[WinZapp] initServer function not found in dist/index.js');
+  }
+} catch (e) {
+  console.error('[WinZapp] Error starting server module:', e);
 }
