@@ -60,9 +60,10 @@ class Connect:
         """
         Start/Create a WhatsApp session in the local WPPConnect Server.
         """
+        session_name = token.split(':')[0] if ':' in token else token
         url = (
             f"{self.main_window.wpp_server}"
-            f":{self.main_window.wpp_port}/api/{token}/start-session"
+            f":{self.main_window.wpp_port}/api/{session_name}/start-session"
         )
         payload = {
             "waitQrCode": False
@@ -585,9 +586,10 @@ class Connect:
                 return
 
             # Poll status-session to pick up a QR code that may already be ready.
+            session_name = self.main_window.token.split(':')[0] if ':' in self.main_window.token else self.main_window.token
             url = (
                 f"{self.main_window.wpp_server}"
-                f":{self.main_window.wpp_port}/api/{self.main_window.token}/status-session"
+                f":{self.main_window.wpp_port}/api/{session_name}/status-session"
             )
             try:
                 response = requests.get(url, headers=self._wpp_headers())
