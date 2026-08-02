@@ -4695,10 +4695,22 @@ class ConversationsPanel(wx.Panel):
 
             def _name(j: str) -> str:
                 # Our own JID gets the self label ("Eu") rather than a phone
-                # number, exactly as in a normal message line.
+                # number, exactly as in a normal message line. Uses
+                # _get_participant_name() rather than _sender_label(): the
+                # latter can legitimately return "" when a @lid can't be
+                # resolved to a phone number and no contact/chat name is
+                # known for it (the exact case a "so-and-so left the group"
+                # notification hits for a participant nobody has chatted
+                # with directly) — which rendered as a blank name with the
+                # rest of the sentence still attached (" saiu do grupo").
+                # _get_participant_name() is the resolver already used for
+                # group participants elsewhere (reply-privately/converse-with
+                # labels) and always falls back to *something* concrete
+                # (formatted phone number, or the @lid's own digits) instead
+                # of an empty string.
                 if self.main_window._is_self_jid(j):
                     return self.main_window.self_reference_label()
-                return self._sender_label({"key": {"participant": j, "remoteJid": j, "fromMe": False}})
+                return self._get_participant_name(j, notif) or self.main_window.i18n.t("unknown_contact")
 
             author_name = _name(author_jid) if author_jid else ""
             names = ", ".join(_name(j) for j in recipient_jids) if recipient_jids else author_name
@@ -4763,14 +4775,18 @@ class ConversationsPanel(wx.Panel):
                 return i18n.t("group_notif_link_revoked").format(author=author_name)
             if subtype in ("membership_approval_mode", "membership_approval_request"):
                 return i18n.t("group_notif_approval_mode").format(author=author_name)
+            if subtype in ("sub_group_link", "linked_group", "community_link"):
+                # WhatsApp Communities: this group was linked as a sub-group
+                # of a community (or unlinked — WPPConnect does not appear to
+                # distinguish the two directions on this subtype).
+                return i18n.t("group_notif_linked_to_community").format(author=author_name)
             # Unknown subtype: still say who did it and what WhatsApp called it,
             # instead of an anonymous "Atualização do grupo" that tells the user
             # nothing about what actually happened. WhatsApp's raw subtype codes
-            # (e.g. "initial_phash_mismatch", "sub_group_link") are internal
-            # snake_case identifiers never meant for display — a screen reader
-            # spelling out the underscores is worse than useless, so turn them
-            # into plain words. `detail` (from the notification body) is real
-            # WhatsApp-provided text and is left as-is.
+            # are internal snake_case identifiers never meant for display — a
+            # screen reader spelling out the underscores is worse than useless,
+            # so turn them into plain words. `detail` (from the notification
+            # body) is real WhatsApp-provided text and is left as-is.
             label = detail or (subtype.replace("_", " ") if subtype else "")
             if author_name and label:
                 return i18n.t("group_notif_generic_detail").format(
@@ -4825,6 +4841,16 @@ class ConversationsPanel(wx.Panel):
             protocol = (m.get("message") or {}).get("protocolMessage") or {}
             p_type = protocol.get("type")
             return p_type in (3, "REVOKE", "revoke")
+        if msg_type == "groupNotification":
+            # Pure protocol/device-resync housekeeping WhatsApp exchanges
+            # between clients to keep a group's participant hash in sync —
+            # not something any participant did, and never shown by the
+            # official client either. Showing it as "Atualização do grupo:
+            # initial phash mismatch" told the user nothing and looked like
+            # a bug report leaking into the chat.
+            notif = (m.get("message") or {}).get("groupNotification") or {}
+            subtype = (notif.get("subtype") or "").lower()
+            return subtype not in ("initial_phash_mismatch", "phash_mismatch")
         return True
 
     def _map_status(self, msg) -> str:
