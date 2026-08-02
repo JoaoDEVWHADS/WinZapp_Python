@@ -509,6 +509,13 @@ class Connect:
     def start_qrcode_connection(self):
         """Initiates QR-CODE connection without user interaction."""
         self.qrcode_connection_started = True
+        # Mark pairing as actively in flight for the WHOLE QR flow. Without this,
+        # the ~30s health poll (check_wa_connection_http) saw the expected QRCODE
+        # "scan me" state as a logout and wiped the session ~1s after the QR
+        # appeared — pairing by QR could never complete on a pending account.
+        # (Phone-code mode already sets this in on_continue.) Cleared by
+        # on_pairing_complete / dialog close, same as the phone-code path.
+        self.main_window._pairing_in_progress = True
         try:
             # Determine whether a token has been saved from a previous session.
             # We still always call _create_instance to (re)start the WPPConnect

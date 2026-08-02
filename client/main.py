@@ -5124,21 +5124,25 @@ class MainWindow(wx.Frame):
 
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
-        if self._is_pairing_dialog_active():
+        if self._is_pairing_dialog_active() or getattr(self, "_pairing_in_progress", False):
             # Nothing below is meaningful yet: WPPConnect reporting
-            # CLOSED/QRCODE/notLogged while the user is actively looking at
-            # the pairing dialog is completely normal — that IS what
-            # "not paired yet" looks like, not an outage. Every branch
-            # below unconditionally called _set_wa_connected(False, ...)
-            # (only the *auto-start-session* side effect was gated on the
-            # dialog being open), so this ran every 30s during pairing and
-            # announced "sem conexão com o WhatsApp. Modo offline ativado
-            # automaticamente" — sound and speech — while the user hadn't
-            # even finished scanning the QR code, let alone ever connected.
-            # This whole HTTP poll exists to detect/recover from outages
-            # *after* pairing; pairing's own completion is already driven by
-            # WebSocket events (on_connection_update/session-logged), so
-            # skipping it entirely here loses nothing.
+            # CLOSED/QRCODE/notLogged while the user is actively pairing is
+            # completely normal — that IS what "not paired yet" / "waiting for
+            # the QR or phone code to be entered" looks like, not an outage.
+            #
+            # The guard checks BOTH the on-screen dialog AND _pairing_in_progress
+            # (set by connect.py for the whole pairing flow). Relying on the
+            # dialog alone missed the case that actually bit a live multi-account
+            # user: a freshly-switched-to pending account pairing where the
+            # health poll saw QRCODE (the expected "scan me" state) and fired
+            # _on_disconnect() → clear_local_data() mid-pairing, ~1s after the QR
+            # appeared, so pairing could never complete. _pairing_in_progress is
+            # the authoritative "do not touch the session" signal.
+            #
+            # This whole HTTP poll exists to detect/recover from outages *after*
+            # pairing; pairing's own completion is driven by WebSocket events
+            # (on_connection_update/session-logged), so skipping it here loses
+            # nothing.
             return
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session"
         headers = {
