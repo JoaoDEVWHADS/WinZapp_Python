@@ -30,7 +30,11 @@ def _match_device(name: str, devices: list):
 
 def enumerate_output_devices() -> list:
     """[(bass_device_index, friendly_name), ...] for enabled BASS output
-    devices (excludes BASS's special device 0, "No sound").
+    devices (excludes BASS's special device 0, "No sound", and its "Default"
+    pseudo-device — BASS always lists a device literally named "Default"
+    ahead of the real hardware entries, which would otherwise show up as a
+    second, redundant "use the default" choice alongside the combo's own
+    sentinel first entry).
 
     Written directly against BASS_GetDeviceInfo rather than reusing
     sound_lib.output.Output.get_device_names()/find_device_by_name(): those
@@ -49,7 +53,8 @@ def enumerate_output_devices() -> list:
             if isinstance(name, bytes):
                 name = name.decode("mbcs")
             name = name.replace("(", "").replace(")", "").strip()
-            devices.append((count, name))
+            if name.lower() != "default":
+                devices.append((count, name))
         count += 1
     return devices
 

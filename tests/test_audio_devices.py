@@ -9,9 +9,47 @@ exercised against a stub BASS `Output` object standing in for
 sound_lib.output.Output, since a real one needs an actual audio device.
 """
 
+import ctypes
+
 import core.sound_system as sound_system_module
-from core.audio_devices import _match_device
+from core.audio_devices import _match_device, enumerate_output_devices
 from core.sound_system import SoundSystem
+
+
+class TestEnumerateOutputDevices:
+    """BASS always lists a device literally named "Default" (with
+    BASS_DEVICE_DEFAULT set) ahead of the real hardware entries — confirmed
+    against a real machine's device list. Left unfiltered, that showed up in
+    the Settings > Audio Devices output combo as a second, redundant "use
+    the default" choice alongside the combo's own sentinel first entry."""
+
+    def test_skips_the_bass_default_pseudo_device(self, monkeypatch):
+        import sound_lib.external.pybass as pybass
+
+        # (enabled, name) per 1-based BASS device index; a falsy entry (or a
+        # missing one) ends the enumeration, like the real BASS_GetDeviceInfo
+        # returning 0 past the last device.
+        fake_devices = {
+            1: (True, b"Default"),
+            2: (True, b"Fone de ouvido do headset (CORSAIR HS80)"),
+            3: (False, b"Some Disabled Device"),
+        }
+
+        def fake_get_device_info(count, info_ref):
+            entry = fake_devices.get(count)
+            if entry is None:
+                return 0
+            enabled, name = entry
+            info = info_ref._obj
+            info.flags = pybass.BASS_DEVICE_ENABLED if enabled else 0
+            info.name = name
+            return 1
+
+        monkeypatch.setattr(pybass, "BASS_GetDeviceInfo", fake_get_device_info)
+
+        devices = enumerate_output_devices()
+
+        assert devices == [(2, "Fone de ouvido do headset CORSAIR HS80")]
 
 
 class TestMatchDevice:
