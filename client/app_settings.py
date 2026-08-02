@@ -32,6 +32,11 @@ _DEFAULTS: dict[str, Any] = {
     "updates_enabled": True,
     "show_tray_icon": True,
     "autostart": False,
+    # install-wide one-time setup prompts (asked once per install, NOT per
+    # account — a new account must not re-ask autostart/hotkey/api-type).
+    "first_run": True,
+    "hotkey_first_run_asked": False,
+    "api_type_first_run_asked": False,
     # single shared WPPConnect connection
     "wpp_server": "http://127.0.0.1",
     "wpp_port": 6300,
@@ -41,7 +46,8 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 # Which legacy general.* keys are global (the rest stay per-account).
-_GENERAL_GLOBAL = ("language", "updates_enabled", "show_tray_icon", "autostart")
+_GENERAL_GLOBAL = ("language", "updates_enabled", "show_tray_icon", "autostart",
+                   "first_run", "hotkey_first_run_asked", "api_type_first_run_asked")
 _CONNECTION_GLOBAL = ("wpp_server", "wpp_port", "wpp_ws_server", "wpp_api_key", "wpp_custom_api")
 
 

@@ -37,7 +37,22 @@ def test_only_global_keys_accepted(tmp_path):
     with pytest.raises(KeyError):
         s.set("notifications_enabled", False)  # per-account, not global
     with pytest.raises(KeyError):
-        s.get("first_run")
+        s.get("audio_default_speed")  # per-account, not global
+
+
+def test_first_run_flags_are_global(tmp_path):
+    """Install-wide one-time setup prompts must be global so a new account never
+    re-asks autostart / hotkey / api-type (regression: they were per-account)."""
+    gd = _gd(tmp_path)
+    s = aset.AppSettings(gd)
+    assert s.get("first_run") is True  # default
+    s.set("first_run", False)
+    s.set("hotkey_first_run_asked", True)
+    s.set("api_type_first_run_asked", True)
+    s2 = aset.AppSettings(gd)
+    assert s2.get("first_run") is False
+    assert s2.get("hotkey_first_run_asked") is True
+    assert s2.get("api_type_first_run_asked") is True
 
 
 def test_connection_is_global(tmp_path):

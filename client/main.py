@@ -1194,7 +1194,9 @@ class MainWindow(wx.Frame):
         stays open (accounts run in the background, choice 1b)."""
         try:
             from account_launcher import switch_to_account
-            switch_to_account(self.global_dir, account_id)
+            activated = switch_to_account(self.global_dir, account_id)
+            logging.info("[accounts] switch to %s -> %s", account_id,
+                         "activated existing process" if activated else "spawned new process")
         except Exception:
             logging.exception("[accounts] switch to %s failed", account_id)
 
@@ -1213,6 +1215,8 @@ class MainWindow(wx.Frame):
         gd = getattr(self, "global_dir", None)
         acc_id = getattr(self, "account_id", None)
         if not (gd and acc_id):
+            logging.info("[ipc] listener NOT started (no account/global_dir) — "
+                         "gd=%s acc=%s", bool(gd), bool(acc_id))
             return
         try:
             import ipc
@@ -1224,6 +1228,8 @@ class MainWindow(wx.Frame):
                 window_ready_predicate=lambda: getattr(self, "_window_ready", False),
             )
             self._ipc_listener.start()
+            ready = self._ipc_listener.wait_ready(timeout=3.0)
+            logging.info("[ipc] listener started for account %s (ready=%s)", acc_id, ready)
         except Exception:
             logging.exception("[ipc] listener start failed (non-fatal)")
 
@@ -4111,6 +4117,7 @@ class MainWindow(wx.Frame):
             self.wpp_custom_api = False
             self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
             self.save_settings()
+            self._persist_global_settings()
         elif result == wx.NO:
             # User wants to specify a custom/remote API
             self.settings.setdefault("connection", {})["wpp_custom_api"] = True
@@ -4128,6 +4135,7 @@ class MainWindow(wx.Frame):
                 # Successfully configured! Mark as asked.
                 self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
                 self.save_settings()
+                self._persist_global_settings()
             else:
                 # User cancelled or closed settings dialog. Roll back and exit.
                 self.settings.setdefault("connection", {})["wpp_custom_api"] = False
@@ -4149,6 +4157,7 @@ class MainWindow(wx.Frame):
         # Mark as done before showing the dialog
         self.settings.setdefault("general", {})["first_run"] = False
         self.save_settings()
+        self._persist_global_settings()
 
         result = wx.MessageBox(
             self.i18n.t("autostart_ask_message"),
@@ -4160,6 +4169,7 @@ class MainWindow(wx.Frame):
         else:
             self.settings.setdefault("general", {})["autostart"] = False
             self.save_settings()
+            self._persist_global_settings()
 
     def _check_hotkey_first_run(self):
         """
@@ -4177,10 +4187,12 @@ class MainWindow(wx.Frame):
         if gen.get("global_hotkey"):
             self.settings.setdefault("general", {})["hotkey_first_run_asked"] = True
             self.save_settings()
+            self._persist_global_settings()
             return
 
         self.settings.setdefault("general", {})["hotkey_first_run_asked"] = True
         self.save_settings()
+        self._persist_global_settings()
 
         from ui.dialogs.settings_dialog import _HotkeyCapture
 
@@ -4389,13 +4401,22 @@ class MainWindow(wx.Frame):
         try:
             from app_settings import AppSettings, _GENERAL_GLOBAL, _CONNECTION_GLOBAL
             app = AppSettings(gd)
+            self._app_settings = app
             general = self.settings.setdefault("general", {})
+            # One-time backfill (GPT-safe): the install-wide "asked once" flags
+            # were per-account before this version. If global app.json doesn't
+            # carry a key yet but THIS account already has a value, seed global
+            # from it — so an account that already finished first-run setup does
+            # not get re-asked once the flag moves to the shared file.
+            raw_global = app._read()
+            for k in _GENERAL_GLOBAL:
+                if k not in raw_global and k in general:
+                    app.set(k, general[k])
             for k in _GENERAL_GLOBAL:
                 general[k] = app.get(k)
             connection = self.settings.setdefault("connection", {})
             for k in _CONNECTION_GLOBAL:
                 connection[k] = app.get(k)
-            self._app_settings = app
         except Exception:
             logging.exception("[settings] applying global app.json failed (non-fatal)")
 
