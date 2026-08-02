@@ -265,7 +265,7 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
       req.logger.info(`[${session}] Force killing session because status is ${client.status}`);
       client.shouldClose = true;
       try {
-        SessionUtil.forceKillSession(session);
+        SessionUtil.forceKillSession(session, req.logger);
       } catch (e) {}
       (clientsArray as any)[session] = undefined;
       return await res
