@@ -281,6 +281,13 @@ const finalConfig = {
     // resolveWhatsappVersion above). Set explicitly here because WPPConnect's
     // own default points at a version wa-version no longer ships.
     whatsappVersion,
+    ...(chromeExecutable ? { executablePath: chromeExecutable } : {}),
+    puppeteerOptions: {
+      protocolTimeout: 120000,
+      ...(chromeExecutable ? { executablePath: chromeExecutable } : {}),
+      ...((configDefault.createOptions && configDefault.createOptions.puppeteerOptions) || {}),
+      ...((customConfig.createOptions && customConfig.createOptions.puppeteerOptions) || {})
+    }
   }
 };
 
