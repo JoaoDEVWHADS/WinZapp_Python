@@ -1740,18 +1740,78 @@ export async function sendMute(req: Request, res: Response) {
    */
   const { phone, time, type = 'hours', isGroup = false } = req.body;
 
+  /*
+   * WinZapp patch — do not call req.client.sendMute().
+   *
+   * That layer runs the legacy `WAPI.sendMute` shim, which drives
+   * `window.Store.SendMute.sendConversationMute()` directly and then decides
+   * success purely from `response.status === 200`. On current WhatsApp Web
+   * builds that call no longer answers with the shape the shim expects, so
+   * every mute came back as
+   *   {"erro":true,"text":"This chat is already mute","type":"sendMute"}
+   * — a hardcoded string the shim emits for *any* non-200, regardless of
+   * whether the chat was actually muted. WPPConnect's own layer rethrows that
+   * object, so this route answered 500 and no chat could ever be muted.
+   * (The `to` field in those errors is a MsgKey, not a chat — more evidence
+   * that the shim's `getchatId()` lookup is resolving against internals that
+   * moved.)
+   *
+   * `WPP.chat.mute()`/`WPP.chat.unmute()` from the bundled wa-js are the
+   * maintained equivalents and take an absolute expiration (or a duration in
+   * seconds), so they are also immune to the "already muted" state the old
+   * path tripped over: re-muting an already-muted chat simply moves the
+   * expiration.
+   */
+  const seconds = (() => {
+    const n = Number(time) || 0;
+    switch (String(type)) {
+      case 'minutes':
+        return n * 60;
+      case 'day':
+      case 'days':
+        return n * 86400;
+      case 'year':
+      case 'years':
+        return n * 31536000;
+      case 'hours':
+      default:
+        return n * 3600;
+    }
+  })();
+
   try {
     let response;
     for (const contato of contactToArray(phone, isGroup)) {
-      response = await req.client.sendMute(`${contato}`, time, type);
+      response = await req.client.page.evaluate(
+        async ({ chatId, duration }) => {
+          const WPP = (window as any).WPP;
+          if (!WPP?.chat?.mute || !WPP?.chat?.unmute) {
+            throw new Error('WPP.chat.mute is unavailable in this wa-js build');
+          }
+          if (duration <= 0) {
+            await WPP.chat.unmute(chatId);
+            return { wid: chatId, isMuted: false, expiration: 0 };
+          }
+          const result = await WPP.chat.mute(chatId, { duration });
+          // The Wid instance does not survive serialization to Node.
+          return {
+            wid: String(result?.wid?._serialized ?? chatId),
+            isMuted: !!result?.isMuted,
+            expiration: Number(result?.expiration ?? 0),
+          };
+        },
+        { chatId: `${contato}`, duration: seconds }
+      );
     }
 
     res.status(200).json({ status: 'success', response: response });
-  } catch (error) {
+  } catch (error: any) {
     req.logger.error(error);
-    res
-      .status(500)
-      .json({ status: 'error', message: 'Error on send mute', error: error });
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on send mute',
+      error: error?.message || error,
+    });
   }
 }
 

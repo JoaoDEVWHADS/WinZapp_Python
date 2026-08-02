@@ -134,7 +134,22 @@ export default class CreateSessionUtil {
       const tokenData = await myTokenStore.getToken(session);
 
       // we need this to update phone in config every time session starts, so we can ask for code for it again.
-      myTokenStore.setToken(session, tokenData ?? {});
+      //
+      // WinZapp patch: only rewrite the token when we actually read one back.
+      // Upstream writes `tokenData ?? {}`, so ANY failure to read the stored
+      // token — a transient fs error, a file still locked by a previous
+      // instance that was force-killed, a partially-written JSON — is
+      // immediately made permanent by overwriting it with an empty object.
+      // The saved WhatsApp Web credentials are then gone for good and the next
+      // start looks like a logout, even though the phone still lists the linked
+      // device. Reading nothing is not a reason to destroy what is on disk.
+      if (tokenData) {
+        myTokenStore.setToken(session, tokenData);
+      } else {
+        req.logger?.warn?.(
+          `[${session}] Token store returned no data — leaving the stored token untouched.`
+        );
+      }
 
       this.startChatWootClient(client);
 
