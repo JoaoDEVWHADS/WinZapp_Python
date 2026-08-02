@@ -42,6 +42,7 @@ const routes: Router = Router();
 
 // Generate Token
 routes.post('/api/:session/:secretkey/generate-token', encryptSession);
+routes.post('/api/:session/:secretkey', encryptSession);
 
 // All Sessions
 routes.get(
