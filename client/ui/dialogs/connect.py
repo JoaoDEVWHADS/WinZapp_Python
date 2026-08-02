@@ -356,8 +356,12 @@ class Connect:
         qrcode_left_sizer.Add(self.qrcode_instructions, 0, wx.ALL | wx.EXPAND, 10)
         qrcode_left_sizer.Add(self.switch_to_phone_btn, 0, wx.ALL, 10)
 
+        # proportion=1 already makes the left column stretch to fill the
+        # remaining horizontal space in this HORIZONTAL sizer — wx.EXPAND
+        # would additionally stretch it vertically too, which conflicts with
+        # (and is rejected by wx for) the wx.ALIGN_CENTER_VERTICAL below.
         qrcode_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        qrcode_sizer.Add(qrcode_left_sizer, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL, 10)
+        qrcode_sizer.Add(qrcode_left_sizer, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         qrcode_sizer.Add(self.qrcode_image, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         self.qrcode_panel.SetSizer(qrcode_sizer)
 
