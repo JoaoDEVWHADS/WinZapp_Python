@@ -52,6 +52,8 @@ if (!chromeExecutable) {
   chromeExecutable = findChromeExecutable(__dirname, 0);
 }
 const hasChrome = !!chromeExecutable;
+console.log(`[WinZapp Debug] Chrome executable resolution: ${chromeExecutable ? chromeExecutable : 'NOT FOUND (will use default Puppeteer)'}`);
+console.log(`[WinZapp Debug] Platform: ${process.platform}, Node version: ${process.version}`);
 
 if (!hasChrome) {
   console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
