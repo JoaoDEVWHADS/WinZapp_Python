@@ -184,7 +184,7 @@ jobs:
         id: cache-puppeteer
         uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\puppeteer
+          path: client/api/node_modules/puppeteer/.local-chromium
           key: puppeteer-chromium-v1
 
       - name: Configurar WPPConnect API
