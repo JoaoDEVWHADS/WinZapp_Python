@@ -614,6 +614,21 @@ class WebSocketClient:
                     "showing it proactively instead of waiting for the "
                     "slower confirmed-logout detection."
                 )
+                # Same sound + MessageBox as the confirmed-logout path's own
+                # _logout_with_warning() (main.py) — recognisable, expected
+                # feedback that something happened, just without that path's
+                # _on_disconnect() call (no data wipe). Also bring the window
+                # to the foreground first: if it was minimized to the tray
+                # (background mode), a modal dialog appearing behind/under
+                # everything with no prior audible cue is easy to miss
+                # entirely — reported live as exactly that.
+                self.main_window.restore_window()
+                self.main_window.error_sound.play()
+                wx.MessageBox(
+                    self.i18n.t("device_logged_out"),
+                    self.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
                 self.connect.show_connection_dial()
 
         wx.CallAfter(_update_ui)

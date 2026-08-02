@@ -57,10 +57,16 @@ class _FakeMainWindow:
         self.settings = {"privateinfo": {"paired": paired}}
         self._pairing_dialog_active = pairing_dialog_active
         self.pairing_code_updated_sound = _FakeSound()
+        self.error_sound = _FakeSound()
         self.speak_output = _FakeSpeakOutput()
+        self.app_name = "WinZapp"
+        self.restore_window_calls = 0
 
     def _is_pairing_dialog_active(self):
         return self._pairing_dialog_active
+
+    def restore_window(self):
+        self.restore_window_calls += 1
 
 
 class _Stub:
@@ -79,6 +85,7 @@ QR_EVENT = {"data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg"}
 @pytest.fixture(autouse=True)
 def _synchronous_call_after(monkeypatch):
     monkeypatch.setattr("core.websocket_client.wx.CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+    monkeypatch.setattr("core.websocket_client.wx.MessageBox", lambda *a, **kw: None)
 
 
 class TestProactivePairingDialog:
@@ -90,6 +97,19 @@ class TestProactivePairingDialog:
         s.on_qrcode_update(QR_EVENT)
 
         assert connect.show_connection_dial_calls == 1
+
+    def test_restores_the_window_and_gives_the_classic_logout_cue_first(self):
+        """Regression: the first version of this feature jumped straight to
+        show_connection_dial() with no sound/MessageBox at all — silent and
+        easy to miss entirely if the window was minimized to the tray at the
+        time, reported live as exactly that."""
+        mw = _FakeMainWindow(paired=True, pairing_dialog_active=False)
+        connect = _FakeConnect()
+        s = _Stub(mw, connect)
+
+        s.on_qrcode_update(QR_EVENT)
+
+        assert mw.restore_window_calls == 1
 
     def test_does_not_open_a_second_dialog_on_a_qr_refresh(self):
         """QR codes rotate every ~20-30s while waiting — must not stack
