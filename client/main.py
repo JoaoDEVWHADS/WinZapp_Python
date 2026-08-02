@@ -1274,12 +1274,16 @@ class MainWindow(wx.Frame):
             logging.exception("[ipc] listener start failed (non-fatal)")
 
     def _ipc_activate(self, source: str):
-        """Bring this window to the foreground on an IPC activate request."""
+        """Bring this window to the foreground on an IPC activate request.
+
+        Delegates to restore_window(), which handles the SW_HIDE state-drift
+        (this window was likely hidden via hide_to_tray on a previous switch,
+        so a bare wx Show()/Raise() can silently no-op) AND lands keyboard focus
+        on the conversation list — without that, repeated switches left the
+        window focused but no control focused, so arrow keys did nothing.
+        """
         try:
-            if self.IsIconized():
-                self.Iconize(False)
-            self.Show()
-            self.Raise()
+            self.restore_window()
             # A conscious user switch updates last_foreground; an autostart-boot
             # activation does not (plan / GPT r5 #2).
             if source == "user" and getattr(self, "registry", None):
@@ -2200,6 +2204,23 @@ class MainWindow(wx.Frame):
             self.Show(True)
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.add_chats_to_ui)
+        # Put keyboard focus on a real navigable control. After a
+        # hide/restore (and especially repeated account switches) the frame can
+        # come forward with focus sitting on the bare window, so arrow-key
+        # navigation has nothing to act on until the user Tabs into a control.
+        # Land focus on the conversation list so the keyboard works immediately.
+        wx.CallAfter(self._focus_primary_control)
+
+    def _focus_primary_control(self):
+        """Move keyboard focus to the main navigable list (conversation list),
+        so arrow keys work right after a window restore / account switch."""
+        try:
+            panel = getattr(self, "conversations_panel", None)
+            lst = getattr(panel, "conversations_list", None) if panel else None
+            if lst is not None and lst.IsShown():
+                lst.SetFocus()
+        except Exception:
+            logging.exception("[focus] restoring primary control focus failed")
 
     def real_exit(self):
         """Completely close WinZapp, removing the tray icon and stopping all threads."""
