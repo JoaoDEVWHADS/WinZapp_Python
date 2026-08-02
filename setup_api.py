@@ -328,27 +328,22 @@ def main():
             print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
             _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, check=False)
 
-        # Run npm run build (using build:js to run Babel transpilation)
+        # Run npm run build (using Babel transpilation)
         print("[INFO] Compiling WPPConnect Server...")
-        if npm_bin.endswith("npm-cli.js"):
+        babel_js = os.path.join(CLIENT_API_DIR, "node_modules", "@babel", "cli", "bin", "babel.js")
+        if os.path.isfile(babel_js):
+            _run([node_bin, babel_js, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
+        elif npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
         else:
             _run([npm_bin, "run", "build:js"], cwd=CLIENT_API_DIR, check=False)
 
         # Check if dist/server.js was compiled successfully
         server_js = os.path.join(CLIENT_API_DIR, "dist", "server.js")
-        if not os.path.isfile(server_js):
-            print("[INFO] Running Babel directly from node_modules/.bin...")
-            babel_bin = os.path.join(CLIENT_API_DIR, "node_modules", ".bin", "babel.cmd" if is_windows else "babel")
-            if os.path.isfile(babel_bin):
-                _run([babel_bin, "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
-            else:
-                _run(["npx", "babel", "src", "--out-dir", "dist", "--extensions", ".ts,.tsx", "--source-maps", "inline", "--copy-files"], cwd=CLIENT_API_DIR, check=False)
-
         if os.path.isfile(server_js):
             print("[OK] WPPConnect Server compiled successfully (dist/server.js verified).")
         else:
-            print("[WARNING] dist/server.js not found after build step, but proceeding...")
+            print("[WARNING] dist/server.js not found after build step.")
 
     except Exception as e:
         print(f"[WARNING] Node.js dependencies installation/build notice: {e}")
