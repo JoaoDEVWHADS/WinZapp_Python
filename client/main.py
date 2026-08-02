@@ -1197,6 +1197,12 @@ class MainWindow(wx.Frame):
             activated = switch_to_account(self.global_dir, account_id)
             logging.info("[accounts] switch to %s -> %s", account_id,
                          "activated existing process" if activated else "spawned new process")
+            # Option 2 UX: single visible window. Once the target account's
+            # window is coming forward (activated now, or spawning and will show
+            # itself when ready), hide THIS window to the tray. The process
+            # stays alive in the background so this account keeps receiving its
+            # messages/notifications; the user just sees one window at a time.
+            self.hide_to_tray()
         except Exception:
             logging.exception("[accounts] switch to %s failed", account_id)
 
@@ -2088,6 +2094,28 @@ class MainWindow(wx.Frame):
             event.Veto()
         else:
             self.real_exit()
+
+    def hide_to_tray(self):
+        """Hide this window to the tray WITHOUT quitting (the process keeps
+        running so it still receives this account's messages/notifications).
+
+        Used by the account switch (Option 2 UX): switching to another account
+        brings that account's window forward and hides this one, so the user
+        sees a single active window while every account stays live in the
+        background. Mirrors _on_close's SW_HIDE path (bypasses wx state-drift).
+        """
+        if getattr(self, "tray_icon", None) is None:
+            return
+        try:
+            import ctypes
+            ctypes.windll.user32.ShowWindow(self.GetHandle(), 0)  # SW_HIDE
+        except Exception:
+            self.Hide()
+        self._window_hidden = True
+        try:
+            self.tray_icon.update_tooltip()
+        except Exception:
+            pass
 
     def restore_window(self):
         """Bring the WinZapp window to the foreground.
