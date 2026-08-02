@@ -45,9 +45,13 @@ export default {
   },
   createOptions: {
     autoClose: 0,
+    headless: 'shell',
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--single-process',
+      '--no-zygote',
       '--aggressive-cache-discard',
       '--disable-cache',
       '--disable-application-cache',
@@ -76,13 +80,14 @@ export default {
       '--disable-voice-input',
       '--disable-renderer-backgrounding',
       '--disable-backgrounding-occluded-windows',
-      '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
+      '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction,Translate,MediaRouter,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,ChromeWhatsNewUI,AndroidAutofill,BlinkGenPropertyTrees',
       '--disable-software-rasterizer',
       '--disable-ipc-flooding-protection',
       '--password-store=basic',
       '--use-mock-keychain',
       '--no-pings',
       '--disable-client-side-phishing-detection',
+      '--js-flags=--max-old-space-size=256',
     ],
     /**
      * Example of configuring the linkPreview generator
