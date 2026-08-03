@@ -89,6 +89,27 @@ def is_wake_from_suspend(elapsed: float, expected_interval: float,
     return elapsed > gap_threshold and gap_threshold >= expected_interval
 
 
+def chrome_cmdline_owns_session(cmdline: str, session_name: str) -> bool:
+    """True when a chrome.exe command line belongs to *this* account's WPPConnect
+    browser — i.e. its ``--user-data-dir`` points at this session's profile.
+
+    The match is deliberately narrow: it requires the session name to appear in
+    a ``userDataDir`` path segment, so it can never match the user's own regular
+    Chrome (different profile dir) or another WinZapp account's browser. This is
+    the wx-free, unit-testable core of the post-suspend orphan-Chrome killer:
+    after hibernation a suspended chrome.exe keeps a lock on its userDataDir, so
+    WPPConnect's start-session cannot relaunch ("browser is already running")
+    and the session hangs in INITIALIZING forever. Recovery must kill exactly
+    that process before restarting — never anything else.
+    """
+    if not session_name or not cmdline:
+        return False
+    low = cmdline.lower()
+    if "userdatadir" not in low:
+        return False
+    return session_name.lower() in low
+
+
 # Attribute names on MainWindow that a wake-from-suspend must reset so the
 # resume is classified like a fresh session start, never a mid-session drop.
 # Kept here (next to classify_unlinked) so the "what counts as connection

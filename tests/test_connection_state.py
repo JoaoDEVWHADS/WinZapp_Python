@@ -72,3 +72,24 @@ def test_wake_from_suspend_ignores_normal_cycles():
 def test_wake_from_suspend_guards_against_misconfig():
     # A gap threshold below the sleep interval would fire every cycle — refuse.
     assert cs.is_wake_from_suspend(60.0, 30, 20) is False
+
+
+def test_chrome_cmdline_owns_session_matches_this_profile():
+    sess = "9a8957e87373a353bd9d0bcbe764506a"
+    cmd = (r'chrome.exe --user-data-dir=C:\Users\m\AppData\Local\WinZapp\api'
+           rf'\userDataDir\{sess} --headless')
+    assert cs.chrome_cmdline_owns_session(cmd, sess) is True
+
+
+def test_chrome_cmdline_ignores_other_profiles_and_regular_chrome():
+    sess = "9a8957e87373a353bd9d0bcbe764506a"
+    other = "d8b3338f4c0552a17cd3a51c9f972fdc"
+    # Another account's WPPConnect browser must NOT match.
+    other_cmd = rf'chrome.exe --user-data-dir=C:\...\userDataDir\{other}'
+    assert cs.chrome_cmdline_owns_session(other_cmd, sess) is False
+    # The user's own regular Chrome (no userDataDir of ours) must NOT match.
+    regular = r'chrome.exe --type=gpu-process --lang=pl'
+    assert cs.chrome_cmdline_owns_session(regular, sess) is False
+    # Empty / missing inputs are safe.
+    assert cs.chrome_cmdline_owns_session("", sess) is False
+    assert cs.chrome_cmdline_owns_session(other_cmd, "") is False

@@ -1808,24 +1808,38 @@ class MainWindow(wx.Frame):
     _RESUME_ZOMBIE_PROBE_INTERVAL = 3.0
 
     def _restart_session_if_zombie_after_resume(self):
-        """Detect and repair a post-wake 'zombie CONNECTED' session.
+        """Detect and repair a post-wake session that cannot recover on its own.
 
-        Only fires when the network is actually up (WhatsApp's own host is
-        reachable) but the session stream is dead — i.e. a real zombie, not a
-        plain 'no internet' outage (that must be left alone to recover on its
-        own when connectivity returns). Confirmed over a few consecutive probes
-        so a momentary blip right after wake doesn't trigger a needless restart.
+        Two distinct post-hibernation failures, both needing the same cure
+        (force a clean session restart), both confirmed over a few probes so a
+        momentary blip right after wake doesn't trigger a needless restart:
+
+        1. 'Zombie CONNECTED' — status stays CONNECTED but the WhatsApp Web
+           stream is dead (isConnected()==false) with the network up.
+        2. 'Stuck INITIALIZING' — a hibernation-suspended chrome.exe still holds
+           the userDataDir lock, so WPPConnect's own relaunch fails with
+           "browser is already running" and the status never leaves
+           INITIALIZING. Only a full app restart (which kills the orphan) used
+           to clear it — exactly the reported symptom.
+
+        Both are gated on the network actually being up (a plain no-internet
+        outage must be left alone to recover naturally).
         """
         if getattr(self, "_wa_connected", False):
             return  # recovered normally — nothing to do
         import connection_state as cs
+        stuck_initializing = 0
         for _ in range(self._RESUME_ZOMBIE_CONFIRM_STRIKES):
             if getattr(self, "_wa_connected", False):
                 return
             status = self._raw_session_status()
             # CLOSED/DESTROYED already auto-starts; QRCODE/notLogged is a real
             # pairing need handled elsewhere — neither is ours to touch here.
-            if status not in ("CONNECTED", "open"):
+            if status in ("CONNECTED", "open"):
+                pass
+            elif status == "INITIALIZING":
+                stuck_initializing += 1
+            else:
                 return
             if not self._probe_whatsapp_host():
                 # No internet: not a zombie, just an outage. The normal health
@@ -1835,6 +1849,16 @@ class MainWindow(wx.Frame):
                 return
             time.sleep(self._RESUME_ZOMBIE_PROBE_INTERVAL)
             self.check_wa_connection_http()
+        if getattr(self, "_wa_connected", False):
+            return
+        # A session still INITIALIZING across every probe (network up) is a
+        # locked-out relaunch — force restart clears the orphaned Chrome lock.
+        if stuck_initializing >= self._RESUME_ZOMBIE_CONFIRM_STRIKES:
+            logging.warning("[power] Session stuck in INITIALIZING after resume "
+                            "(orphaned Chrome holding userDataDir lock, network up) "
+                            "— forcing session restart to clear it.")
+            self._force_whatsapp_session_restart()
+            return
         if not cs.is_zombie_session_after_resume(
             getattr(self, "_wa_connected", False),
             self._raw_session_status(),
@@ -1860,6 +1884,70 @@ class MainWindow(wx.Frame):
             logging.info("[_raw_session_status] probe failed: %s", e)
         return ""
 
+    def _kill_orphaned_chrome_for_session(self):
+        """Kill a suspended chrome.exe still holding this account's userDataDir
+        lock, then drop its stale lockfile, so WPPConnect can relaunch.
+
+        After hibernation the WhatsApp Web chrome.exe is suspended, not killed:
+        it keeps the lock on ./userDataDir/<session>, so the post-wake
+        start-session fails with "The browser is already running" and the
+        session is stuck in INITIALIZING forever (only a full app restart, which
+        kills the orphan, cleared it — exactly the reported symptom). Matching is
+        narrow (connection_state.chrome_cmdline_owns_session): only a chrome
+        whose --user-data-dir carries THIS session name is touched — never the
+        user's own Chrome, never another account's browser.
+        """
+        import sys
+        if sys.platform != "win32":
+            return
+        import connection_state as cs
+        session_name = (getattr(self, "token", "") or "").split(":")[0]
+        if not session_name:
+            return
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        killed = False
+        try:
+            # WMIC-free: PowerShell CIM gives us PID + full command line.
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+                 "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+                creationflags=no_window, text=True, stderr=subprocess.DEVNULL, timeout=15,
+            )
+        except Exception as e:
+            logging.info("[wake-recover] could not list chrome processes: %s", e)
+            out = ""
+        for line in out.splitlines():
+            pid, _, cmdline = line.partition("\t")
+            if not cs.chrome_cmdline_owns_session(cmdline, session_name):
+                continue
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", pid.strip()],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=no_window)
+                logging.warning("[wake-recover] killed orphaned Chrome pid=%s holding "
+                                "userDataDir lock for session %s", pid.strip(), session_name)
+                killed = True
+            except Exception as e:
+                logging.info("[wake-recover] taskkill pid=%s failed: %s", pid.strip(), e)
+        # Drop the stale lockfile so a relaunch is not refused even if the
+        # process was already gone but left the file behind.
+        try:
+            from app_paths import data_path
+            udd = os.path.join(os.path.dirname(data_path("settings.json")),
+                               "..", "..", "api", "userDataDir", session_name)
+            for name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"):
+                p = os.path.join(udd, name)
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        logging.info("[wake-recover] removed stale %s", name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return killed
+
     def _force_whatsapp_session_restart(self):
         """Close then re-start the WhatsApp session so Chrome reloads
         web.whatsapp.com and rebuilds a dead stream. Safe on a live session:
@@ -1884,6 +1972,11 @@ class MainWindow(wx.Frame):
         # to CLOSED before re-starting (start-session is a no-op unless CLOSED —
         # see createSessionUtil.ts:128).
         time.sleep(3)
+        # A hibernation-suspended chrome.exe may still hold the userDataDir lock,
+        # which makes the start-session below fail with "browser is already
+        # running" and hangs the session in INITIALIZING forever. Kill that
+        # orphan (this account's only) and clear its lockfile first.
+        self._kill_orphaned_chrome_for_session()
         try:
             requests.post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{token}/start-session",
