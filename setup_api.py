@@ -55,7 +55,7 @@ CUSTOM_SRC_FILES = [
 def _load_env() -> dict:
     """Parse the root .env file and return a key→value dict."""
     env_path = os.path.join(ROOT_DIR, ".env")
-    result = {"WPPCONNECT_TAG_VERSION": "2.10.0"}
+    result = {}
     if not os.path.isfile(env_path):
         return result
     with open(env_path, encoding="utf-8") as fh:
@@ -186,7 +186,7 @@ def main():
             print("[INFO] Git command not found in PATH — downloading WPPConnect Server ZIP from GitHub...")
             import urllib.request
             import zipfile
-            zip_url = f"https://github.com/wppconnect-team/wppconnect-server/archive/refs/tags/{tag}.zip" if tag else "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
+            zip_url = "https://github.com/wppconnect-team/wppconnect-server/archive/refs/heads/main.zip"
             zip_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp.zip")
             extract_tmp = os.path.join(ROOT_DIR, "wppconnect_server_tmp_dir")
             try:
@@ -226,23 +226,6 @@ def main():
             with open(dest_path, "wb") as f:
                 f.write(content)
             print(f"[INFO] Restored custom file: {rel_path}")
-
-    if tag and shutil.which("git"):
-        print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "fetch", "--tags"], cwd=CLIENT_API_DIR, check=False)
-        tag_to_use = tag if tag.startswith("v") else f"v{tag}"
-        res = _run(["git", "checkout", "-f", tag_to_use], cwd=CLIENT_API_DIR, check=False)
-        if res.returncode != 0:
-            tag_alt = tag[1:] if tag.startswith("v") else tag
-            _run(["git", "checkout", "-f", tag_alt], cwd=CLIENT_API_DIR, check=False)
-
-        # Re-restore after checkout just in case git checkout overwrites files
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-        print("[INFO] Re-applied custom files after checking out tag.")
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
