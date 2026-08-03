@@ -38,6 +38,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
     "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git",
+    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
     "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git",
     "archiver": "^7.0.1",
     "axios": "^1.14.0",
@@ -123,5 +124,11 @@
     "crypto-js": "^4.2.0",
     "mongoose": "^8.23.0",
     "redis": "^4.7.1"
+  },
+  "overrides": {
+    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git"
+  },
+  "resolutions": {
+    "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git"
   }
 }
