@@ -664,9 +664,25 @@ class StatusPanel(wx.Panel):
             else:
                 try:
                     self._audio_stream.play()
+                    self._is_playing = True
                 except Exception:
-                    self.main_window.sound_system.handle_playback_failure()
-                self._is_playing = True
+                    # BASS_Free()/BASS_Init() from a device switch (Settings,
+                    # or a startup fallback) invalidates this paused stream's
+                    # BASS handle — replaying it after falling back to the
+                    # default device would fail again the same way. There's
+                    # no cheap way to resume a freed stream at its old
+                    # position, so restart this status's audio from the
+                    # beginning instead of leaving it silently stuck paused.
+                    if self.main_window.sound_system.handle_playback_failure():
+                        temp_file = self._audio_temp_file
+                        self._audio_stream = None
+                        # _play_file() below calls _stop_playback() first,
+                        # which deletes self._audio_temp_file from disk if
+                        # it's still set — clear it here so that doesn't
+                        # unlink the very file we're about to reopen.
+                        self._audio_temp_file = None
+                        if temp_file:
+                            self._play_file(temp_file)
         else:
             self._start_playback()
 
@@ -701,11 +717,22 @@ class StatusPanel(wx.Panel):
         try:
             self._audio_stream    = sl_stream.FileStream(file=path, decode=True)
             self._audio_temp_file = path
-            self._audio_stream.play()
+            try:
+                self._audio_stream.play()
+            except Exception:
+                # A device switch just before this (Settings, or a startup
+                # fallback) invalidates the stream we just created — BASS_Free()/
+                # BASS_Init() during handle_playback_failure()'s own fallback
+                # frees it too, so retrying play() on that same object would
+                # fail again the same way. Reopen a fresh one instead.
+                if self.main_window.sound_system.handle_playback_failure():
+                    self._audio_stream = sl_stream.FileStream(file=path, decode=True)
+                    self._audio_stream.play()
+                else:
+                    raise
             self._is_playing  = True
             self._audio_timer.Start(500)
         except Exception:
-            self.main_window.sound_system.handle_playback_failure()
             self._stop_playback()
 
     def _stop_playback(self):

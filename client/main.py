@@ -520,6 +520,19 @@ class MainWindow(wx.Frame):
         logging.info("MainWindow: Initializing sound system...")
         self.sound_system = SoundSystem(self, sound_dir=resource_path("sounds"))
         self.sound_system.start()
+
+        # Switch to the configured output device (Settings > Audio Devices)
+        # BEFORE loading any UI sound — Output.set_device() frees and
+        # reinitializes the whole BASS session (BASS_Free()/BASS_Init()),
+        # which invalidates every stream already created against it. Doing
+        # this after load_sounds() left every loaded Sound (startup.ogg
+        # included) pointing at a stream BASS had already freed out from
+        # under it, so nothing played. warn_on_failure is deferred to
+        # _apply_configured_audio_devices() below since i18n isn't ready yet.
+        self.sound_system.apply_output_device(
+            self.settings.get("audio_devices", {}).get("output_device_name", "")
+        )
+
         self.refresh_sound_packs()
         self.load_sounds()
 
@@ -4441,14 +4454,20 @@ class MainWindow(wx.Frame):
                 setattr(self, f"{key}_sound", NullSound())
 
     def _apply_configured_audio_devices(self):
-        """Apply the Settings > Audio Devices output/input device choices.
+        """Finish applying the Settings > Audio Devices output/input device
+        choices, and warn if either failed.
 
-        Called once at startup (after the sound system is up). A device
-        that isn't found or fails to open falls back to the Windows default
-        and warns — the stored setting is left as-is so the same device is
-        retried on the next launch (see core.sound_system.SoundSystem and
-        the Settings dialog's own validation for the other two points this
-        same policy applies at).
+        The output device itself was already switched to right after the
+        sound system started (before load_sounds(), see __init__) — this
+        call is deliberately a no-op if that already succeeded (Output.
+        set_device() only does real work when the target device differs
+        from the current one) and exists here purely to surface the failure
+        message box, which needs i18n (not ready yet at that earlier point).
+        A device that isn't found or fails to open falls back to the
+        Windows default and warns — the stored setting is left as-is so the
+        same device is retried on the next launch (see
+        core.sound_system.SoundSystem and the Settings dialog's own
+        validation for the other two points this same policy applies at).
         """
         audio_devices = self.settings.get("audio_devices", {})
 

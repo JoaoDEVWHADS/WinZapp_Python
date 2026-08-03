@@ -69,17 +69,30 @@ class TestMatchDevice:
 
 class _StubOutput:
     """Stands in for sound_lib.output.Output: records set_device() calls and
-    raises for indices in `fail_indices`, like a device that fails to open."""
+    raises for indices in `fail_indices`, like a device that fails to open.
+    Also exposes _device/free()/init_device() — SoundSystem._switch_to_default_device()
+    uses those directly instead of set_device(-1), which real BASS rejects
+    outright (see the docstring on that method)."""
 
     def __init__(self, fail_indices=None):
         self.fail_indices = fail_indices or set()
         self.current = -1
+        self._device = -1
         self.set_device_calls = []
+        self.free_calls = 0
 
     def set_device(self, device):
         self.set_device_calls.append(device)
         if device in self.fail_indices:
             raise Exception("simulated BASS device error")
+        self.current = device
+        self._device = device
+
+    def free(self):
+        self.free_calls += 1
+
+    def init_device(self, device=None):
+        self._device = device
         self.current = device
 
 
@@ -89,6 +102,10 @@ class _StubMainWindow:
         # (no wx.App is running in these tests).
         self.background_mode = True
         self.app_name = "WinZapp"
+        self.load_sounds_calls = 0
+
+    def load_sounds(self):
+        self.load_sounds_calls += 1
 
 
 def _make_sound_system(monkeypatch, name_to_index, fail_indices=None):
@@ -131,6 +148,25 @@ class TestApplyOutputDevice:
         ss.apply_output_device("Speakers")
         assert ss._warned_output_failure is False
 
+    def test_switching_back_to_default_uses_free_and_init_not_set_device(self, monkeypatch):
+        # Regression: sound_lib.output.Output.set_device(-1) always raised
+        # "illegal device number" on real BASS — it calls BASS_SetDevice(-1)
+        # internally, and -1 is only ever valid as a BASS_Init() argument.
+        # That exception used to be silently swallowed, so "switch back to
+        # default" was a no-op lying about success: the previously-selected
+        # device stayed active. Confirmed live against a real BASS device
+        # before writing this fix.
+        ss = _make_sound_system(monkeypatch, {"Speakers": 1})
+        ss.apply_output_device("Speakers")
+        assert ss.output.current == 1
+
+        ss.apply_output_device("")
+
+        assert ss.output.current == -1
+        assert ss.output.free_calls == 1
+        # -1 must never reach set_device() — only real device indices do.
+        assert -1 not in ss.output.set_device_calls
+
 
 class TestHandlePlaybackFailure:
     def test_no_configured_device_means_nothing_to_fall_back_from(self, monkeypatch):
@@ -142,6 +178,17 @@ class TestHandlePlaybackFailure:
         ss.apply_output_device("Speakers")
         assert ss.handle_playback_failure() is True
         assert ss.output.current == -1
+
+    def test_reloads_cached_sound_events_after_falling_back(self, monkeypatch):
+        # BASS_Free()/BASS_Init() during the fallback invalidates every
+        # cached Settings > Sound Events stream (startup_sound, error_sound,
+        # ...) that existed before it — reloading them here is what lets
+        # future calls to those cached objects recover on their own, instead
+        # of every one of their many call sites needing its own retry logic.
+        ss = _make_sound_system(monkeypatch, {"Speakers": 1})
+        ss.apply_output_device("Speakers")
+        ss.handle_playback_failure()
+        assert ss.main_window.load_sounds_calls == 1
 
     def test_repeated_failures_only_warn_once_per_session(self, monkeypatch):
         ss = _make_sound_system(monkeypatch, {"Speakers": 1})

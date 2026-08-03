@@ -4174,32 +4174,27 @@ class ConversationsPanel(wx.Panel):
 
         # ── Try decoded stream + Tempo FX (enables speed control) ───────────
         # A decoded stream (BASS_STREAM_DECODE) cannot be played directly; it
-        # must be wrapped by a BASS FX processor such as Tempo.  If the FX
-        # plugin is unavailable, fall back to a plain stream without the effect.
-        stream_ok = False
-        try:
-            self._audio_stream = sl_stream.FileStream(
-                file=self._audio_temp_file, decode=True
-            )
-            self._audio_tempo_ctrl = Tempo(self._audio_stream)
-            _speed = self._audio_speed_steps[self._audio_speed_index]
-            self._audio_tempo_ctrl.tempo = self._audio_tempo_map.get(_speed, 0)
-            stream_ok = True
-        except Exception:
-            # BASS FX not available or format not supported with decode=True;
-            # discard the broken stream and retry without decode.
-            self._audio_tempo_ctrl = None
-            self._audio_stream = None
-
-        if not stream_ok:
+        # must be wrapped by a BASS FX processor such as Tempo. If the FX
+        # plugin is unavailable, fall back to a plain stream without the
+        # effect. Pulled into a helper since a device-switch fallback below
+        # needs to reopen a brand new stream, not just retry the old one.
+        def _open_stream():
             try:
-                self._audio_stream = sl_stream.FileStream(
-                    file=self._audio_temp_file
-                )
-            except Exception as e:
-                logging.exception(f"[UI Audio Playback] Error creating fallback FileStream: {e}")
-                self._stop_audio()
-                return
+                s = sl_stream.FileStream(file=self._audio_temp_file, decode=True)
+                tempo = Tempo(s)
+                _speed = self._audio_speed_steps[self._audio_speed_index]
+                tempo.tempo = self._audio_tempo_map.get(_speed, 0)
+                return s, tempo
+            except Exception:
+                # BASS FX not available or format not supported with decode=True.
+                return sl_stream.FileStream(file=self._audio_temp_file), None
+
+        try:
+            self._audio_stream, self._audio_tempo_ctrl = _open_stream()
+        except Exception as e:
+            logging.exception(f"[UI Audio Playback] Error creating stream: {e}")
+            self._stop_audio()
+            return
 
         # ── Start playback ───────────────────────────────────────────────────
         # When Tempo FX is active the decode stream has no audio output of its
@@ -4209,21 +4204,45 @@ class ConversationsPanel(wx.Panel):
         self._audio_conv_jid   = (
             self.conversation.get("remoteJid", "") if self.conversation else ""
         )
+        playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+        # Restore saved position (e.g. when another audio preempted this one)
+        saved_pos = self._audio_positions.pop(msg_id, None)
+        if saved_pos:
+            try:
+                playback_ctrl.set_position(saved_pos)
+            except Exception:
+                pass
+
         try:
-            playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
-            # Restore saved position (e.g. when another audio preempted this one)
-            saved_pos = self._audio_positions.pop(msg_id, None)
-            if saved_pos:
-                try:
-                    playback_ctrl.set_position(saved_pos)
-                except Exception:
-                    pass
             playback_ctrl.play()
         except Exception as e:
             logging.exception(f"[UI Audio Playback] Error starting playback: {e}")
-            self.main_window.sound_system.handle_playback_failure()
-            self._stop_audio()
-            return
+            # The output device may have just been switched (Settings, or a
+            # fallback at startup) — BASS_Free()/BASS_Init() during that
+            # switch invalidates the stream we just tried to play on (a
+            # confirmed BASS behaviour, not a one-off glitch), so retrying
+            # play() on the SAME playback_ctrl would fail again with the
+            # same error. Reopen a fresh stream from the same (still valid)
+            # decrypted temp file instead, and play that.
+            if self.main_window.sound_system.handle_playback_failure():
+                try:
+                    self._audio_stream, self._audio_tempo_ctrl = _open_stream()
+                    playback_ctrl = (
+                        self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+                    )
+                    if saved_pos:
+                        try:
+                            playback_ctrl.set_position(saved_pos)
+                        except Exception:
+                            pass
+                    playback_ctrl.play()
+                except Exception as e2:
+                    logging.exception(f"[UI Audio Playback] Retry after device fallback also failed: {e2}")
+                    self._stop_audio()
+                    return
+            else:
+                self._stop_audio()
+                return
 
         self._is_audio_playing = True
         self._audio_timer.Start(200)

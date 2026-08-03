@@ -168,6 +168,25 @@ class SoundSystem:
         if not (self._load_bass_plugin('bass_aac.dll') or self._load_bass_plugin('bassaac.dll')):
             logging.warning("[sound_system] bass_aac.dll not loaded")
 
+    def _switch_to_default_device(self):
+        """Actually switch BASS back to the system default device.
+
+        sound_lib.output.Output.set_device(-1) does NOT work for this:
+        internally it calls BASS_Init(-1) (which correctly resolves -1 to
+        the real default device) but then ALSO calls BASS_SetDevice(-1)
+        unconditionally — and BASS_SetDevice rejects -1 outright ("illegal
+        device number"; -1 is only ever valid as a BASS_Init() argument).
+        That call raised every single time, silently swallowed by the
+        try/except this used to wrap it in, so "switch to default" was a
+        no-op that lied about succeeding: the previously-selected device
+        stayed active. Free + reinit directly instead, skipping Output.
+        set_device()'s own broken second call.
+        """
+        if self.output._device == -1:
+            return
+        self.output.free()
+        self.output.init_device(device=-1)
+
     def apply_output_device(self, device_name: str, warn_on_failure: bool = False) -> bool:
         """Switch the single process-wide BASS output device to the one
         named `device_name` (every stream anywhere in the app plays through
@@ -181,10 +200,7 @@ class SoundSystem:
         self._configured_output_device = device_name or ""
         self._warned_output_failure = False
         if not device_name:
-            try:
-                self.output.set_device(-1)
-            except Exception:
-                pass
+            self._switch_to_default_device()
             return True
 
         idx = find_output_device_index(device_name)
@@ -199,10 +215,7 @@ class SoundSystem:
                     device_name, e,
                 )
         if not ok:
-            try:
-                self.output.set_device(-1)
-            except Exception:
-                pass
+            self._switch_to_default_device()
             if warn_on_failure:
                 self._warn_device_failure("output", device_name)
         return ok
@@ -228,17 +241,27 @@ class SoundSystem:
         failures on the same device this session stay silent so a broken
         device doesn't spam a message box on every single sound.
 
-        Returns True if it just performed that fallback (caller may retry
-        the play() call once).
+        BASS_Free()/BASS_Init() during that fallback invalidates every BASS
+        stream that existed before it — including whichever one just failed
+        to play, so the caller must not retry play() on that same stream/
+        channel object (it'll raise the same "invalid handle" error again);
+        it needs to reopen a fresh one from the same source file instead.
+        This also reloads every cached Settings > Sound Events sound
+        (main_window.load_sounds()) so those recover for future calls too,
+        without needing every one of their many call sites to handle this.
+
+        Returns True if it just performed that fallback (caller should open
+        and play a brand new stream rather than retry the old one).
         """
         if not self._configured_output_device or self._warned_output_failure:
             return False
         self._warned_output_failure = True
         name = self._configured_output_device
+        self._switch_to_default_device()
         try:
-            self.output.set_device(-1)
+            self.main_window.load_sounds()
         except Exception:
-            pass
+            logging.exception("[sound_system] load_sounds() failed while recovering from a playback failure")
         self._warn_device_failure("output", name)
         return True
 
@@ -497,11 +520,20 @@ class Sound(stream.FileStream):
             super().play()
         except Exception:
             # The configured output device may have gone away mid-session
-            # (unplugged, disabled) after having worked fine earlier —
-            # fall back to the system default and retry once.
+            # (unplugged, disabled) after having worked fine earlier — fall
+            # back to the system default. Retrying super().play() on `self`
+            # would still fail: handle_playback_failure()'s BASS_Free()/
+            # BASS_Init() invalidates this exact stream's BASS handle too
+            # (confirmed live — same "invalid handle" error), so recovering
+            # THIS particular play() call means reopening a fresh stream
+            # from the same file rather than reusing `self`.
+            # handle_playback_failure() itself already reloads every cached
+            # Sound Events sound via main_window.load_sounds(), so future
+            # calls to those (e.g. self.main_window.startup_sound) recover
+            # on their own without going through this fallback again.
             if self.sound_system.handle_playback_failure():
                 try:
-                    super().play()
+                    stream.FileStream(file=self.file).play()
                 except Exception:
                     pass
 
