@@ -866,35 +866,21 @@ class MainWindow(wx.Frame):
                 # "Initialize websocket" comment above). Nothing else to do.
                 logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
                 return
-            try:
-                logging.info("MainWindow: Connecting WebSocket...")
-                self.connect_websocket()
-            except Exception as e:
-                logging.exception("MainWindow: Exception during websocket connection")
-                self.error_sound.play()
-                error_str = str(e)
-                # If the instance does not exist on the server (e.g. database recreated/wiped),
-                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
-                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
-                    def _gui_logout():
-                        wx.MessageBox(
-                            self.i18n.t("device_logged_out"),
-                            self.i18n.t("error").format(self.app_name),
-                            wx.OK | wx.ICON_ERROR,
-                        )
-                        self._on_disconnect()
-                    wx.CallAfter(_gui_logout)
-                else:
-                    def _gui_failed():
-                        wx.MessageBox(
-                            self.i18n.t("websocket_failed_reconnect"),
-                            self.i18n.t("connection_error"),
-                            wx.OK | wx.ICON_WARNING,
-                        )
-                        self.connect.show_connection_dial()
-                    wx.CallAfter(_gui_failed)
-                self._just_paired = True
+            ws_connected = False
+            for attempt in range(5):
+                try:
+                    logging.info(f"MainWindow: Connecting WebSocket... attempt {attempt + 1}")
+                    self.connect_websocket()
+                    ws_connected = True
+                    break
+                except Exception as e:
+                    logging.warning(f"MainWindow: WebSocket connect attempt {attempt + 1} failed: {e}")
+                    time.sleep(2)
+
+            if not ws_connected:
+                logging.warning("MainWindow: WebSocket could not connect during startup; background HTTP probe will auto-connect when ready.")
+                self._set_wa_connected(False, "WebSocket initial connection failed")
+            self._just_paired = True
 
         threading.Thread(target=_connect_bg, daemon=True).start()
         
