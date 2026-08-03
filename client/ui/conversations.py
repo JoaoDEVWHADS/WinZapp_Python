@@ -1674,9 +1674,8 @@ class ConversationsPanel(wx.Panel):
                 # it (CPU/GIL contention). Logged so choppy recordings are
                 # diagnosable; the larger frames_per_buffer below minimises it.
                 logging.debug("[audio] input stream status flag: %s", status)
-            if not self._recording_paused:
-                self._recording_frames.append(in_data)
-            return (None, pyaudio.paContinue)
+            pa_cont = getattr(pyaudio, "paContinue", 0) if pyaudio is not None else 0
+            return (None, pa_cont)
 
         # Try each (rate, channels) combination in preference order (shared
         # with core.audio_devices.test_input_device()'s Settings-dialog
