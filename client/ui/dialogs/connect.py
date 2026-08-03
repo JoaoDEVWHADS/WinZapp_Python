@@ -60,9 +60,10 @@ class Connect:
         """
         Start/Create a WhatsApp session in the local WPPConnect Server.
         """
+        session_name = token.split(':')[0] if ':' in token else token
         url = (
             f"{self.main_window.wpp_server}"
-            f":{self.main_window.wpp_port}/api/{token}/start-session"
+            f":{self.main_window.wpp_port}/api/{session_name}/start-session"
         )
         payload = {
             "waitQrCode": False
