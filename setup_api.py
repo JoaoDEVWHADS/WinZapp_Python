@@ -18,7 +18,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 
 # ---------------------------------------------------------------------------
 
@@ -304,8 +303,6 @@ def main():
             _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
 
         # Run npm run build
-        print("[INFO] Pausando 8 segundos (número da sorte 🍀) para consolidação das dependências...")
-        time.sleep(8)
         print("[INFO] Compiling WPPConnect Server...")
         if npm_bin.endswith("npm-cli.js"):
             _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
