@@ -77,6 +77,24 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
+      - name: Cache Pip Wheels
+        id: cache-pip-wheels
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-wheels-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-wheels-${{ runner.os }}-
+
+      - name: Cache Global NPM
+        id: cache-npm-global
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\npm-cache
+          key: npm-global-${{ runner.os }}-${{ hashFiles('client/api_patches/package.json') }}
+          restore-keys: |
+            npm-global-${{ runner.os }}-
+
       - name: Cache Node.js Portátil
         id: cache-node
         uses: actions/cache@v4
@@ -100,12 +118,31 @@ jobs:
           restore-keys: |
             npm-packages-
 
+      - name: Cache Build Dist da WPPConnect API
+        id: cache-api-dist
+        uses: actions/cache@v4
+        with:
+          path: client/api/dist
+          key: api-dist-${{ hashFiles('client/api_patches/**') }}
+          restore-keys: |
+            api-dist-
+
       - name: Cache Chrome do Puppeteer
         id: cache-puppeteer-chrome
         uses: actions/cache@v4
         with:
           path: client/api/.cache
           key: puppeteer-chrome-${{ hashFiles('client/api_patches/package.json') }}
+
+      - name: Cache PyInstaller
+        id: cache-pyinstaller
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\pyinstaller
+          key: pyinstaller-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pyinstaller-${{ runner.os }}-
 
       - name: Executar Master Builder (Prepara Ambiente, Node, MinGit, DLLs e API)
         run: |
