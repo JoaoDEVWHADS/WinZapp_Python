@@ -22,6 +22,8 @@ function findChromeExecutable(dir, depth) {
       const found = findChromeExecutable(full, depth + 1);
       if (found) return found;
     } else if (
+      entry.name === 'chrome-headless-shell.exe' ||
+      entry.name === 'chrome-headless-shell' ||
       entry.name === 'chrome.exe' ||
       entry.name === 'chrome' ||
       entry.name === 'Chromium'
@@ -58,8 +60,8 @@ if (!hasChrome) {
     // is no npx.cmd shim inside the portable extraction on every layout.
     const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
     const npxCmd = fs.existsSync(npxCli)
-      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome`
-      : 'npx puppeteer browsers install chrome';
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome-headless-shell`
+      : 'npx puppeteer browsers install chrome-headless-shell';
     execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',

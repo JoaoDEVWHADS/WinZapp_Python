@@ -45,13 +45,17 @@ export const chromiumArgs = [
   '--disable-voice-input',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
-  '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
+  '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction,MediaRouter,DialMediaRouteProvider,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,CertificateTransparencyComponentUpdater',
   '--disable-software-rasterizer',
   '--disable-ipc-flooding-protection',
   '--password-store=basic',
   '--use-mock-keychain',
   '--no-pings',
   '--disable-client-side-phishing-detection',
+  '--disable-breakpad',
+  '--disable-component-extensions-with-background-pages',
+  '--disable-background-timer-throttling',
+  '--disable-popup-blocking',
 ];
 // eslint-disable-next-line prefer-const
 export let clientsArray: Whatsapp[] = [];

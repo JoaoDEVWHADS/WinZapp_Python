@@ -45,6 +45,10 @@ export default {
   },
   createOptions: {
     autoClose: 0,
+    headless: 'shell',
+    puppeteerOptions: {
+      headless: 'shell',
+    },
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',
@@ -76,13 +80,18 @@ export default {
       '--disable-voice-input',
       '--disable-renderer-backgrounding',
       '--disable-backgrounding-occluded-windows',
-      '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
+      '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction,MediaRouter,DialMediaRouteProvider,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,CertificateTransparencyComponentUpdater',
       '--disable-software-rasterizer',
       '--disable-ipc-flooding-protection',
       '--password-store=basic',
       '--use-mock-keychain',
       '--no-pings',
       '--disable-client-side-phishing-detection',
+      '--disable-breakpad',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-background-timer-throttling',
+      '--disable-client-side-phishing-detection',
+      '--disable-popup-blocking',
     ],
     /**
      * Example of configuring the linkPreview generator
