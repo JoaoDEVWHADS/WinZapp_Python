@@ -10,6 +10,7 @@
     "url": "https://github.com/wppconnect-team/wppconnect-server"
   },
   "scripts": {
+    "postinstall": "npx --yes @puppeteer/browsers install chrome@stable --path ./chrome",
     "build:types": "tsc",
     "build:js": "rimraf dist && babel src --out-dir dist --extensions \".ts,.tsx\" --source-maps inline --copy-files",
     "build": "npm run build:types && npm run build:js",
@@ -37,9 +38,11 @@
   "packageManager": "yarn@4.14.1",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
+    "@puppeteer/browsers": "^2.7.1",
     "@wppconnect-team/wa-js": "git+https://github.com/wppconnect-team/wa-js.git",
     "@wppconnect-team/wa-version": "git+https://github.com/wppconnect-team/wa-version.git",
     "@wppconnect-team/wppconnect": "git+https://github.com/wppconnect-team/wppconnect.git",
+    "puppeteer": "^24.0.0",
     "archiver": "^7.0.1",
     "axios": "^1.14.0",
     "bcrypt": "^6.0.0",
