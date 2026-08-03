@@ -662,20 +662,6 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 4.5: download chrome if using modern puppeteer ───────
-            self._set_stage("Baixando executável do Chrome (puppeteer)...", *stages["chrome"])
-            ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
-                cwd=api_dir,
-                env=npm_env,
-            )
-            # Do not fail hard if this step fails (e.g. offline setup where Chrome was pre-copied)
-            if not ok:
-                logging.warning(f"Failed to install Chrome browser via Puppeteer CLI: {err}")
-
-            if self._cancelled:
-                return
-
             # ── Step 4.6: npm run db:generate (only if the script is defined) ──
             # Documented as part of this flow but previously never actually
             # implemented here (only the separate ModuleInstallDialog this
