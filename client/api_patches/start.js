@@ -38,7 +38,37 @@ const chromeExecutable = fs.existsSync(puppeteerCacheDir)
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
-  console.log('[WinZapp Warning] Custom Chrome executable not found in client/api/chrome. Puppeteer will attempt to launch default browser.');
+  console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
+  try {
+    const { execSync } = require('child_process');
+    const nodeDir = path.dirname(process.execPath);
+    const env = { 
+      ...process.env, 
+      PUPPETEER_CACHE_DIR: puppeteerCacheDir 
+    };
+    if (process.platform === 'win32') {
+      env.Path = `${nodeDir};${env.Path || ''};${env.PATH || ''}`;
+    } else {
+      env.PATH = `${nodeDir}:${env.PATH || ''}`;
+    }
+    // Prefer invoking npm's own npx-cli.js with the Node binary we are already
+    // running under. WinZapp ships a portable Node in client/node/, and on a
+    // machine with no system-wide Node the bare `npx` command simply does not
+    // resolve — prepending nodeDir to PATH above is not enough, because there
+    // is no npx.cmd shim inside the portable extraction on every layout.
+    const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
+    const npxCmd = fs.existsSync(npxCli)
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome`
+      : 'npx puppeteer browsers install chrome';
+    execSync(npxCmd, {
+      cwd: __dirname,
+      stdio: 'inherit',
+      env: env
+    });
+    console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
+  } catch (err) {
+    console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err);
+  }
 }
 
 // Carrega a configuração padrão compilada

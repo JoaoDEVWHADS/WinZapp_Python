@@ -1613,18 +1613,64 @@ export async function getMessages(req: Request, res: Response) {
         return result;
       }, { chatId: phone, targetCount, id: id as string });
     } else {
-      if (phone && phone.endsWith('@lid')) {
-        // Direct page evaluate bypasses strict NodeJS TS validations inside WPPConnect wrapper package
-        response = await req.client.page.evaluate(({ chatId, params }) => {
-          return (window as any).WAPI.getMessages(chatId, params);
-        }, { chatId: phone, params: { count: targetCount, direction: direction.toString() as any, id: id as string } });
-      } else {
-        response = await req.client.getMessages(`${phone}`, {
-          count: targetCount,
-          direction: direction.toString() as any,
-          id: id as string,
-        });
-      }
+      // WinZapp patch: no anchor id — this is the plain "give me up to
+      // `count` messages" call sync_chat_messages() makes for every chat on
+      // every sync. WAPI.getMessages() only ever returns what WhatsApp Web's
+      // in-browser Store already has loaded for that chat — for a chat that
+      // hasn't been opened inside this Chrome session recently, that can be
+      // a small number (WhatsApp Web itself only keeps a short initial
+      // window in memory per chat until something scrolls/asks for more) —
+      // e.g. `count=200` silently coming back with only ~15 messages,
+      // regardless of how much real history the account actually has.
+      // WAPI.loadEarlierMessages() (the same call the deprecated
+      // client.loadEarlierMessages() wrapper uses) pulls more history from
+      // the server into Store on demand; do the same here in a loop until
+      // either `count` is satisfied or a pass brings back no additional
+      // messages (real end of history).
+      //
+      // Deliberately WAPI throughout, matching exactly what this branch
+      // called before (client.getMessages() → WAPI.getMessages() — see
+      // wppconnect's own whatsapp.js) and what the @lid page.evaluate below
+      // already called directly. An earlier version of this patch used
+      // WPP.chat.getMessages()/WPP.chat.loadEarlierMessages() instead — a
+      // different, modern API with no relation to the legacy WAPI bridge
+      // this server otherwise runs on — which came back with EMPTY results
+      // for at least one real group chat. That empty (not failed, not
+      // null — a valid but empty array) response is indistinguishable from
+      // "every message was deleted on the phone" to WinZapp's own
+      // _fetch_remote_message_ids()/_reconcile_active_conversation_with_remote(),
+      // and was reported live as a group's entire message history vanishing
+      // from the currently open conversation mid-read, "recovering" only
+      // once a new live message forced a repaint.
+      response = await req.client.page.evaluate(async ({ chatId, targetCount }) => {
+        const fetchBatch = async () =>
+          (window as any).WAPI.getMessages(chatId, {
+            count: targetCount,
+            direction: 'before',
+            id: null,
+          });
+
+        let result = await fetchBatch();
+        let attempts = 0;
+        const maxAttempts = 10;
+        while (
+          result && result.length < targetCount &&
+          (window as any).WAPI?.loadEarlierMessages &&
+          attempts < maxAttempts
+        ) {
+          const before = result.length;
+          try {
+            await (window as any).WAPI.loadEarlierMessages(chatId);
+          } catch (e) {
+            break;
+          }
+          const next = await fetchBatch();
+          if (!next || next.length <= before) break; // no more history available
+          result = next;
+          attempts++;
+        }
+        return result;
+      }, { chatId: phone, targetCount });
     }
     res.status(200).json({ status: 'success', response: response });
   } catch (e: any) {
@@ -1740,18 +1786,78 @@ export async function sendMute(req: Request, res: Response) {
    */
   const { phone, time, type = 'hours', isGroup = false } = req.body;
 
+  /*
+   * WinZapp patch — do not call req.client.sendMute().
+   *
+   * That layer runs the legacy `WAPI.sendMute` shim, which drives
+   * `window.Store.SendMute.sendConversationMute()` directly and then decides
+   * success purely from `response.status === 200`. On current WhatsApp Web
+   * builds that call no longer answers with the shape the shim expects, so
+   * every mute came back as
+   *   {"erro":true,"text":"This chat is already mute","type":"sendMute"}
+   * — a hardcoded string the shim emits for *any* non-200, regardless of
+   * whether the chat was actually muted. WPPConnect's own layer rethrows that
+   * object, so this route answered 500 and no chat could ever be muted.
+   * (The `to` field in those errors is a MsgKey, not a chat — more evidence
+   * that the shim's `getchatId()` lookup is resolving against internals that
+   * moved.)
+   *
+   * `WPP.chat.mute()`/`WPP.chat.unmute()` from the bundled wa-js are the
+   * maintained equivalents and take an absolute expiration (or a duration in
+   * seconds), so they are also immune to the "already muted" state the old
+   * path tripped over: re-muting an already-muted chat simply moves the
+   * expiration.
+   */
+  const seconds = (() => {
+    const n = Number(time) || 0;
+    switch (String(type)) {
+      case 'minutes':
+        return n * 60;
+      case 'day':
+      case 'days':
+        return n * 86400;
+      case 'year':
+      case 'years':
+        return n * 31536000;
+      case 'hours':
+      default:
+        return n * 3600;
+    }
+  })();
+
   try {
     let response;
     for (const contato of contactToArray(phone, isGroup)) {
-      response = await req.client.sendMute(`${contato}`, time, type);
+      response = await req.client.page.evaluate(
+        async ({ chatId, duration }) => {
+          const WPP = (window as any).WPP;
+          if (!WPP?.chat?.mute || !WPP?.chat?.unmute) {
+            throw new Error('WPP.chat.mute is unavailable in this wa-js build');
+          }
+          if (duration <= 0) {
+            await WPP.chat.unmute(chatId);
+            return { wid: chatId, isMuted: false, expiration: 0 };
+          }
+          const result = await WPP.chat.mute(chatId, { duration });
+          // The Wid instance does not survive serialization to Node.
+          return {
+            wid: String(result?.wid?._serialized ?? chatId),
+            isMuted: !!result?.isMuted,
+            expiration: Number(result?.expiration ?? 0),
+          };
+        },
+        { chatId: `${contato}`, duration: seconds }
+      );
     }
 
     res.status(200).json({ status: 'success', response: response });
-  } catch (error) {
+  } catch (error: any) {
     req.logger.error(error);
-    res
-      .status(500)
-      .json({ status: 'error', message: 'Error on send mute', error: error });
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on send mute',
+      error: error?.message || error,
+    });
   }
 }
 

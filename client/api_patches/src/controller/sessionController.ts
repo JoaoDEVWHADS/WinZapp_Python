@@ -265,7 +265,7 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
       req.logger.info(`[${session}] Force killing session because status is ${client.status}`);
       client.shouldClose = true;
       try {
-        SessionUtil.forceKillSession(session);
+        SessionUtil.forceKillSession(session, req.logger);
       } catch (e) {}
       (clientsArray as any)[session] = undefined;
       return await res
@@ -376,6 +376,68 @@ export async function checkConnectionSession(
     res.status(200).json({ status: true, message: 'Connected' });
   } catch (error) {
     res.status(200).json({ status: false, message: 'Disconnected' });
+  }
+}
+
+// WinZapp patch: nudge WhatsApp Web's own multi-device socket back open.
+//
+// Reported live: after the OS resumes from sleep, WinZapp's status-session
+// probe keeps reporting the WPPConnect session object as "CONNECTED" (that
+// string is just cached at session creation — see checkConnectionSession's
+// own comment above it), but the *live* isConnected() probe never comes back
+// true again, forever — the app is stuck offline until the whole program is
+// restarted (a fresh Puppeteer/Chrome + fresh page).
+//
+// The real WhatsApp Web client re-opens its socket stream via
+// WPP.whatsapp.Cmd.openSocketStream() — normally triggered by the page's own
+// visibility/focus/online DOM events. This session's Chrome page runs
+// headless and is never focused or brought to the foreground, so nothing
+// ever fires those events after a suspend/resume cycle — the socket that
+// went down during sleep has no trigger left to reconnect it, unlike a real,
+// visible browser tab a user might click back into. Calling the same
+// internal command directly reproduces whatever a focus/visibility event
+// would have triggered on a normal tab.
+export async function reconnectSocketStream(req: Request, res: Response) {
+  /**
+   * #swagger.tags = ["Auth"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+   */
+  try {
+    const page = (req.client as any)?.page;
+    if (!page || page.isClosed()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'The WhatsApp session is not active.',
+      });
+    }
+    const result = await page.evaluate(() => {
+      try {
+        const wpp = (window as any).WPP;
+        if (wpp?.whatsapp?.Cmd?.openSocketStream) {
+          wpp.whatsapp.Cmd.openSocketStream();
+          return { ok: true };
+        }
+        return { ok: false, error: 'WPP.whatsapp.Cmd.openSocketStream not available' };
+      } catch (e: any) {
+        return { ok: false, error: e?.message || String(e) };
+      }
+    });
+    if (!result?.ok) {
+      req.logger.warn(`[reconnectSocketStream] ${result?.error || 'unknown failure'}`);
+    }
+    res.status(200).json({ status: 'success', response: result });
+  } catch (error: any) {
+    req.logger.error(error);
+    res.status(500).json({
+      status: 'error',
+      message: error?.message || String(error),
+    });
   }
 }
 
@@ -531,20 +593,35 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
+    // Ensure client browser context is alive
+    if (client.page && client.page.isClosed()) {
+      req.logger.warn(`Browser page is closed for session when downloading media ${messageId}`);
+      return res.status(503).json({
+        status: 'error',
+        message: 'Browser session is closed or re-connecting',
+      });
+    }
+
     // Ensure it contains media properties or has mimetype
     const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
     if (!mediaUrl) {
-      if (typeof (client as any).downloadMedia === 'function') {
-        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia...`);
+      if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
+        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia with 5s timeout...`);
         try {
           let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+          const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
+            req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
+            return null;
+          }).finally(() => {
             if (timer) clearTimeout(timer);
           });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
+          const timeoutPromise = new Promise<null>((resolve) => {
+            timer = setTimeout(() => {
+              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              resolve(null);
+            }, 5000);
           });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
+          let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
             let mimetype = message.mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
@@ -576,19 +653,21 @@ export async function getMediaByMessage(req: Request, res: Response) {
       
       // Attempt browser-side recovery: fetch the message fresh from WhatsApp Web to get updated CDN URLs
       let freshMessage: any = null;
-      try {
-        freshMessage = await client.getMessageById(messageId);
-      } catch (err) {}
+      if (client.page && !client.page.isClosed()) {
+        try {
+          freshMessage = await client.getMessageById(messageId);
+        } catch (err) {}
 
-      if (!freshMessage && messageId) {
-        const parts = messageId.split('_');
-        if (parts.length >= 2) {
-          const chatId = parts[1];
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
-            try {
-              await client.loadEarlierMessages(chatId);
-              freshMessage = await client.getMessageById(messageId);
-            } catch (err) {}
+        if (!freshMessage && messageId) {
+          const parts = messageId.split('_');
+          if (parts.length >= 2) {
+            const chatId = parts[1];
+            if (chatId && typeof client.loadEarlierMessages === 'function') {
+              try {
+                await client.loadEarlierMessages(chatId);
+                freshMessage = await client.getMessageById(messageId);
+              } catch (err) {}
+            }
           }
         }
       }
@@ -607,16 +686,22 @@ export async function getMediaByMessage(req: Request, res: Response) {
       }
 
       // Final fallback to WPPConnect's downloadMedia
-      if (typeof (client as any).downloadMedia === 'function') {
+      if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
         try {
           let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).finally(() => {
+          const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
+            req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
+            return null;
+          }).finally(() => {
             if (timer) clearTimeout(timer);
           });
-          const timeoutPromise = new Promise<string>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Timeout downloading media via Puppeteer')), 30000);
+          const timeoutPromise = new Promise<null>((resolve) => {
+            timer = setTimeout(() => {
+              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              resolve(null);
+            }, 5000);
           });
-          let base64: string = await Promise.race([downloadPromise, timeoutPromise]);
+          let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
             let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {

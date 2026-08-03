@@ -583,6 +583,53 @@ class WebSocketClient:
                         # Never let a refresh failure go unnoticed again — this
                         # bug hid behind a silent `pass` for exactly that reason.
                         logging.exception("[on_qrcode_update] Failed to refresh the pairing code field.")
+            elif (
+                base64_img
+                and not self.main_window._is_pairing_dialog_active()
+                and self.main_window.settings.get("privateinfo", {}).get("paired")
+                and not getattr(self.main_window, "_auto_repair_dialog_shown", False)
+            ):
+                # WPPConnect just generated a real QR/pairing code with no
+                # pairing dialog open at all — it only does this once it has
+                # already decided the stored session can't be restored, so
+                # this is a reliable "you need to re-pair" signal on its own,
+                # unlike the coarse status-session string the health-check
+                # poll watches (which needs several minutes of confirmation
+                # to rule out a normal slow boot). Surfacing the pairing
+                # dialog immediately — instead of leaving the user staring at
+                # "offline" for up to _LOGOUT_STARTUP_GRACE_SECONDS /
+                # _AUTO_RESTART_LOGOUT_GRACE_SECONDS with no explanation —
+                # was an explicit, accepted tradeoff: this dialog's own
+                # Cancel/close buttons quit the app / drop the WebSocket for
+                # good, which is fine here specifically because a session
+                # that reached this point has nothing left to lose by
+                # closing — see the conversation this was decided in.
+                # _auto_repair_dialog_shown latches so a 20-30s QR refresh
+                # while the user is still deciding what to do doesn't pop
+                # a second nested dialog.
+                self.main_window._auto_repair_dialog_shown = True
+                logging.warning(
+                    "[on_qrcode_update] Session needs re-pairing while "
+                    "previously paired, with no pairing dialog open — "
+                    "showing it proactively instead of waiting for the "
+                    "slower confirmed-logout detection."
+                )
+                # Same sound + MessageBox as the confirmed-logout path's own
+                # _logout_with_warning() (main.py) — recognisable, expected
+                # feedback that something happened, just without that path's
+                # _on_disconnect() call (no data wipe). Also bring the window
+                # to the foreground first: if it was minimized to the tray
+                # (background mode), a modal dialog appearing behind/under
+                # everything with no prior audible cue is easy to miss
+                # entirely — reported live as exactly that.
+                self.main_window.restore_window()
+                self.main_window.error_sound.play()
+                wx.MessageBox(
+                    self.i18n.t("device_logged_out"),
+                    self.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+                self.connect.show_connection_dial()
 
         wx.CallAfter(_update_ui)
 

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 import { create, SocketState, StatusFind } from '@wppconnect-team/wppconnect';
-import { exec } from 'child_process';
+import { exec, execFile, execSync } from 'child_process';
 import { Request } from 'express';
 
 import { download } from '../controller/sessionController';
@@ -24,9 +24,84 @@ import { autoDownload, callWebHook, startHelper } from './functions';
 import { clientsArray, eventEmitter } from './sessionUtil';
 import Factory from './tokenStore/factory';
 
-function forceKillByUserDataDir(userDataDir: string) {
+/**
+ * Kill the actual Puppeteer/Chrome browser process (and its tree of child
+ * renderer/GPU processes) behind `page`, given a live handle to it.
+ *
+ * This is the precise, preferred kill path — used whenever a `page` is
+ * actually available (e.g. closeSession() on an already-created session).
+ * `page.browser().process()` returns Node's own ChildProcess for a
+ * locally-launched browser; Node's `ChildProcess.kill()` alone only signals
+ * that one process on Windows (Windows has no process-group SIGKILL
+ * cascade), so this shells out to `taskkill /T` for the actual tree-kill —
+ * the same thing @puppeteer/browsers' own Process.kill() does internally.
+ * Falls back to forceKillByUserDataDir() (below) when no page/pid is
+ * available, e.g. mid-pairing, before create() has returned.
+ */
+function forceKillBrowserProcess(page: any, logger?: any): boolean {
+  let pid: number | undefined;
+  try {
+    pid = page?.browser?.()?.process?.()?.pid;
+    if (!pid) return false;
+    if (process.platform === 'win32') {
+      execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' });
+    } else {
+      process.kill(pid, 'SIGKILL');
+    }
+    logger?.info?.(`[forceKillBrowserProcess] Killed browser process ${pid} and its tree`);
+    return true;
+  } catch (e: any) {
+    logger?.warn?.(
+      `[forceKillBrowserProcess] Failed to kill browser process ${pid}: ${e?.message || e}`
+    );
+    return false;
+  }
+}
+
+/**
+ * Best-effort fallback: kill whatever process (Chrome + its children) has
+ * this session's userDataDir on its command line, used when there is no
+ * live `page`/`pid` handle to kill precisely (e.g. shouldClose fires inside
+ * catchQR/catchLinkCode, which run synchronously *during* `create()` —
+ * before the `wppClient` it returns is even assigned, so nothing in this
+ * file can reach the browser directly yet).
+ *
+ * This used to be `exec('pkill -9 -f "<userDataDir>"')` unconditionally.
+ * `pkill` does not exist on Windows at all — Node's child_process.exec
+ * spawns it via cmd.exe, which can't find the command, and the callback
+ * here discarded the error — so on Windows this silently killed nothing,
+ * ever. That's the root cause behind WinZapp's WhatsApp Web session
+ * occasionally coming back "logged out" after exiting: closeSession()'s
+ * fast path (see sessionController.ts) skips the graceful
+ * `await client.close()` whenever the session isn't fully CONNECTED and
+ * relies entirely on this function instead — silently doing nothing left
+ * Chrome running, so WinZapp's own exit routine eventually had to
+ * `taskkill /F /T` the whole Node process tree once its grace period ran
+ * out, tearing down Chrome's profile (a LevelDB store) mid-write.
+ */
+function forceKillByUserDataDir(userDataDir: string, logger?: any) {
   if (!userDataDir) return;
-  exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  if (process.platform === 'win32') {
+    // Windows has no built-in "kill by command-line substring" either, so
+    // this uses PowerShell's CIM/WMI process query — the closest equivalent
+    // to `pkill -f` available without a third-party dependency.
+    const psFilter = userDataDir.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    const script =
+      `Get-CimInstance Win32_Process | ` +
+      `Where-Object { $_.CommandLine -like '*${psFilter}*' } | ` +
+      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      (err) => {
+        if (err) {
+          logger?.warn?.(`[forceKillByUserDataDir] PowerShell kill failed: ${err.message}`);
+        }
+      }
+    );
+  } else {
+    exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  }
 }
 
 /**
@@ -104,8 +179,11 @@ async function restoreMsgKeySerialized(
 }
 
 export default class CreateSessionUtil {
-  forceKillSession(session: string) {
-    forceKillByUserDataDir(`userDataDir/${session}`);
+  forceKillSession(session: string, logger?: any) {
+    const client: any = clientsArray[session];
+    if (!forceKillBrowserProcess(client?.page, logger)) {
+      forceKillByUserDataDir(`userDataDir/${session}`, logger);
+    }
   }
 
   startChatWootClient(client: any) {
@@ -134,7 +212,22 @@ export default class CreateSessionUtil {
       const tokenData = await myTokenStore.getToken(session);
 
       // we need this to update phone in config every time session starts, so we can ask for code for it again.
-      myTokenStore.setToken(session, tokenData ?? {});
+      //
+      // WinZapp patch: only rewrite the token when we actually read one back.
+      // Upstream writes `tokenData ?? {}`, so ANY failure to read the stored
+      // token — a transient fs error, a file still locked by a previous
+      // instance that was force-killed, a partially-written JSON — is
+      // immediately made permanent by overwriting it with an empty object.
+      // The saved WhatsApp Web credentials are then gone for good and the next
+      // start looks like a logout, even though the phone still lists the linked
+      // device. Reading nothing is not a reason to destroy what is on disk.
+      if (tokenData) {
+        myTokenStore.setToken(session, tokenData);
+      } else {
+        req.logger?.warn?.(
+          `[${session}] Token store returned no data — leaving the stored token untouched.`
+        );
+      }
 
       this.startChatWootClient(client);
 
@@ -150,6 +243,23 @@ export default class CreateSessionUtil {
           req.serverOptions.createOptions.puppeteerOptions || {}
         );
       }
+
+      // Best-effort kill for the shouldClose branches below. `wppClient` is
+      // only assigned once `create()` actually returns — catchLinkCode/
+      // catchQR/statusFind run synchronously *during* create() itself
+      // (before that assignment), so referencing `wppClient` there is a
+      // temporal-dead-zone ReferenceError, silently swallowed by their
+      // existing `try { wppClient.close() } catch {}`. This has the same
+      // problem and stays wrapped for the same reason, but tries the
+      // precise process-tree kill first and only falls back to the
+      // userDataDir scan when no live page/pid is reachable yet.
+      const killBrowserOrFallback = () => {
+        let killed = false;
+        try {
+          killed = forceKillBrowserProcess(wppClient?.page, req.logger);
+        } catch (e) {}
+        if (!killed) forceKillByUserDataDir(`userDataDir/${session}`, req.logger);
+      };
 
       const wppClient = await create(
         Object.assign(
@@ -183,8 +293,7 @@ export default class CreateSessionUtil {
             catchLinkCode: (code: string) => {
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
-                try { wppClient.close(); } catch (e) {}
-                forceKillByUserDataDir(`userDataDir/${session}`);
+                killBrowserOrFallback();
                 clientsArray[session] = undefined;
                 return;
               }
@@ -198,8 +307,7 @@ export default class CreateSessionUtil {
             ) => {
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
-                try { wppClient.close(); } catch (e) {}
-                forceKillByUserDataDir(`userDataDir/${session}`);
+                killBrowserOrFallback();
                 clientsArray[session] = undefined;
                 return;
               }
@@ -212,8 +320,7 @@ export default class CreateSessionUtil {
               try {
                 if ((client as any).shouldClose) {
                   req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
-                  try { wppClient.close(); } catch (e) {}
-                  forceKillByUserDataDir(`userDataDir/${session}`);
+                  killBrowserOrFallback();
                   clientsArray[session] = undefined;
                   return;
                 }
@@ -246,8 +353,7 @@ export default class CreateSessionUtil {
         if ((client as any).shouldClose) {
           req.logger.info(`[${session}] shouldClose detected by poller. Force-killing browser.`);
           clearInterval(shouldClosePoller);
-          try { wppClient.close(); } catch (e) {}
-          forceKillByUserDataDir(`userDataDir/${session}`);
+          killBrowserOrFallback();
           clientsArray[session] = undefined;
         }
       }, 2000);

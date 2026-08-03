@@ -56,6 +56,11 @@ routes.get(
   verifyToken,
   SessionController.checkConnectionSession
 );
+routes.post(
+  '/api/:session/reconnect-socket-stream',
+  verifyToken,
+  SessionController.reconnectSocketStream
+);
 routes.get(
   '/api/:session/get-media-by-message/:messageId',
   verifyToken,
@@ -125,6 +130,12 @@ routes.post(
   verifyToken,
   statusConnection,
   MessageController.editMessage
+);
+routes.post(
+  '/api/:session/pin-message',
+  verifyToken,
+  statusConnection,
+  MessageController.pinMessage
 );
 routes.post(
   '/api/:session/send-image',
