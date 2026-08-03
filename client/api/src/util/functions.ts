@@ -50,30 +50,34 @@ export function contactToArray(
   isLid?: boolean
 ) {
   const localArr: any = [];
+  const isGrp = isGroup === true || (isGroup as any) === 'true';
+  const isNsl = isNewsletter === true || (isNewsletter as any) === 'true';
+  const isLd = isLid === true || (isLid as any) === 'true';
+
   if (Array.isArray(number)) {
     for (let contact of number) {
       const isLidContact = typeof contact === 'string' && contact.endsWith('@lid');
-      isGroup || isNewsletter
+      isGrp || isNsl
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
       if (contact !== '')
-        if (isGroup) (localArr as any).push(`${contact}@g.us`);
-        else if (isNewsletter) (localArr as any).push(`${contact}@newsletter`);
-        else if (isLid || isLidContact)
+        if (isGrp) (localArr as any).push(`${contact}@g.us`);
+        else if (isNsl) (localArr as any).push(`${contact}@newsletter`);
+        else if (isLd || isLidContact)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
     }
   } else {
-    const arrContacts = number.split(/\s*[,;]\s*/g);
+    const arrContacts = typeof number === 'string' ? number.split(/\s*[,;]\s*/g) : [String(number || '')];
     for (let contact of arrContacts) {
       const isLidContact = typeof contact === 'string' && contact.endsWith('@lid');
-      isGroup || isNewsletter
+      isGrp || isNsl
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
       if (contact !== '')
-        if (isGroup) (localArr as any).push(`${contact}@g.us`);
-        else if (isNewsletter) (localArr as any).push(`${contact}@newsletter`);
-        else if (isLid || isLidContact)
+        if (isGrp) (localArr as any).push(`${contact}@g.us`);
+        else if (isNsl) (localArr as any).push(`${contact}@newsletter`);
+        else if (isLd || isLidContact)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
     }

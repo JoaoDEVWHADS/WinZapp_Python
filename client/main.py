@@ -9463,11 +9463,6 @@ class MainWindow(wx.Frame):
             if response.status_code == 404 and isinstance(body, dict):
                 if str(body.get("status", "")).lower() == "disconnected":
                     disconnected = True
-            if response.status_code in (500, 502, 503) and isinstance(body, dict):
-                err_obj = body.get("error", {})
-                err_name = str(err_obj.get("name", "")) if isinstance(err_obj, dict) else ""
-                if "TargetCloseError" in err_name or "ProtocolError" in err_name or "TargetCloseError" in str(body):
-                    disconnected = True
             if isinstance(body, dict):
                 messages = body.get("response", {})
                 messages = messages.get("message", []) if isinstance(messages, dict) else []
@@ -9476,8 +9471,8 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
         if disconnected:
-            logging.warning("[send] WhatsApp reported Disconnected or TargetCloseError — pausing queue and triggering session recovery")
-            self._set_wa_connected(False, "API answered Disconnected or TargetCloseError")
+            logging.warning("[send] WhatsApp reported Disconnected — pausing queue and triggering session recovery")
+            self._set_wa_connected(False, "API answered Disconnected")
             # Proactively schedule connection check to auto-recover session via HTTP
             wx.CallAfter(self.check_wa_connection_http)
         return disconnected
@@ -12512,6 +12507,12 @@ class MainWindow(wx.Frame):
             if quoted_id:
                 data["quotedMessageId"] = quoted_id
         # Scale timeout with file size: at least 1 s per 100 KB, min 120 s, max 30 min.
+        MAX_FILE_SIZE = 64 * 1024 * 1024  # 64 MB CDP browser limit
+        if file_size > MAX_FILE_SIZE:
+            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 64 MB browser upload limit."
+            logging.error("[send_media] %s", err_msg)
+            return {"ok": False, "error": err_msg, "retry": False}
+
         timeout = max(120, file_size // (100 * 1024))
         timeout = min(timeout, 1800)
 

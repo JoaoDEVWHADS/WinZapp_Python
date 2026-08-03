@@ -10,7 +10,10 @@ import uuid
 import wx
 import wx.adv
 import pyperclip
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
@@ -1682,12 +1685,49 @@ class ConversationsPanel(wx.Panel):
         # Prioritizing Mono avoids CPU-intensive downmixing loops in pure
         # Python.
         _configs = RECORDING_SAMPLE_CONFIGS
-        if self._recording_pa is None:
+        if self._recording_pa is None and pyaudio is not None:
             try:
                 self._recording_pa = pyaudio.PyAudio()
             except Exception as exc:
                 logging.error("[audio] Failed to initialize PyAudio: %s", exc)
+
+        if pyaudio is None or (self._recording_pa is None and pyaudio is None):
+            try:
+                import sounddevice as sd
+                def _sd_callback(indata, frames, time_info, status):
+                    if not self._recording_paused:
+                        self._recording_frames.append(indata.tobytes())
+                self._recording_actual_rate = 48000
+                self._recording_actual_ch = 1
+                self._is_recording = True
+                
+                # UI updates INSTANTLY (0.01s)
+                self.main_window.voicemsg_startrecording_sound.play()
+                _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+                if _rec_jid and not _rec_jid.endswith("@newsletter"):
+                    self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+                self.send_message_btn.Hide()
+                self.record_voice_message_btn.Hide()
+                self._add_attachment_btn.Hide()
+                self._pause_resume_btn.SetLabel(self.main_window.i18n.t("pause_recording"))
+                self._voice_panel.Show()
+                self.conversation_panel.Layout()
+                self._send_voice_btn.SetFocus()
+
+                def _bg_start_mic():
+                    try:
+                        sd_stream = sd.InputStream(samplerate=48000, channels=1, dtype='int16', callback=_sd_callback)
+                        sd_stream.start()
+                        self._sd_stream = sd_stream
+                        self._recording_stream = sd_stream
+                    except Exception as err:
+                        logging.error("[audio] Async sounddevice InputStream error: %s", err)
+                threading.Thread(target=_bg_start_mic, daemon=True).start()
                 return
+            except Exception as sd_exc:
+                logging.error("[audio] Failed sounddevice fallback recording: %s", sd_exc)
+                return
+
         pa = self._recording_pa
 
         def _try_open(device_index):
@@ -1767,7 +1807,14 @@ class ConversationsPanel(wx.Panel):
             self._send_voice_btn.SetFocus()
 
     def _stop_recording_stream(self):
-        """Stop and close the active PyAudio stream (safe to call when None)."""
+        """Stop and close the active stream (safe to call when None)."""
+        if hasattr(self, "_sd_stream") and self._sd_stream:
+            try:
+                self._sd_stream.stop()
+                self._sd_stream.close()
+            except Exception:
+                pass
+            self._sd_stream = None
         if self._recording_stream is not None:
             try:
                 self._recording_stream.stop_stream()
@@ -3483,9 +3530,11 @@ class ConversationsPanel(wx.Panel):
                             for msg in self._sorted_messages:
                                 self.messages_list.Append((self._render_message_line(msg),))
                                 
-                            self.messages_list.Focus(n_new)
-                            self.messages_list.Select(n_new, True)
-                            self.messages_list.EnsureVisible(n_new)
+                            focus_target = max(0, n_new - 1)
+                            self.messages_list.Focus(focus_target)
+                            self.messages_list.Select(focus_target, True)
+                            self.messages_list.EnsureVisible(focus_target)
+                            self.main_window.speak_output.output(f"Loaded {n_new} older messages.")
                             self._is_loading_more = False
                             return
                         else:
@@ -3618,9 +3667,11 @@ class ConversationsPanel(wx.Panel):
             for msg in self._sorted_messages:
                 self.messages_list.Append((self._render_message_line(msg),))
                 
-            self.messages_list.Focus(n_new)
-            self.messages_list.Select(n_new, True)
-            self.messages_list.EnsureVisible(n_new)
+            focus_target = max(0, n_new - 1)
+            self.messages_list.Focus(focus_target)
+            self.messages_list.Select(focus_target, True)
+            self.messages_list.EnsureVisible(focus_target)
+            self.main_window.speak_output.output(f"Loaded {n_new} older messages.")
         finally:
             self.messages_list.Thaw()
 
@@ -3651,10 +3702,11 @@ class ConversationsPanel(wx.Panel):
             for msg in self._sorted_messages:
                 self.messages_list.Append((self._render_message_line(msg),))
 
-            # Keep the previously-first item in view (now at index n_new)
-            self.messages_list.Focus(n_new)
-            self.messages_list.Select(n_new, True)
-            self.messages_list.EnsureVisible(n_new)
+            focus_target = max(0, n_new - 1)
+            self.messages_list.Focus(focus_target)
+            self.messages_list.Select(focus_target, True)
+            self.messages_list.EnsureVisible(focus_target)
+            self.main_window.speak_output.output(f"Loaded {n_new} older messages.")
         finally:
             self.messages_list.Thaw()
             self._is_loading_more = False

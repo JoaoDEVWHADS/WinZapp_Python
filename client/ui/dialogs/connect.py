@@ -279,23 +279,22 @@ class Connect:
                         self.main_window.settings.setdefault("privateinfo", {})["paired"] = True
                         self.main_window.save_settings()
                     return True
-                _INCOMPLETE = {"INITIALIZING", "QRCODE", "PHONECODE", "notLogged", ""}
-                if status not in _INCOMPLETE and is_paired:
-                    # Session is connected or closed (but closed is allowed if still paired)
+                _UNPAIRED_OR_LOGGED_OUT = {"QRCODE", "PHONECODE", "notLogged"}
+                if is_paired and status not in _UNPAIRED_OR_LOGGED_OUT:
+                    # Session is connected, initializing, or temporarily offline (but still paired)
                     return True
-                # Stale token — pairing was never finished. Clear it so the
+                # Stale token — pairing was never finished or user logged out. Clear it so the
                 # connection dialog is shown on this and future launches.
                 logging.warning(
                     "[check_connection_status] Token exists but session status is '%s' "
-                    "and paired=%s (pairing incomplete). Clearing stale WA_token and wiping local data.",
+                    "and paired=%s. Clearing WA_token.",
                     status,
                     is_paired,
                 )
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
-                if is_paired:
-                    # Clear local cached data if it was previously paired
+                if not is_paired:
                     self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
@@ -912,13 +911,17 @@ class Connect:
                 def _call_start_session():
                     try:
                         resp = requests.post(url, json=payload, headers=headers, timeout=120)
-                        # If the code came back inline (rare), unblock the wait loop.
+                        logging.info("[_call_start_session] start-session response status: %s, body: %s", resp.status_code, resp.text[:300])
+                        if resp.status_code not in (200, 201):
+                            logging.error("[_call_start_session] start-session failed with HTTP %s: %s", resp.status_code, resp.text[:200])
+                            ws_ref._phone_code_event.set()
+                            return
                         inline_code = resp.json().get("phoneCode", "")
                         if inline_code and not ws_ref._phone_code_event.is_set():
                             ws_ref._phone_code_value = str(inline_code)
                             ws_ref._phone_code_event.set()
-                    except Exception:
-                        # Signal the event so the main thread doesn't wait forever.
+                    except Exception as exc:
+                        logging.error("[_call_start_session] Exception during start-session: %s", exc)
                         ws_ref._phone_code_event.set()
 
                 threading.Thread(target=_call_start_session, daemon=True).start()

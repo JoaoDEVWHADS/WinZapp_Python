@@ -227,13 +227,6 @@ export async function sendFile(req: Request, res: Response) {
           filename: filename,
           caption: msg,
           quotedMsg: quotedMessageId,
-          // Without this, sendFile() defaults to type: 'auto-detect', which
-          // picks the WhatsApp message kind from the file's mimetype — so an
-          // .mp3/.jpg sent via the "Document" attachment option uploaded as
-          // a playable audio/photo message instead of a document, unlike
-          // the official client (which only auto-detects for the Photos &
-          // Videos/Audio menu options, and always uploads as a document
-          // otherwise). Respect the type WinZapp explicitly requested.
           type: type || 'auto-detect',
           ...options,
         })
@@ -241,10 +234,13 @@ export async function sendFile(req: Request, res: Response) {
     }
 
     if (results.length === 0) res.status(400).json('Error sending message');
-    if (req.file) await unlinkAsync(pathFile);
     returnSucess(res, results);
   } catch (error) {
     returnError(req, res, error);
+  } finally {
+    if (req.file) {
+      await unlinkAsync(pathFile).catch(() => {});
+    }
   }
 }
 

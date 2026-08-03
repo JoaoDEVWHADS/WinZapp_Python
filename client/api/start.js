@@ -38,6 +38,11 @@ const chromeExecutable = fs.existsSync(puppeteerCacheDir)
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
+  if (fs.existsSync(puppeteerCacheDir)) {
+    try {
+      fs.rmSync(puppeteerCacheDir, { recursive: true, force: true });
+    } catch (e) {}
+  }
   console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
     const { execSync } = require('child_process');

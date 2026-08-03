@@ -592,12 +592,18 @@ class DatabaseManager:
             Normalized message dicts (same shape as current messages.dat).
         """
         conn = await self._ensure_conn()
+        jids = [remote_jid]
+        if "@s.whatsapp.net" in remote_jid:
+            jids.append(remote_jid.replace("@s.whatsapp.net", "@c.us"))
+        elif "@c.us" in remote_jid:
+            jids.append(remote_jid.replace("@c.us", "@s.whatsapp.net"))
+        placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            """SELECT message_json FROM messages
-               WHERE remote_jid=?
+            f"""SELECT message_json FROM messages
+               WHERE remote_jid IN ({placeholders})
                ORDER BY timestamp DESC, message_id
                LIMIT ? OFFSET ?""",
-            (remote_jid, limit, offset),
+            (*jids, limit, offset),
         )
         rows = await cursor.fetchall()
         result = []
@@ -612,12 +618,18 @@ class DatabaseManager:
     ) -> list[dict]:
         """Return message dicts oldest-first (for initial chat load)."""
         conn = await self._ensure_conn()
+        jids = [remote_jid]
+        if "@s.whatsapp.net" in remote_jid:
+            jids.append(remote_jid.replace("@s.whatsapp.net", "@c.us"))
+        elif "@c.us" in remote_jid:
+            jids.append(remote_jid.replace("@c.us", "@s.whatsapp.net"))
+        placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            """SELECT message_json FROM messages
-               WHERE remote_jid=?
+            f"""SELECT message_json FROM messages
+               WHERE remote_jid IN ({placeholders})
                ORDER BY timestamp ASC, message_id
                LIMIT ? OFFSET ?""",
-            (remote_jid, limit, offset),
+            (*jids, limit, offset),
         )
         rows = await cursor.fetchall()
         result = []

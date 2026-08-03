@@ -1,6 +1,7 @@
 # ── WinZapp: project-specific ignores ────────────────────────────────────────
 
 # User data / secrets (generated at runtime, never committed)
+data/
 client/data/media_failed.json
 client/data/messages.db
 client/data/messages.db-shm
@@ -47,6 +48,7 @@ client/logs/
 !/client/api/src/middleware/
 /client/api/src/middleware/*
 !/client/api/src/middleware/statusConnection.ts
+!/client/api/src/middleware/auth.ts
 !/client/api/src/util/
 /client/api/src/util/*
 !/client/api/src/util/createSessionUtil.ts

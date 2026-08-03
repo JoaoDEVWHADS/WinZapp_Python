@@ -1,7 +1,7 @@
 import { ServerOptions } from './types/ServerOptions';
 
 export default {
-  secretKey: 'THISISMYSECURETOKEN',
+  secretKey: process.env.AUTHENTICATION_API_KEY || 'wz-local-api-key',
   host: 'http://localhost',
   port: '6300',
   deviceName: 'WppConnect',

@@ -275,20 +275,31 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
 
     (clientsArray as any)[session] = { status: null };
 
-    if (req.client && typeof req.client.close === 'function') {
-      await req.client.close();
+    try {
+      if (req.client && typeof req.client.close === 'function') {
+        await req.client.close();
+      }
+    } catch (closeErr) {
+      req.logger?.warn?.(`[${session}] Error during req.client.close(): ${closeErr}. Force killing session.`);
+      try {
+        SessionUtil.forceKillSession(session, req.logger);
+      } catch (e) {}
+    } finally {
+      (clientsArray as any)[session] = undefined;
     }
-      req.io.emit('whatsapp-status', false);
-      callWebHook(req.client, req, 'closesession', {
-        message: `Session: ${session} disconnected`,
-        connected: false,
-      });
 
-      return await res
-        .status(200)
-        .json({ status: true, message: 'Session successfully closed' });
+    req.io.emit('whatsapp-status', false);
+    callWebHook(req.client, req, 'closesession', {
+      message: `Session: ${session} disconnected`,
+      connected: false,
+    });
+
+    return await res
+      .status(200)
+      .json({ status: true, message: 'Session successfully closed' });
   } catch (error) {
     req.logger.error(error);
+    (clientsArray as any)[session] = undefined;
     return await res
       .status(500)
       .json({ status: false, message: 'Error closing session', error });
