@@ -429,7 +429,7 @@ class Connect:
         logging.info("[_close_active_session] Active token retrieved: %s", token)
         if token:
             session_name = token.split(':')[0]
-            headers = self._wpp_headers(use_global_key=False)
+            headers = self._wpp_headers(use_global_key=True)
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
             mw_token = getattr(self.main_window, 'token', '')
