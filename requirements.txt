@@ -24,7 +24,7 @@ pefile==2024.8.26
 platform_utils==1.6.0
 platformdirs==4.5.0
 pluggy==1.6.0
-PyAudio==0.2.14
+PyAudio==0.2.14; python_version < "3.14"
 pycparser==2.23
 pydantic==2.12.5
 pydantic_core==2.41.5
