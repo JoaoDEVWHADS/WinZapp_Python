@@ -26,7 +26,12 @@ import Factory from './tokenStore/factory';
 
 function forceKillByUserDataDir(userDataDir: string) {
   if (!userDataDir) return;
-  exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  if (process.platform === 'win32') {
+    // Windows force kill Chromium processes matching userDataDir if needed
+    exec(`wmic process where "commandline like '%${userDataDir.replace(/\\/g, '\\\\')}%'" call terminate`, () => {});
+  } else {
+    exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  }
 }
 
 /**
@@ -151,6 +156,8 @@ export default class CreateSessionUtil {
         );
       }
 
+      req.logger.info(`[${session}] Starting createSessionUtil. createOptions: ${JSON.stringify(req.serverOptions.createOptions)}`);
+
       const wppClient = await create(
         Object.assign(
           {},
@@ -181,6 +188,7 @@ export default class CreateSessionUtil {
                   'WPPConnect-Server'
                 : undefined,
             catchLinkCode: (code: string) => {
+              req.logger.info(`[${session}] catchLinkCode triggered with code: ${code}`);
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
                 try { wppClient.close(); } catch (e) {}
@@ -196,6 +204,7 @@ export default class CreateSessionUtil {
               attempt: any,
               urlCode: string
             ) => {
+              req.logger.info(`[${session}] catchQR triggered (attempt ${attempt}). urlCode: ${urlCode ? urlCode.substring(0, 30) + '...' : 'none'}`);
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
                 try { wppClient.close(); } catch (e) {}
@@ -206,9 +215,10 @@ export default class CreateSessionUtil {
               this.exportQR(req, base64Qr, urlCode, client, res);
             },
             onLoadingScreen: (percent: string, message: string) => {
-              req.logger.info(`[${session}] ${percent}% - ${message}`);
+              req.logger.info(`[${session}] LoadingScreen: ${percent}% - ${message}`);
             },
             statusFind: (statusFind: StatusFind) => {
+              req.logger.info(`[${session}] statusFind event: ${statusFind}`);
               try {
                 if ((client as any).shouldClose) {
                   req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
@@ -234,8 +244,9 @@ export default class CreateSessionUtil {
                   status: statusFind,
                   session: client.session,
                 });
-                req.logger.info(statusFind + '\n\n');
-              } catch (error) {}
+              } catch (error: any) {
+                req.logger.error(`[${session}] Error in statusFind handler: ${error?.message || error}`);
+              }
             },
           }
         )
@@ -270,9 +281,10 @@ export default class CreateSessionUtil {
       if (client.page) {
         client.page.on('console', (msg: any) => {
           const text = msg.text();
-          if (text.includes('[browser-evaluate]')) {
-            req.logger.info(text);
-          }
+          req.logger.info(`[${session} Browser Console] ${msg.type()}: ${text}`);
+        });
+        client.page.on('pageerror', (err: any) => {
+          req.logger.error(`[${session} Browser PageError] ${err?.message || err}`);
         });
         // The shim lives on a prototype inside the page, so it dies with every
         // WhatsApp Web reload (and wa-js is re-injected fresh each time).
