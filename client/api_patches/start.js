@@ -38,28 +38,7 @@ const chromeExecutable = fs.existsSync(puppeteerCacheDir)
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
-  console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
-  try {
-    const { execSync } = require('child_process');
-    const nodeDir = path.dirname(process.execPath);
-    const env = { 
-      ...process.env, 
-      PUPPETEER_CACHE_DIR: puppeteerCacheDir 
-    };
-    if (process.platform === 'win32') {
-      env.Path = `${nodeDir};${env.Path || ''};${env.PATH || ''}`;
-    } else {
-      env.PATH = `${nodeDir}:${env.PATH || ''}`;
-    }
-    execSync('npx puppeteer browsers install chrome', {
-      cwd: __dirname,
-      stdio: 'inherit',
-      env: env
-    });
-    console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
-  } catch (err) {
-    console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err);
-  }
+  console.log('[WinZapp Warning] Custom Chrome executable not found in client/api/chrome. Puppeteer will attempt to launch default browser.');
 }
 
 // Carrega a configuração padrão compilada
