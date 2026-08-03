@@ -3193,58 +3193,29 @@ class MainWindow(wx.Frame):
                 missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
-                    "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
+                    "[ensure_api_modules_installed] Missing packages detected: %s — (background npm install disabled)",
                     missing,
                 )
-                if sys.platform == "win32":
-                    node_exe = resource_path("node", "node.exe")
-                    npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
-                    npm_cmd  = [node_exe, npm_cli]
-                    node_dir = resource_path("node")
-                    path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
-                else:
-                    local_node = resource_path("node", "node")
-                    if os.path.isfile(local_node):
-                        node_exe = local_node
-                    else:
-                        node_exe = shutil.which("node") or "node"
-                    local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
-                    if os.path.isfile(local_npm):
-                        npm_cmd = [node_exe, local_npm]
-                    else:
-                        npm_cmd = [shutil.which("npm") or "npm"]
-                    node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-                    path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
-
-                npm_env  = {
-                    **os.environ,
-                    "PATH": path_env,
-                    "PUPPETEER_CACHE_DIR": resource_path("api", ".cache", "puppeteer"),
-                }
-                api_dir  = resource_path("api")
-                creation_flags = 0
-                if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-                    creation_flags = subprocess.CREATE_NO_WINDOW
-
-                try:
-                    proc = subprocess.Popen(
-                        npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
-                        cwd=api_dir,
-                        env=npm_env,
-                        creationflags=creation_flags,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                    )
-                    _, stderr_bytes = proc.communicate()
-                    if proc.returncode != 0:
-                        logging.error(
-                            "[ensure_api_modules_installed] npm install failed: %s",
-                            (stderr_bytes or b"").decode("utf-8", errors="replace"),
-                        )
-                    else:
-                        logging.info("[ensure_api_modules_installed] npm install completed OK")
-                except Exception as exc:
-                    logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
+                # Disabled background npm install on app startup
+                # try:
+                #     proc = subprocess.Popen(
+                #         npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
+                #         cwd=api_dir,
+                #         env=npm_env,
+                #         creationflags=creation_flags,
+                #         stdout=subprocess.DEVNULL,
+                #         stderr=subprocess.PIPE,
+                #     )
+                #     _, stderr_bytes = proc.communicate()
+                #     if proc.returncode != 0:
+                #         logging.error(
+                #             "[ensure_api_modules_installed] npm install failed: %s",
+                #             (stderr_bytes or b"").decode("utf-8", errors="replace"),
+                #         )
+                #     else:
+                #         logging.info("[ensure_api_modules_installed] npm install completed OK")
+                # except Exception as exc:
+                #     logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
             return
 
         # Everything already set up — nothing to do.
