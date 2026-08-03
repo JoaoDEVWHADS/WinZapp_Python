@@ -63,23 +63,36 @@ class TestRealExitDoesNotBlockTheMainThread:
 
 
 class TestGracefulStopBudgetIsBounded:
-    def test_the_two_stages_share_one_deadline_instead_of_stacking(self):
-        """The bug: the HTTP call got timeout=_WPP_GRACEFUL_STOP_SECONDS AND the
-        poll loop after it got its own fresh _WPP_GRACEFUL_STOP_SECONDS window —
-        additive, so the real worst case was double the documented budget."""
+    def test_no_poll_loop_waits_for_an_impossible_condition(self):
+        """The real, dominant bug behind the reported corruption: WPPConnect
+        Server is a persistent multi-session host that never exits or
+        releases its port just because one session's /close-session call
+        succeeded — other sessions may still be using it. A poll loop
+        waiting for proc.poll()/port-release as "did it close gracefully"
+        can therefore never come true, guaranteeing every single exit burned
+        the whole grace budget and fell through to taskkill /F /T
+        regardless of whether Chrome itself had already closed cleanly in
+        under a second. That poll loop must not come back."""
         src = inspect.getsource(MainWindow._stop_wpp_server)
-        # `deadline` computed exactly once from the constant, then reused by
-        # both the request timeout and the poll loop — not two independent
-        # `_WPP_GRACEFUL_STOP_SECONDS` windows back to back.
-        assert src.count("time.time() + self._WPP_GRACEFUL_STOP_SECONDS") == 1, (
-            "_stop_wpp_server() must derive both the HTTP timeout and the poll "
-            "deadline from ONE shared budget, not spend the full constant twice"
+        # proc.poll()/the port lookup are still legitimately used once, to
+        # decide *which PID to terminate* — what must be gone is a loop that
+        # waits/sleeps on either of them as a "did it close gracefully" signal.
+        assert "while time.time()" not in src
+        assert "time.sleep(" not in src
+        assert "_find_pid_listening_on_port" in src, (
+            "the port-lookup helper is still legitimately needed to locate "
+            "the process to terminate — just not as a 'did it close "
+            "gracefully' signal to poll on"
         )
-        assert "deadline = time.time() + self._WPP_GRACEFUL_STOP_SECONDS" in src
-        assert "timeout=max(1, deadline - time.time())" in src, (
-            "the /close-session request must be capped by what's left of the "
-            "shared deadline, not get its own full budget"
-        )
+
+    def test_success_is_read_from_the_http_response_not_polled_for(self):
+        """WPPConnect's close-session handler `await`s client.close() (page.
+        close() + browser.close()) before responding — a 200 here IS proof
+        Chrome is already down, directly, with no need to then poll for
+        some other side effect."""
+        src = inspect.getsource(MainWindow._stop_wpp_server)
+        assert "resp.status_code == 200" in src
+        assert "timeout=self._WPP_GRACEFUL_STOP_SECONDS" in src
 
     def test_the_budget_is_short_enough_to_feel_like_quitting(self):
         """Not a hard number the user asked for, just a sanity ceiling: the old

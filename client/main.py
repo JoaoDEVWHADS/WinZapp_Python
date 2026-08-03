@@ -3663,9 +3663,8 @@ class MainWindow(wx.Frame):
             pass
         event.Skip()
 
-    # Total time to let WPPConnect finish closing Chrome on its own — covering
-    # BOTH the /close-session request and the poll that follows it — before
-    # resorting to taskkill /F /T.
+    # How long to wait for WPPConnect's /close-session request to confirm
+    # Chrome closed gracefully before giving up and force-killing.
     #
     # This used to be a flat 2-second sleep, and that is very likely how a
     # perfectly valid WhatsApp Web session ended up "logged out" after a
@@ -3679,64 +3678,86 @@ class MainWindow(wx.Frame):
     # anything, keeps listing the session as active. That is precisely the
     # reported symptom.
     #
-    # A first fix gave the HTTP request and the poll loop AFTER it 25s each —
-    # 50s worst case, and since _stop_wpp_server() ran on the wx main thread
-    # at the time, that made every "Sair" look and feel exactly like a hang
-    # (Windows marks a quiet message loop "Not Responding" after a few
-    # seconds). _stop_wpp_server() now always runs off the main thread (see
-    # real_exit()), which fixes the "Not Responding" symptom on its own — but
-    # a 50s wait to actually quit is still bad on its own merits. Both stages
-    # now share ONE budget instead of getting their own back to back.
+    # A first fix gave the HTTP request 25s, plus a SEPARATE poll loop after
+    # it waiting up to another 25s for the Node process to exit or its port
+    # to be released — 50s worst case, and since _stop_wpp_server() ran on
+    # the wx main thread at the time, that made every "Sair" look and feel
+    # exactly like a hang (Windows marks a quiet message loop "Not
+    # Responding" after a few seconds). _stop_wpp_server() now always runs
+    # off the main thread (see real_exit()), fixing the "Not Responding"
+    # symptom on its own — but that poll loop turned out to be worse than
+    # just slow: WPPConnect Server is a persistent multi-session host that
+    # never exits or releases its port just because one session's browser
+    # closed, so the condition it polled for could never come true. That
+    # guaranteed every single exit burned the whole budget and then force-
+    # killed the tree regardless of whether Chrome had already closed
+    # cleanly in under a second — which was likely the actual, dominant
+    # cause of the reported profile corruption, not a slow/hung Chrome. The
+    # poll loop is gone; a 200 response from /close-session (which the
+    # server only sends after `await`ing client.close()) is trusted directly
+    # as proof Chrome is down, and the budget below is the request's own
+    # timeout.
     _WPP_GRACEFUL_STOP_SECONDS = 10
 
     def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
 
-        Calls /close-session first so WPPConnect asks Puppeteer to
-        browser.close() Chrome gracefully, then *waits* for the Node process to
-        exit on its own before force-killing anything — see
-        _WPP_GRACEFUL_STOP_SECONDS for why the wait is not optional. Must not
-        be called on the wx main thread: this can legitimately block for the
-        whole budget above.
+        This does two genuinely different things, and conflating them (as
+        this used to) is what made `taskkill /F /T` — the thing that tears
+        down Chrome's LevelDB-backed profile mid-write if it's still running
+        — fire on essentially every single exit, even when Chrome itself had
+        already closed cleanly and quickly:
+
+        1. Ask WPPConnect to close THIS session's Chrome/Puppeteer instance
+           via /close-session. Its handler `await`s `client.close()`
+           (page.close() + browser.close()) before responding — a 200 here
+           genuinely means Chrome is already down; that's the part that
+           protects the profile (see _WPP_GRACEFUL_STOP_SECONDS' comment).
+        2. Terminate the Node.js server process itself. WPPConnect Server is
+           a persistent multi-session host — it never exits or releases its
+           port just because one session's browser closed, by design (other
+           sessions may still be using it). The old code waited for exactly
+           that (proc.poll()/port release) as its "did it close gracefully"
+           signal, which can never come true from step 1 alone — so it
+           always burned the whole grace budget and always fell through to
+           force-killing the tree, Chrome included, regardless of whether
+           Chrome had already closed on its own in under a second. Chrome is
+           no longer running under this process by the time we get here (if
+           step 1 succeeded), so terminating the bare Node process is
+           comparatively low-risk — it holds no fragile profile of its own.
+
+        Must not be called on the wx main thread: step 1 can legitimately
+        block for the whole grace budget.
         """
         proc = getattr(self, "wpp_process", None)
         token = getattr(self, "token", "")
+        browser_closed_cleanly = False
         if token:
-            deadline = time.time() + self._WPP_GRACEFUL_STOP_SECONDS
             try:
                 url = (
                     f"{self.wpp_server}:{self.wpp_port}"
                     f"/api/{token}/close-session"
                 )
-                requests.post(
+                resp = requests.post(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
-                    # This request only returns once WPPConnect has actually
-                    # awaited client.close(), i.e. once Chrome is down — but it
-                    # shares the overall budget with the poll loop below rather
-                    # than getting its own on top, so a slow/hung response here
-                    # can't by itself double the total wait.
-                    timeout=max(1, deadline - time.time()),
+                    timeout=self._WPP_GRACEFUL_STOP_SECONDS,
                 )
-            except Exception:
-                pass
-
-            # /close-session returning is not proof Node itself is finished
-            # writing; use whatever's left of the shared budget to confirm it.
-            while time.time() < deadline:
-                if proc is not None:
-                    if proc.poll() is not None:
-                        logging.info("[_stop_wpp_server] WPPConnect exited gracefully.")
-                        return
-                elif self._find_pid_listening_on_port(self.wpp_port) is None:
-                    logging.info("[_stop_wpp_server] WPPConnect port released gracefully.")
-                    return
-                time.sleep(0.5)
-            logging.warning(
-                "[_stop_wpp_server] WPPConnect still alive after %ss — force-killing. "
-                "Chrome's profile may not have finished flushing.",
-                self._WPP_GRACEFUL_STOP_SECONDS,
-            )
+                if resp.status_code == 200:
+                    browser_closed_cleanly = True
+                    logging.info("[_stop_wpp_server] WPPConnect closed the session's browser gracefully.")
+                else:
+                    logging.warning(
+                        "[_stop_wpp_server] close-session returned HTTP %s — "
+                        "Chrome may not have closed cleanly.",
+                        resp.status_code,
+                    )
+            except Exception as e:
+                logging.warning(
+                    "[_stop_wpp_server] close-session request failed or timed out (%s) — "
+                    "Chrome may still be running.",
+                    e,
+                )
 
         pid = None
         if proc and proc.poll() is None:
@@ -3748,24 +3769,31 @@ class MainWindow(wx.Frame):
             # port it's listening on so it doesn't leak across restarts.
             pid = self._find_pid_listening_on_port(self.wpp_port)
 
-        if pid:
-            try:
-                import sys
-                if sys.platform == "win32":
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-                    )
-                elif proc is not None:
+        if not pid:
+            return
+
+        if not browser_closed_cleanly:
+            logging.warning(
+                "[_stop_wpp_server] Force-killing WPPConnect (and any Chrome still "
+                "running under it) — the graceful close-session above didn't confirm "
+                "success, so its profile may not have finished flushing."
+            )
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                )
+            elif proc is not None:
+                proc.terminate()
+        except Exception:
+            if proc is not None:
+                try:
                     proc.terminate()
-            except Exception:
-                if proc is not None:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
     def _find_pid_listening_on_port(self, port):
         """Return the PID of the node.exe process listening on *port* (Windows only).
