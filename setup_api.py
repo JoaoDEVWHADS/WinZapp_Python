@@ -15,6 +15,7 @@ Usage:
 """
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -54,7 +55,7 @@ CUSTOM_SRC_FILES = [
 def _load_env() -> dict:
     """Parse the root .env file and return a key→value dict."""
     env_path = os.path.join(ROOT_DIR, ".env")
-    result = {}
+    result = {"WPPCONNECT_TAG_VERSION": "2.10.0"}
     if not os.path.isfile(env_path):
         return result
     with open(env_path, encoding="utf-8") as fh:
@@ -63,7 +64,8 @@ def _load_env() -> dict:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            result[key.strip()] = value.strip()
+            if key.strip() and value.strip():
+                result[key.strip()] = value.strip()
     return result
 
 
