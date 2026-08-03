@@ -67,7 +67,7 @@ if (!hasChrome) {
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    execSync('npx --yes @puppeteer/browsers install chrome-headless-shell', {
+    execSync('npx --yes @puppeteer/browsers install chrome@stable', {
       cwd: __dirname,
       stdio: 'inherit',
       env: env
