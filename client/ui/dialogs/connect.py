@@ -446,7 +446,7 @@ class Connect:
                 try:
                     close_url = (
                         f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{token}/close-session"
+                        f":{self.main_window.wpp_port}/api/{session_name}/close-session"
                     )
                     logging.info("[_close_active_session] Sending close-session request to: %s", close_url)
                     resp = requests.post(close_url, headers=headers, timeout=5)
