@@ -112,25 +112,41 @@ def find_input_device_index(name: str, pa: "pyaudio.PyAudio | None" = None):
     return _match_device(name, enumerate_input_devices(pa))
 
 
+# Sample-rate/channel combinations to try opening an input device with, in
+# preference order — must mirror ui/conversations.py's _start_voice_recording()
+# fallback chain exactly. A single hardcoded (rate, channels) pair doesn't
+# work as a general "can this device open" test: most WASAPI devices only
+# accept their own native rate (48000 on every device tested), rejecting
+# 44100 outright with "Invalid sample rate" — every non-default recording
+# device used to fail Settings validation for exactly this reason, the
+# device itself was never actually at fault.
+RECORDING_SAMPLE_CONFIGS = [(48000, 1), (48000, 2), (44100, 1), (44100, 2)]
+
+
 def test_input_device(device_index: int) -> bool:
     """Try to briefly open (without starting) an input stream on
-    `device_index`. Returns True if the device accepted the open."""
+    `device_index`, across every sample-rate/channel combo recording itself
+    would try. Returns True if any combo was accepted."""
     pa = pyaudio.PyAudio()
     try:
-        stream = pa.open(
-            rate=44100,
-            channels=1,
-            format=pyaudio.paInt16,
-            input=True,
-            input_device_index=device_index,
-            frames_per_buffer=1024,
-            start=False,
-        )
-        stream.close()
-        return True
-    except Exception as e:
+        for rate, channels in RECORDING_SAMPLE_CONFIGS:
+            try:
+                stream = pa.open(
+                    rate=rate,
+                    channels=channels,
+                    format=pyaudio.paInt16,
+                    input=True,
+                    input_device_index=device_index,
+                    frames_per_buffer=1024,
+                    start=False,
+                )
+                stream.close()
+                return True
+            except Exception:
+                continue
         logging.warning(
-            "[audio_devices] Input device test failed (index=%s): %s", device_index, e
+            "[audio_devices] Input device test failed for every sample-rate/channel combo (index=%s)",
+            device_index,
         )
         return False
     finally:

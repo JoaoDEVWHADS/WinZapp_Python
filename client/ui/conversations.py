@@ -14,7 +14,7 @@ import pyaudio
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
-from core.audio_devices import find_input_device_index
+from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
@@ -1675,15 +1675,13 @@ class ConversationsPanel(wx.Panel):
                 self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
 
-        # Try each (rate, channels) combination in preference order.
-        # WhatsApp voice messages are natively 48 kHz Mono. Prioritizing Mono
-        # avoids CPU-intensive downmixing loops in pure Python.
-        _configs = [
-            (48000, 1),   # 48 kHz mono   — native for WhatsApp/Opus, fastest
-            (48000, 2),   # 48 kHz stereo
-            (44100, 1),   # 44.1 kHz mono
-            (44100, 2),   # 44.1 kHz stereo
-        ]
+        # Try each (rate, channels) combination in preference order (shared
+        # with core.audio_devices.test_input_device()'s Settings-dialog
+        # validation, so a device that validates there is guaranteed to open
+        # here too). WhatsApp voice messages are natively 48 kHz Mono.
+        # Prioritizing Mono avoids CPU-intensive downmixing loops in pure
+        # Python.
+        _configs = RECORDING_SAMPLE_CONFIGS
         if self._recording_pa is None:
             try:
                 self._recording_pa = pyaudio.PyAudio()

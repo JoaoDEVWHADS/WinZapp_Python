@@ -1148,19 +1148,24 @@ class SettingsDialog(wx.Dialog):
         # earlier, cheaper check is going to fail this validation anyway.
         # Input is a plain open+close test — actually starting to record here
         # would be pointless.
+        # Always call apply_output_device() — even when "default" (index 0)
+        # is selected — so switching back to the default actually happens
+        # live. Guarding this behind "only if a specific device is picked"
+        # used to mean picking "default" here only ever updated settings.json
+        # (correctly retried on next launch) without ever telling BASS to
+        # switch away from whatever non-default device was still active.
         output_sel = self._audio_output_combo.GetSelection()
-        if output_sel > 0:
-            output_name = self._audio_output_device_names[output_sel - 1]
-            if not self.main_window.sound_system.apply_output_device(output_name):
-                self._notebook.SetSelection(4)
-                self._audio_output_combo.SetFocus()
-                wx.MessageBox(
-                    self.main_window.i18n.t("invalid_audio_output_device"),
-                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
-                    wx.OK | wx.ICON_ERROR,
-                    self,
-                )
-                return False
+        output_name = self._audio_output_device_names[output_sel - 1] if output_sel > 0 else ""
+        if not self.main_window.sound_system.apply_output_device(output_name):
+            self._notebook.SetSelection(4)
+            self._audio_output_combo.SetFocus()
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_audio_output_device"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return False
 
         input_sel = self._audio_input_combo.GetSelection()
         if input_sel > 0:

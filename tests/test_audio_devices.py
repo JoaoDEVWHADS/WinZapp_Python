@@ -11,6 +11,7 @@ sound_lib.output.Output, since a real one needs an actual audio device.
 
 import ctypes
 
+import core.audio_devices as audio_devices_module
 import core.sound_system as sound_system_module
 from core.audio_devices import _match_device, enumerate_output_devices
 from core.sound_system import SoundSystem
@@ -150,3 +151,54 @@ class TestHandlePlaybackFailure:
         # popping message boxes for the rest of the session.
         assert ss.handle_playback_failure() is False
         assert ss.handle_playback_failure() is False
+
+
+class _FakePyAudioStream:
+    def close(self):
+        pass
+
+
+class _FakePyAudio:
+    """Stands in for pyaudio.PyAudio: accepts open() only for the exact
+    (rate, channels) pairs in `accepted_configs`, like a real device that
+    only supports its own native sample rate."""
+
+    def __init__(self, accepted_configs):
+        self.accepted_configs = accepted_configs
+        self.opened_with = []
+
+    def open(self, rate, channels, format, input, input_device_index, frames_per_buffer, start):
+        self.opened_with.append((rate, channels))
+        if (rate, channels) not in self.accepted_configs:
+            raise OSError(-9997, "Invalid sample rate")
+        return _FakePyAudioStream()
+
+    def terminate(self):
+        pass
+
+
+class TestTestInputDevice:
+    """Regression coverage for a real bug: hardcoding a single (44100, 1)
+    test config rejected every device on a machine where every WASAPI
+    device's native rate was 48000 — "Invalid sample rate" for every one of
+    them, regardless of the device actually being fine. The test now walks
+    the same fallback chain _start_voice_recording() itself uses."""
+
+    def test_succeeds_on_the_first_supported_combo(self, monkeypatch):
+        fake_pa = _FakePyAudio(accepted_configs={(48000, 1)})
+        monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: fake_pa)
+        assert audio_devices_module.test_input_device(5) is True
+        assert fake_pa.opened_with == [(48000, 1)]
+
+    def test_falls_back_to_a_later_combo(self, monkeypatch):
+        # Only the very last combo in the fallback chain works.
+        fake_pa = _FakePyAudio(accepted_configs={(44100, 2)})
+        monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: fake_pa)
+        assert audio_devices_module.test_input_device(5) is True
+        assert fake_pa.opened_with == audio_devices_module.RECORDING_SAMPLE_CONFIGS
+
+    def test_fails_only_when_no_combo_is_supported(self, monkeypatch):
+        fake_pa = _FakePyAudio(accepted_configs=set())
+        monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: fake_pa)
+        assert audio_devices_module.test_input_device(5) is False
+        assert fake_pa.opened_with == audio_devices_module.RECORDING_SAMPLE_CONFIGS
