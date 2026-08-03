@@ -69,16 +69,16 @@ def _load_env() -> dict:
     return result
 
 
-def _run(cmd: list, cwd: str = None):
+def _run(cmd: list, cwd: str = None, check: bool = True):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"))
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
+    return result
 
 
 def ensure_portable_git():
-    import shutil
     import urllib.request
     import zipfile
 
@@ -159,7 +159,6 @@ def main():
         print(f"[INFO] client/api/ already exists — skipping clone.")
     else:
         print(f"[INFO] Cloning WPPConnect Server …")
-        import shutil
         temp_node_modules = os.path.join(ROOT_DIR, "temp_node_modules")
         node_modules_path = os.path.join(CLIENT_API_DIR, "node_modules")
         has_node_modules = os.path.isdir(node_modules_path)
@@ -230,7 +229,12 @@ def main():
 
     if tag and shutil.which("git"):
         print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+        _run(["git", "fetch", "--tags"], cwd=CLIENT_API_DIR, check=False)
+        tag_to_use = tag if tag.startswith("v") else f"v{tag}"
+        res = _run(["git", "checkout", "-f", tag_to_use], cwd=CLIENT_API_DIR, check=False)
+        if res.returncode != 0:
+            tag_alt = tag[1:] if tag.startswith("v") else tag
+            _run(["git", "checkout", "-f", tag_alt], cwd=CLIENT_API_DIR, check=False)
 
         # Re-restore after checkout just in case git checkout overwrites files
         for rel_path, content in custom_contents.items():
@@ -291,14 +295,13 @@ def main():
 
         # Apply the RangeError/memory-leak patch to @wppconnect-team/wppconnect decrypt.js by copying our modified file
         try:
-            import shutil as _shutil
             custom_decrypt = os.path.join(CLIENT_API_DIR, "decrypt.js")
             decrypt_js_path = os.path.join(CLIENT_API_DIR, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
             if os.path.isfile(custom_decrypt):
                 print("[INFO] Copying custom decrypt.js patch to node_modules...")
                 # Ensure the destination directory exists (should exist due to npm install)
                 os.makedirs(os.path.dirname(decrypt_js_path), exist_ok=True)
-                _shutil.copy2(custom_decrypt, decrypt_js_path)
+                shutil.copy2(custom_decrypt, decrypt_js_path)
                 print("[OK] Copied decrypt.js patch successfully.")
             else:
                 print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
@@ -344,7 +347,6 @@ def main():
     if not is_windows:
         print("\n[INFO] Detecting Linux OS and installing system dependencies for Chromium...")
         # Check if apt-get is available
-        import shutil
         if shutil.which("apt-get"):
             # Check if running as root or has sudo
             try:
