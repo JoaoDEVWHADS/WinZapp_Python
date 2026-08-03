@@ -7,7 +7,7 @@ const fs = require('fs');
 // quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
 // checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
 
-function findChromeExecutable(dir, depth) {
+function findChromeExecutable(dir, depth, targetName = null) {
   if (depth > 6) return null;
   let entries;
   try {
@@ -18,8 +18,10 @@ function findChromeExecutable(dir, depth) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      const found = findChromeExecutable(full, depth + 1);
+      const found = findChromeExecutable(full, depth + 1, targetName);
       if (found) return found;
+    } else if (targetName) {
+      if (entry.name === targetName) return full;
     } else if (
       entry.name === 'chrome.exe' ||
       entry.name === 'chrome' ||
@@ -38,20 +40,33 @@ const nodeModulesCacheDir = path.join(__dirname, 'node_modules', '.cache', 'pupp
 const directHeadlessShellDir = path.join(__dirname, 'chrome-headless-shell');
 const directChromeDir = path.join(__dirname, 'chrome');
 
-let chromeExecutable = fs.existsSync(puppeteerCacheDir) ? findChromeExecutable(puppeteerCacheDir, 0) : null;
-if (!chromeExecutable && fs.existsSync(nodeModulesCacheDir)) {
-  chromeExecutable = findChromeExecutable(nodeModulesCacheDir, 0);
+function resolveChromeExecutable() {
+  // Pass 1: Look for full Chrome binary first
+  for (const dir of [puppeteerCacheDir, nodeModulesCacheDir, directChromeDir, __dirname]) {
+    if (fs.existsSync(dir)) {
+      const exe = findChromeExecutable(dir, 0, process.platform === 'win32' ? 'chrome.exe' : 'chrome');
+      if (exe) return exe;
+    }
+  }
+  // Pass 2: Look for any Chrome / headless-shell binary
+  for (const dir of [puppeteerCacheDir, nodeModulesCacheDir, directHeadlessShellDir, directChromeDir, __dirname]) {
+    if (fs.existsSync(dir)) {
+      const exe = findChromeExecutable(dir, 0);
+      if (exe) return exe;
+    }
+  }
+  // Pass 3: Fallback to puppeteer.executablePath()
+  try {
+    const puppeteer = require('puppeteer');
+    const pPath = puppeteer.executablePath();
+    if (pPath && fs.existsSync(pPath)) return pPath;
+  } catch (e) {}
+  return null;
 }
-if (!chromeExecutable && fs.existsSync(directHeadlessShellDir)) {
-  chromeExecutable = findChromeExecutable(directHeadlessShellDir, 0);
-}
-if (!chromeExecutable && fs.existsSync(directChromeDir)) {
-  chromeExecutable = findChromeExecutable(directChromeDir, 0);
-}
-if (!chromeExecutable) {
-  chromeExecutable = findChromeExecutable(__dirname, 0);
-}
+
+let chromeExecutable = resolveChromeExecutable();
 const hasChrome = !!chromeExecutable;
+console.log(`[WinZapp Debug] Chrome executable resolution: ${chromeExecutable ? chromeExecutable : 'NOT FOUND (will use default Puppeteer)'}`);
 
 if (!hasChrome) {
   console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
