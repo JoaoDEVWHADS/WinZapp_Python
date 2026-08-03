@@ -54,3 +54,21 @@ def test_logout_needs_connection_first():
     # Even with a huge logout-strike count, without ever connecting this run it
     # must never be classified as a logout (that was the destructive bug).
     assert _classify("QRCODE", False, 1000, 0) == cs.RESUMING
+
+
+def test_wake_from_suspend_detects_long_gap():
+    # A 30s loop that really took 5 minutes = the machine was asleep.
+    assert cs.is_wake_from_suspend(300.0, 30, 90) is True
+    # Right at the threshold is not "over" it yet.
+    assert cs.is_wake_from_suspend(90.0, 30, 90) is False
+
+
+def test_wake_from_suspend_ignores_normal_cycles():
+    # A normal ~30s cycle (even a slightly slow one) is not a wake.
+    assert cs.is_wake_from_suspend(31.0, 30, 90) is False
+    assert cs.is_wake_from_suspend(0.0, 30, 90) is False
+
+
+def test_wake_from_suspend_guards_against_misconfig():
+    # A gap threshold below the sleep interval would fire every cycle — refuse.
+    assert cs.is_wake_from_suspend(60.0, 30, 20) is False

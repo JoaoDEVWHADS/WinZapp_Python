@@ -1746,6 +1746,19 @@ class MainWindow(wx.Frame):
         logging.info("[power] System is suspending.")
         event.Skip()
 
+    def _reset_connection_state_for_resume(self):
+        """Reset the connection/logout latches so a wake-from-suspend is
+        treated like a fresh session start, NOT like a mid-session drop.
+
+        Thin wx-side wrapper over connection_state.reset_state_for_resume,
+        which holds the pure (unit-testable) logic and the full rationale:
+        across a suspend the ``_wa_connect_announced`` latch stayed True, so a
+        transient post-wake QRCODE was misread as a logout and wiped the token
+        of accounts that did not re-attach instantly.
+        """
+        import connection_state as cs
+        cs.reset_state_for_resume(self, time.time())
+
     def _on_power_resume(self, event):
         """Force a reconnection check right after the system wakes up.
 
@@ -1753,14 +1766,15 @@ class MainWindow(wx.Frame):
         eventually notice the socket/session died across the suspend —
         which observed live routinely never actually recovered, leaving
         the app permanently in offline mode until manually restarted from
-        the tray. Resetting the failure-strike counters and re-probing
-        immediately (rather than waiting up to 30s, plus however many
-        strikes are now required) gives both the HTTP health check and the
-        WebSocket a clean slate to reconnect against right away.
+        the tray. Resetting the connection state (see
+        _reset_connection_state_for_resume) and re-probing immediately
+        (rather than waiting up to 30s, plus however many strikes are now
+        required) gives both the HTTP health check and the WebSocket a
+        clean slate to reconnect against right away — crucially without a
+        transient post-wake QRCODE being mistaken for a logout.
         """
         logging.info("[power] System resumed from suspend — forcing reconnection check.")
-        self._wa_http_fail_strikes = 0
-        self._offline_probe_strikes = 0
+        self._reset_connection_state_for_resume()
         threading.Thread(target=self._recover_from_suspend, daemon=True).start()
         event.Skip()
 
@@ -1770,8 +1784,115 @@ class MainWindow(wx.Frame):
                 self._reconnect_websocket_now()
             self.check_wa_connection_http()
             self.trigger_sync_if_needed()
+            # After a wake, WhatsApp Web inside the (suspended) Chrome loses its
+            # stream and does NOT rebuild it on its own, yet WPPConnect keeps a
+            # stale "CONNECTED" status string — so check_wa_connection_http()
+            # above lands in the CONNECTED branch, sees isConnected()==false,
+            # flips the UI to offline and returns WITHOUT ever calling
+            # start-session (that path is gated to CLOSED/DESTROYED only). The
+            # session is a zombie: alive object, dead stream. Nothing recovers it
+            # but a full app restart — which is exactly the symptom the user hit.
+            # Actively restart the WhatsApp session once here to force Chrome to
+            # reload web.whatsapp.com and rebuild the stream.
+            self._restart_session_if_zombie_after_resume()
         except Exception:
             logging.exception("[power] _recover_from_suspend failed")
+
+    # After resume, how many consecutive "CONNECTED but isConnected()==false with
+    # the network up" readings confirm a zombie session (dead stream) worth an
+    # active restart, and how long to wait between them. Kept deliberately short
+    # (a few real seconds) because the user is staring at an offline app: unlike
+    # the first-launch grace window, waiting minutes here buys nothing — the
+    # stream never comes back by itself.
+    _RESUME_ZOMBIE_CONFIRM_STRIKES = 3
+    _RESUME_ZOMBIE_PROBE_INTERVAL = 3.0
+
+    def _restart_session_if_zombie_after_resume(self):
+        """Detect and repair a post-wake 'zombie CONNECTED' session.
+
+        Only fires when the network is actually up (WhatsApp's own host is
+        reachable) but the session stream is dead — i.e. a real zombie, not a
+        plain 'no internet' outage (that must be left alone to recover on its
+        own when connectivity returns). Confirmed over a few consecutive probes
+        so a momentary blip right after wake doesn't trigger a needless restart.
+        """
+        if getattr(self, "_wa_connected", False):
+            return  # recovered normally — nothing to do
+        import connection_state as cs
+        for _ in range(self._RESUME_ZOMBIE_CONFIRM_STRIKES):
+            if getattr(self, "_wa_connected", False):
+                return
+            status = self._raw_session_status()
+            # CLOSED/DESTROYED already auto-starts; QRCODE/notLogged is a real
+            # pairing need handled elsewhere — neither is ours to touch here.
+            if status not in ("CONNECTED", "open"):
+                return
+            if not self._probe_whatsapp_host():
+                # No internet: not a zombie, just an outage. The normal health
+                # loop will reconnect once the network is back.
+                logging.info("[power] post-resume offline but network is down — "
+                             "leaving session alone to recover naturally.")
+                return
+            time.sleep(self._RESUME_ZOMBIE_PROBE_INTERVAL)
+            self.check_wa_connection_http()
+        if not cs.is_zombie_session_after_resume(
+            getattr(self, "_wa_connected", False),
+            self._raw_session_status(),
+            self._probe_whatsapp_host(),
+        ):
+            return
+        logging.warning("[power] Confirmed zombie session after resume "
+                        "(CONNECTED but stream dead, network up) — forcing "
+                        "session restart to rebuild WhatsApp Web stream.")
+        self._force_whatsapp_session_restart()
+
+    def _raw_session_status(self) -> str:
+        """Return WPPConnect's current status-session string ('' on failure)."""
+        try:
+            resp = requests.get(
+                f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                return resp.json().get("status", "") or ""
+        except Exception as e:
+            logging.info("[_raw_session_status] probe failed: %s", e)
+        return ""
+
+    def _force_whatsapp_session_restart(self):
+        """Close then re-start the WhatsApp session so Chrome reloads
+        web.whatsapp.com and rebuilds a dead stream. Safe on a live session:
+        close-session persists state, and the token/paired flags are untouched
+        (this is a stream refresh, NOT a logout). After close, status becomes
+        CLOSED, so the next check_wa_connection_http() naturally issues
+        start-session via its existing CLOSED branch; we also kick one restart
+        directly so recovery doesn't wait for the next poll."""
+        token = getattr(self, "token", "")
+        if not token:
+            return
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            requests.post(
+                f"{self.wpp_server}:{self.wpp_port}/api/{token}/close-session",
+                headers=headers, timeout=10,
+            )
+            logging.info("[power] zombie recovery: close-session sent")
+        except Exception as e:
+            logging.warning("[power] zombie recovery: close-session failed: %s", e)
+        # Give WPPConnect a moment to tear the browser tab down and flip status
+        # to CLOSED before re-starting (start-session is a no-op unless CLOSED —
+        # see createSessionUtil.ts:128).
+        time.sleep(3)
+        try:
+            requests.post(
+                f"{self.wpp_server}:{self.wpp_port}/api/{token}/start-session",
+                json={"waitQrCode": False}, headers=headers, timeout=15,
+            )
+            logging.info("[power] zombie recovery: start-session sent — "
+                         "WhatsApp Web reloading")
+        except Exception as e:
+            logging.warning("[power] zombie recovery: start-session failed: %s", e)
 
     # How long, and how many consecutive not-yet-connected results, the very
     # first connection attempt of a session gets before the UI is allowed to
@@ -5268,12 +5389,31 @@ class MainWindow(wx.Frame):
         self.start_connection_health_checker()
         logging.info("[prepare_sync] done")
 
+    # How long a single health-check sleep may overrun before we treat the gap
+    # as "the machine was suspended and just resumed". The loop sleeps 30s, so
+    # anything past ~90s of real elapsed time can only mean the thread was
+    # frozen across a system sleep/hibernate — clocks don't otherwise skip
+    # minutes. See _HEALTH_CHECK_INTERVAL below.
+    _HEALTH_CHECK_INTERVAL = 30
+    _WAKE_DETECT_GAP = 90
+
     def start_connection_health_checker(self):
-        """Periodically verify session health and auto-restart Puppeteer if closed."""
+        """Periodically verify session health and auto-restart Puppeteer if closed.
+
+        Doubles as the reliable wake detector. wx's EVT_POWER_RESUME is bound in
+        __init__, but on Windows it is NOT delivered to a frame that lives in the
+        system tray (hidden top-level window) — observed live as zero "[power]"
+        log lines across real hibernations, so the post-wake zombie-session
+        repair never ran and the app stayed offline until manually restarted.
+        This loop measures how long each sleep *actually* took: a 30s sleep that
+        really took minutes means the process was frozen across a suspend, so we
+        fire the exact same recovery path EVT_POWER_RESUME was supposed to.
+        """
         def _loop():
             # Wait a bit after startup before starting checks
-            time.sleep(30)
+            time.sleep(self._HEALTH_CHECK_INTERVAL)
             while True:
+                slept_at = time.time()
                 try:
                     # Only a *user-requested* offline pauses the checker.  When
                     # offline mode was entered automatically (connection lost)
@@ -5290,7 +5430,25 @@ class MainWindow(wx.Frame):
                         self.trigger_sync_if_needed()
                 except Exception as e:
                     logging.warning(f"[health_checker] Error checking connection in background: {e}")
-                time.sleep(30)
+                time.sleep(self._HEALTH_CHECK_INTERVAL)
+                # Clock-gap wake detection: if the sleep above overran massively,
+                # the machine was suspended and just came back. Trigger recovery
+                # here because EVT_POWER_RESUME is unreliable for a tray app.
+                import connection_state as cs
+                elapsed = time.time() - slept_at
+                if cs.is_wake_from_suspend(elapsed, self._HEALTH_CHECK_INTERVAL,
+                                           self._WAKE_DETECT_GAP) \
+                        and not getattr(self, "_user_offline", False):
+                    logging.info(
+                        "[wake-detect] Health-check sleep overran (%.0fs elapsed vs %ss expected) "
+                        "— treating as resume from suspend, forcing recovery.",
+                        elapsed, self._HEALTH_CHECK_INTERVAL,
+                    )
+                    try:
+                        self._reset_connection_state_for_resume()
+                        self._recover_from_suspend()
+                    except Exception:
+                        logging.exception("[wake-detect] recovery after detected wake failed")
 
         threading.Thread(target=_loop, daemon=True).start()
 
@@ -5469,6 +5627,7 @@ class MainWindow(wx.Frame):
                 if status not in ("notLogged", "QRCODE"):
                     self._logout_strikes = 0
                     self._resume_fail_strikes = 0
+                    self._last_strike_ts = 0.0
 
                 # Robust check: Only call start-session if the instance is explicitly CLOSED, DESTROYED, or completely inactive.
                 # WPPConnect status values include: CONNECTED, open, INITIALIZING, QRCODE, PHONECODE, notLogged, inChat, PAIRED, etc.
@@ -5564,6 +5723,21 @@ class MainWindow(wx.Frame):
                             # reaching 'inChat' the same second the client wiped).
                             import connection_state as cs
                             ever = bool(getattr(self, "_wa_connect_announced", False))
+                            # Count at most one strike per STRIKE_MIN_INTERVAL so
+                            # the thresholds mean real elapsed time, not raw
+                            # reading count: tight poll loops (e.g. _run_sync's
+                            # 0.2s cadence) used to race through 20 unlinked
+                            # readings in ~6s and wipe a session WhatsApp had just
+                            # logged back in. A reading inside the interval is
+                            # still "resuming, data preserved" — never escalates.
+                            now = time.time()
+                            if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
+                                logging.info(
+                                    "[check_wa_connection_http] Unlinked '%s' "
+                                    "(ever_connected=%s) — within strike interval, "
+                                    "not counting; data preserved.", status, ever)
+                                return
+                            self._last_strike_ts = now
                             if ever:
                                 self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
                             else:

@@ -25,6 +25,117 @@ LOGOUT = "logout"                 # confirmed logout after being connected — w
 
 UNLINKED_STATES = ("notLogged", "QRCODE")
 
+# Minimum wall-clock gap between two counted unlinked strikes. The strike
+# thresholds (_LOGOUT_CONFIRM_STRIKES, _RESUME_FAIL_STRIKES) were tuned for the
+# ~30s health-check cadence, i.e. "N strikes ≈ N×30s of real time". But several
+# code paths poll check_wa_connection_http() in tight loops (e.g. _run_sync's
+# `for _ in range(25): sleep(0.2)`), and strikes count READINGS, not time — so a
+# fast loop raced through 20 unlinked readings in ~6s and force-killed a session
+# that WhatsApp had actually just logged back in (node log showed inChat the same
+# second the client wiped). Gating strikes to at most one per this interval makes
+# the thresholds mean real elapsed time again: kept just under the 30s health
+# cadence so every ordinary health-check reading still counts (restoring
+# RESUME_FAIL≈10min, LOGOUT≈2min), while a burst of sub-second readings in a
+# tight loop collapses to a single strike.
+STRIKE_MIN_INTERVAL_SECONDS = 20.0
+
+
+def should_count_strike(now: float, last_strike_ts: float,
+                        min_interval: float = STRIKE_MIN_INTERVAL_SECONDS) -> bool:
+    """True if enough wall-clock time has passed since the last counted strike
+    that this unlinked reading should count as a new one. A missing/zero
+    last_strike_ts (first reading of a run) always counts."""
+    if not last_strike_ts:
+        return True
+    return (now - last_strike_ts) >= min_interval
+
+
+def is_zombie_session_after_resume(wa_connected: bool, status: str,
+                                   host_reachable: bool) -> bool:
+    """Decide whether a post-wake session is a 'zombie CONNECTED' worth an
+    active restart.
+
+    After a long hibernation WhatsApp Web inside Chrome drops its stream and
+    does not rebuild it, yet WPPConnect keeps a stale 'CONNECTED' status — so
+    the app shows offline forever until a manual restart. This is that case:
+
+    * not actually connected (isConnected()==false → wa_connected False), AND
+    * WPPConnect still reports the stale CONNECTED/open status, AND
+    * the network is up (WhatsApp's host is reachable) — so it's a dead stream,
+      not a plain 'no internet' outage (which must be left to recover itself).
+
+    Any other status (CLOSED/DESTROYED auto-starts; QRCODE/notLogged is a real
+    pairing need) is not a zombie.
+    """
+    if wa_connected:
+        return False
+    if status not in ("CONNECTED", "open"):
+        return False
+    return host_reachable
+
+
+def is_wake_from_suspend(elapsed: float, expected_interval: float,
+                         gap_threshold: float) -> bool:
+    """True when a periodic sleep overran so far it can only mean the process
+    was frozen across a system suspend/hibernate.
+
+    The health-check loop sleeps ``expected_interval`` seconds each cycle; a
+    cycle whose real elapsed time exceeds ``gap_threshold`` did not merely run
+    slow — the machine was asleep. This is the wx-free, unit-testable core of
+    the clock-gap wake detector (wx's EVT_POWER_RESUME is not delivered to a
+    tray-resident window on Windows, so this, not the event, is what reliably
+    fires post-wake recovery).
+    """
+    return elapsed > gap_threshold and gap_threshold >= expected_interval
+
+
+# Attribute names on MainWindow that a wake-from-suspend must reset so the
+# resume is classified like a fresh session start, never a mid-session drop.
+# Kept here (next to classify_unlinked) so the "what counts as connection
+# state" definition lives in one wx-free, unit-testable place.
+_RESET_ZERO_ATTRS = (
+    "_wa_http_fail_strikes",
+    "_offline_probe_strikes",
+    "_logout_strikes",
+    "_resume_fail_strikes",
+)
+_RESET_FALSE_ATTRS = (
+    "_logout_handled",
+    "_wa_connect_announced",
+)
+
+
+def reset_state_for_resume(obj, now: float) -> None:
+    """Reset the connection/logout latches on ``obj`` so a wake-from-suspend
+    is treated like a fresh session start, NOT a mid-session drop.
+
+    The token-level twin of the never-wipe-on-resume database guard. After a
+    long hibernation WhatsApp Web inside Chrome has disconnected, so WPPConnect
+    reports QRCODE/notLogged for a while until the saved profile re-attaches.
+    classify_unlinked() escalates to a *logout* (dropping the token and the
+    paired flag) only when we were connected THIS run — the
+    ``_wa_connect_announced`` latch. Across a suspend that latch is still True
+    from before the machine slept, so a transient post-wake QRCODE looked like
+    "we were online, now logged out" and, after the logout-confirm strikes,
+    wiped the token of every account that did not re-attach instantly.
+
+    Clearing the latch (plus the strike tallies and the one-shot logout latch,
+    and re-arming the startup grace window via ``_wa_startup_time``) makes the
+    resume behave like launch: an unlinked reading is RESUMING, and only a
+    genuinely dead session eventually surfaces the pairing dialog via
+    RESUME_FAILED — which never wipes.
+
+    Pure/wx-free (mutates a plain object), so it is unit-testable without the
+    whole wx/requests stack.
+    """
+    for attr in _RESET_ZERO_ATTRS:
+        setattr(obj, attr, 0)
+    for attr in _RESET_FALSE_ATTRS:
+        setattr(obj, attr, False)
+    obj._wa_startup_time = now
+    obj._last_strike_ts = 0.0
+
+
 
 def classify_unlinked(
     status: str,
