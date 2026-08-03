@@ -63,3 +63,10 @@ export function deleteSessionOnArray(session: string): void {
   delete clientsArray[session];
   clientsArray = newArray;
 }
+
+export interface Session {
+  name?: string;
+  client?: Whatsapp;
+  status?: string;
+  [key: string]: any;
+}

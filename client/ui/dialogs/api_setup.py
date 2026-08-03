@@ -508,28 +508,7 @@ class ApiSetupDialog(wx.Dialog):
 
         try:
             if not modules_only:
-                self._set_stage("Verificando a versão mais recente do WPPConnect Server...", *stages["resolve_tag"])
-                tag = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
-                if not tag:
-                    # No explicit tag was requested and .env doesn't pin one — resolve
-                    # the actual latest GitHub release instead of defaulting straight
-                    # to the main branch head. A fixed WPPCONNECT_TAG_VERSION only
-                    # ever changes when WinZapp itself ships a new build, so it is
-                    # stale from the moment it's set; a brand-new install deserves
-                    # whatever is genuinely newest today, not a version already
-                    # behind by the time the user installs it. Falls through to the
-                    # main branch (the previous behaviour) if the API is unreachable.
-                    tag = fetch_latest_wpp_tag()
-                    if tag:
-                        logging.info("[api_setup] Using latest released wppconnect-server tag: %s", tag)
-                    else:
-                        logging.warning("[api_setup] Could not resolve latest release tag — falling back to main branch")
-
-                # ── Step 1: download source ZIP ───────────────────────────────
-                if tag:
-                    url = _REPO_ZIP_TAG.format(tag=tag)
-                else:
-                    url = _REPO_ZIP_MAIN
+                url = _REPO_ZIP_MAIN
 
                 tmp_zip = tempfile.mktemp(suffix=".zip", prefix="winzapp_api_")
                 try:
