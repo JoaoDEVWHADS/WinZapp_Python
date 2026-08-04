@@ -90,7 +90,9 @@ jobs:
         id: cache-npm-global
         uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\npm-cache
+          path: |
+            ~\AppData\Roaming\npm-cache
+            ~\AppData\Local\npm-cache
           key: npm-global-${{ runner.os }}-${{ hashFiles('client/api_patches/package.json') }}
           restore-keys: |
             npm-global-${{ runner.os }}-
@@ -140,6 +142,7 @@ jobs:
         with:
           path: |
             ~\AppData\Local\pyinstaller
+            build\pyinstaller_work
           key: pyinstaller-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             pyinstaller-${{ runner.os }}-
