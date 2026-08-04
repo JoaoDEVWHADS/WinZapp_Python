@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.04.1804"
+=======
+__version__ = "2026.08.04.1120"
+>>>>>>> 5ad3105d (revert: rollback files to commit 4 state and retain commit 1 sessionController fix)
