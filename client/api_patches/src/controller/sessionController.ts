@@ -724,24 +724,44 @@ export async function getMediaByMessage(req: Request, res: Response) {
         .status(200)
         .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
     } catch (decryptErr) {
-      req.logger.error(`decryptFile failed (CDN link expired or forbidden), attempting WPP.chat.downloadMedia in browser: ${decryptErr}`);
+      req.logger.error(`decryptFile failed for ${messageId} (mediaUrl: ${message.clientUrl || message.deprecatedMms3Url}): ${decryptErr}`);
       
       if (client.page && !client.page.isClosed()) {
         try {
           const rawBase64 = await client.page.evaluate(async ({ mId }) => {
             try {
               const WPP = (window as any).WPP;
+              const Store = (window as any).Store;
               if (!WPP?.chat?.downloadMedia) return null;
+
+              // Find target Msg model in Store.Msg
+              let targetMsg = Store?.Msg?.get ? Store.Msg.get(mId) : null;
+              if (!targetMsg && Store?.Msg?.models) {
+                const parts = mId.split('_');
+                const rawId = parts.length > 2 ? parts[2] : mId;
+                targetMsg = Store.Msg.models.find((item: any) => {
+                  if (!item || !item.id) return false;
+                  const ser = item.id._serialized || '';
+                  const itemId = item.id.id || '';
+                  return itemId === rawId || ser === mId || ser.includes(rawId);
+                });
+              }
+
+              const target = targetMsg || mId;
               let blob: any = null;
               try {
-                blob = await WPP.chat.downloadMedia(mId);
+                blob = await WPP.chat.downloadMedia(target);
               } catch (e) {
-                if (mId.includes('@c.us')) {
-                  try { blob = await WPP.chat.downloadMedia(mId.replace(/@c\.us/g, '@s.whatsapp.net')); } catch (e2) {}
-                } else if (mId.includes('@s.whatsapp.net')) {
-                  try { blob = await WPP.chat.downloadMedia(mId.replace(/@s\.whatsapp\.net/g, '@c.us')); } catch (e2) {}
+                console.log(`[WPP.chat.downloadMedia primary fail]: ${e}`);
+                if (typeof mId === 'string') {
+                  if (mId.includes('@c.us')) {
+                    try { blob = await WPP.chat.downloadMedia(mId.replace(/@c\.us/g, '@s.whatsapp.net')); } catch (e2) {}
+                  } else if (mId.includes('@s.whatsapp.net')) {
+                    try { blob = await WPP.chat.downloadMedia(mId.replace(/@s\.whatsapp\.net/g, '@c.us')); } catch (e2) {}
+                  }
                 }
               }
+
               if (blob) {
                 if (WPP?.util?.blobToBase64) {
                   return await WPP.util.blobToBase64(blob);
