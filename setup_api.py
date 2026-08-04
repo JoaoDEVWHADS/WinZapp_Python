@@ -292,14 +292,16 @@ def main():
 
 
 
-        # Download Chromium (Puppeteer postinstall)
-        print("[INFO] Downloading Chromium (Puppeteer)...")
-        install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
-        if os.path.isfile(install_js):
-            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+        # Download Chromium (Puppeteer postinstall into client/api/.cache)
+        print("[INFO] Downloading Chromium (Puppeteer into client/api/.cache)...")
+        cache_dir = os.path.join(CLIENT_API_DIR, ".cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        env = dict(os.environ)
+        env["PUPPETEER_CACHE_DIR"] = cache_dir
+        if npm_bin.endswith("npm-cli.js"):
+            subprocess.run([node_bin, npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, env=env, check=False)
         else:
-            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
-            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
+            subprocess.run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, env=env, check=False)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
