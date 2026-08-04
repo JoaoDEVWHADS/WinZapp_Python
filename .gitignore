@@ -67,7 +67,6 @@ client/logs/
 # fallback is worthless when client/api/ was already gone. NEVER add a
 # pattern above that would catch this path — it must always be tracked.
 !/client/api_patches/
-/client/api_patches/dist/
 /build/
 /dist/
 
