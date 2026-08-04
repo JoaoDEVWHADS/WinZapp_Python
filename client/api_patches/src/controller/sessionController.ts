@@ -724,43 +724,61 @@ export async function getMediaByMessage(req: Request, res: Response) {
         .status(200)
         .json({ base64: buffer.toString('base64'), mimetype: message.mimetype || 'audio/ogg' });
     } catch (decryptErr) {
-      req.logger.error(`decryptFile failed, trying browser-side recovery: ${decryptErr}`);
+      req.logger.error(`decryptFile failed (CDN link expired or forbidden), attempting WPP.chat.downloadMedia in browser: ${decryptErr}`);
       
-      // Attempt browser-side recovery: fetch the message fresh from WhatsApp Web to get updated CDN URLs
-      let freshMessage: any = null;
       if (client.page && !client.page.isClosed()) {
         try {
-          freshMessage = await client.getMessageById(messageId);
-        } catch (err) {}
-
-        if (!freshMessage && messageId) {
-          const parts = messageId.split('_');
-          if (parts.length >= 2) {
-            const chatId = parts[1];
-            if (chatId && typeof client.loadEarlierMessages === 'function') {
+          const rawBase64 = await client.page.evaluate(async ({ mId }) => {
+            try {
+              const WPP = (window as any).WPP;
+              if (!WPP?.chat?.downloadMedia) return null;
+              let blob: any = null;
               try {
-                await client.loadEarlierMessages(chatId);
-                freshMessage = await client.getMessageById(messageId);
-              } catch (err) {}
+                blob = await WPP.chat.downloadMedia(mId);
+              } catch (e) {
+                if (mId.includes('@c.us')) {
+                  try { blob = await WPP.chat.downloadMedia(mId.replace(/@c\.us/g, '@s.whatsapp.net')); } catch (e2) {}
+                } else if (mId.includes('@s.whatsapp.net')) {
+                  try { blob = await WPP.chat.downloadMedia(mId.replace(/@s\.whatsapp\.net/g, '@c.us')); } catch (e2) {}
+                }
+              }
+              if (blob) {
+                if (WPP?.util?.blobToBase64) {
+                  return await WPP.util.blobToBase64(blob);
+                }
+                return new Promise((resolve) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result);
+                  reader.onerror = () => resolve(null);
+                  reader.readAsDataURL(blob);
+                });
+              }
+              return null;
+            } catch (e) {
+              console.log(`[browser-evaluate downloadMedia error]: ${e}`);
+              return null;
             }
+          }, { mId: messageId });
+
+          if (rawBase64 && typeof rawBase64 === 'string') {
+            let mimetype = message.mimetype || 'audio/ogg';
+            let base64 = rawBase64;
+            if (rawBase64.startsWith('data:')) {
+              const matches = rawBase64.match(/^data:(.*?);base64,(.*)$/);
+              if (matches) {
+                mimetype = matches[1];
+                base64 = matches[2];
+              }
+            }
+            req.logger.info(`Successfully downloaded media via browser WPP.chat.downloadMedia for ${messageId}! base64 len=${base64.length}`);
+            return res.status(200).json({ base64, mimetype });
           }
+        } catch (browserErr) {
+          req.logger.error(`Browser WPP.chat.downloadMedia fallback error: ${browserErr}`);
         }
       }
 
-      if (freshMessage) {
-        try {
-          req.logger.info(`Found fresh message in browser for ${messageId}, attempting decryption...`);
-          const buffer = await client.decryptFile(freshMessage);
-          return res.status(200).json({
-            base64: buffer.toString('base64'),
-            mimetype: freshMessage.mimetype || 'audio/ogg'
-          });
-        } catch (freshDecryptErr) {
-          req.logger.error(`Decryption of fresh browser message failed: ${freshDecryptErr}`);
-        }
-      }
-
-      // Final fallback to WPPConnect's downloadMedia
+      // Secondary fallback to WPPConnect's downloadMedia
       if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
         try {
           let timer: any;
@@ -772,13 +790,13 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
           const timeoutPromise = new Promise<null>((resolve) => {
             timer = setTimeout(() => {
-              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              req.logger.warn(`Timeout 15000ms reached for client.downloadMedia (${messageId})`);
               resolve(null);
-            }, 5000);
+            }, 15000);
           });
           let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
-            let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
+            let mimetype = message.mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
               const matches = base64.match(/^data:(.*?);base64,(.*)$/);
               if (matches) {
