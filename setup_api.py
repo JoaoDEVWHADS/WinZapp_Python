@@ -47,6 +47,7 @@ CUSTOM_SRC_FILES = [
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
     "src/routes/index.ts",
+    "dist/controller/sessionController.js",
     "decrypt.js",
 ]
 
@@ -218,13 +219,13 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-    # Always restore every patched file from client/api_patches/ on every run
-    for rel_path, content in custom_contents.items():
-        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        with open(dest_path, "wb") as f:
-            f.write(content)
-        print(f"[INFO] Synced custom patch: {rel_path}")
+        # Restore every patched file after cloning/extracting
+        for rel_path, content in custom_contents.items():
+            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(content)
+            print(f"[INFO] Restored custom file: {rel_path}")
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
@@ -307,6 +308,7 @@ def main():
             _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
+
         print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
     except Exception as e:
