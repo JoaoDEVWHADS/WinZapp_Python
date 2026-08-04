@@ -949,6 +949,7 @@ class MainWindow(wx.Frame):
         self._presence_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER,    self._on_presence_timer,   self._presence_timer)
         self.Bind(wx.EVT_ACTIVATE, self._on_window_activate)
+        self._presence_debounce_timer = None
 
         # ── System tray icon ──────────────────────────────────────────────────
         self.tray_icon = None
@@ -1861,6 +1862,12 @@ class MainWindow(wx.Frame):
         Fired by wxPython when the main window gains or loses OS focus.
         - Gained focus  → send "available" immediately, then every 20 s
         - Lost focus    → stop the timer, send "unavailable" once
+
+        Debounced: internal modal dialogs (pairing, settings, etc.) can toggle
+        the main frame's activation state several times within milliseconds
+        as focus moves to/from them, and each toggle used to fire its own
+        presence POST. Only the state that's still current after a short
+        quiet window gets sent, collapsing that flicker into a single request.
         """
         if self.background_mode:
             event.Skip()
@@ -1869,7 +1876,15 @@ class MainWindow(wx.Frame):
         if not token:
             event.Skip()
             return
-        if event.GetActive():
+        active = event.GetActive()
+        if self._presence_debounce_timer is not None and self._presence_debounce_timer.IsRunning():
+            self._presence_debounce_timer.Stop()
+        self._presence_debounce_timer = wx.CallLater(300, self._apply_window_activate, active)
+        event.Skip()
+
+    def _apply_window_activate(self, active: bool):
+        """Actually send the presence update after `_on_window_activate`'s debounce settles."""
+        if active:
             self._last_activation_time = time.time()
             threading.Thread(
                 target=self._send_presence, args=("available",), daemon=True
@@ -1881,7 +1896,6 @@ class MainWindow(wx.Frame):
             threading.Thread(
                 target=self._send_presence, args=("unavailable",), daemon=True
             ).start()
-        event.Skip()
 
     def _on_presence_timer(self, event):
         """Periodic keep-alive: resend 'available' while window is focused."""
@@ -2013,6 +2027,11 @@ class MainWindow(wx.Frame):
         # Stop the presence keep-alive timer before tearing down
         if hasattr(self, "_presence_timer") and self._presence_timer.IsRunning():
             self._presence_timer.Stop()
+        # Also cancel a pending debounced activate/deactivate — otherwise it
+        # can fire mid-shutdown and spawn a presence POST + restart the timer
+        # just stopped above.
+        if getattr(self, "_presence_debounce_timer", None) is not None and self._presence_debounce_timer.IsRunning():
+            self._presence_debounce_timer.Stop()
         if getattr(self, "tray_icon", None) is not None:
             try:
                 self.tray_icon.RemoveIcon()

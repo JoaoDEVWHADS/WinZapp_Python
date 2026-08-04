@@ -7414,9 +7414,20 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
+        # WPPConnect's WhatsApp-imposed limits are 70 MB (media) / 1 GB (docs),
+        # but that's not what WinZapp can actually deliver: sendFile() reads
+        # the whole file, base64-encodes it in memory, and hands the result to
+        # Puppeteer's page.evaluate() as a single argument sent over the
+        # Chrome DevTools Protocol. A large upload (200 MB raw → ~266 MB of
+        # base64) makes that transfer slow enough, and heavy enough on the
+        # Node/Chromium processes, that it has been observed killing the
+        # underlying Puppeteer session outright — which WinZapp then reports
+        # as a permanent offline mode with the message stuck pending, since
+        # there's no live browser tab left to reconnect to. Capping documents
+        # at 100 MB keeps sends inside the range that transport reliably
+        # handles instead of raising WhatsApp's own (much higher) ceiling.
         _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
-        _MAX_DOC_BYTES      = 1   * 1024 * 1024 * 1024
+        _MAX_DOC_BYTES      = 100 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
@@ -7424,7 +7435,7 @@ class ConversationsPanel(wx.Panel):
 
             is_doc    = media_type == "document"
             max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
-            max_mb    = 1024 if is_doc else 70
+            max_mb    = 100 if is_doc else 70
 
             try:
                 if os.path.getsize(path) > max_bytes:
