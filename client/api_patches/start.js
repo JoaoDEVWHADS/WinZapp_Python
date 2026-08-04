@@ -11,11 +11,11 @@ try {
 
 
 // Auto-instala o Chrome do Puppeteer caso não exista.
-// Procura pelo executável real (chrome.exe / chrome / Chromium), não apenas
+// Procura pelo executável real (chrome.exe / chrome / Chromium / chrome-headless-shell), não apenas
 // por uma pasta não-vazia: um antivírus pode ter removido/colocado em
 // quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
 // checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
-const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+const puppeteerCacheDir = path.join(__dirname, '.cache');
 
 function findChromeExecutable(dir, depth) {
   if (depth > 6) return null;
