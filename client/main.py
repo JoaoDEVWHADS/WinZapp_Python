@@ -498,6 +498,14 @@ class MainWindow(wx.Frame):
         self._save_timer_lock = threading.Lock()
         # Guards self.sync_thread creation — see _try_start_sync_thread().
         self._sync_start_lock = threading.Lock()
+        # Serializes wake-from-suspend recovery so the two independent triggers
+        # (EVT_POWER_RESUME thread and the health-check clock-gap detector)
+        # never run _recover_from_suspend concurrently — overlapping runs made
+        # the second kill-orphan sweep murder the fresh Chrome the first run's
+        # start-session had just spawned, hanging the session in INITIALIZING or
+        # bouncing it to QRCODE. See _recover_from_suspend.
+        self._resume_recovery_lock = threading.Lock()
+        self._resume_recovery_active = False
         self._unresolvable_lids = set()
         self._unresolvable_names = set()
         self._resolving_lids = set()
@@ -1377,11 +1385,31 @@ class MainWindow(wx.Frame):
             logging.exception("[ipc] activate failed")
 
     def _ipc_quit(self):
-        """Handle an IPC quit request: shut down, then flag released."""
+        """Handle an IPC quit request from the account that owns the 'Exit'.
+
+        Ordering is critical. real_exit() ends in os._exit(0), which never
+        returns — so setting the released flag AFTER it (the old code's finally)
+        was unreachable, the IPC handler never saw `released`, and the
+        initiating account's request_quit() waited its full 10s timeout then
+        exited anyway WITHOUT confirming this account had flushed. Combined with
+        the old fixed sleep(2), that race hard-killed a still-flushing session
+        into a re-pair on next launch.
+
+        Fix: run the full graceful teardown (close-session + wait-for-flush +
+        stop Node) FIRST, then flag released so the IPC handler can reply
+        `released:True`, give it a beat to send that reply over the pipe, and
+        only THEN take the process down for good.
+        """
         try:
-            self.real_exit()
+            self._perform_shutdown()
         finally:
+            # Reachable now (teardown does not call os._exit). Let the IPC
+            # listener observe this and reply released:True to the initiator.
             self._ipc_released = True
+        # Give the listener thread a moment to send the released reply before we
+        # vanish (its poll loop checks the predicate every 50ms).
+        time.sleep(0.3)
+        self._terminate_process()
 
     def quit_all_accounts(self):
         """Quit the WHOLE app: gracefully stop every OTHER account's background
@@ -1779,6 +1807,23 @@ class MainWindow(wx.Frame):
         event.Skip()
 
     def _recover_from_suspend(self):
+        # Single-flight: EVT_POWER_RESUME (a dedicated thread) and the
+        # health-check clock-gap detector can both fire for the SAME wake, a few
+        # seconds apart. Two overlapping recoveries interleave their
+        # close/kill-orphan/start-session steps, and the later run's kill-orphan
+        # sweep (chrome_cmdline_owns_session matches by session name only) kills
+        # the fresh Chrome the earlier run's start-session just launched — the
+        # session then hangs in INITIALIZING or bounces to QRCODE/unpaired.
+        # Observed live after an 8h hibernation: same PIDs killed twice,
+        # "start-session sent" logged twice, 1 of 3 accounts recovered cleanly.
+        # If a recovery is already in progress, this trigger is redundant — drop
+        # it rather than pile a second pass on top. try_begin_resume_recovery
+        # holds the pure single-flight logic (connection_state, unit-tested).
+        import connection_state as cs
+        if not cs.try_begin_resume_recovery(self, self._resume_recovery_lock):
+            logging.info("[power] recovery already in progress — "
+                         "skipping duplicate wake trigger.")
+            return
         try:
             if self.ws is not None and not getattr(self.ws.sio, "connected", False):
                 self._reconnect_websocket_now()
@@ -1797,6 +1842,8 @@ class MainWindow(wx.Frame):
             self._restart_session_if_zombie_after_resume()
         except Exception:
             logging.exception("[power] _recover_from_suspend failed")
+        finally:
+            cs.end_resume_recovery(self, self._resume_recovery_lock)
 
     # After resume, how many consecutive "CONNECTED but isConnected()==false with
     # the network up" readings confirm a zombie session (dead stream) worth an
@@ -2596,13 +2643,28 @@ class MainWindow(wx.Frame):
             logging.exception("[focus] restoring primary control focus failed")
 
     def real_exit(self):
-        """Completely close WinZapp, removing the tray icon and stopping all threads."""
+        """Completely close WinZapp: graceful teardown, then terminate.
+
+        Split into _perform_shutdown() (reversible teardown — close session,
+        flush, stop Node, close DB) and _terminate_process() (the terminal
+        os._exit). The IPC quit handler needs the teardown WITHOUT the immediate
+        os._exit so it can flag `released` and reply to the initiating account
+        before the process vanishes (see _ipc_quit)."""
+        self._perform_shutdown()
+        self._terminate_process()
+
+    def _perform_shutdown(self):
+        """Reversible shutdown: stop timers/threads, gracefully close the WPP
+        session (waiting for its flush), stop the Node, close the DB. Does NOT
+        exit the process, so it is safe to call from the IPC quit handler."""
         # Set FIRST, before anything else: _stop_wpp_server() below closes
         # the WPPConnect session itself, which — while our WebSocket is
         # still connected — arrives as an ordinary "connection closed" event
         # indistinguishable from a real disconnect. _set_wa_connected()
         # checks this flag and skips entirely, so quitting never announces
         # "modo offline ativado" in the moment before the process exits.
+        if getattr(self, "_shutting_down", False):
+            return  # teardown already ran (e.g. real_exit after an IPC quit)
         self._shutting_down = True
         # Stop the presence keep-alive timer before tearing down
         if hasattr(self, "_presence_timer") and self._presence_timer.IsRunning():
@@ -2626,6 +2688,9 @@ class MainWindow(wx.Frame):
                 self.db.close()
             except Exception:
                 pass
+
+    def _terminate_process(self):
+        """Terminal exit — never returns."""
         try:
             wx.GetApp().ExitMainLoop()
         except Exception:
@@ -4274,6 +4339,64 @@ class MainWindow(wx.Frame):
                 return
         logging.info("[startup] WhatsApp Web version pin OK (no fallback reported by WPPConnect).")
 
+    # How long to wait for a close-session to actually flush WhatsApp Web's auth
+    # state to disk before we hard-kill the Node. Generous because a large
+    # profile's leveldb flush can take well over the old fixed 2s — and cutting
+    # it short is exactly what corrupted the profile into a re-pair.
+    _SHUTDOWN_FLUSH_TIMEOUT = 15.0
+    _SHUTDOWN_FLUSH_POLL = 0.3
+
+    def _shutdown_audit(self, msg: str):
+        """Append one line to a PERSISTENT shutdown-audit log that (unlike
+        log.log, opened mode='w') survives across launches, so the teardown of
+        one run can still be read after the next launch has started. This is the
+        only way to prove what actually happened during a close that leads to a
+        'Session Unpaired' on the following start."""
+        try:
+            from app_paths import log_path
+            line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [pid={os.getpid()}] {msg}\n"
+            with open(log_path("shutdown_audit.log"), "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+
+    def _wait_for_session_flushed(self, token: str) -> bool:
+        """Poll status-session until the session reports CLOSED (browser down,
+        auth flushed) or the timeout elapses. Returns True if it confirmed
+        CLOSED, False on timeout. See connection_state.session_closed_after_flush
+        for why a blind sleep was not enough."""
+        import connection_state as cs
+        deadline = time.monotonic() + self._SHUTDOWN_FLUSH_TIMEOUT
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/status-session"
+        started = time.monotonic()
+        polls = 0
+        while time.monotonic() < deadline:
+            polls += 1
+            try:
+                resp = requests.get(url, headers=headers, timeout=5)
+                if resp.status_code in (200, 201):
+                    status = resp.json().get("status", "") or ""
+                    self._shutdown_audit(
+                        f"flush poll #{polls} status={status!r} "
+                        f"elapsed={time.monotonic()-started:.1f}s")
+                    if cs.session_closed_after_flush(status):
+                        return True
+                else:
+                    self._shutdown_audit(
+                        f"flush poll #{polls} HTTP {resp.status_code}")
+            except Exception as e:
+                # A connection error here usually means the Node already tore the
+                # session/HTTP server down — treat as flushed rather than block.
+                self._shutdown_audit(
+                    f"flush poll #{polls} conn-error ({e!r}) — treating as closed")
+                return True
+            time.sleep(self._SHUTDOWN_FLUSH_POLL)
+        self._shutdown_audit(
+            f"flush TIMEOUT after {polls} polls / {self._SHUTDOWN_FLUSH_TIMEOUT}s "
+            "— never saw CLOSED")
+        return False
+
     def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
 
@@ -4296,6 +4419,9 @@ class MainWindow(wx.Frame):
         # regardless of whether we go on to stop the Node or leave it up. This
         # must happen for EVERY closing process, not just the last one.
         token = getattr(self, "token", "")
+        session_name = (token or "").split(":")[0]
+        self._shutdown_audit(f"_stop_wpp_server START account={getattr(self,'account_id','?')} "
+                             f"session={session_name!r} port={getattr(self,'wpp_port','?')}")
         if token:
             try:
                 url = (
@@ -4307,10 +4433,25 @@ class MainWindow(wx.Frame):
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=5,
                 )
-                logging.info("[shutdown] gracefully closed own WPP session")
-                time.sleep(2)
-            except Exception:
+                logging.info("[shutdown] close-session sent — waiting for flush")
+                self._shutdown_audit("close-session POSTed — waiting for flush")
+                # Wait for WhatsApp Web to actually shut its browser down and
+                # flush auth state to userDataDir BEFORE we taskkill the Node.
+                # A fixed sleep(2) was too short for a large profile: the kill
+                # landed mid-flush, corrupting leveldb -> "Session Unpaired" on
+                # next launch (a big account came back to a pairing screen after
+                # a normal quit). Poll the real CLOSED signal instead.
+                if self._wait_for_session_flushed(token):
+                    logging.info("[shutdown] session flushed cleanly (CLOSED)")
+                    self._shutdown_audit("FLUSH OK — session reached CLOSED")
+                else:
+                    logging.warning("[shutdown] session did not confirm CLOSED "
+                                    "before timeout — proceeding to stop Node")
+                    self._shutdown_audit("FLUSH FAIL — timed out, killing Node anyway "
+                                         "(risk of Session Unpaired next launch)")
+            except Exception as e:
                 logging.info("[shutdown] own close-session failed (non-fatal)")
+                self._shutdown_audit(f"close-session EXCEPTION ({e!r})")
 
         # STEP 2: stop OUR OWN Node. Each account now runs its own Node on its
         # own port (revised architecture), so there is no shared server to spare
@@ -4339,6 +4480,7 @@ class MainWindow(wx.Frame):
             pid = self._find_pid_listening_on_port(self.wpp_port)
 
         if pid:
+            self._shutdown_audit(f"taskkill /F /T node pid={pid} (flush done above)")
             try:
                 import sys
                 if sys.platform == "win32":
@@ -4356,6 +4498,8 @@ class MainWindow(wx.Frame):
                         proc.terminate()
                     except Exception:
                         pass
+        else:
+            self._shutdown_audit("no node pid to kill (proc gone / port free)")
 
     def _find_pid_listening_on_port(self, port):
         """Return the PID of the node.exe process listening on *port* (Windows only).
@@ -5339,6 +5483,23 @@ class MainWindow(wx.Frame):
                 store.ensure_from_legacy_token(self.token.split(":")[0], self.token)
         except Exception:
             logging.exception("[sessions] seeding session store failed (non-fatal)")
+        # Persistent audit: which session are we starting with, and what does the
+        # store think of it + every sibling. If a working session silently turned
+        # 'abandoned' and a fresh (unpaired) one took over between quit and this
+        # launch, THIS line proves it across the log truncation.
+        try:
+            store = self._get_session_store()
+            listing = []
+            if store is not None:
+                for s in store.list():
+                    listing.append(f"{s.get('name','?')[:12]}={s.get('status','?')}")
+            self._shutdown_audit(
+                f"STARTUP account={getattr(self,'account_id','?')} "
+                f"active_session={self.token.split(':')[0]!r} "
+                f"paired={self.settings.get('privateinfo',{}).get('paired')} "
+                f"store=[{', '.join(listing)}]")
+        except Exception:
+            pass
 
     def prepare_sync(self):
         # Diagnostic breadcrumbs: prepare_sync() runs synchronously on the
