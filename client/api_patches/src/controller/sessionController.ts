@@ -543,10 +543,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
   try {
     let message: any = null;
 
-    // If details are provided in the request body (e.g. POST request with local cache), use them directly.
-    if (req.body && (req.body.mediaKey || req.body.clientUrl)) {
-      req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
+    // If details are provided in the request body (e.g. POST request with local cache AND download URL), use them directly.
+    const hasDownloadUrl = req.body && (req.body.clientUrl || req.body.deprecatedMms3Url || req.body.url || req.body.directPath);
+    if (req.body && req.body.mediaKey && hasDownloadUrl) {
+      req.logger.info(`Received full decryption keys and download URL in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
+      if (!message.clientUrl && (message.url || message.deprecatedMms3Url)) {
+        message.clientUrl = message.clientUrl || message.url || message.deprecatedMms3Url;
+      }
       // Normalise key types and structures if needed by decryptFile
       if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
         message.mediaKey = Buffer.from(message.mediaKey.data);
