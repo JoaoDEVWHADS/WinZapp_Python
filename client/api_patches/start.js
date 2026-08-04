@@ -1,6 +1,15 @@
 const path = require('path');
 const fs = require('fs');
 
+// Ensure CJS loader resolves body-parser submodules properly
+try {
+  require('body-parser/lib/types/json');
+  require('body-parser/lib/types/raw');
+  require('body-parser/lib/types/text');
+  require('body-parser/lib/types/urlencoded');
+} catch (_) {}
+
+
 // Auto-instala o Chrome do Puppeteer caso não exista.
 // Procura pelo executável real (chrome.exe / chrome / Chromium), não apenas
 // por uma pasta não-vazia: um antivírus pode ter removido/colocado em
