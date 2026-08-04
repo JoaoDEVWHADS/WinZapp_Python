@@ -307,19 +307,6 @@ def main():
             _run([node_bin, npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
         else:
             _run([npm_bin, "run", "build"], cwd=CLIENT_API_DIR)
-
-        # Sync freshly compiled dist back to client/api_patches/dist
-        try:
-            api_dist = os.path.join(CLIENT_API_DIR, "dist")
-            patches_dist = os.path.join(API_PATCHES_DIR, "dist")
-            if os.path.isdir(api_dist) and os.path.isdir(API_PATCHES_DIR):
-                if os.path.exists(patches_dist):
-                    shutil.rmtree(patches_dist)
-                shutil.copytree(api_dist, patches_dist)
-                print("[INFO] Synced freshly compiled dist to client/api_patches/dist/")
-        except Exception as sync_err:
-            print(f"[WARNING] Failed to sync compiled dist to client/api_patches: {sync_err}")
-
         print("[OK] WPPConnect Server dependencies installed and built successfully.")
 
     except Exception as e:
