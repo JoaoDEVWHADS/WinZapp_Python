@@ -197,3 +197,60 @@ def classify_unlinked(
     if logout_strikes >= logout_confirm_strikes:
         return LOGOUT
     return RESUMING  # connected before, brief blip — keep waiting (no wipe)
+
+
+def try_begin_resume_recovery(obj, lock) -> bool:
+    """Atomic compare-and-set that makes wake-from-suspend recovery
+    single-flight. Returns True if the caller acquired the recovery slot (and
+    must call end_resume_recovery when done), False if a recovery is already in
+    progress and this trigger should be dropped.
+
+    The two wake triggers — EVT_POWER_RESUME (its own thread) and the
+    health-check clock-gap detector — both fire for the SAME wake a few seconds
+    apart. Two overlapping _recover_from_suspend runs interleave their
+    close/kill-orphan/start-session steps, and the later run's kill-orphan sweep
+    (chrome_cmdline_owns_session matches by session NAME only) kills the fresh
+    Chrome the earlier run's start-session just spawned — hanging the session in
+    INITIALIZING or bouncing it to QRCODE/unpaired. Observed live after an ~8h
+    hibernation across 3 accounts: same PIDs killed twice, "start-session sent"
+    logged twice, only 1 of 3 recovered cleanly.
+
+    Pure/wx-free (a plain object flag + a caller-supplied lock), so the
+    single-flight decision is unit-testable without the whole wx stack.
+    """
+    with lock:
+        if getattr(obj, "_resume_recovery_active", False):
+            return False
+        obj._resume_recovery_active = True
+        return True
+
+
+def end_resume_recovery(obj, lock) -> None:
+    """Release the recovery slot taken by try_begin_resume_recovery so a LATER
+    wake can recover again. Must run in a finally so a failed recovery does not
+    permanently wedge the app offline."""
+    with lock:
+        obj._resume_recovery_active = False
+
+
+# Status strings WPPConnect reports once a session's browser has fully shut
+# down after a close-session: the WhatsApp Web page is gone and its auth state
+# has been flushed to userDataDir. An empty string is a session no longer known
+# to the server (also closed).
+_CLOSED_AFTER_FLUSH_STATES = ("CLOSED", "DESTROYED", "")
+
+
+def session_closed_after_flush(status: str) -> bool:
+    """True once the WPPConnect session has fully closed after a close-session
+    (browser shut down, WhatsApp Web auth flushed to userDataDir).
+
+    Used to replace a fixed sleep(2) during shutdown: proceeding to
+    `taskkill /F` before this is True cut the leveldb write mid-flush, so the
+    account came back to a pairing screen ("Session Unpaired") on next launch —
+    reported live as "closed one window, another account demanded re-pairing".
+    A larger profile needs longer than 2s to flush, hence waiting on the actual
+    CLOSED signal rather than a blind sleep.
+
+    Pure/wx-free so the decision is unit-testable without the requests/wx stack.
+    """
+    return (status or "") in _CLOSED_AFTER_FLUSH_STATES
