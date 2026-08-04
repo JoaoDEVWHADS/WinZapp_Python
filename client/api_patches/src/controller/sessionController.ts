@@ -567,19 +567,90 @@ export async function getMediaByMessage(req: Request, res: Response) {
         const parts = messageId.split('_');
         if (parts.length >= 2) {
           const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
-          if (chatId && typeof client.loadEarlierMessages === 'function') {
-            req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+          if (chatId) {
+            req.logger.info(`Message ${messageId} not found in cache. Attempting WPP.chat.find & loadEarlierMessages for ${chatId}`);
             try {
-              // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
-              await client.loadEarlierMessages(chatId);
-              // Query again
-              try {
-                message = await client.getMessageById(messageId);
-              } catch (retryErr: any) {
-                req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
+              if (client.page && !client.page.isClosed()) {
+                message = await client.page.evaluate(async ({ msgId, targetChatId }) => {
+                  try {
+                    const WPP = (window as any).WPP;
+                    const Store = (window as any).Store;
+
+                    // Helper 1: Convert string JID to Wid if possible
+                    let targetWid = targetChatId;
+                    if (WPP?.whatsapp?.WidFactory?.create) {
+                      try {
+                        targetWid = WPP.whatsapp.WidFactory.create(targetChatId);
+                      } catch (e) {}
+                    }
+
+                    // Helper 2: Ensure chat is loaded
+                    if (WPP?.chat?.find) {
+                      try { await WPP.chat.find(targetChatId); } catch (e) {}
+                      try { if (targetWid !== targetChatId) await WPP.chat.find(targetWid); } catch (e) {}
+                      try {
+                        if (targetChatId.includes('@c.us')) {
+                          await WPP.chat.find(targetChatId.replace(/@c\.us/g, '@s.whatsapp.net'));
+                        }
+                      } catch (e) {}
+                    }
+
+                    if (WPP?.chat?.loadEarlierMessages) {
+                      try { await WPP.chat.loadEarlierMessages(targetChatId); } catch (e) {}
+                    }
+
+                    // Helper 3: Deep search message
+                    const getMsgSafe = async (mId: string) => {
+                      if (!mId) return null;
+                      if (WPP?.chat?.getMessageById) {
+                        try {
+                          const m = await WPP.chat.getMessageById(mId);
+                          if (m) return m;
+                        } catch (e) {}
+                        try {
+                          if (mId.includes('@c.us')) {
+                            const m = await WPP.chat.getMessageById(mId.replace(/@c\.us/g, '@s.whatsapp.net'));
+                            if (m) return m;
+                          } else if (mId.includes('@s.whatsapp.net')) {
+                            const m = await WPP.chat.getMessageById(mId.replace(/@s\.whatsapp\.net/g, '@c.us'));
+                            if (m) return m;
+                          }
+                        } catch (e) {}
+                      }
+
+                      // Fallback: search Store.Msg.models by raw message ID
+                      const parts = mId.split('_');
+                      const rawId = parts.length > 2 ? parts[2] : mId;
+                      if (Store?.Msg?.models) {
+                        const found = Store.Msg.models.find((item: any) => {
+                          if (!item || !item.id) return false;
+                          const ser = item.id._serialized || '';
+                          const itemId = item.id.id || '';
+                          return itemId === rawId || ser === mId || (rawId && ser.includes(rawId));
+                        });
+                        if (found) return found;
+                      }
+                      return null;
+                    };
+
+                    return await getMsgSafe(msgId);
+                  } catch (e) {
+                    console.log(`[browser-evaluate getMediaByMessage fallback error]: ${e}`);
+                    return null;
+                  }
+                }, { msgId: messageId, targetChatId: chatId });
+              }
+
+              // Second check if evaluate returned null but client.getMessageById might work now
+              if (!message && typeof client.getMessageById === 'function') {
+                try {
+                  message = await client.getMessageById(messageId);
+                } catch (retryErr: any) {
+                  req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
+                }
               }
             } catch (loadErr) {
-              req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+              req.logger.error(`Error executing getMediaByMessage fallback: ${loadErr}`);
             }
           }
         }
