@@ -507,6 +507,12 @@ def assemble_staging():
     if os.path.isfile(sha_src):
         shutil.copy2(sha_src, os.path.join(api_dst, ".commit_sha"))
         print("  -> api/.commit_sha copied to staging")
+
+    cache_src = os.path.join(API_DIR, ".cache")
+    if os.path.isdir(cache_src):
+        cache_dst = os.path.join(api_dst, ".cache")
+        shutil.copytree(cache_src, cache_dst, dirs_exist_ok=True)
+        print("  -> api/.cache (Chrome Headless) copied to staging")
     for rel_path in API_CUSTOM_SRC_FILES:
         src_path = os.path.join(API_DIR, rel_path.replace("/", os.sep))
         if not os.path.isfile(src_path):

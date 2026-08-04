@@ -68,9 +68,9 @@ def _load_env() -> dict:
     return result
 
 
-def _run(cmd: list, cwd: str = None, check: bool = True):
+def _run(cmd: list, cwd: str = None, check: bool = True, env: dict = None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"))
+    result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"), env=env)
     if check and result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
@@ -298,10 +298,13 @@ def main():
         os.makedirs(cache_dir, exist_ok=True)
         env = dict(os.environ)
         env["PUPPETEER_CACHE_DIR"] = cache_dir
-        if npm_bin.endswith("npm-cli.js"):
-            subprocess.run([node_bin, npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, env=env, check=False)
-        else:
-            subprocess.run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR, env=env, check=False)
+        dl_script = (
+            "const { install, BROWSERS } = require('@puppeteer/browsers'); "
+            "install({ browser: BROWSERS.chromeheadlessshell, buildId: 'stable', cacheDir: process.env.PUPPETEER_CACHE_DIR })"
+            ".then(b => console.log('[OK] Browser downloaded to:', b.executablePath))"
+            ".catch(e => console.error('[ERROR] Failed to download browser:', e));"
+        )
+        _run([node_bin, "-e", dl_script], cwd=CLIENT_API_DIR, env=env, check=False)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
