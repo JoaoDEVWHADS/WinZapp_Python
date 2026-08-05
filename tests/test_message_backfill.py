@@ -371,3 +371,47 @@ class TestBackfillPacing:
             passes += 1
             d = self._next_delay(d, 0)
         assert passes <= 15, f"{passes} passes for a store that never warms up"
+
+    def test_a_full_chat_does_not_stay_in_the_re_query_list(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(640), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_a_short_chat_is_taken_at_face_value_once_the_queue_is_drained(self):
+        """Nothing left to decode means a re-query returns the identical list."""
+        s = _Stub(page_size=200, chunks_pending=False)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_a_chat_that_grew_keeps_its_slot_after_the_queue_drains(self):
+        """The ramp has to finish: history landed for this one, so ask once more."""
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        s._history_still_landing = False
+        s._note_backfill_state("a@lid", _chat(records=_records(90), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == {"a@lid"}
+
+    def test_a_pass_that_adds_nothing_ends_the_retries(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        s._history_still_landing = False
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_growth_bookkeeping_survives_the_lid_rekey(self):
+        """deduplicate_chats() re-keys the chat between passes; the count must
+        follow it, or every pass would look like the first one and never stop."""
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._lid_to_phone = {"111@lid": "5511999999999@s.whatsapp.net"}
+        s._phone_to_lid = {"5511999999999@s.whatsapp.net": "111@lid"}
+        s._note_backfill_state("111@lid", _chat(records=_records(15), t=1), api_ok=True)
+        s._history_still_landing = False
+        s._note_backfill_state(
+            "5511999999999@s.whatsapp.net", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+        assert s._partial_history_counts == {}
+
+    def test_a_failed_call_still_belongs_to_the_retry_loop(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=False)
+        assert s._chats_awaiting_messages == set()

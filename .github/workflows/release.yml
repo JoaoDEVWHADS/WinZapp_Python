@@ -1,270 +1,167 @@
-name: Release Build
+# Manual Trigger Commit - Rollback to edb0388
+name: Release WinZapp
 
 on:
-  release:
-    types: [created]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão da Release (Deixe em branco para usar a data/hora atual)"
+        required: false
+        type: string
 
-env:
-  NODE_VERSION: "24.15.0"
-  PYTHON_VERSION: "3.13"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Gate for everything below: a release is only worth building/shipping if
-  # the test suite is green. Kept as its own job (rather than a step inside
-  # `build`) so `reject-on-test-failure` can react to it independently —
-  # cheap to run (no Node/MSYS2/PyInstaller setup needed) and fails fast
-  # before the ~10+ minute build job ever starts.
-  test:
-    name: Run test suite
+  release:
     runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip --quiet
-          pip install -r requirements.txt --quiet
-          pip install -r requirements-dev.txt --quiet
-
-      - name: Run pytest
-        run: pytest
-
-  # A release object already exists on GitHub by the time this workflow runs
-  # (the `release: created` trigger fires once the release itself is made,
-  # before any artifacts are attached) — `needs: test` only stops the BUILD
-  # job, it can't retroactively un-create the release. This job is what
-  # actually rejects a release whose tests failed: it deletes the just-created
-  # release (and its tag) outright, so a broken release never lingers on the
-  # Releases page looking like a normal one just because it has no assets yet.
-  reject-on-test-failure:
-    name: Delete release if tests failed
-    runs-on: ubuntu-latest
-    needs: test
-    if: ${{ failure() && needs.test.result == 'failure' }}
-    permissions:
-      contents: write
-    steps:
-      - name: Delete the release and its tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release delete "${{ github.event.release.tag_name }}" \
-            --repo "${{ github.repository }}" \
-            --cleanup-tag \
-            --yes
-
-  build:
-    name: Build Windows installer and portable ZIP
-    runs-on: windows-latest
-    needs: test
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Código-Fonte
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Bake the just-created release's tag into version.py so the compiled
-      # app reports the right version. This also gets committed back to the
-      # repo's default branch below, so client/version.py in source control
-      # matches what shipped in the release artifacts.
-      - name: Set version.py from release tag
+      - name: Definir Versão da Release
         shell: pwsh
         run: |
-          $ver = "${{ github.event.release.tag_name }}" -replace '^[vV]', ''
+          $ver = "${{ inputs.version }}"
+          if ([string]::IsNullOrEmpty($ver)) {
+              $ver = Get-Date -Format "yyyy.MM.dd.HHmm"
+          }
+          echo "RELEASE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "[INFO] Versão definida para: $ver"
+
+      - name: Atualizar versão no version.py
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_VERSION }}"
           $filePath = "client/version.py"
           $content = "__version__ = `"$ver`""
           $content | Out-File -FilePath $filePath -Encoding utf8 -NoNewline
-          Write-Output "[INFO] version.py set to $ver"
+          Write-Output "[INFO] Arquivo version.py atualizado para a versão $ver."
 
-      # GCC and windres (from UCRT64 binutils) are required by build.py to compile
-      # the C installer/uninstaller.  libopus-0.dll is committed to client/lib/
-      # so no opus package is needed here.
-      - name: Set up MSYS2 (GCC + windres)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: false
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-binutils
-
-      # cygpath resolves /ucrt64/bin to the real Windows path regardless of
-      # where the runner installed MSYS2 (avoids hard-coding C:\msys64).
-      - name: Add MSYS2 UCRT64 bin to Windows PATH
-        shell: msys2 {0}
-        run: echo "$(cygpath -w /ucrt64/bin)" >> "$GITHUB_PATH"
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      # build.py expects client/node/node.exe — download the same portable ZIP
-      # version that developers use and place it at the right path.
-      - name: Download portable Node.js v${{ env.NODE_VERSION }}
+      - name: Configurar Git, Commit e Tag
         shell: pwsh
         run: |
-          $version = "${{ env.NODE_VERSION }}"
-          $zip = "node-v${version}-win-x64.zip"
-          Invoke-WebRequest "https://nodejs.org/dist/v${version}/${zip}" -OutFile $zip -UseBasicParsing
-          # nodejs.org publishes a signed checksum manifest for every release —
-          # verify the download against it before ever extracting/using it,
-          # same as client/ui/dialogs/node_download.py does for the identical
-          # download performed on a user's machine during first-run setup.
-          Invoke-WebRequest "https://nodejs.org/dist/v${version}/SHASUMS256.txt" -OutFile "SHASUMS256.txt" -UseBasicParsing
-          $expected = (Select-String -Path "SHASUMS256.txt" -Pattern "  $zip$").Line.Split(" ")[0]
-          if (-not $expected) {
-            Write-Error "Could not find a checksum for $zip in SHASUMS256.txt"
-            exit 1
-          }
-          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $expected) {
-            Write-Error "Node.js download checksum mismatch: expected $expected, got $actual"
-            exit 1
-          }
-          Write-Output "[INFO] Node.js download checksum verified: $actual"
-          Expand-Archive $zip -DestinationPath . -Force
-          Move-Item "node-v${version}-win-x64" "client\node"
+          $ver = "${{ env.RELEASE_VERSION }}"
+          git config --local user.name "github-actions"
+          git config --local user.email "github-actions@github.com"
+          git add client/version.py
+          git commit -m "chore: bump version to $ver [skip ci]"
+          git tag "v$ver"
+          git push origin HEAD:main
+          git push origin "v$ver"
+          Write-Output "[INFO] Alterações enviadas e tag v$ver criada."
 
-      - name: Create Python venv and install dependencies
+      - name: Configurar Arquivos .env
+        shell: pwsh
         run: |
-          python -m venv venv
-          venv\Scripts\pip install --upgrade pip --quiet
-          venv\Scripts\pip install -r requirements-dev.txt --quiet
-          venv\Scripts\pip install -r requirements.txt --quiet
+          $envContent = @"
+          WPPCONNECT_TAG_VERSION=2.10.0
+          WPPCONNECT_API_MINIMUM_VERSION=2.10.0
+          LICENSING_USER_EMAIL=gabrielhaberkamp@gmail.com
+          "@
+          $envContent | Out-File -FilePath ".env" -Encoding utf8
+          $envContent | Out-File -FilePath "client/.env" -Encoding utf8
+          Write-Output "[INFO] Arquivos .env criados para o build."
 
-      # Cache node_modules to avoid re-downloading hundreds of packages on every run.
-      # setup_api.py preserves node_modules across clones (moves/restores the folder),
-      # so this cache survives the WPPConnect Server re-clone in the next step.
-      - name: Cache API node_modules
+      - name: Configurar Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Cache Pip Wheels
+        id: cache-pip-wheels
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-wheels-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-wheels-${{ runner.os }}-
+
+      - name: Cache Global NPM
+        id: cache-npm-global
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Roaming\npm-cache
+            ~\AppData\Local\npm-cache
+          key: npm-global-${{ runner.os }}-${{ hashFiles('client/api_patches/package.json') }}
+          restore-keys: |
+            npm-global-${{ runner.os }}-
+
+      - name: Cache Node.js Portátil
+        id: cache-node
+        uses: actions/cache@v4
+        with:
+          path: client/node
+          key: node-portable-v24.15.0
+
+      - name: Cache MinGit Portátil
+        id: cache-git
+        uses: actions/cache@v4
+        with:
+          path: client/git
+          key: mingit-portable-v2.44.0
+
+      - name: Cache Node Modules da WPPConnect API
+        id: cache-api-modules
         uses: actions/cache@v4
         with:
           path: client/api/node_modules
-          key: ${{ runner.os }}-npm-${{ hashFiles('client/api/package.json') }}
+          key: npm-packages-${{ hashFiles('client/api_patches/package.json') }}
           restore-keys: |
-            ${{ runner.os }}-npm-
+            npm-packages-
 
-      # Clones the WPPConnect Server repo into client/api/ and restores
-      # WinZapp's custom files (start.js, package.json, config.json, src patches).
-      - name: Set up WPPConnect Server
-        run: venv\Scripts\python.exe setup_api.py
-
-      # Install JS dependencies and compile TypeScript → dist/server.js.
-      # PUPPETEER_SKIP_DOWNLOAD skips the ~680 MB Chrome download — the app
-      # downloads Chrome on the user's machine during first-run setup instead.
-      - name: Install API dependencies and build
-        env:
-          PUPPETEER_SKIP_DOWNLOAD: "1"
-          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1"
-        run: |
-          $node = "$env:GITHUB_WORKSPACE\client\node\node.exe"
-          $npm  = "$env:GITHUB_WORKSPACE\client\node\node_modules\npm\bin\npm-cli.js"
-
-          Set-Location "$env:GITHUB_WORKSPACE\client\api"
-
-          & $node $npm install --no-audit --no-fund --legacy-peer-deps
-
-          # Run Prisma generate only if the package defines the script
-          $scripts = (Get-Content "package.json" | ConvertFrom-Json).scripts
-          if ($null -ne $scripts.'db:generate') {
-            & $node $npm run db:generate
-          }
-
-          & $node $npm run build
-
-      # Runs all 8 build steps: PyInstaller → staging → C installer/uninstaller → ZIP.
-      - name: Build WinZapp
-        run: venv\Scripts\python.exe build.py
-
-      # Sanity-check that the portable ZIP contains the expected directories.
-      # A missing sounds/ or lib/ entry means the staging step silently failed.
-      - name: Verify dist/WinZapp.zip contents
-        run: |
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist\WinZapp.zip")
-          try {
-            $entries = $zip.Entries | ForEach-Object { $_.FullName }
-            $hasSounds   = ($entries | Where-Object { $_ -like "WinZapp/sounds/*" }).Count -gt 0
-            $hasLib      = ($entries | Where-Object { $_ -like "WinZapp/lib/bass.dll" }).Count -gt 0
-            $hasBassOpus = ($entries | Where-Object { $_ -like "WinZapp/lib/bassopus.dll" }).Count -gt 0
-            $hasExe      = ($entries | Where-Object { $_ -eq   "WinZapp/WinZapp.exe" }).Count -gt 0
-            # These three are what actually let WinZapp start the local
-            # WPPConnect Server at runtime — without them the app launches
-            # but every WhatsApp feature is dead. None of the checks above
-            # would have caught a broken/missing node/ or api/dist/server.js,
-            # so a build that silently failed to bundle them would still have
-            # passed this gate and shipped a release that can't connect.
-            $hasNodeExe  = ($entries | Where-Object { $_ -eq   "WinZapp/node/node.exe" }).Count -gt 0
-            $hasServerJs = ($entries | Where-Object { $_ -eq   "WinZapp/api/dist/server.js" }).Count -gt 0
-            $hasFfmpeg   = ($entries | Where-Object { $_ -eq   "WinZapp/lib/ffmpeg.exe" }).Count -gt 0
-            # api_patches/ is the pristine reference copy of WinZapp's custom
-            # wppconnect-server patches that ApiSetupDialog restores from on
-            # every WPPConnect (re)install/update — without it, a reinstall
-            # falls back to whatever patch snapshot the user's install
-            # already happened to have (possibly outdated or broken), so a
-            # release that failed to bundle it would silently stop shipping
-            # patch fixes to existing installs without any error anywhere.
-            $hasApiPatches = ($entries | Where-Object { $_ -eq "WinZapp/api_patches/src/controller/messageController.ts" }).Count -gt 0
-            Write-Host "WinZapp.exe        : $hasExe"
-            Write-Host "sounds/*           : $hasSounds"
-            Write-Host "lib/bass.dll       : $hasLib"
-            Write-Host "lib/bassopus       : $hasBassOpus"
-            Write-Host "node/node.exe      : $hasNodeExe"
-            Write-Host "api/dist/server.js : $hasServerJs"
-            Write-Host "ffmpeg             : $hasFfmpeg"
-            Write-Host "api_patches/       : $hasApiPatches"
-            if (-not ($hasSounds -and $hasLib -and $hasBassOpus -and $hasExe -and $hasNodeExe -and $hasServerJs -and $hasFfmpeg -and $hasApiPatches)) {
-              Write-Error "dist/WinZapp.zip is missing required entries — build failed."
-              exit 1
-            }
-          } finally {
-            $zip.Dispose()
-          }
-
-      # Push the version.py bump back to the default branch so the repo
-      # reflects the version that was actually released, not just the build
-      # artifacts. Runs after a successful build/verify so a failed build
-      # never lands a version bump for a release that didn't ship.
-      - name: Commit version.py bump back to the repository
-        uses: stefanzweifel/git-auto-commit-action@v5
+      - name: Cache Build Dist da WPPConnect API
+        id: cache-api-dist
+        uses: actions/cache@v4
         with:
-          commit_message: "chore: bump version to ${{ github.event.release.tag_name }} [skip ci]"
-          file_pattern: client/version.py
-          branch: main
-          commit_user_name: github-actions[bot]
-          commit_user_email: github-actions[bot]@users.noreply.github.com
+          path: client/api/dist
+          key: api-dist-${{ hashFiles('client/api_patches/**') }}
+          restore-keys: |
+            api-dist-
 
-      # Published alongside the release so updater.py (client/updater.py) can
-      # verify a downloaded ZIP's integrity before extracting it and handing
-      # it elevated write access to the install directory — without this,
-      # nothing checks that a release asset wasn't tampered with in transit
-      # or via a compromised/hijacked GitHub release edit.
-      - name: Generate SHA256SUMS.txt for release assets
+      - name: Cache Chrome do Puppeteer
+        id: cache-puppeteer-chrome
+        uses: actions/cache@v4
+        with:
+          path: client/api/.cache
+          key: puppeteer-chrome-${{ hashFiles('client/api_patches/package.json') }}
+
+      - name: Cache PyInstaller
+        id: cache-pyinstaller
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\pyinstaller
+            build\pyinstaller_work
+          key: pyinstaller-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pyinstaller-${{ runner.os }}-
+
+      - name: Executar Master Builder (Prepara Ambiente, Node, MinGit, DLLs e API)
+        run: |
+          python builder.py
+
+      - name: Compilar WinZapp com PyInstaller e Gerar Instalador
         shell: pwsh
         run: |
-          $lines = @()
-          foreach ($f in @("dist/WinZappInstaller.exe", "dist/WinZapp.zip")) {
-            $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
-            $name = Split-Path $f -Leaf
-            $lines += "$hash  $name"
-          }
-          $lines | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding ascii
-          Write-Output "[INFO] dist/SHA256SUMS.txt:"
-          Get-Content "dist/SHA256SUMS.txt"
+          python build.py
 
-      - name: Upload release assets
+      - name: Criar GitHub Release e Fazer Upload dos Assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.RELEASE_VERSION }}
+          name: Versão ${{ env.RELEASE_VERSION }}
           files: |
             dist/WinZappInstaller.exe
             dist/WinZapp.zip
-            dist/SHA256SUMS.txt
+          generate_release_notes: true

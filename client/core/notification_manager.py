@@ -661,11 +661,6 @@ class NotificationManager:
             self.i18n.get_language()
             reply_hint = self.i18n.t("notif_reply_hint")
 
-            # Appended here, right before the toast is actually shown,
-            # instead of by the caller at enqueue time — see the comment on
-            # the call site in main.py's on_new_message(). Reads
-            # self.main_window.chats directly rather than trusting a value
-            # computed possibly several messages ago.
             chat = self.main_window.chats.get(remote_jid)
             if chat is not None:
                 body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
