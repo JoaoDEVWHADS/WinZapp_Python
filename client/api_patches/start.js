@@ -129,10 +129,8 @@ const optimizedBrowserArgs = [
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
   '--no-zygote',
-  '--disable-shared-workers',
   '--disable-3d-apis',
   '--disable-webgl',
-  '--disable-notifications',
   '--disable-component-update',
   '--disable-speech-api',
   '--disable-voice-input',
@@ -206,6 +204,91 @@ function resolveWhatsappVersion() {
 }
 
 const whatsappVersion = resolveWhatsappVersion();
+
+const WA_WEB_URL = 'https://web.whatsapp.com/';
+const WA_CHECK_UPDATE = 'https://web.whatsapp.com/check-update';
+
+async function installPinnedPageInterception(page, body, log) {
+  const cdp = await page.createCDPSession();
+  await cdp.send('Fetch.enable', {
+    patterns: [
+      { urlPattern: WA_WEB_URL, requestStage: 'Request' },
+      { urlPattern: WA_CHECK_UPDATE + '*', requestStage: 'Request' },
+    ],
+  });
+  cdp.on('Fetch.requestPaused', async (event) => {
+    const { requestId, request } = event;
+    try {
+      if (request.url.startsWith(WA_CHECK_UPDATE)) {
+        await cdp.send('Fetch.failRequest', { requestId, errorReason: 'Aborted' });
+      } else if (request.url === WA_WEB_URL) {
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+          body: Buffer.from(body).toString('base64'),
+        });
+      } else {
+        await cdp.send('Fetch.continueRequest', { requestId });
+      }
+    } catch (e) {
+      log?.('verbose', `[WinZapp] Fetch.requestPaused handling failed: ${e && e.message}`);
+    }
+  });
+}
+
+function patchWppconnectVersionPinning() {
+  let browserController;
+  try {
+    const wppEntry = require.resolve('@wppconnect-team/wppconnect/package.json');
+    browserController = require(path.join(
+      path.dirname(wppEntry), 'dist', 'controllers', 'browser'
+    ));
+  } catch (e) {
+    console.error(
+      '[WinZapp] Could not load WPPConnect\'s browser controller to install the ' +
+      `narrow request interception (${e && e.message}). WhatsApp Web's backend ` +
+      'worker will stall and chats will only ever show their newest messages.'
+    );
+    return;
+  }
+  const original = browserController.initWhatsapp;
+  if (typeof original !== 'function') return;
+
+  browserController.initWhatsapp = async function (page, token, clear, version, proxy, log) {
+    if (version) {
+      let body = null;
+      try {
+        body = waVersion.getPageContent(version);
+      } catch (e) {
+        body = null;
+      }
+      if (body) {
+        try {
+          await installPinnedPageInterception(page, body, log);
+          console.log(
+            `[WinZapp] Serving pinned WhatsApp Web ${version} via a document-only ` +
+            'interception (worker requests left alone).'
+          );
+          version = undefined;
+        } catch (e) {
+          console.error(
+            '[WinZapp] Failed to install the document-only interception ' +
+            `(${e && e.message}); falling back to WPPConnect's blanket one. ` +
+            'History sync will not work in this session.'
+          );
+        }
+      } else {
+        console.error(
+          `[WinZapp] wa-version cannot serve ${version}; leaving the pin to WPPConnect.`
+        );
+      }
+    }
+    return original.call(this, page, token, clear, version, proxy, log);
+  };
+}
+
+patchWppconnectVersionPinning();
 
 // Mesclagem simples recursiva para webhooks e outros objetos aninhados
 const finalConfig = {

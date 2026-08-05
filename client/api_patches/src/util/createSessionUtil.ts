@@ -178,6 +178,97 @@ async function restoreMsgKeySerialized(
   }
 }
 
+/**
+ * Give WhatsApp Web a durable storage bucket.
+ *
+ * In a headless, freshly-created Chrome profile the persistent-storage
+ * permission defaults to 'prompt', and since there is nobody to answer a
+ * prompt Chrome resolves it to a denial: navigator.storage.persist() returns
+ * false and WhatsApp Web logs
+ *   [storage] storage bucket persistence denied (aquire-persistent-storage-denied)
+ * A non-durable bucket still works — it is merely evictable under storage
+ * pressure — so this is a robustness fix, not the history-sync fix. (What
+ * actually stalled history sync was the blanket request interception hanging
+ * the backend worker's cross-origin imports; see the long note in start.js.)
+ *
+ * Two details, both measured against this exact Chrome build rather than
+ * assumed, because getting either wrong leaves the grant silently ineffective:
+ *
+ *   * The CDP session must stay attached. `Browser.grantPermissions` is a
+ *     session-scoped override — detaching resets the origin straight back to
+ *     'prompt'. The earlier version of this function called cdp.detach()
+ *     immediately after granting, which is why the log kept reporting
+ *     permission 'prompt' and persisted false even though the grant itself
+ *     succeeded. The session is parked on the page so it outlives this call.
+ *
+ *   * No puppeteer overridePermissions() here. That call replaces the whole
+ *     granted set for the origin, so asking for ['notifications'] flips
+ *     durableStorage from 'prompt' to 'denied' — measurably worse than doing
+ *     nothing. The CDP grant below covers notifications anyway.
+ *
+ * Best-effort throughout: never throw from here.
+ */
+async function grantPersistentStorage(page: any, logger: any, session: string) {
+  if (!page) return;
+  const origin = 'https://web.whatsapp.com';
+  try {
+    // durableStorage has no puppeteer-level name, so it goes over raw CDP.
+    // Reuse one session per page: a fresh one per navigation would be fine,
+    // but each detach would revoke what the previous one granted.
+    if (!page.__wzPermissionSession) {
+      page.__wzPermissionSession = await page.createCDPSession();
+    }
+    await page.__wzPermissionSession.send('Browser.grantPermissions', {
+      origin,
+      permissions: ['durableStorage', 'notifications'],
+    });
+  } catch (e: any) {
+    page.__wzPermissionSession = null;
+    logger?.warn?.(
+      `[${session}] Browser.grantPermissions failed: ${e?.message || e}`
+    );
+  }
+  try {
+    const state = await page.evaluate(async () => {
+      const out: any = {};
+      out.notificationApi = typeof (globalThis as any).Notification;
+      try {
+        out.permission = (
+          await navigator.permissions.query({
+            name: 'persistent-storage' as PermissionName,
+          })
+        ).state;
+      } catch (e: any) {
+        out.permission = `query-failed: ${e?.message || e}`;
+      }
+      try {
+        out.persisted = await navigator.storage.persisted();
+        if (!out.persisted) out.granted = await navigator.storage.persist();
+        out.persistedAfter = await navigator.storage.persisted();
+      } catch (e: any) {
+        out.persistError = String(e?.message || e);
+      }
+      return out;
+    });
+    // Logged at info even on success: this single line is the fastest way to
+    // tell a session that can ingest history from one that silently cannot.
+    logger?.info?.(
+      `[${session}] persistent storage: ${JSON.stringify(state)}`
+    );
+    if (!state?.persistedAfter) {
+      logger?.warn?.(
+        `[${session}] WhatsApp Web did NOT get a persistent storage bucket — ` +
+          `its database stays evictable, so Chrome may drop synced history ` +
+          `under storage pressure.`
+      );
+    }
+  } catch (e: any) {
+    logger?.warn?.(
+      `[${session}] Could not verify persistent storage: ${e?.message || e}`
+    );
+  }
+}
+
 export default class CreateSessionUtil {
   forceKillSession(session: string, logger?: any) {
     const client: any = clientsArray[session];
@@ -231,18 +322,15 @@ export default class CreateSessionUtil {
 
       this.startChatWootClient(client);
 
-      const execPath = req.serverOptions.createOptions.executablePath;
       if (req.serverOptions.customUserDataDir) {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
           { protocolTimeout: 120000 },
-          execPath ? { executablePath: execPath } : {},
           req.serverOptions.createOptions.puppeteerOptions || {},
           { userDataDir: req.serverOptions.customUserDataDir + session }
         );
       } else {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
           { protocolTimeout: 120000 },
-          execPath ? { executablePath: execPath } : {},
           req.serverOptions.createOptions.puppeteerOptions || {}
         );
       }
@@ -389,8 +477,13 @@ export default class CreateSessionUtil {
         // silently brings the id-less messages back.
         client.page.on('load', () => {
           restoreMsgKeySerialized(client.page, req.logger, session);
+          // The permission grant survives a navigation (it is stored on the
+          // browser context), but the bucket request does not — persist() has
+          // to be asked again by the new document, so re-run the whole thing.
+          grantPersistentStorage(client.page, req.logger, session);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
+        await grantPersistentStorage(client.page, req.logger, session);
       }
       await this.start(req, client);
 
@@ -530,6 +623,70 @@ export default class CreateSessionUtil {
     if (req.serverOptions.webhook.onPresenceChanged) {
       await this.onPresenceChanged(client, req);
     }
+
+    await this.onUnreadCountChanged(client, req);
+  }
+
+  /**
+   * WinZapp patch: forward WA-JS's own `chat.unread_count_changed` event
+   * (fired whenever a chat's unread count changes for ANY reason — including
+   * the user reading it on their phone or another linked device) to
+   * WinZapp's client as a `chats-update` socket event.
+   *
+   * There is no wppconnect-server webhook/event wrapper for this — every
+   * other onXxx() in this file (onReactionMessage, onPollResponse, ...)
+   * relies on an ExposedFn binding wppconnect's own page-injection code sets
+   * up ahead of time, and this event has none. `page.exposeFunction()`
+   * needs no such prior wiring: it lets Node register a callback directly
+   * invocable from the page, so a small `WPP.on(...)` installed here is
+   * self-contained. Without this, WinZapp's own `on_chats_update` handler
+   * (which already exists client-side and does exactly the right thing)
+   * never received a single event — a chat read on the phone stayed shown
+   * as unread in WinZapp until the user happened to open it there too.
+   *
+   * `WPP.on` lives on the page and is re-injected fresh on every WhatsApp
+   * Web reload, same as the msgKey._serialized shim above — re-install on
+   * 'load' too, or the first reload silently drops this listener.
+   */
+  async onUnreadCountChanged(client: WhatsAppServer, req: Request) {
+    try {
+      await client.page.exposeFunction(
+        '__winzappOnUnreadChanged',
+        (chatId: string, unreadCount: number) => {
+          req.io.emit('chats-update', {
+            data: [{ remoteJid: chatId, unreadCount }],
+          });
+        }
+      );
+    } catch (e) {
+      // exposeFunction throws if a prior session already registered this
+      // name on the same page (e.g. a reconnect reusing the browser) —
+      // harmless, the existing binding still works.
+    }
+
+    const installListener = () => {
+      client.page
+        .evaluate(() => {
+          const WPP = (window as any).WPP;
+          if (!WPP || !WPP.on || (window as any).__winzappUnreadListenerInstalled) {
+            return;
+          }
+          (window as any).__winzappUnreadListenerInstalled = true;
+          WPP.on('chat.unread_count_changed', (evt: any) => {
+            const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
+            if (!chatId) return;
+            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount);
+          });
+        })
+        .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));
+    };
+
+    // A page reload gets a fresh JS context (window.__winzappUnreadListenerInstalled
+    // starts undefined again along with everything else wa-js re-injects), so
+    // re-running installListener() here is exactly the reinstall the reload
+    // needs — no separate reset step required.
+    client.page.on('load', installListener);
+    installListener();
   }
 
   async checkStateSession(client: WhatsAppServer, req: Request) {

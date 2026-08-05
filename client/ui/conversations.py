@@ -6215,15 +6215,15 @@ class ConversationsPanel(wx.Panel):
         if result != wx.ID_OK:
             return
 
+        msg_key = msg.get("key", {})
+        jid = msg_key.get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+
         if for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
             # correct serialized id and actually revoke it.
-            msg_key = msg.get("key", {})
-            jid = msg_key.get("remoteJid", "") or (
-                self.conversation.get("remoteJid", "") if self.conversation else ""
-            )
-
             def _revoke(k=dict(msg_key), j=jid):
                 ok = self.main_window.delete_message_for_everyone(j, k)
                 if not ok:
@@ -6234,6 +6234,10 @@ class ConversationsPanel(wx.Panel):
                         wx.OK | wx.ICON_WARNING,
                     )
             threading.Thread(target=_revoke, daemon=True).start()
+        else:
+            def _delete_for_me(k=dict(msg_key), j=jid):
+                self.main_window.delete_message_for_me(j, k)
+            threading.Thread(target=_delete_for_me, daemon=True).start()
 
         # Always delete locally
         if msg_id:
@@ -7416,7 +7420,7 @@ class ConversationsPanel(wx.Panel):
 
         # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
         _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
-        _MAX_DOC_BYTES      = 1   * 1024 * 1024 * 1024
+        _MAX_DOC_BYTES      = 100 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
@@ -7424,7 +7428,7 @@ class ConversationsPanel(wx.Panel):
 
             is_doc    = media_type == "document"
             max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
-            max_mb    = 1024 if is_doc else 70
+            max_mb    = 100 if is_doc else 70
 
             try:
                 if os.path.getsize(path) > max_bytes:
@@ -8070,6 +8074,13 @@ class ArchivedConversationsPanel(wx.Panel):
         sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(sizer)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook_alt1)
+
+    def _on_char_hook_alt1(self, event):
+        if event.AltDown() and event.GetKeyCode() == ord('1'):
+            self.main_window.on_alt_1(event)
+            return
+        event.Skip()
 
     # ── Accelerators ─────────────────────────────────────────────────────────
 

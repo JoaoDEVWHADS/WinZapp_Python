@@ -8741,6 +8741,50 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[backfill] Unhandled error in the backfill loop")
 
+    def request_older_messages(self, remote_jid: str, timeout: float = 15) -> bool:
+        """Ask the connected phone to push its next history-sync chunk for remote_jid."""
+        jid = self._normalize_jid(remote_jid)
+        lid = getattr(self, "_phone_to_lid", {}).get(jid, "")
+        if lid:
+            phone = lid
+        elif jid.endswith("@s.whatsapp.net"):
+            phone = jid.split("@")[0] + "@c.us"
+        else:
+            phone = jid
+
+        url = (f"{self.wpp_server}:{self.wpp_port}"
+               f"/api/{self.token}/request-older-messages/{phone}")
+        try:
+            response = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {self.token}",
+                         "Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            body = {}
+            try:
+                body = response.json()
+            except Exception:
+                pass
+            payload = body.get("response") if isinstance(body, dict) else None
+            if response.status_code in (200, 201) and isinstance(payload, dict) \
+                    and payload.get("requested"):
+                logging.info(
+                    "[history-sync] Requested older messages from the phone for "
+                    "%s (primary_has_more=%s).", jid, payload.get("primaryHasMore"),
+                )
+                return True
+            logging.info(
+                "[history-sync] Older-message request for %s did not go out "
+                "(status=%s, payload=%s).", jid, response.status_code,
+                payload if payload else response.text[:200],
+            )
+            return False
+        except Exception as exc:
+            logging.warning(
+                "[history-sync] Older-message request failed for %s: %s", jid, exc)
+            return False
+
     def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
                         "stickerMessage", "videoMessage"}
@@ -11083,6 +11127,9 @@ class MainWindow(wx.Frame):
 
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
+        if not hasattr(self, "_locally_read_at"):
+            self._locally_read_at = {}
+        self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
         self._schedule_save(dirty_jid=remote_jid)
         # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
         # this isn't suppressed while a media sync is running, so the badge
@@ -12749,6 +12796,42 @@ class MainWindow(wx.Frame):
             return False
         except Exception as exc:
             logging.error("[delete_for_everyone] exception for %s: %s", full_id, exc)
+            return False
+
+    def delete_message_for_me(self, remote_jid: str, msg_key: dict) -> bool:
+        """Delete a message for the current account only, via the same
+        POST /api/session/delete-message endpoint delete_message_for_everyone()
+        uses, with onlyLocal=True.
+        """
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
+        url = (
+            f"{self.wpp_server}:{self.wpp_port}"
+            f"/api/{self.token}/delete-message"
+        )
+        chat_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
+        full_id = self._serialize_msg_id(chat_jid, msg_key)
+
+        payload = {
+            "phone":     chat_jid,
+            "isGroup":   chat_jid.endswith("@g.us"),
+            "messageId": full_id,
+            "onlyLocal": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True
+            logging.error("[delete_for_me] HTTP %s for %s: %s",
+                          r.status_code, full_id, r.text[:300])
+            return False
+        except Exception as exc:
+            logging.error("[delete_for_me] exception for %s: %s", full_id, exc)
             return False
 
     def forward_message(self, source_jid: str, msg_key: dict, target_jid: str) -> bool:
