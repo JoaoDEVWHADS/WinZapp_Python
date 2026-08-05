@@ -2,12 +2,7 @@ const path = require('path');
 const fs = require('fs');
 
 // Garante que o Puppeteer saiba onde encontrar o cache do Chrome
-const cacheBaseDir = path.join(__dirname, '.cache');
-const chromeHeadlessShellDir = path.join(cacheBaseDir, 'chrome-headless-shell');
-const puppeteerCacheDir = fs.existsSync(chromeHeadlessShellDir)
-  ? chromeHeadlessShellDir
-  : (fs.existsSync(path.join(cacheBaseDir, 'puppeteer')) ? path.join(cacheBaseDir, 'puppeteer') : cacheBaseDir);
-
+const puppeteerCacheDir = path.join(__dirname, '.cache');
 process.env.PUPPETEER_CACHE_DIR = puppeteerCacheDir;
 
 function findChromeExecutable(dir, depth) {
@@ -36,7 +31,7 @@ function findChromeExecutable(dir, depth) {
   return null;
 }
 
-const chromeExecutable = findChromeExecutable(cacheBaseDir, 0);
+const chromeExecutable = findChromeExecutable(puppeteerCacheDir, 0);
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
