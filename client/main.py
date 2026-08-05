@@ -506,6 +506,10 @@ class MainWindow(wx.Frame):
         # bouncing it to QRCODE. See _recover_from_suspend.
         self._resume_recovery_lock = threading.Lock()
         self._resume_recovery_active = False
+        # True only during the ACTIVE close/kill/start restart sequence (not the
+        # whole passive observation window), so the health loop's auto-start
+        # yields to it without being suppressed for the full observation (GPT r5 #3).
+        self._recovery_restart_active = False
         self._unresolvable_lids = set()
         self._unresolvable_names = set()
         self._resolving_lids = set()
@@ -1845,77 +1849,182 @@ class MainWindow(wx.Frame):
         finally:
             cs.end_resume_recovery(self, self._resume_recovery_lock)
 
-    # After resume, how many consecutive "CONNECTED but isConnected()==false with
-    # the network up" readings confirm a zombie session (dead stream) worth an
-    # active restart, and how long to wait between them. Kept deliberately short
-    # (a few real seconds) because the user is staring at an offline app: unlike
-    # the first-launch grace window, waiting minutes here buys nothing — the
-    # stream never comes back by itself.
-    _RESUME_ZOMBIE_CONFIRM_STRIKES = 3
-    _RESUME_ZOMBIE_PROBE_INTERVAL = 3.0
+    # Post-resume recovery timing. After the WAPI-race fix a plain INITIALIZING
+    # right after wake is usually the session coming up on its own (onStateChange
+    # promotes it to CONNECTED without our help), so we no longer force-restart on
+    # a raw probe count. Instead we OBSERVE for up to _RESUME_OBSERVE_SECONDS,
+    # polling every _RESUME_PROBE_INTERVAL, and only force a restart if the
+    # session stays INITIALIZING with NO progress for _RESUME_INITIALIZING_GRACE
+    # (GPT r2: time-without-progress, not attempt count). The zombie-CONNECTED
+    # path still needs its own independent confirmation (dead stream, network up).
+    _RESUME_PROBE_INTERVAL = 3.0
+    _RESUME_OBSERVE_SECONDS = 150.0       # observation window (NOT a total recovery budget)
+    _RESUME_INITIALIZING_GRACE = 90.0     # no-progress INITIALIZING before restart
+    _RESUME_ZOMBIE_CONFIRM_SECONDS = 12.0  # CONNECTED-but-dead-stream must persist this long
+    # MVP gate (GPT r5 #1): auto-restarting a stuck INITIALIZING session calls
+    # close-session, which in WPPConnect force-kills (pkill -9, NO auth flush) any
+    # non-CONNECTED session — risking a re-pair. Until the Node close path is made
+    # graceful-first, we OBSERVE/log a stuck INITIALIZING but do NOT restart it.
+    # The zombie-CONNECTED recovery stays ON: it only ever closes a genuinely
+    # CONNECTED session, which takes WPPConnect's graceful client.close() (flush)
+    # path, not the force-kill branch. Flip back to True once Node is graceful.
+    _RESUME_RESTART_STUCK_INITIALIZING = False
 
     def _restart_session_if_zombie_after_resume(self):
         """Detect and repair a post-wake session that cannot recover on its own.
 
-        Two distinct post-hibernation failures, both needing the same cure
-        (force a clean session restart), both confirmed over a few probes so a
-        momentary blip right after wake doesn't trigger a needless restart:
+        Runs on a daemon thread (see _on_power_resume), never the wx GUI thread,
+        so the polling sleeps here do not block the UI.
 
-        1. 'Zombie CONNECTED' — status stays CONNECTED but the WhatsApp Web
-           stream is dead (isConnected()==false) with the network up.
-        2. 'Stuck INITIALIZING' — a hibernation-suspended chrome.exe still holds
-           the userDataDir lock, so WPPConnect's own relaunch fails with
-           "browser is already running" and the status never leaves
-           INITIALIZING. Only a full app restart (which kills the orphan) used
-           to clear it — exactly the reported symptom.
+        Conservative by design (GPT r2/r3): the WAPI-race fix made status reliable
+        enough that most post-wake INITIALIZING sessions now finish connecting by
+        themselves via onStateChange. So we do NOT restart on a raw probe count.
+        We observe for _RESUME_OBSERVE_SECONDS and act only on genuinely stuck
+        cases, gated on the network actually being up:
 
-        Both are gated on the network actually being up (a plain no-internet
-        outage must be left alone to recover naturally).
+        1. 'Stuck INITIALIZING' — MVP: OBSERVED and logged, but NOT auto-restarted
+           (_RESUME_RESTART_STUCK_INITIALIZING=False). Restarting it would call
+           WPPConnect's close-session, which force-kills a non-CONNECTED session
+           without flushing auth and can re-pair the account. Re-enable once the
+           Node close path is graceful-first (GPT r5 #1).
+        2. 'Zombie CONNECTED' — status CONNECTED but the stream is dead
+           (isConnected()==false) with the network up, PERSISTING for
+           _RESUME_ZOMBIE_CONFIRM_SECONDS. This IS restarted: closing a genuinely
+           CONNECTED session takes WPPConnect's graceful client.close() (flush)
+           path, so it does not risk the force-kill re-pair.
+
+        A genuinely healthy CONNECTED or a user-action state (QRCODE/UNPAIRED)
+        ends observation immediately — we never loop restarts on a pairing screen
+        nor bounce a working session.
         """
         if getattr(self, "_wa_connected", False):
             return  # recovered normally — nothing to do
         import connection_state as cs
-        stuck_initializing = 0
-        for _ in range(self._RESUME_ZOMBIE_CONFIRM_STRIKES):
+        self._logged_stuck_initializing = False  # per-observation, so each wake logs once
+        deadline = time.monotonic() + self._RESUME_OBSERVE_SECONDS
+        prev_status = None
+        initializing_since = None  # monotonic time the current INITIALIZING run began
+        zombie_since = None        # monotonic time CONNECTED-but-dead-stream began
+        while time.monotonic() < deadline:
             if getattr(self, "_wa_connected", False):
-                return
+                return  # came up on its own — no restart needed
             status = self._raw_session_status()
-            # CLOSED/DESTROYED already auto-starts; QRCODE/notLogged is a real
-            # pairing need handled elsewhere — neither is ours to touch here.
-            if status in ("CONNECTED", "open"):
-                pass
-            elif status == "INITIALIZING":
-                stuck_initializing += 1
-            else:
+            network_up = self._probe_whatsapp_host()  # probe once per iteration
+            now = time.monotonic()
+
+            # User-action state (QR/pairing) is handled by the pairing UI — stop,
+            # never restart-loop. Checked FIRST (GPT r3 #1).
+            if cs.recovery_needs_user_action(status):
                 return
-            if not self._probe_whatsapp_host():
+
+            if not network_up:
                 # No internet: not a zombie, just an outage. The normal health
                 # loop will reconnect once the network is back.
                 logging.info("[power] post-resume offline but network is down — "
                              "leaving session alone to recover naturally.")
                 return
-            time.sleep(self._RESUME_ZOMBIE_PROBE_INTERVAL)
+
+            # CONNECTED path: distinguish a HEALTHY session (done) from a ZOMBIE
+            # (CONNECTED object, dead stream). Only a zombie that PERSISTS for the
+            # confirm window is restarted — not a single post-wake blip (GPT r3 #2).
+            if cs.recovery_connected(status):
+                if not cs.is_zombie_session_after_resume(
+                    getattr(self, "_wa_connected", False), status, network_up,
+                ):
+                    return  # healthy CONNECTED — leave it alone
+                if zombie_since is None:
+                    zombie_since = now
+                elif (now - zombie_since) >= self._RESUME_ZOMBIE_CONFIRM_SECONDS:
+                    # Final re-check right before the destructive restart. Order
+                    # matters (GPT r5 #4): do the slow network probe FIRST, then
+                    # read a fresh status, then the _wa_connected flag last — so a
+                    # stream that revived DURING the probe is not clobbered.
+                    fresh_net = self._probe_whatsapp_host()
+                    final_status = self._raw_session_status()
+                    if getattr(self, "_wa_connected", False):
+                        return
+                    if not (fresh_net and cs.recovery_connected(final_status)
+                            and cs.is_zombie_session_after_resume(
+                                getattr(self, "_wa_connected", False), final_status,
+                                fresh_net)):
+                        # No longer a confirmed zombie — reset and keep observing.
+                        zombie_since = None
+                        prev_status = status
+                        time.sleep(self._RESUME_PROBE_INTERVAL)
+                        self.check_wa_connection_http()
+                        continue
+                    logging.warning("[power] Confirmed zombie session after resume "
+                                    "(CONNECTED but stream dead >%.0fs, network up) — "
+                                    "forcing restart to rebuild the stream.",
+                                    self._RESUME_ZOMBIE_CONFIRM_SECONDS)
+                    self._force_whatsapp_session_restart()
+                    return
+                initializing_since = None  # not initializing while (zombie) connected
+            elif status == "INITIALIZING":
+                zombie_since = None
+                # Start the no-progress clock once; a readable non-INITIALIZING
+                # status resets it below. Using "is None" (not prev_status) means
+                # a transient unreadable '' between two INITIALIZING reads does
+                # NOT restart the clock (GPT r4 #1).
+                if initializing_since is None:
+                    initializing_since = now
+                if cs.initializing_restart_due(initializing_since, now,
+                                               self._RESUME_INITIALIZING_GRACE):
+                    if not self._RESUME_RESTART_STUCK_INITIALIZING:
+                        # MVP: auto-restart of stuck INITIALIZING is gated OFF
+                        # (would hit WPPConnect's force-kill-without-flush path
+                        # and risk a re-pair). Log once and keep observing; the
+                        # normal health loop / a manual restart handles it until
+                        # the Node close path is graceful-first (GPT r5 #1).
+                        if not getattr(self, "_logged_stuck_initializing", False):
+                            self._logged_stuck_initializing = True
+                            logging.warning("[power] Session stuck in INITIALIZING with no "
+                                            "progress for %.0fs after resume — auto-restart "
+                                            "is disabled (would risk re-pair via force-kill); "
+                                            "leaving to health loop.",
+                                            self._RESUME_INITIALIZING_GRACE)
+                            self._shutdown_audit("WAKE stuck INITIALIZING — auto-restart gated OFF (MVP)")
+                        # Do not spin the clock: keep observing without restart.
+                        if status:
+                            prev_status = status
+                        time.sleep(self._RESUME_PROBE_INTERVAL)
+                        self.check_wa_connection_http()
+                        continue
+                    # Re-check immediately before the destructive restart: only
+                    # restart if it's STILL exactly INITIALIZING (GPT r4 #2).
+                    if getattr(self, "_wa_connected", False):
+                        return
+                    if self._raw_session_status() != "INITIALIZING":
+                        # Progress (or a user-action/closed state) appeared — let
+                        # the loop re-evaluate on the next iteration instead.
+                        prev_status = status
+                        time.sleep(self._RESUME_PROBE_INTERVAL)
+                        self.check_wa_connection_http()
+                        continue
+                    logging.warning("[power] Session stuck in INITIALIZING with no "
+                                    "progress for %.0fs after resume (network up) — "
+                                    "one force restart to clear a hung/detached browser.",
+                                    self._RESUME_INITIALIZING_GRACE)
+                    self._force_whatsapp_session_restart()
+                    return
+            else:
+                # Any other readable, non-terminal status = progress; reset clocks.
+                # An unreadable '' falls here too but must NOT count as progress,
+                # so only reset when the status is genuinely readable (GPT r3 #8).
+                zombie_since = None
+                if cs.is_progress_status(status):
+                    initializing_since = None
+
+            # Do not let an unreadable '' overwrite the last real status we saw —
+            # otherwise INITIALIZING -> '' -> INITIALIZING would look like a fresh
+            # run (GPT r4 #1). Only remember readable statuses.
+            if status:
+                prev_status = status
+            time.sleep(self._RESUME_PROBE_INTERVAL)
             self.check_wa_connection_http()
-        if getattr(self, "_wa_connected", False):
-            return
-        # A session still INITIALIZING across every probe (network up) is a
-        # locked-out relaunch — force restart clears the orphaned Chrome lock.
-        if stuck_initializing >= self._RESUME_ZOMBIE_CONFIRM_STRIKES:
-            logging.warning("[power] Session stuck in INITIALIZING after resume "
-                            "(orphaned Chrome holding userDataDir lock, network up) "
-                            "— forcing session restart to clear it.")
-            self._force_whatsapp_session_restart()
-            return
-        if not cs.is_zombie_session_after_resume(
-            getattr(self, "_wa_connected", False),
-            self._raw_session_status(),
-            self._probe_whatsapp_host(),
-        ):
-            return
-        logging.warning("[power] Confirmed zombie session after resume "
-                        "(CONNECTED but stream dead, network up) — forcing "
-                        "session restart to rebuild WhatsApp Web stream.")
-        self._force_whatsapp_session_restart()
+        logging.info("[power] post-resume observation window elapsed without a "
+                     "definitive stuck/zombie signal — leaving session to the "
+                     "normal health loop.")
 
     def _raw_session_status(self) -> str:
         """Return WPPConnect's current status-session string ('' on failure)."""
@@ -1995,30 +2104,164 @@ class MainWindow(wx.Frame):
             pass
         return killed
 
+    # Wake-recovery restart policy. A hibernation-suspended Chrome, once resumed,
+    # can hand puppeteer a dead page context ("Attempted to use detached Frame"
+    # in the node log) — start-session then throws inside waitForLogin and the
+    # session hangs. One clean close (wait for CLOSED) before re-starting gives a
+    # fresh frame. GPT r2: prefer ONE restart + re-diagnose + cooldown over a
+    # tight 3x loop, because a rapid close/start loop can itself generate locks
+    # and detached frames. We allow a small number of attempts but SPACE them
+    # with a cooldown and stop the moment the session connects or needs the user.
+    # GPT r5 #2: for the MVP a SINGLE restart attempt. A second attempt would
+    # fire only ~50s after the first (settle+cooldown), cutting the agreed 90s
+    # no-progress grace short and possibly bouncing a session that was still
+    # coming up. A further restart instead comes from a fresh 90s no-progress
+    # window (or a hard Puppeteer error) on the next observation pass.
+    _RECOVERY_MAX_ATTEMPTS = 1
+    _RECOVERY_CLOSE_WAIT = 12.0      # wait for the browser to reach CLOSED
+    _RECOVERY_SETTLE_TIMEOUT = 40.0  # wait for the restart to connect
+    _RECOVERY_COOLDOWN = 10.0        # pause between attempts to let things settle
+    _RECOVERY_POLL = 2.0
+
+    def _wait_for_status(self, predicate, timeout: float,
+                         stop_when_connected: bool = True) -> str:
+        """Poll status-session until predicate(status) is True or timeout.
+        Returns the last status string seen ('' on repeated failure).
+
+        stop_when_connected: short-circuit as soon as _wa_connected flips True.
+        Correct when WAITING FOR A CONNECTION, but WRONG when waiting for CLOSED
+        (a still-connected flag would abort the close-wait and let kill/start run
+        before the browser actually shut down — GPT r3 #5). Callers waiting for
+        CLOSED must pass False.
+        """
+        deadline = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < deadline:
+            last = self._raw_session_status()
+            if predicate(last):
+                return last
+            if stop_when_connected and getattr(self, "_wa_connected", False):
+                return last
+            time.sleep(self._RECOVERY_POLL)
+        return last
+
     def _force_whatsapp_session_restart(self):
         """Close then re-start the WhatsApp session so Chrome reloads
         web.whatsapp.com and rebuilds a dead stream. Safe on a live session:
         close-session persists state, and the token/paired flags are untouched
-        (this is a stream refresh, NOT a logout). After close, status becomes
-        CLOSED, so the next check_wa_connection_http() naturally issues
-        start-session via its existing CLOSED branch; we also kick one restart
-        directly so recovery doesn't wait for the next poll."""
+        (this is a stream refresh, NOT a logout).
+
+        GPT r2: one restart, re-diagnose, cooldown, at most a couple of attempts.
+        Success = a genuinely CONNECTED session; a user-action state (QRCODE/
+        UNPAIRED) also STOPS the loop (the pairing UI takes over — never keep
+        restarting a session that's waiting on the human).
+        """
         token = getattr(self, "token", "")
         if not token:
             return
-        headers = {"Authorization": f"Bearer {token}"}
+        import connection_state as cs
+        # Mark the ACTIVE restart sequence so the health loop won't fire a
+        # competing start-session while we own the close/kill/start cycle
+        # (GPT r5 #3). Scoped tightly to this method — NOT the whole observation.
+        self._recovery_restart_active = True
         try:
-            requests.post(
+            self._run_recovery_attempts(token, cs)
+        finally:
+            self._recovery_restart_active = False
+
+    def _run_recovery_attempts(self, token, cs):
+        for attempt in range(1, self._RECOVERY_MAX_ATTEMPTS + 1):
+            # Before each attempt re-check: the session may have connected or
+            # dropped to a user-action state during the previous settle+cooldown
+            # (GPT r4 #3). Never restart something that's already good/waiting.
+            if attempt > 1:
+                if getattr(self, "_wa_connected", False):
+                    return
+                pre = self._raw_session_status()
+                if cs.recovery_connected(pre):
+                    logging.info("[power] recovery: session CONNECTED before attempt %d "
+                                 "— no further restart.", attempt)
+                    return
+                if cs.recovery_needs_user_action(pre):
+                    logging.info("[power] recovery: session needs user action (%s) before "
+                                 "attempt %d — stopping.", pre, attempt)
+                    return
+            self._restart_session_once(token, attempt)
+            settled = self._wait_for_status(cs.recovery_should_stop,
+                                            self._RECOVERY_SETTLE_TIMEOUT)
+            if getattr(self, "_wa_connected", False) or cs.recovery_connected(settled):
+                logging.info("[power] recovery attempt %d CONNECTED (status=%s)",
+                             attempt, settled or "?")
+                self._shutdown_audit(f"WAKE recovery attempt {attempt} CONNECTED status={settled or '?'}")
+                return
+            if cs.recovery_needs_user_action(settled):
+                logging.info("[power] recovery attempt %d -> user action needed "
+                             "(status=%s) — stopping, pairing UI takes over.",
+                             attempt, settled or "?")
+                self._shutdown_audit(f"WAKE recovery attempt {attempt} USER-ACTION status={settled or '?'}")
+                return
+            logging.warning("[power] recovery attempt %d did not connect "
+                            "(status=%s) — %s", attempt, settled or "?",
+                            "cooldown then retry" if attempt < self._RECOVERY_MAX_ATTEMPTS
+                            else "giving up to normal health loop")
+            self._shutdown_audit(f"WAKE recovery attempt {attempt} NOT CONNECTED status={settled or '?'}")
+            if attempt < self._RECOVERY_MAX_ATTEMPTS:
+                time.sleep(self._RECOVERY_COOLDOWN)
+        logging.warning("[power] recovery exhausted %d attempts — leaving session "
+                        "to the normal health loop.", self._RECOVERY_MAX_ATTEMPTS)
+        self._shutdown_audit(f"WAKE recovery EXHAUSTED {self._RECOVERY_MAX_ATTEMPTS} attempts")
+
+    def _restart_session_once(self, token: str, attempt: int = 1):
+        """One close -> wait-for-CLOSED -> kill-orphan -> start-session cycle.
+        Waiting for CLOSED (not a blind sleep) is what makes the re-start get a
+        fresh browser frame instead of reusing a hibernation-detached one.
+
+        NOTE: close-session in WPPConnect force-kills (no auth flush) any session
+        whose status is not CONNECTED/open, so a restart from a non-CONNECTED
+        state can still lose auth until the WPPConnect close path is made
+        graceful-first. The conservative trigger upstream keeps us off this path
+        in the common case; a full fix belongs in the Node close handler.
+        """
+        headers = {"Authorization": f"Bearer {token}"}
+        close_ok = False
+        try:
+            resp = requests.post(
                 f"{self.wpp_server}:{self.wpp_port}/api/{token}/close-session",
                 headers=headers, timeout=10,
             )
-            logging.info("[power] zombie recovery: close-session sent")
+            close_ok = resp.status_code in (200, 201)
+            if close_ok:
+                logging.info("[power] zombie recovery: close-session sent (attempt %d)", attempt)
+            else:
+                logging.warning("[power] zombie recovery: close-session HTTP %s (attempt %d)",
+                                resp.status_code, attempt)
         except Exception as e:
             logging.warning("[power] zombie recovery: close-session failed: %s", e)
-        # Give WPPConnect a moment to tear the browser tab down and flip status
-        # to CLOSED before re-starting (start-session is a no-op unless CLOSED —
-        # see createSessionUtil.ts:128).
-        time.sleep(3)
+        # Wait for the browser to actually tear down (CLOSED) before re-starting,
+        # so puppeteer gets a fresh page frame — reusing a half-closed,
+        # hibernation-resumed browser is what throws "detached Frame" and hangs
+        # in INITIALIZING. Do NOT short-circuit on _wa_connected here: we are
+        # waiting for the browser to go DOWN, so a stale connected flag must not
+        # abort the wait (GPT r3 #5). Fall back to a short sleep if the
+        # close-session request itself failed and CLOSED never confirms.
+        import connection_state as cs
+        closed = self._wait_for_status(cs.session_closed_after_flush,
+                                       self._RECOVERY_CLOSE_WAIT,
+                                       stop_when_connected=False)
+        confirmed_closed = cs.session_closed_after_flush(closed)
+        # Only proceed to the destructive kill/start if the browser is genuinely
+        # down: either close-session was accepted OR the status actually reached
+        # CLOSED despite an endpoint error. Bailing here avoids killing/starting
+        # on top of a still-live browser after a failed close (GPT r4 #4).
+        if not close_ok and not confirmed_closed:
+            logging.warning("[power] recovery: close-session not accepted (HTTP/err) "
+                            "and status not CLOSED (status=%s) — skipping kill/start "
+                            "this attempt.", closed or "?")
+            return False
+        if not confirmed_closed:
+            logging.info("[power] recovery: browser did not confirm CLOSED "
+                         "(status=%s) — proceeding after close was accepted", closed or "?")
+            time.sleep(2)
         # A hibernation-suspended chrome.exe may still hold the userDataDir lock,
         # which makes the start-session below fail with "browser is already
         # running" and hangs the session in INITIALIZING forever. Kill that
@@ -2030,7 +2273,7 @@ class MainWindow(wx.Frame):
                 json={"waitQrCode": False}, headers=headers, timeout=15,
             )
             logging.info("[power] zombie recovery: start-session sent — "
-                         "WhatsApp Web reloading")
+                         "WhatsApp Web reloading (attempt %d)", attempt)
         except Exception as e:
             logging.warning("[power] zombie recovery: start-session failed: %s", e)
 
@@ -4420,8 +4663,15 @@ class MainWindow(wx.Frame):
         # must happen for EVERY closing process, not just the last one.
         token = getattr(self, "token", "")
         session_name = (token or "").split(":")[0]
+        # Log the REAL session status BEFORE close-session. This is the missing
+        # piece: WPPConnect's closeSession force-kills (no auth flush) any session
+        # whose status is not exactly CONNECTED/open, which corrupts the profile
+        # into 'Session Unpaired' on next launch. If a failing account shows a
+        # non-CONNECTED status here, that force-kill path is the culprit.
+        pre_status = self._raw_session_status() if token else "(no token)"
         self._shutdown_audit(f"_stop_wpp_server START account={getattr(self,'account_id','?')} "
-                             f"session={session_name!r} port={getattr(self,'wpp_port','?')}")
+                             f"session={session_name!r} port={getattr(self,'wpp_port','?')} "
+                             f"pre_close_status={pre_status!r}")
         if token:
             try:
                 url = (
@@ -5397,11 +5647,30 @@ class MainWindow(wx.Frame):
             store = self._get_session_store()
             if store is not None:
                 new_name = token.replace("/", "_").replace("+", "-").split(":")[0]
-                for s in store.list():
-                    if s.get("status") == "active" and s.get("name") != new_name:
-                        store.set_status(s["name"], "abandoned")
-                store.register(new_name, token=token.replace("/", "_").replace("+", "-"),
-                               status="active")
+                # Under sessions_lock: register/abandon must be atomic w.r.t. the
+                # shared-userDataDir cleanup so it can never delete a dir we're
+                # activating (GPT r2/r3). NEVER write outside the lock — a
+                # side-write reopens the TOCTOU and can corrupt sessions.json.
+                # On lock timeout we skip the store update (the session still
+                # works; the store is reconciled on a later register/startup).
+                from coord_locks import sessions_lock, LockTimeout
+                gd = getattr(self, "global_dir", None)
+                def _commit():
+                    for s in store.list():
+                        if s.get("status") == "active" and s.get("name") != new_name:
+                            store.set_status(s["name"], "abandoned")
+                    store.register(new_name, token=token.replace("/", "_").replace("+", "-"),
+                                   status="active")
+                if gd:
+                    try:
+                        with sessions_lock(gd):
+                            _commit()
+                    except LockTimeout:
+                        logging.warning("[sessions] sessions_lock busy — deferring active-"
+                                        "session store update (will reconcile later); NOT "
+                                        "writing without the lock")
+                else:
+                    _commit()
         except Exception:
             logging.exception("[sessions] registering active session failed (non-fatal)")
 
@@ -5500,6 +5769,131 @@ class MainWindow(wx.Frame):
                 f"store=[{', '.join(listing)}]")
         except Exception:
             pass
+
+        # Reclaim disk from superseded sessions: each re-pair marks the old
+        # WPPConnect session 'abandoned' but nothing ever deleted its userDataDir
+        # (60-100 MB of Chrome profile each), so they piled up unbounded. Clean
+        # them now, at startup, when they are provably not in use.
+        self._cleanup_abandoned_sessions()
+
+    def _cleanup_abandoned_sessions(self):
+        """Delete this account's superseded ('abandoned') WPPConnect sessions:
+        logout in Node (best-effort), remove the userDataDir, drop the store row.
+
+        Runs on a worker thread (never the wx UI thread): deleting ~1 GB plus a
+        run of HTTP timeouts must never freeze the UI — especially harmful for a
+        screen-reader user (GPT r1 #a).
+        """
+        threading.Thread(target=self._cleanup_abandoned_sessions_worker,
+                         name="session-cleanup", daemon=True).start()
+
+    def _protected_session_names(self) -> set:
+        """Every session name that is active/pairing in ANY account's
+        sessions.json. userDataDir is SHARED across accounts (it lives next to
+        the exe, not per-account), so before deleting a dir we must be sure no
+        other account is using that name — not just our own store (GPT r1 #4/#5).
+
+        FAIL-CLOSED: if ANY sessions.json cannot be read/parsed, raise — the
+        caller aborts the whole cleanup rather than delete on an incomplete
+        protected set (GPT r2). Call under sessions_lock so the set can't change
+        under us between here and the rmtree.
+        """
+        protected = set()
+        acc_root = accounts_root()
+        for acc_id in os.listdir(acc_root):
+            sj = os.path.join(acc_root, acc_id, "sessions.json")
+            if not os.path.isfile(sj):
+                continue
+            # No try/except: a corrupt/unreadable sessions.json must abort the
+            # cleanup (fail-closed), not silently yield a partial protected set.
+            with open(sj, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for s in data.get("sessions", []):
+                if s.get("status") in ("active", "pairing") and s.get("name"):
+                    protected.add(s["name"])
+        return protected
+
+    def _cleanup_abandoned_sessions_worker(self):
+        import connection_state as cs
+        from coord_locks import sessions_lock, LockTimeout
+        try:
+            import session_store
+            store = self._get_session_store()
+            if store is None:
+                return
+            current = (getattr(self, "token", "") or "").split(":")[0]
+            if not current:
+                return  # no confirmed current session — delete nothing (GPT r1 #a)
+            gd = getattr(self, "global_dir", None)
+            if not gd:
+                return
+            udd_root = os.path.abspath(os.path.join(
+                os.path.dirname(data_path("settings.json")),
+                "..", "..", "api", "userDataDir"))
+            node_down = False  # circuit breaker: stop retrying logout once refused
+            # Whole scan -> validate -> rmtree runs under the shared sessions_lock
+            # so no other account can register/activate a name mid-cleanup, and
+            # the protected set is rebuilt HERE (fresh, under the lock) — closing
+            # the TOCTOU window on the shared userDataDir (GPT r2).
+            try:
+                with sessions_lock(gd):
+                    try:
+                        protected = self._protected_session_names()  # fail-closed
+                    except Exception:
+                        logging.exception("[sessions] a sessions.json is unreadable — "
+                                          "aborting cleanup (fail-closed)")
+                        return
+                    protected.add(current)
+                    stale = session_store.sessions_to_close(store.list(), current)
+                    for s in stale:
+                        name = s.get("name") or ""
+                        if not name or name in protected:
+                            continue  # never a current/active/pairing name of any account
+                        target = cs.safe_session_dir_to_delete(udd_root, name)
+                        if not target:
+                            logging.warning("[sessions] refusing unsafe session name for cleanup")
+                            continue
+                        try:
+                            node_down = not self._logout_abandoned_session(name, skip=node_down)
+                            # Delete then CONFIRM gone before dropping the store row.
+                            # No ignore_errors: a failed delete (e.g. a lock) leaves
+                            # the 'abandoned' record so we retry next start (GPT r1 #2/#c).
+                            if os.path.isdir(target):
+                                shutil.rmtree(target)
+                            if os.path.exists(target):
+                                logging.warning("[sessions] userDataDir still present after "
+                                                "delete — keeping record for retry")
+                                continue
+                            store.remove(name)
+                            logging.info("[sessions] cleaned abandoned session %s", name[:12])
+                        except Exception:
+                            logging.exception("[sessions] cleanup of abandoned %s failed "
+                                              "(kept for retry)", name[:12])
+            except LockTimeout:
+                logging.info("[sessions] sessions_lock busy — skipping cleanup this start")
+        except Exception:
+            logging.exception("[sessions] _cleanup_abandoned_sessions failed (non-fatal)")
+
+    def _logout_abandoned_session(self, name: str, skip: bool = False) -> bool:
+        """Best-effort logout by SESSION NAME (never the token — a token in the
+        URL can be mis-parsed and leak to logs; the token goes in Bearer only,
+        GPT r1 #1). Returns True if Node is reachable (so the caller's circuit
+        breaker keeps trying), False on connection-refused (Node down — skip the
+        rest). ``skip`` short-circuits once Node is known down."""
+        if skip or not name:
+            return not skip
+        try:
+            token = self._get_wa_token() or name
+            requests.post(
+                f"{self.wpp_server}:{self.wpp_port}/api/{name}/logout-session",
+                headers={"Authorization": f"Bearer {token}"}, timeout=5,
+            )
+            return True
+        except requests.exceptions.ConnectionError:
+            logging.info("[sessions] Node not reachable — skipping further logouts")
+            return False
+        except Exception:
+            return True  # unknown/other error: Node likely up, keep trying others
 
     def prepare_sync(self):
         # Diagnostic breadcrumbs: prepare_sync() runs synchronously on the
@@ -5928,6 +6322,15 @@ class MainWindow(wx.Frame):
                     # while the dialog is active — kept as a defensive fallback.)
                     if self._is_pairing_dialog_active():
                         logging.info("[check_wa_connection_http] Skipping auto-start — pairing dialog is active.")
+                    elif getattr(self, "_recovery_restart_active", False):
+                        # An ACTIVE close/kill/start restart sequence owns the
+                        # browser right now; the CLOSED we see is likely ITS own
+                        # close-session in flight. Firing start-session here would
+                        # race it and could spawn a duplicate Chrome / detached
+                        # frame (GPT r5 #3 — scoped to the active restart only, NOT
+                        # the whole passive observation window).
+                        logging.info("[check_wa_connection_http] Skipping auto-start — "
+                                     "recovery restart sequence in progress owns it.")
                     else:
                         try:
                             start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"

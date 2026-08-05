@@ -150,3 +150,115 @@ def test_live_statuses_are_not_yet_flushed():
     # the flush. Must keep waiting.
     for status in ("CONNECTED", "open", "INITIALIZING", "QRCODE", "notLogged"):
         assert cs.session_closed_after_flush(status) is False
+
+
+# ── wake-recovery retry gate (recovery_settled) ───────────────────────────────
+# Regression guard for the "one account never comes back after hibernation" bug:
+# a hibernation-resumed Chrome hands puppeteer a detached frame, start-session
+# throws in waitForLogin, and the session hangs in INITIALIZING forever. The
+# recovery loop retries a full close/start cycle until the status leaves
+# INITIALIZING for a resolved state.
+
+
+def test_still_initializing_is_not_settled():
+    # The exact hang state — must keep retrying.
+    assert cs.recovery_settled("INITIALIZING") is False
+
+
+def test_empty_status_is_not_settled():
+    # Unreadable status (probe failed) — treat as not settled, keep trying.
+    assert cs.recovery_settled("") is False
+    assert cs.recovery_settled(None) is False
+
+
+def test_resolved_statuses_are_settled():
+    # CONNECTED/open = recovered; QRCODE/notLogged = a real pairing need handled
+    # elsewhere. All stop the retry loop.
+    for status in ("CONNECTED", "open", "QRCODE", "notLogged", "CLOSED"):
+        assert cs.recovery_settled(status) is True
+
+
+# ── narrowed recovery decisions (GPT r2): success vs user-action vs keep-going ──
+# The old `settled = status != INITIALIZING` was too broad — it treated QRCODE
+# and even CLOSED as "done". The rebuilt recovery distinguishes a genuine
+# CONNECTED success from a user-action (pairing) stop and from transient churn.
+
+
+def test_recovery_connected_only_true_when_really_connected():
+    assert cs.recovery_connected("CONNECTED") is True
+    assert cs.recovery_connected("open") is True
+    for status in ("QRCODE", "UNPAIRED", "notLogged", "INITIALIZING", "CLOSED", "", None):
+        assert cs.recovery_connected(status) is False
+
+
+def test_recovery_needs_user_action_for_pairing_states():
+    for status in ("QRCODE", "UNPAIRED", "UNPAIRED_IDLE", "notLogged", "PHONECODE"):
+        assert cs.recovery_needs_user_action(status) is True
+    for status in ("CONNECTED", "INITIALIZING", "CLOSED", "", None):
+        assert cs.recovery_needs_user_action(status) is False
+
+
+def test_recovery_should_stop_on_connected_or_user_action_only():
+    # Stop the restart loop on success OR pairing need...
+    for status in ("CONNECTED", "open", "QRCODE", "UNPAIRED", "notLogged"):
+        assert cs.recovery_should_stop(status) is True
+    # ...but keep going while still churning / unreadable / merely closed.
+    for status in ("INITIALIZING", "", None, "CLOSED"):
+        assert cs.recovery_should_stop(status) is False
+
+
+def test_initializing_restart_due_is_time_based_not_count_based():
+    grace = 90.0
+    # Just entered INITIALIZING: not due yet.
+    assert cs.initializing_restart_due(1000.0, 1000.0, grace) is False
+    # Halfway through the grace window: still not due.
+    assert cs.initializing_restart_due(1000.0, 1044.0, grace) is False
+    # One second short of the grace: not due.
+    assert cs.initializing_restart_due(1000.0, 1089.0, grace) is False
+    # At/after the grace with no progress: due for one restart.
+    assert cs.initializing_restart_due(1000.0, 1090.0, grace) is True
+    assert cs.initializing_restart_due(1000.0, 1200.0, grace) is True
+
+
+def test_empty_status_is_not_progress():
+    # A failed REST probe ('') must NOT reset the no-progress clock, or flaky
+    # probes would mask a genuine INITIALIZING hang forever (GPT r3 #8).
+    assert cs.is_progress_status("") is False
+    assert cs.is_progress_status(None) is False
+    # INITIALIZING is the hang state itself — not progress.
+    assert cs.is_progress_status("INITIALIZING") is False
+    # Any other readable state is real progress.
+    for status in ("CONNECTED", "open", "QRCODE", "CLOSED", "notLogged", "PAIRING"):
+        assert cs.is_progress_status(status) is True
+
+
+# ── abandoned-session cleanup path safety (safe_session_dir_to_delete) ─────────
+# Guards the destructive rmtree of superseded WPPConnect userDataDirs: a session
+# name must resolve to a direct child of the userDataDir root, or we refuse.
+
+
+def test_safe_session_dir_accepts_plain_session_name():
+    root = "/data/api/userDataDir"
+    name = "a" * 32
+    assert cs.safe_session_dir_to_delete(root, name) == f"{root}/{name}"
+
+
+def test_safe_session_dir_rejects_traversal_and_absolute():
+    root = "/data/api/userDataDir"
+    # '..' escaping the root, path separators, and absolute paths must all be
+    # refused so a bad session name can never delete outside userDataDir.
+    for bad in ("../secret", "..", ".", "a/b", "/etc", "sub/../../x", "",
+                "a\\b", "C:evil", "name:stream", "name.with.dots", "a b"):
+        assert cs.safe_session_dir_to_delete(root, bad) is None
+
+
+def test_safe_session_dir_accepts_only_allowlisted_names():
+    root = "/data/api/userDataDir"
+    # Real WPPConnect session names: hex tokens, dashes, underscores.
+    for good in ("a" * 32, "63d3fd5cf2aecaffb807a9ecb17af07d",
+                 "sess_123-abc", "A1b2C3"):
+        assert cs.safe_session_dir_to_delete(root, good) == f"{root}/{good}"
+
+
+def test_safe_session_dir_rejects_empty_root():
+    assert cs.safe_session_dir_to_delete("", "a" * 32) is None

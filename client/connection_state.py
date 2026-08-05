@@ -254,3 +254,115 @@ def session_closed_after_flush(status: str) -> bool:
     Pure/wx-free so the decision is unit-testable without the requests/wx stack.
     """
     return (status or "") in _CLOSED_AFTER_FLUSH_STATES
+
+
+# A wake-recovery restart is only a SUCCESS when the session reaches a truly
+# connected state. QRCODE/UNPAIRED/notLogged means "waiting for the user" (a
+# real pairing need handled elsewhere — must NOT trigger a restart loop), and
+# CLOSED/DESTROYED/INITIALIZING/'' are NOT success. This is intentionally
+# narrower than "left INITIALIZING": the old `settled = status != INITIALIZING`
+# wrongly treated QRCODE and even CLOSED as done (GPT r2 #5).
+_RECOVERY_CONNECTED_STATES = ("CONNECTED", "open")
+# States that mean the session is waiting on the human, not on us — recovery
+# must stop (not loop restarts) but it is NOT a connection success either.
+_RECOVERY_USER_ACTION_STATES = ("QRCODE", "UNPAIRED", "UNPAIRED_IDLE", "notLogged", "PHONECODE")
+
+
+def recovery_connected(status: str) -> bool:
+    """True once a post-wake restart reached a genuinely connected state.
+    Only CONNECTED/open count — the sole signal worth calling recovery a success."""
+    return (status or "") in _RECOVERY_CONNECTED_STATES
+
+
+def recovery_needs_user_action(status: str) -> bool:
+    """True when the session is parked waiting for the user (QR/pairing). Recovery
+    should STOP restarting and let the pairing UI take over — never loop here."""
+    return (status or "") in _RECOVERY_USER_ACTION_STATES
+
+
+def recovery_should_stop(status: str) -> bool:
+    """Stop the recovery attempt loop on either a real success OR a user-action
+    state. Keep going only while still churning (INITIALIZING/'' /transient)."""
+    return recovery_connected(status) or recovery_needs_user_action(status)
+
+
+def initializing_restart_due(first_seen_monotonic: float, now_monotonic: float,
+                             grace_seconds: float) -> bool:
+    """Decide whether a session that has been stuck in INITIALIZING warrants a
+    (single) force-restart, based on ELAPSED TIME WITHOUT PROGRESS rather than a
+    raw probe count (GPT r2 #1).
+
+    After the WAPI-race fix, a plain INITIALIZING right after wake is usually the
+    session coming up on its own (onStateChange promotes it to CONNECTED without
+    our help). Only a session that stays INITIALIZING with no state change for a
+    long grace window is a genuine hang worth restarting. Callers reset
+    ``first_seen_monotonic`` whenever the status changes, so any progress
+    restarts the clock.
+    """
+    return (now_monotonic - first_seen_monotonic) >= grace_seconds
+
+
+def is_progress_status(status: str) -> bool:
+    """True if ``status`` is a real, readable state that counts as progress for
+    the no-progress INITIALIZING clock. An empty/unreadable status ('') is a
+    failed REST probe, NOT progress — treating it as progress would let flaky
+    probes reset the clock forever and mask a genuine hang (GPT r3 #8)."""
+    return bool(status) and status != "INITIALIZING"
+
+
+# A wake-recovery restart has "settled" once the session leaves INITIALIZING for
+# ANY resolved state: CONNECTED/open (recovered), or QRCODE/notLogged (a real
+# pairing need handled elsewhere). Staying in INITIALIZING (or an unreadable
+# empty status) means the restart landed on a hibernation-detached browser
+# frame and hung — the caller retries a full close/start cycle.
+_RECOVERY_UNSETTLED_STATES = ("INITIALIZING", "")
+
+
+def recovery_settled(status: str) -> bool:
+    """True if a post-wake restart reached a resolved state (worth stopping the
+    retry loop); False while still INITIALIZING/unreadable (retry).
+
+    DEPRECATED for the restart-success decision — prefer recovery_connected()
+    (success) / recovery_should_stop() (stop looping). Kept for the shutdown
+    flush gate wiring that still imports it.
+    """
+    return (status or "") not in _RECOVERY_UNSETTLED_STATES
+
+
+def _valid_session_name(name: str) -> bool:
+    """True only for a well-formed WPPConnect session name safe to use in a
+    filesystem path. Names are random 32-hex-ish tokens; reject anything with
+    separators, drive prefixes, dots-only, or NTFS stream markers so a bad
+    sessions.json entry can never be turned into a path outside userDataDir
+    (GPT r1 #3). Conservative allowlist: letters, digits, dash, underscore."""
+    import re
+    if not name or not isinstance(name, str):
+        return False
+    if name in (".", ".."):
+        return False
+    return re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) is not None
+
+
+def safe_session_dir_to_delete(udd_root: str, name: str):
+    """Return the absolute userDataDir path for ``name`` under ``udd_root`` ONLY
+    if it is safe to delete, else None.
+
+    Guards a destructive rmtree against a malicious/garbage session name (one
+    containing '/', '..', absolute paths, drive prefixes, NTFS streams, etc.):
+    the name must pass _valid_session_name AND the resolved path's parent must be
+    exactly ``udd_root`` (case-insensitive on Windows) and its basename must
+    equal ``name`` and not be the root itself. Pure/wx-free so the safety check
+    is unit testable without touching the filesystem or requests/wx (GPT r1 #3/#d).
+    """
+    import os
+    if not name or not udd_root or not _valid_session_name(name):
+        return None
+    root = os.path.abspath(udd_root)
+    target = os.path.abspath(os.path.join(root, name))
+    if target == root:
+        return None  # never the root itself
+    parent = os.path.dirname(target)
+    same_parent = (os.path.normcase(parent) == os.path.normcase(root))
+    if os.path.basename(target) == name and same_parent:
+        return target
+    return None

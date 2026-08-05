@@ -311,6 +311,20 @@ def updater_lock(global_dir: str, timeout: float = 10.0) -> NamedLock:
     )
 
 
+def sessions_lock(global_dir: str, timeout: float = 20.0) -> NamedLock:
+    """Guards the SHARED api/userDataDir: session register / status transitions
+    (active|pairing|abandoned) AND the abandoned-session cleanup (scan protected
+    names -> re-validate -> rmtree) must all run under this one lock, or a
+    cleanup in account A could delete a dir account B is registering (TOCTOU on
+    the shared dir — GPT r2)."""
+    h = _hash_dir(global_dir)
+    return NamedLock(
+        f"WinZappSessions_{h}",
+        os.path.join(global_dir, "sessions.lock"),
+        timeout=timeout,
+    )
+
+
 # ── fork safety (POSIX) ──────────────────────────────────────────────────────
 def _reset_locks_after_fork() -> None:
     """Reset all inherited lock state in a forked child (GPT r4 #5).

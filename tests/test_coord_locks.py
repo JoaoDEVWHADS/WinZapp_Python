@@ -15,6 +15,7 @@ from coord_locks import (
     NamedLock,
     node_lock,
     registry_lock,
+    sessions_lock,
     updater_lock,
 )
 
@@ -127,6 +128,10 @@ def test_factory_names_differ(tmp_path):
     assert registry_lock(gd).name != node_lock(gd).name
     assert node_lock(gd).name != updater_lock(gd).name
     assert registry_lock(gd).name != updater_lock(gd).name
+    # sessions_lock is a distinct, independent critical section.
+    assert sessions_lock(gd).name != registry_lock(gd).name
+    assert sessions_lock(gd).name != node_lock(gd).name
+    assert sessions_lock(gd).name != updater_lock(gd).name
 
 
 def test_same_global_dir_same_name(tmp_path):
