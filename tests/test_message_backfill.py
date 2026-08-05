@@ -26,13 +26,19 @@ claims = MainWindow._server_claims_content
 
 
 class _Stub:
-    def __init__(self):
+    def __init__(self, page_size=1, chunks_pending=False):
         self._chats_awaiting_messages = set()
+        # Most cases here predate paging and care only about empty-vs-not, so
+        # the default target of 1 keeps a single record meaning "done".
+        self.settings = {"user_interface": {"messages_page_size": page_size}}
+        self._history_still_landing = chunks_pending
 
     _server_claims_content = staticmethod(MainWindow._server_claims_content)
     _note_backfill_state = MainWindow._note_backfill_state
     _jid_address_forms = MainWindow._jid_address_forms
     _resolve_backfill_target = MainWindow._resolve_backfill_target
+    history_page_target = MainWindow.history_page_target
+    _local_record_count = MainWindow._local_record_count
 
 
 def _chat(records=(), unread=0, t=0):
@@ -40,6 +46,10 @@ def _chat(records=(), unread=0, t=0):
     if records:
         c["messages"] = {"messages": {"records": list(records)}}
     return c
+
+
+def _records(n):
+    return [{"key": {"id": f"M{i}"}} for i in range(n)]
 
 
 class TestServerClaimsContent:
@@ -114,6 +124,88 @@ class TestBackfillBookkeeping:
         for i in range(0, 514, 2):
             s._note_backfill_state(f"c{i}@lid", _chat(records=[{"key": {"id": i}}], t=1), api_ok=True)
         assert len(s._chats_awaiting_messages) == 257
+
+
+class TestShortOfAPage:
+    """A chat can be short because it *is* short, or because it is early.
+
+    While WhatsApp Web is still decoding history-sync chunks its store keeps
+    growing for minutes after the sync ends — measured on this account, 1.2k to
+    60k messages over about ten minutes. So a chat that answers with 15 messages
+    during that window is not a 15-message conversation, and the sync should
+    come back for it until it holds a full page (messages_page_size) or stops
+    growing. With the chunk queue drained there is nothing to come back for:
+    get-messages reads the same store the chunks feed.
+    """
+
+    def test_a_short_chat_is_retried_while_chunks_are_decoding(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == {"a@lid"}
+
+    def test_a_full_page_is_done(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(200), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_more_than_a_page_is_done(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(640), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_a_short_chat_is_taken_at_face_value_once_the_queue_is_drained(self):
+        """Nothing left to decode means a re-query returns the identical list."""
+        s = _Stub(page_size=200, chunks_pending=False)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_a_chat_that_grew_keeps_its_slot_after_the_queue_drains(self):
+        """The ramp has to finish: history landed for this one, so ask once more."""
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        s._history_still_landing = False
+        s._note_backfill_state("a@lid", _chat(records=_records(90), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == {"a@lid"}
+
+    def test_a_pass_that_adds_nothing_ends_the_retries(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        s._history_still_landing = False
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    def test_growth_bookkeeping_survives_the_lid_rekey(self):
+        """deduplicate_chats() re-keys the chat between passes; the count must
+        follow it, or every pass would look like the first one and never stop."""
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._lid_to_phone = {"111@lid": "5511999999999@s.whatsapp.net"}
+        s._phone_to_lid = {"5511999999999@s.whatsapp.net": "111@lid"}
+        s._note_backfill_state("111@lid", _chat(records=_records(15), t=1), api_ok=True)
+        s._history_still_landing = False
+        s._note_backfill_state(
+            "5511999999999@s.whatsapp.net", _chat(records=_records(15), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+        assert s._partial_history_counts == {}
+
+    def test_a_failed_call_still_belongs_to_the_retry_loop(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s._note_backfill_state("a@lid", _chat(records=_records(15), t=1), api_ok=False)
+        assert s._chats_awaiting_messages == set()
+
+    def test_page_size_comes_from_settings(self):
+        s = _Stub(page_size=50, chunks_pending=True)
+        assert s.history_page_target() == 50
+        s._note_backfill_state("a@lid", _chat(records=_records(50), t=1), api_ok=True)
+        assert s._chats_awaiting_messages == set()
+
+    @pytest.mark.parametrize("settings", [
+        {}, {"user_interface": {}}, {"user_interface": {"messages_page_size": "junk"}},
+        {"user_interface": {"messages_page_size": 0}},
+    ])
+    def test_page_target_survives_junk_settings(self, settings):
+        s = _Stub()
+        s.settings = settings
+        assert s.history_page_target() >= 1
 
 
 class TestJidBridge:
