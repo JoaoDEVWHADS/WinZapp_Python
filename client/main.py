@@ -842,7 +842,8 @@ class MainWindow(wx.Frame):
 
                 logging.info("MainWindow: Preparing sync...")
                 self.prepare_sync()
-                self.set_chats()
+                # Refresh the chat list on the GUI thread now that the DB is populated.
+                wx.CallAfter(self.set_chats)
 
                 # Ensure session is active on WPPConnect Server before connecting WebSocket
                 self.check_wa_connection_http()
