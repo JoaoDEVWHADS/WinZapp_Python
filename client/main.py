@@ -4055,6 +4055,21 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel.Hide()
         if hasattr(self, "status_panel"):
             self.status_panel.Hide()
+        # ArchivedConversationsPanel.on_conversation_selected() hides
+        # conversations_panel's own conversations_label/conversations_list
+        # (leaving only the conversation detail pane visible) when an
+        # archived chat is opened, since ConversationsPanel is the shared
+        # widget both the normal and archived lists open messages in. Alt+1
+        # showed conversations_panel itself but never undid that hide, so
+        # the list _restore_conversation_selection() below focuses/selects
+        # a control that stayed hidden — NVDA still announced the row
+        # (Select() fires an accessibility event regardless of visibility)
+        # but keyboard focus had nothing visible to actually land on,
+        # reported live as "announces the first conversation but focus
+        # itself is lost", reproducing only when an archived conversation
+        # was open.
+        self.conversations_panel.conversations_label.Show()
+        self.conversations_panel.conversations_list.Show()
         self.conversations_panel.Show()
         self.content_panel.Layout()
         # Restore focus AND selection so the list never ends up empty-focused
