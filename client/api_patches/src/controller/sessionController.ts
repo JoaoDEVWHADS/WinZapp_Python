@@ -1046,8 +1046,12 @@ export async function subscribePresence(req: Request, res: Response) {
           req.logger.warn(`[subscribePresence] WPP fallback for ${contato}: ${wppErr}`);
         }
       }
-      // Legacy fallback
-      await req.client.subscribePresence(contato);
+      async function subscribeOne(req: any, phone: string) {
+  if (req.client && typeof req.client.subscribePresence === 'function') {
+    return await req.client.subscribePresence(phone);
+  }
+  return false;
+}
     };
 
     if (all) {
