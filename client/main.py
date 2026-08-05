@@ -3892,8 +3892,6 @@ class MainWindow(wx.Frame):
 
         from ui.dialogs.api_startup import ApiStartupDialog
         def _show_startup_dlg():
-            if self._is_wpp_running():
-                return wx.ID_OK
             dlg = ApiStartupDialog(self, self.wpp_port)
             res = dlg.ShowModal()
             dlg.Destroy()
