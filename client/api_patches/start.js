@@ -229,6 +229,11 @@ const finalConfig = {
     ...(customConfig.createOptions || {}),
     browserArgs: optimizedBrowserArgs,
     executablePath: chromeExecutable || undefined,
+    puppeteerOptions: {
+      ...(configDefault.createOptions?.puppeteerOptions || {}),
+      ...(customConfig.createOptions?.puppeteerOptions || {}),
+      executablePath: chromeExecutable || undefined,
+    },
     disableSpins: true,  // Disables command line spinners (saves CPU)
     updatesLog: false,   // Disables checking for updates on startup
     // undefined => WPPConnect pins nothing and uses the live build (see

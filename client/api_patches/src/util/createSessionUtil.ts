@@ -231,15 +231,18 @@ export default class CreateSessionUtil {
 
       this.startChatWootClient(client);
 
+      const execPath = req.serverOptions.createOptions.executablePath;
       if (req.serverOptions.customUserDataDir) {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
           { protocolTimeout: 120000 },
+          execPath ? { executablePath: execPath } : {},
           req.serverOptions.createOptions.puppeteerOptions || {},
           { userDataDir: req.serverOptions.customUserDataDir + session }
         );
       } else {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
           { protocolTimeout: 120000 },
+          execPath ? { executablePath: execPath } : {},
           req.serverOptions.createOptions.puppeteerOptions || {}
         );
       }
