@@ -6215,15 +6215,15 @@ class ConversationsPanel(wx.Panel):
         if result != wx.ID_OK:
             return
 
+        msg_key = msg.get("key", {})
+        jid = msg_key.get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+
         if for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
             # correct serialized id and actually revoke it.
-            msg_key = msg.get("key", {})
-            jid = msg_key.get("remoteJid", "") or (
-                self.conversation.get("remoteJid", "") if self.conversation else ""
-            )
-
             def _revoke(k=dict(msg_key), j=jid):
                 ok = self.main_window.delete_message_for_everyone(j, k)
                 if not ok:
@@ -6234,6 +6234,16 @@ class ConversationsPanel(wx.Panel):
                         wx.OK | wx.ICON_WARNING,
                     )
             threading.Thread(target=_revoke, daemon=True).start()
+        else:
+            # "Delete for me" used to only remove the row locally, never
+            # telling WhatsApp — the message stayed put on the phone and
+            # every other linked device. Replicate it via the same
+            # delete-message API delete_message_for_everyone() uses, with
+            # onlyLocal=True (WhatsApp's real "delete for me" semantics: it
+            # never removes the message for anyone else, no time limit).
+            def _delete_for_me(k=dict(msg_key), j=jid):
+                self.main_window.delete_message_for_me(j, k)
+            threading.Thread(target=_delete_for_me, daemon=True).start()
 
         # Always delete locally
         if msg_id:
@@ -8081,6 +8091,25 @@ class ArchivedConversationsPanel(wx.Panel):
         sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(sizer)
+        # Alt+1 (back to the normal conversation list) is registered as a
+        # global accelerator on the main frame, but this panel's own
+        # AcceleratorTable (see create_accelerator_table() below) sits closer
+        # to whichever child control has focus and — unlike Alt+4/Alt+5,
+        # which are only ever pressed from a window that has no accelerator
+        # table of its own — was observed to swallow Alt+1 before it ever
+        # reached the frame's table, leaving the user stuck in Archived with
+        # no way back via the shortcut (the "Conversas" nav-list item still
+        # worked, since that path never goes through this panel's table at
+        # all). EVT_CHAR_HOOK fires before accelerator translation, so
+        # handling it explicitly here guarantees Alt+1 always works from
+        # anywhere inside this panel.
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook_alt1)
+
+    def _on_char_hook_alt1(self, event):
+        if event.AltDown() and event.GetKeyCode() == ord('1'):
+            self.main_window.on_alt_1(event)
+            return
+        event.Skip()
 
     # ── Accelerators ─────────────────────────────────────────────────────────
 

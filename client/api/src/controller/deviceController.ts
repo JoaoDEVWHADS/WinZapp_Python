@@ -919,7 +919,45 @@ export async function reactMessage(req: Request, res: Response) {
   const { msgId, reaction } = req.body;
 
   try {
-    await req.client.sendReactionToMessage(msgId, reaction);
+    if (typeof msgId === 'string' && msgId.includes('status@broadcast')) {
+      // wa-js's WPP.chat.sendReactionToMessage(msgId, reaction) resolves a
+      // string id via getMessageById(), which — for any @broadcast id —
+      // unconditionally looks the message up in
+      // StatusV3Store.getMyStatus().msgs, i.e. only YOUR OWN posted
+      // statuses. Liking another contact's status therefore always failed
+      // to even locate the message, before a reaction was ever attempted.
+      // Resolve the MsgModel ourselves from the global Store.Msg collection
+      // (populated for every status the app has actually received, whoever
+      // posted it — the same store getMessages()'s own browser-evaluate
+      // fallback above searches) and hand the model object straight to
+      // WPP.chat.sendReactionToMessage(): passing an actual MsgModel
+      // instance instead of a string skips getMessageById() entirely.
+      const ok = await req.client.page.evaluate(
+        async ({ msgId, reaction }) => {
+          const parts = msgId.split('_');
+          const rawId = parts.length > 2 ? parts[2] : msgId;
+          let model: any = null;
+          if ((window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
+            const models = (window as any).Store.Msg.models;
+            model = models.find((item: any) => {
+              if (!item || !item.id) return false;
+              const ser = item.id._serialized || '';
+              const itemId = item.id.id || '';
+              return itemId === rawId || ser === msgId || (rawId && ser.includes(rawId));
+            });
+          }
+          if (!model) return false;
+          await (window as any).WPP.chat.sendReactionToMessage(model, reaction || '');
+          return true;
+        },
+        { msgId, reaction },
+      );
+      if (!ok) {
+        throw new Error(`Status message not found in Store for reaction: ${msgId}`);
+      }
+    } else {
+      await req.client.sendReactionToMessage(msgId, reaction);
+    }
 
     res
       .status(200)
@@ -1901,6 +1939,28 @@ export async function sendSeen(req: Request, res: Response) {
     const results: any = [];
     const phoneList = Array.isArray(phone) ? phone : [phone];
     for (const contato of phoneList) {
+      // req.client.sendSeen() → WPP.chat.markIsRead() calls
+      // assertGetChat(chatId) first, which throws "Chat not found" for any
+      // chat WA-JS's in-browser Store hasn't already loaded — unlike
+      // getMessages() above (which calls WPP.chat.find(chatId) before
+      // touching Store for exactly this reason), sendSeen never did, so a
+      // chat the user hadn't actually opened inside this Chrome session
+      // recently (e.g. WinZapp itself just synced it via the REST API,
+      // without WA-JS's own Store ever "finding" it) silently failed to be
+      // marked read — reported live as some conversations staying unread
+      // both in WinZapp and on the phone even right after opening them.
+      // WPP.chat.find() loads/registers the chat in Store first so the
+      // subsequent markIsRead() has something to resolve.
+      await req.client.page.evaluate(async (chatId: string) => {
+        try {
+          if ((window as any).WPP?.chat?.find) {
+            await (window as any).WPP.chat.find(chatId);
+          }
+        } catch (e) {
+          // Ignore — markIsRead below still tries, and surfaces its own
+          // "Chat not found" if this genuinely doesn't exist.
+        }
+      }, contato);
       results.push(await req.client.sendSeen(contato));
     }
     returnSucess(res, session, phone, results);

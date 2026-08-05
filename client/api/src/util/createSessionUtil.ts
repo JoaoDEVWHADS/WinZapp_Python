@@ -527,6 +527,70 @@ export default class CreateSessionUtil {
     if (req.serverOptions.webhook.onPresenceChanged) {
       await this.onPresenceChanged(client, req);
     }
+
+    await this.onUnreadCountChanged(client, req);
+  }
+
+  /**
+   * WinZapp patch: forward WA-JS's own `chat.unread_count_changed` event
+   * (fired whenever a chat's unread count changes for ANY reason — including
+   * the user reading it on their phone or another linked device) to
+   * WinZapp's client as a `chats-update` socket event.
+   *
+   * There is no wppconnect-server webhook/event wrapper for this — every
+   * other onXxx() in this file (onReactionMessage, onPollResponse, ...)
+   * relies on an ExposedFn binding wppconnect's own page-injection code sets
+   * up ahead of time, and this event has none. `page.exposeFunction()`
+   * needs no such prior wiring: it lets Node register a callback directly
+   * invocable from the page, so a small `WPP.on(...)` installed here is
+   * self-contained. Without this, WinZapp's own `on_chats_update` handler
+   * (which already exists client-side and does exactly the right thing)
+   * never received a single event — a chat read on the phone stayed shown
+   * as unread in WinZapp until the user happened to open it there too.
+   *
+   * `WPP.on` lives on the page and is re-injected fresh on every WhatsApp
+   * Web reload, same as the msgKey._serialized shim above — re-install on
+   * 'load' too, or the first reload silently drops this listener.
+   */
+  async onUnreadCountChanged(client: WhatsAppServer, req: Request) {
+    try {
+      await client.page.exposeFunction(
+        '__winzappOnUnreadChanged',
+        (chatId: string, unreadCount: number) => {
+          req.io.emit('chats-update', {
+            data: [{ remoteJid: chatId, unreadCount }],
+          });
+        }
+      );
+    } catch (e) {
+      // exposeFunction throws if a prior session already registered this
+      // name on the same page (e.g. a reconnect reusing the browser) —
+      // harmless, the existing binding still works.
+    }
+
+    const installListener = () => {
+      client.page
+        .evaluate(() => {
+          const WPP = (window as any).WPP;
+          if (!WPP || !WPP.on || (window as any).__winzappUnreadListenerInstalled) {
+            return;
+          }
+          (window as any).__winzappUnreadListenerInstalled = true;
+          WPP.on('chat.unread_count_changed', (evt: any) => {
+            const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
+            if (!chatId) return;
+            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount);
+          });
+        })
+        .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));
+    };
+
+    // A page reload gets a fresh JS context (window.__winzappUnreadListenerInstalled
+    // starts undefined again along with everything else wa-js re-injects), so
+    // re-running installListener() here is exactly the reinstall the reload
+    // needs — no separate reset step required.
+    client.page.on('load', installListener);
+    installListener();
   }
 
   async checkStateSession(client: WhatsAppServer, req: Request) {

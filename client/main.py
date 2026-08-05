@@ -2426,6 +2426,13 @@ class MainWindow(wx.Frame):
                 self.conversations_panel.on_incoming_message(remote_jid, msg)
             self._maybe_notify_reaction(remote_jid, msg)
             self._track_last_reaction(remote_jid, msg)
+            # Own reactions refresh the chat list explicitly from
+            # _on_own_reaction_sent() right after sending. A reaction from
+            # someone else only ever arrives here, so without this the chat
+            # list's last-message preview never picked up
+            # chat["_last_reaction"] until some unrelated event happened to
+            # trigger a refresh.
+            self._schedule_set_chats()
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
@@ -2697,7 +2704,7 @@ class MainWindow(wx.Frame):
 
         from core.notification_manager import (
             format_notification_title, format_notification_body,
-            format_foreground_sender, format_toast_unread_suffix,
+            format_foreground_sender,
         )
 
         body  = format_notification_body(msg, self, self.i18n)
@@ -2750,12 +2757,18 @@ class MainWindow(wx.Frame):
             return
         title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
-            # effective_unread_count() (not the raw field) — same cap every
-            # other unread display already uses: a server-reported count
-            # with no locally-fetched messages behind it must not claim a
-            # number the chat list itself wouldn't show for this same chat.
-            toast_body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
-            self.notification_manager.send(title, toast_body, remote_jid)
+            # The unread suffix is deliberately NOT baked in here — see
+            # NotificationManager._dispatch(), which appends it fresh right
+            # before the toast is actually shown. A burst of messages queues
+            # one notification per message, but _coalesce_pending() only
+            # ever displays the newest one; that toast's body (formatted
+            # here, at enqueue time) could still be showing the unreadCount
+            # from the FIRST message of the burst — e.g. "1" — while several
+            # more arrived (and incremented the real count) before the
+            # worker thread got around to actually dispatching it. Reported
+            # live as the toast's "✉️ N não lidas" line reading much lower
+            # than what Alt+3 announced moments later in the same chat.
+            self.notification_manager.send(title, body, remote_jid)
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
@@ -6483,6 +6496,28 @@ class MainWindow(wx.Frame):
                                     # "1 unread" right after the reset, even though
                                     # several messages had already piled up before it.
                                     continue
+                                else:
+                                    # A snapshot taken shortly after
+                                    # mark_conversation_as_read() cleared this chat
+                                    # (the user opened it and left) can still report
+                                    # the pre-read unreadCount — WhatsApp Web's own
+                                    # server-side read receipt lags behind our local
+                                    # /send-seen call. Accepting it here resurrected
+                                    # already-read messages into the badge/separator,
+                                    # and any live message that then arrived stacked
+                                    # its own +1 on top of that resurrected total
+                                    # (e.g. 2 already-read + 1 genuinely new = "3
+                                    # unread"). Trust the server value again only
+                                    # once this chat's own last-activity timestamp
+                                    # has actually moved past what it was when we
+                                    # marked it read — i.e. a genuinely new message
+                                    # has since arrived server-side.
+                                    read_at_t = getattr(self, "_locally_read_at", {}).get(jid)
+                                    if read_at_t is not None:
+                                        incoming_t = int(chat.get("t", 0) or 0)
+                                        if incoming_t <= read_at_t:
+                                            continue
+                                        self._locally_read_at.pop(jid, None)
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see
@@ -6915,6 +6950,47 @@ class MainWindow(wx.Frame):
                 if active_jid == lid_jid:
                     self.conversations_panel.conversation = chats[alt_jid]
                     wx.CallAfter(self.conversations_panel.refresh_messages_if_changed)
+
+        # ── Pass 3: re-key any entry whose dict key drifted from its own
+        # remoteJid field ──────────────────────────────────────────────────
+        # Every pass above keys strictly off dict keys (self.chats.keys()),
+        # so a chat whose stored chat["remoteJid"] no longer matches the key
+        # it's actually sitting under — left over from before an earlier
+        # merge/rename ran, or written once under a slightly different JID
+        # serialization from an older WPPConnect payload shape — slips
+        # through every one of them untouched. _compute_chat_lists()'s
+        # render-time dedupe only catches two *different* dict keys sharing
+        # the exact same remoteJid string; it has no way to notice a key
+        # that disagrees with its own entry's remoteJid, and neither did any
+        # pass above until now. Left alone, sync_remote_chats() (keyed off
+        # these same stale dict keys) keeps re-fetching and re-inserting
+        # both, which is how a single real group ended up rendered two or
+        # three times — reported live as groups (archived and not)
+        # duplicating for some accounts.
+        for stale_key in list(chats.keys()):
+            chat_obj = chats.get(stale_key)
+            if chat_obj is None:
+                continue
+            canonical = self._normalize_jid(chat_obj.get("remoteJid", "") or stale_key)
+            if not canonical or canonical == stale_key:
+                continue
+            del chats[stale_key]
+            if canonical in chats:
+                dst_records = (
+                    chats[canonical]
+                    .setdefault("messages", {})
+                    .setdefault("messages", {})
+                    .setdefault("records", [])
+                )
+                src_records = (
+                    chat_obj.get("messages", {})
+                    .get("messages", {})
+                    .get("records", [])
+                )
+                _merge_records(dst_records, src_records)
+            else:
+                chat_obj["remoteJid"] = canonical
+                chats[canonical] = chat_obj
 
         return chats
 
@@ -11106,6 +11182,14 @@ class MainWindow(wx.Frame):
 
         unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
+        # Remember this chat's last-activity timestamp as of the moment we
+        # cleared it locally — see the periodic list-chats merge in
+        # get_remote_chats(), which uses this to tell a genuinely new
+        # unreadCount apart from WhatsApp Web's own server-side read receipt
+        # simply not having caught up with this mark-as-read yet.
+        if not hasattr(self, "_locally_read_at"):
+            self._locally_read_at = {}
+        self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
         self._schedule_save(dirty_jid=remote_jid)
         # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
         # this isn't suppressed while a media sync is running, so the badge
@@ -12772,6 +12856,49 @@ class MainWindow(wx.Frame):
             return False
         except Exception as exc:
             logging.error("[delete_for_everyone] exception for %s: %s", full_id, exc)
+            return False
+
+    def delete_message_for_me(self, remote_jid: str, msg_key: dict) -> bool:
+        """Delete a message for the current account only, via the same
+        POST /api/session/delete-message endpoint delete_message_for_everyone()
+        uses, with onlyLocal=True.
+
+        "Delete for me" only ever removed the message from WinZapp's own
+        local database — it never told WhatsApp about it at all, so the
+        message stayed put on the phone and every other linked device. The
+        delete-message controller already accepts onlyLocal for exactly this
+        (WPP.chat.deleteMessage's own revoke=false path), it was simply never
+        called from here.
+        """
+        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid_jid:
+            remote_jid = lid_jid
+        url = (
+            f"{self.wpp_server}:{self.wpp_port}"
+            f"/api/{self.token}/delete-message"
+        )
+        chat_jid = remote_jid.replace("@s.whatsapp.net", "@c.us")
+        full_id = self._serialize_msg_id(chat_jid, msg_key)
+
+        payload = {
+            "phone":     chat_jid,
+            "isGroup":   chat_jid.endswith("@g.us"),
+            "messageId": full_id,
+            "onlyLocal": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True
+            logging.error("[delete_for_me] HTTP %s for %s: %s",
+                          r.status_code, full_id, r.text[:300])
+            return False
+        except Exception as exc:
+            logging.error("[delete_for_me] exception for %s: %s", full_id, exc)
             return False
 
     def forward_message(self, source_jid: str, msg_key: dict, target_jid: str) -> bool:
