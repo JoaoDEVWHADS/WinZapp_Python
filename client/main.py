@@ -654,24 +654,27 @@ class MainWindow(wx.Frame):
 
         # Handle API execution configuration
         if self.wpp_custom_api:
-            # Delete local node_modules and Puppeteer cache (Chrome) to free space
-            node_modules_path = resource_path("api", "node_modules")
-            if os.path.isdir(node_modules_path):
-                logging.info("MainWindow: Custom API enabled. Cleaning local node_modules...")
-                try:
-                    import shutil
-                    shutil.rmtree(node_modules_path, ignore_errors=True)
-                except Exception as e:
-                    logging.error("MainWindow: Failed to clean local node_modules: %s", e)
+            # Delete local node_modules and Puppeteer cache in a background thread
+            # so disk deletion of thousands of files doesn't block the UI loop.
+            def _async_clean_local_api_files():
+                import shutil
+                node_modules_path = resource_path("api", "node_modules")
+                if os.path.isdir(node_modules_path):
+                    logging.info("MainWindow: Custom API enabled. Cleaning local node_modules in background...")
+                    try:
+                        shutil.rmtree(node_modules_path, ignore_errors=True)
+                    except Exception as e:
+                        logging.error("MainWindow: Failed to clean local node_modules: %s", e)
 
-            puppeteer_cache_path = resource_path("api", ".cache")
-            if os.path.isdir(puppeteer_cache_path):
-                logging.info("MainWindow: Custom API enabled. Cleaning local Puppeteer cache...")
-                try:
-                    import shutil
-                    shutil.rmtree(puppeteer_cache_path, ignore_errors=True)
-                except Exception as e:
-                    logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
+                puppeteer_cache_path = resource_path("api", ".cache")
+                if os.path.isdir(puppeteer_cache_path):
+                    logging.info("MainWindow: Custom API enabled. Cleaning local Puppeteer cache in background...")
+                    try:
+                        shutil.rmtree(puppeteer_cache_path, ignore_errors=True)
+                    except Exception as e:
+                        logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
+
+            threading.Thread(target=_async_clean_local_api_files, daemon=True, name="clean_local_api_files").start()
         else:
             # Check API modules and start WPPConnect Server synchronously BEFORE init_UI
             # so the startup dialog shows first before opening the main conversation list.
