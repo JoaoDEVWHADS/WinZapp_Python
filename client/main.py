@@ -3731,10 +3731,6 @@ class MainWindow(wx.Frame):
         Must not be called on the wx main thread: step 1 can legitimately
         block for the whole grace budget.
         """
-        if getattr(self, "wpp_custom_api", False):
-            logging.info("[_stop_wpp_server] wpp_custom_api enabled — skipping session teardown and server termination.")
-            return
-
         proc = getattr(self, "wpp_process", None)
         token = getattr(self, "token", "")
         browser_closed_cleanly = False
