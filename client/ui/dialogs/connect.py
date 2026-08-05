@@ -696,17 +696,15 @@ class Connect:
         return max(1, box // src)
 
     def display_qrcode_image(self, base64_string):
-        """Decodes and displays the base64 QR-CODE image.
+        """Decodes and displays the base64 QR-CODE image."""
+        now = time.time()
+        last_update = getattr(self, "_last_qr_code_update_ts", 0)
+        if now - last_update < 15.0:
+            logging.info("[display_qrcode_image] Ignoring rapid QR update (cooldown active: %.1fs remaining).", 15.0 - (now - last_update))
+            return
 
-        Scaling is nearest-neighbour and by a whole-number factor. Both matter:
-        this used to call Scale(300, 300, wx.IMAGE_QUALITY_HIGH), which resamples
-        with interpolation and stretched the source (264 px from WPPConnect) by
-        a fractional 1.14×. That blurs the black/white module edges and makes
-        their widths uneven — the phone camera then reads it as a damaged code
-        and simply refuses it, which is the "QR Code inválido" users reported.
-        A QR must be magnified in whole pixels with no smoothing, or not at all.
-        """
         try:
+            self._last_qr_code_update_ts = now
             # Remove data URI prefix if present
             if "," in base64_string:
                 base64_string = base64_string.split(",")[1]
@@ -1253,9 +1251,18 @@ class Connect:
         # A destroyed wx.Dialog evaluates to False, covering cancel/close.
         if not dial:
             return
+        # Debounce/cooldown: Ignore code updates coming faster than 15s
+        # to prevent rapid, flickering updates if WhatsApp/WPPConnect rotates too quickly.
+        now = time.time()
+        last_update = getattr(self, "_last_phone_code_update_ts", 0)
+        if now - last_update < 15.0:
+            logging.info("[update_pairing_code] Ignoring rapid code update (cooldown active: %.1fs remaining).", 15.0 - (now - last_update))
+            return
+
         try:
             if not dial.IsShown() or self.pairing_code_field.GetValue() == code:
                 return
+            self._last_phone_code_update_ts = now
             self.pairing_code_field.ChangeValue(code)
         except RuntimeError:
             return  # dialog destroyed between the checks
