@@ -28,7 +28,10 @@
       "Read(//c/msys64/ucrt64/bin/**)",
       "Read(//c/msys64/mingw64/bin/**)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('client/ui/conversations.py', encoding='utf-8'\\).read\\(\\)\\)\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(python -m py_compile client/main.py)",
+      "Bash(python -m py_compile client/ui/conversations.py)",
+      "Bash(node --check client/api/start.js)"
     ]
   }
 }
