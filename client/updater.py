@@ -321,7 +321,13 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         "if errorlevel 4 (\n"
         f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
         ")\n"
-        f'if exist "{exe_path}" start "" "{exe_path}"\n'
+        # Wait for file system to finish writing the new exe before launching it.
+        "timeout /t 3 /nobreak >NUL\n"
+        f'if exist "{exe_path}" (\n'
+        f'    start "" "{exe_path}"\n'
+        ") else (\n"
+        f'    echo WinZapp exe not found after update: {exe_path} >> "{install_dir}\\update_failed.marker"\n'
+        ")\n"
         'del "%~f0"\n'
     )
 

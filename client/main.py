@@ -805,76 +805,86 @@ class MainWindow(wx.Frame):
 
         # Perform sync preparation and connection setup in background / post-UI show
         def _post_ui_init():
-            # Check for what window should be shown (skipped in background mode)
-            if not self.background_mode:
-                logging.info("MainWindow: Checking WhatsApp connection status...")
-                if not self.connect.check_connection_status():
-                    logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
-                    self.connect.show_connection_dial()
-                    if not self.connect.check_connection_status():
-                        logging.info("Connection dialog closed without pairing. Exiting application.")
-                        sys.exit()
-                    self._just_paired = True
-
-            logging.info("MainWindow: Retrieving token...")
-            self.retrieve_token()
-            if not self.token:
-                logging.error("No token retrieved. Exiting application.")
-                sys.exit()
-
-            logging.info("MainWindow: Initializing WebSocketClient...")
-            reuse_existing_ws = (
-                self._just_paired
-                and getattr(self, "ws", None) is not None
-                and getattr(self.ws.sio, "connected", False)
-            )
-            if reuse_existing_ws:
-                logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
-            else:
-                if hasattr(self, 'ws') and self.ws:
-                    try:
-                        self.ws.sio.disconnect()
-                    except Exception:
-                        pass
-                    self.ws = None
-                self.ws = WebSocketClient(self, self.connect, self.token)
-
-            logging.info("MainWindow: Preparing sync...")
-            self.prepare_sync()
-            self.set_chats()
-
-            # Ensure session is active on WPPConnect Server before connecting WebSocket
-            self.check_wa_connection_http()
-            if reuse_existing_ws:
-                logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
-                return
             try:
-                logging.info("MainWindow: Connecting WebSocket...")
-                self.connect_websocket()
-            except Exception as e:
-                logging.exception("MainWindow: Exception during websocket connection")
-                self.error_sound.play()
-                error_str = str(e)
-                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
-                    def _gui_logout():
-                        wx.MessageBox(
-                            self.i18n.t("device_logged_out"),
-                            self.i18n.t("error").format(self.app_name),
-                            wx.OK | wx.ICON_ERROR,
-                        )
-                        self._on_disconnect()
-                    wx.CallAfter(_gui_logout)
-                else:
-                    def _gui_failed():
-                        wx.MessageBox(
-                            self.i18n.t("websocket_failed_reconnect"),
-                            self.i18n.t("connection_error"),
-                            wx.OK | wx.ICON_WARNING,
-                        )
+                # Check for what window should be shown (skipped in background mode)
+                if not self.background_mode:
+                    logging.info("MainWindow: Checking WhatsApp connection status...")
+                    if not self.connect.check_connection_status():
+                        logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
                         self.connect.show_connection_dial()
-                    wx.CallAfter(_gui_failed)
-                self._just_paired = True
+                        if not self.connect.check_connection_status():
+                            logging.info("Connection dialog closed without pairing. Exiting application.")
+                            sys.exit()
+                        self._just_paired = True
+
+                logging.info("MainWindow: Retrieving token...")
+                self.retrieve_token()
+                if not self.token:
+                    logging.error("No token retrieved. Exiting application.")
+                    sys.exit()
+
+                logging.info("MainWindow: Initializing WebSocketClient...")
+                reuse_existing_ws = (
+                    self._just_paired
+                    and getattr(self, "ws", None) is not None
+                    and getattr(self.ws.sio, "connected", False)
+                )
+                if reuse_existing_ws:
+                    logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
+                else:
+                    if hasattr(self, 'ws') and self.ws:
+                        try:
+                            self.ws.sio.disconnect()
+                        except Exception:
+                            pass
+                        self.ws = None
+                    self.ws = WebSocketClient(self, self.connect, self.token)
+
+                logging.info("MainWindow: Preparing sync...")
+                self.prepare_sync()
+                self.set_chats()
+
+                # Ensure session is active on WPPConnect Server before connecting WebSocket
+                self.check_wa_connection_http()
+                if reuse_existing_ws:
+                    logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
+                    return
+                try:
+                    logging.info("MainWindow: Connecting WebSocket...")
+                    self.connect_websocket()
+                except Exception as e:
+                    logging.exception("MainWindow: Exception during websocket connection")
+                    self.error_sound.play()
+                    error_str = str(e)
+                    if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                        logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
+                        def _gui_logout():
+                            wx.MessageBox(
+                                self.i18n.t("device_logged_out"),
+                                self.i18n.t("error").format(self.app_name),
+                                wx.OK | wx.ICON_ERROR,
+                            )
+                            self._on_disconnect()
+                        wx.CallAfter(_gui_logout)
+                    else:
+                        def _gui_failed():
+                            wx.MessageBox(
+                                self.i18n.t("websocket_failed_reconnect"),
+                                self.i18n.t("connection_error"),
+                                wx.OK | wx.ICON_WARNING,
+                            )
+                            self.connect.show_connection_dial()
+                        wx.CallAfter(_gui_failed)
+                    # On websocket failure, clear the "connecting" status so the
+                    # UI is never left frozen on that label.
+                    wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
+                    self._just_paired = True
+            except SystemExit:
+                raise
+            except Exception:
+                logging.exception("MainWindow: Unexpected error in _post_ui_init")
+                # Ensure the status is never left stuck at "conectando" on any crash.
+                wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
 
         threading.Thread(target=_post_ui_init, daemon=True, name="post_ui_init").start()
 
