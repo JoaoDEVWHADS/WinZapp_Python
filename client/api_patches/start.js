@@ -1,12 +1,14 @@
 const path = require('path');
 const fs = require('fs');
 
-// Auto-instala o Chrome do Puppeteer caso não exista.
-// Procura pelo executável real (chrome.exe / chrome / Chromium), não apenas
-// por uma pasta não-vazia: um antivírus pode ter removido/colocado em
-// quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
-// checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
-const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+// Garante que o Puppeteer saiba onde encontrar o cache do Chrome
+const cacheBaseDir = path.join(__dirname, '.cache');
+const chromeHeadlessShellDir = path.join(cacheBaseDir, 'chrome-headless-shell');
+const puppeteerCacheDir = fs.existsSync(chromeHeadlessShellDir)
+  ? chromeHeadlessShellDir
+  : (fs.existsSync(path.join(cacheBaseDir, 'puppeteer')) ? path.join(cacheBaseDir, 'puppeteer') : cacheBaseDir);
+
+process.env.PUPPETEER_CACHE_DIR = puppeteerCacheDir;
 
 function findChromeExecutable(dir, depth) {
   if (depth > 6) return null;
@@ -34,9 +36,7 @@ function findChromeExecutable(dir, depth) {
   return null;
 }
 
-const chromeExecutable = fs.existsSync(puppeteerCacheDir)
-  ? findChromeExecutable(puppeteerCacheDir, 0)
-  : null;
+const chromeExecutable = findChromeExecutable(cacheBaseDir, 0);
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
@@ -233,6 +233,7 @@ const finalConfig = {
     ...(configDefault.createOptions || {}),
     ...(customConfig.createOptions || {}),
     browserArgs: optimizedBrowserArgs,
+    executablePath: chromeExecutable || undefined,
     disableSpins: true,  // Disables command line spinners (saves CPU)
     updatesLog: false,   // Disables checking for updates on startup
     // undefined => WPPConnect pins nothing and uses the live build (see
