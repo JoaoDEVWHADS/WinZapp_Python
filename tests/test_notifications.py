@@ -52,7 +52,38 @@ class _FakeI18n:
         pass
 
     def t(self, key):
+        # Mirrors the real plural string closely enough to assert on: the
+        # production code calls .format(count=...) on this one.
+        if key == "unread_sep_plural":
+            return "{count} [unread_sep_plural]"
         return f"[{key}]"
+
+
+class _FakeMainWindow:
+    """The one attribute _dispatch() reaches through: the live chat map.
+
+    _dispatch() appends the unread-count suffix at display time by reading
+    main_window.chats directly, so a stand-in without it makes every dispatch
+    raise — and because send_worker() swallows that exception, the failure is
+    silent apart from a stdout line.
+    """
+
+    def __init__(self, chats=None):
+        self.chats = chats if chats is not None else {}
+
+
+def _chat(unread=0, records=1):
+    """A chat shaped the way effective_unread_count() reads it.
+
+    The local record count matters: a reported count over a chat with no
+    stored messages is suppressed to 0, so a test that wants a suffix has to
+    give the chat some history.
+    """
+    return {
+        "unreadCount": unread,
+        "messages": {"messages": {"records": [{"key": {"id": f"M{i}"}}
+                                              for i in range(records)]}},
+    }
 
 
 class _Stub:
@@ -69,14 +100,14 @@ class _Stub:
     def _play_sound(self, remote_jid=""):
         pass
 
-    def __init__(self, toaster=None, interactable=False):
+    def __init__(self, toaster=None, interactable=False, chats=None):
         self._queue = queue.Queue()
         self._toaster = toaster
         self._last_toast = None
         self._last_shown_at = None
         self._interactable = interactable
         self.i18n = _FakeI18n()
-        self.main_window = object()
+        self.main_window = _FakeMainWindow(chats)
 
 
 class TestCoalescePending:
@@ -232,3 +263,62 @@ class TestDispatchLatency:
         mgr._dispatch("title", "body", "j@g.us")
 
         assert mgr._last_shown_at >= before
+
+
+class TestUnreadSuffix:
+    """The unread line is appended at display time, from the live chat map.
+
+    It used to be formatted by the caller at enqueue time, so a burst that
+    coalesced down to the newest message still showed the count captured when
+    the *first* one was queued. Moving it here means _dispatch() reaches into
+    main_window.chats — and everything in _dispatch() runs inside a try/except
+    that send_worker() swallows, so anything wrong in this path costs the whole
+    notification with nothing but a stdout line to show for it. Hence these.
+    """
+
+    def _body_of(self, toaster):
+        assert len(toaster.shown_toasts) == 1
+        return toaster.shown_toasts[0].text_fields[1]
+
+    def test_suffix_is_appended_from_the_live_chat(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={"j@g.us": _chat(unread=7, records=20)})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        body = self._body_of(toaster)
+        assert body.startswith("body\n")
+        assert "7" in body
+
+    def test_singular_and_plural_take_different_strings(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={"j@g.us": _chat(unread=1, records=5)})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert "unread_sep_singular" in self._body_of(toaster)
+
+    def test_a_chat_we_do_not_know_yet_still_notifies(self, monkeypatch):
+        """The message can arrive before the chat is in the map at all —
+        silently dropping the notification would be far worse than losing a
+        count line."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert self._body_of(toaster) == "body"
+
+    def test_a_count_over_an_empty_chat_is_suppressed(self, monkeypatch):
+        """effective_unread_count()'s rule: a count over a chat with no stored
+        messages would announce unread over a conversation that opens empty."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={"j@g.us": _chat(unread=9, records=0)})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert "9" not in self._body_of(toaster)
