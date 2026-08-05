@@ -789,84 +789,63 @@ class MainWindow(wx.Frame):
         # blip.
         self._pairing_in_progress = False
 
-        #Check for what window should be shown (skipped in background mode)
-        if not self.background_mode:
-            logging.info("MainWindow: Checking WhatsApp connection status...")
-            if not self.connect.check_connection_status():
-                logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
-                self.connect.show_connection_dial()
-                if not self.connect.check_connection_status():
-                    logging.info("Connection dialog closed without pairing. Exiting application.")
-                    sys.exit()
-                # Do NOT disconnect self.ws here — see the "Initialize
-                # websocket" block below for why this used to cause the
-                # pairing session to crash.
-                self._just_paired = True
-
-        logging.info("MainWindow: Retrieving token...")
-        self.retrieve_token()
-        if not self.token:
-            logging.error("No token retrieved. Exiting application.")
-            sys.exit()
-        #Initialize websocket
-        logging.info("MainWindow: Initializing WebSocketClient...")
-        # A pairing that just succeeded (_just_paired) already leaves self.ws
-        # connected and authenticated — Connect._bg_pairing_flow() created it
-        # and used it to receive the phoneCode/session-logged events that
-        # just completed pairing. Disconnecting it here (unconditionally,
-        # until this fix) and reconnecting from scratch a moment later raced
-        # WPPConnect's own session lifecycle: reported live, disconnecting
-        # the socket mere milliseconds after WPPConnect logged the session as
-        # "Started" reliably closed the WhatsApp Web page/browser
-        # server-side (wppconnect.log showed the socket's "saiu" entry
-        # immediately followed by "Page Closed" / "browserClose") — leaving
-        # WinZapp connected to a server with a dead WhatsApp session inside
-        # it, forever, with no window ever shown, no sync, and no further
-        # event arriving to explain why. Reuse the live connection instead.
-        reuse_existing_ws = (
-            self._just_paired
-            and getattr(self, "ws", None) is not None
-            and getattr(self.ws.sio, "connected", False)
-        )
-        if reuse_existing_ws:
-            logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
-        else:
-            if hasattr(self, 'ws') and self.ws:
-                try:
-                    self.ws.sio.disconnect()
-                except Exception:
-                    pass
-                self.ws = None
-            self.ws = WebSocketClient(self, self.connect, self.token)
-
-        logging.info("MainWindow: Preparing sync...")
-        self.prepare_sync()
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
         # Bounded pool for per-message background work spawned from
         # on_new_message (DB inserts, LID resolution, media downloads).
-        # A burst of incoming messages (reconnect catch-up, big history sync)
-        # used to spawn one raw threading.Thread per message per task, all
-        # contending for the single asyncio DB write lock at once — a small
-        # fixed pool serializes that work sanely instead of thread-storming.
         self._msg_bg_executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="msg-bg"
         )
-        # Cache of resolved background-notification Sound objects, keyed by
-        # absolute file path, so repeated notifications for the same
-        # alert-tone choice don't reopen the file stream every time.
+        # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
-        # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
-        def _connect_bg():
+
+        logging.info("MainWindow: Initializing User Interface immediately...")
+        self.init_UI()
+
+        # Perform sync preparation and connection setup in background / post-UI show
+        def _post_ui_init():
+            # Check for what window should be shown (skipped in background mode)
+            if not self.background_mode:
+                logging.info("MainWindow: Checking WhatsApp connection status...")
+                if not self.connect.check_connection_status():
+                    logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
+                    self.connect.show_connection_dial()
+                    if not self.connect.check_connection_status():
+                        logging.info("Connection dialog closed without pairing. Exiting application.")
+                        sys.exit()
+                    self._just_paired = True
+
+            logging.info("MainWindow: Retrieving token...")
+            self.retrieve_token()
+            if not self.token:
+                logging.error("No token retrieved. Exiting application.")
+                sys.exit()
+
+            logging.info("MainWindow: Initializing WebSocketClient...")
+            reuse_existing_ws = (
+                self._just_paired
+                and getattr(self, "ws", None) is not None
+                and getattr(self.ws.sio, "connected", False)
+            )
+            if reuse_existing_ws:
+                logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
+            else:
+                if hasattr(self, 'ws') and self.ws:
+                    try:
+                        self.ws.sio.disconnect()
+                    except Exception:
+                        pass
+                    self.ws = None
+                self.ws = WebSocketClient(self, self.connect, self.token)
+
+            logging.info("MainWindow: Preparing sync...")
+            self.prepare_sync()
+            self.set_chats()
+
             # Ensure session is active on WPPConnect Server before connecting WebSocket
             self.check_wa_connection_http()
             if reuse_existing_ws:
-                # self.ws is already the live connection from pairing —
-                # connect_websocket() itself unconditionally disconnects
-                # before reconnecting, which is exactly the premature
-                # disconnect this whole path exists to avoid (see the
-                # "Initialize websocket" comment above). Nothing else to do.
                 logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
                 return
             try:
@@ -876,8 +855,6 @@ class MainWindow(wx.Frame):
                 logging.exception("MainWindow: Exception during websocket connection")
                 self.error_sound.play()
                 error_str = str(e)
-                # If the instance does not exist on the server (e.g. database recreated/wiped),
-                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
                 if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
                     logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
                     def _gui_logout():
@@ -899,10 +876,7 @@ class MainWindow(wx.Frame):
                     wx.CallAfter(_gui_failed)
                 self._just_paired = True
 
-        threading.Thread(target=_connect_bg, daemon=True).start()
-        
-        logging.info("MainWindow: Initializing User Interface...")
-        self.init_UI()
+        threading.Thread(target=_post_ui_init, daemon=True, name="post_ui_init").start()
 
 
 
