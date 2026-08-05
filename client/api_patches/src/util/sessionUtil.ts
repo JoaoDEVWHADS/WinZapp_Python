@@ -39,7 +39,6 @@ export const chromiumArgs = [
   '--ignore-certificate-errors-spki-list', // Ignores certificate errors in SPKI list
   '--disable-3d-apis',
   '--disable-webgl',
-  '--disable-notifications',
   '--disable-component-update',
   '--disable-speech-api',
   '--disable-voice-input',

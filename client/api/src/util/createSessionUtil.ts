@@ -178,6 +178,97 @@ async function restoreMsgKeySerialized(
   }
 }
 
+/**
+ * Give WhatsApp Web a durable storage bucket.
+ *
+ * In a headless, freshly-created Chrome profile the persistent-storage
+ * permission defaults to 'prompt', and since there is nobody to answer a
+ * prompt Chrome resolves it to a denial: navigator.storage.persist() returns
+ * false and WhatsApp Web logs
+ *   [storage] storage bucket persistence denied (aquire-persistent-storage-denied)
+ * A non-durable bucket still works — it is merely evictable under storage
+ * pressure — so this is a robustness fix, not the history-sync fix. (What
+ * actually stalled history sync was the blanket request interception hanging
+ * the backend worker's cross-origin imports; see the long note in start.js.)
+ *
+ * Two details, both measured against this exact Chrome build rather than
+ * assumed, because getting either wrong leaves the grant silently ineffective:
+ *
+ *   * The CDP session must stay attached. `Browser.grantPermissions` is a
+ *     session-scoped override — detaching resets the origin straight back to
+ *     'prompt'. The earlier version of this function called cdp.detach()
+ *     immediately after granting, which is why the log kept reporting
+ *     permission 'prompt' and persisted false even though the grant itself
+ *     succeeded. The session is parked on the page so it outlives this call.
+ *
+ *   * No puppeteer overridePermissions() here. That call replaces the whole
+ *     granted set for the origin, so asking for ['notifications'] flips
+ *     durableStorage from 'prompt' to 'denied' — measurably worse than doing
+ *     nothing. The CDP grant below covers notifications anyway.
+ *
+ * Best-effort throughout: never throw from here.
+ */
+async function grantPersistentStorage(page: any, logger: any, session: string) {
+  if (!page) return;
+  const origin = 'https://web.whatsapp.com';
+  try {
+    // durableStorage has no puppeteer-level name, so it goes over raw CDP.
+    // Reuse one session per page: a fresh one per navigation would be fine,
+    // but each detach would revoke what the previous one granted.
+    if (!page.__wzPermissionSession) {
+      page.__wzPermissionSession = await page.createCDPSession();
+    }
+    await page.__wzPermissionSession.send('Browser.grantPermissions', {
+      origin,
+      permissions: ['durableStorage', 'notifications'],
+    });
+  } catch (e: any) {
+    page.__wzPermissionSession = null;
+    logger?.warn?.(
+      `[${session}] Browser.grantPermissions failed: ${e?.message || e}`
+    );
+  }
+  try {
+    const state = await page.evaluate(async () => {
+      const out: any = {};
+      out.notificationApi = typeof (globalThis as any).Notification;
+      try {
+        out.permission = (
+          await navigator.permissions.query({
+            name: 'persistent-storage' as PermissionName,
+          })
+        ).state;
+      } catch (e: any) {
+        out.permission = `query-failed: ${e?.message || e}`;
+      }
+      try {
+        out.persisted = await navigator.storage.persisted();
+        if (!out.persisted) out.granted = await navigator.storage.persist();
+        out.persistedAfter = await navigator.storage.persisted();
+      } catch (e: any) {
+        out.persistError = String(e?.message || e);
+      }
+      return out;
+    });
+    // Logged at info even on success: this single line is the fastest way to
+    // tell a session that can ingest history from one that silently cannot.
+    logger?.info?.(
+      `[${session}] persistent storage: ${JSON.stringify(state)}`
+    );
+    if (!state?.persistedAfter) {
+      logger?.warn?.(
+        `[${session}] WhatsApp Web did NOT get a persistent storage bucket — ` +
+          `its database stays evictable, so Chrome may drop synced history ` +
+          `under storage pressure.`
+      );
+    }
+  } catch (e: any) {
+    logger?.warn?.(
+      `[${session}] Could not verify persistent storage: ${e?.message || e}`
+    );
+  }
+}
+
 export default class CreateSessionUtil {
   forceKillSession(session: string, logger?: any) {
     const client: any = clientsArray[session];
@@ -386,8 +477,13 @@ export default class CreateSessionUtil {
         // silently brings the id-less messages back.
         client.page.on('load', () => {
           restoreMsgKeySerialized(client.page, req.logger, session);
+          // The permission grant survives a navigation (it is stored on the
+          // browser context), but the bucket request does not — persist() has
+          // to be asked again by the new document, so re-run the whole thing.
+          grantPersistentStorage(client.page, req.logger, session);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
+        await grantPersistentStorage(client.page, req.logger, session);
       }
       await this.start(req, client);
 
