@@ -290,23 +290,6 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
-
-
-        # Download Chromium (Puppeteer postinstall into client/api/.cache)
-        print("[INFO] Downloading Chromium (Puppeteer into client/api/.cache)...")
-        cache_dir = os.path.join(CLIENT_API_DIR, ".cache")
-        os.makedirs(cache_dir, exist_ok=True)
-        env = dict(os.environ)
-        env["PUPPETEER_CACHE_DIR"] = cache_dir
-        dl_script = (
-            "const p = require('@puppeteer/browsers'); "
-            "const b = (p.BROWSERS && (p.BROWSERS.chromeHeadlessShell || p.BROWSERS.CHROME_HEADLESS_SHELL)) || 'chrome-headless-shell'; "
-            "p.install({ browser: b, buildId: 'stable', cacheDir: process.env.PUPPETEER_CACHE_DIR })"
-            ".then(res => console.log('[OK] Browser installed to:', res.executablePath))"
-            ".catch(err => console.error('[ERROR] Browser install warning:', err.message));"
-        )
-        _run([node_bin, "-e", dl_script], cwd=CLIENT_API_DIR, env=env, check=False)
-
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
         if npm_bin.endswith("npm-cli.js"):
