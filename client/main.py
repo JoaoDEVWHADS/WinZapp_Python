@@ -6016,9 +6016,6 @@ class MainWindow(wx.Frame):
 
     def clear_local_data(self):
         """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
-        if getattr(self, "wpp_custom_api", False):
-            logging.info("[clear_local_data] wpp_custom_api enabled — skipping clearing local data/database.")
-            return
         logging.info("[clear_local_data] Clearing all local caches, media, and database...")
         self.chats = {}
         self.contacts = {}
