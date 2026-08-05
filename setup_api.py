@@ -300,7 +300,8 @@ def main():
         env["PUPPETEER_CACHE_DIR"] = cache_dir
         dl_script = (
             "const { install, BROWSERS } = require('@puppeteer/browsers'); "
-            "install({ browser: BROWSERS.chromeheadlessshell, buildId: 'stable', cacheDir: process.env.PUPPETEER_CACHE_DIR })"
+            "const bType = BROWSERS.chromeHeadlessShell || BROWSERS.chromeheadlessshell || 'chrome-headless-shell'; "
+            "install({ browser: bType, buildId: 'stable', cacheDir: process.env.PUPPETEER_CACHE_DIR })"
             ".then(b => console.log('[OK] Browser downloaded to:', b.executablePath))"
             ".catch(e => console.error('[ERROR] Failed to download browser:', e));"
         )
