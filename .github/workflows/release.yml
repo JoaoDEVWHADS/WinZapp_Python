@@ -25,7 +25,8 @@ jobs:
       - name: Checkout Código-Fonte
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: main
+          fetch-depth: 1
 
       - name: Definir Versão da Release
         shell: pwsh
