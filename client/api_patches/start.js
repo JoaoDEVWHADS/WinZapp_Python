@@ -1,12 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 
-// Auto-instala o Chrome do Puppeteer caso não exista.
-// Procura pelo executável real (chrome.exe / chrome / Chromium), não apenas
-// por uma pasta não-vazia: um antivírus pode ter removido/colocado em
-// quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
-// checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
-const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+// Garante que o Puppeteer saiba onde encontrar o cache do Chrome
+const puppeteerCacheDir = path.join(__dirname, '.cache');
+process.env.PUPPETEER_CACHE_DIR = puppeteerCacheDir;
 
 function findChromeExecutable(dir, depth) {
   if (depth > 6) return null;
@@ -22,6 +19,8 @@ function findChromeExecutable(dir, depth) {
       const found = findChromeExecutable(full, depth + 1);
       if (found) return found;
     } else if (
+      entry.name === 'chrome-headless-shell.exe' ||
+      entry.name === 'chrome-headless-shell' ||
       entry.name === 'chrome.exe' ||
       entry.name === 'chrome' ||
       entry.name === 'Chromium'
@@ -32,9 +31,7 @@ function findChromeExecutable(dir, depth) {
   return null;
 }
 
-const chromeExecutable = fs.existsSync(puppeteerCacheDir)
-  ? findChromeExecutable(puppeteerCacheDir, 0)
-  : null;
+const chromeExecutable = findChromeExecutable(puppeteerCacheDir, 0);
 const hasChrome = !!chromeExecutable;
 
 if (!hasChrome) {
@@ -58,8 +55,8 @@ if (!hasChrome) {
     // is no npx.cmd shim inside the portable extraction on every layout.
     const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
     const npxCmd = fs.existsSync(npxCli)
-      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome`
-      : 'npx puppeteer browsers install chrome';
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome-headless-shell`
+      : 'npx puppeteer browsers install chrome-headless-shell';
     execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',
@@ -116,11 +113,6 @@ const optimizedBrowserArgs = [
   '--disable-renderer-accessibility',
   '--disable-web-security',
   '--no-sandbox',
-  '--aggressive-cache-discard',
-  '--disable-cache',
-  '--disable-application-cache',
-  '--disable-offline-load-stale-cache',
-  '--disk-cache-size=0',
   '--disable-background-networking',
   '--disable-default-apps',
   '--disable-extensions',
@@ -137,27 +129,6 @@ const optimizedBrowserArgs = [
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
   '--no-zygote',
-  // NOTE on two flags deliberately NOT in this list any more —
-  // '--disable-shared-workers' and '--disable-notifications'. Neither one was
-  // the cause of the "chats only ever show their last ~15 messages" bug (that
-  // was the blanket request interception — see the long block further down),
-  // but both are wrong for this page and stay out:
-  //
-  //   * WhatsApp Web runs its whole storage/decode backend inside workers. It
-  //     is not worth handing that page a Chrome with any part of the worker
-  //     surface removed to save a few MB.
-  //
-  //   * --disable-notifications removes the Notification API outright
-  //     (typeof Notification === 'undefined'). Chrome's auto-grant heuristic
-  //     for persistent storage keys off the notifications permission, so with
-  //     the API gone navigator.storage.persist() can only ever return false and
-  //     WhatsApp Web's database stays evictable. createSessionUtil.ts grants
-  //     the permission explicitly once the page exists; this flag has to be
-  //     gone for that grant to mean anything.
-  //
-  // Headless Chrome has no notification UI, so dropping the flag cannot
-  // produce a visible prompt or a toast — it only restores the API surface
-  // WhatsApp Web probes.
   '--disable-3d-apis',
   '--disable-webgl',
   '--disable-component-update',
@@ -234,48 +205,6 @@ function resolveWhatsappVersion() {
 
 const whatsappVersion = resolveWhatsappVersion();
 
-// ── Serving the pinned HTML without breaking WhatsApp Web's workers ─────────
-//
-// WPPConnect serves the pinned build by calling page.setRequestInterception(true)
-// (controllers/browser.js, setWhatsappVersion) and answering the one request for
-// https://web.whatsapp.com/ with wa-version's HTML. That single call is a blanket
-// Fetch.enable over *every* request the target makes — and puppeteer never
-// answers the ones a dedicated Worker issues in CORS mode. They do not fail;
-// they hang forever, with no error anywhere.
-//
-// Measured directly, with plain puppeteer and no WhatsApp involved (a blob
-// Worker doing one cross-origin fetch):
-//
-//   setRequestInterception(false):  worker cors ok 200 (560ms)
-//   setRequestInterception(true):   worker cors HANG (>10s), no-cors and
-//                                   page-issued requests unaffected
-//
-// What that broke: WhatsApp Web boots a dedicated module worker
-// (WAWebBackendWorker) whose init script imports its bundles from
-// https://static.whatsapp.net — cross-origin, CORS mode. Those imports hung, so
-// the worker never posted ww-init-complete, so startBackendWorker() never
-// resolved, so setBackendWorkerBridge() was never called and
-// isBackendWorkerBridgeReady() stayed false for the whole session. Because it
-// hangs rather than throws, WhatsApp Web's own retry path (3 attempts, keyed off
-// the init promise rejecting) never fired either — one silent stall, forever.
-//
-// And every history-sync chunk handler awaits getBackendWorkerBridge() before
-// decoding. So the phone delivered history normally and WhatsApp Web stored it
-// unread: 13 chunks parked at 'notification_stored', its own message store
-// holding 1214 rows across 604 chats (~2 per chat). get-messages was returning
-// everything WhatsApp Web had; WhatsApp Web just had almost nothing. That is the
-// "only the last ~15 messages ever load" report, all the way down.
-//
-// Fix: keep the substitution, drop the blanket. A raw-CDP Fetch.enable carrying
-// a urlPattern matching only the document (and check-update, which WPPConnect
-// aborts) pauses those two URLs and nothing else, so worker traffic is never
-// intercepted in the first place. Verified with the same harness: document still
-// substituted, worker cors back to ok 200 (606ms).
-//
-// This is installed by wrapping the controller's exported initWhatsapp — the
-// call site in host.layer.js reads the property off the module namespace at call
-// time, so replacing it here takes effect. Passing version=undefined onward is
-// what keeps WPPConnect from installing its own interception on top of ours.
 const WA_WEB_URL = 'https://web.whatsapp.com/';
 const WA_CHECK_UPDATE = 'https://web.whatsapp.com/check-update';
 
@@ -300,14 +229,9 @@ async function installPinnedPageInterception(page, body, log) {
           body: Buffer.from(body).toString('base64'),
         });
       } else {
-        // Cannot happen with the patterns above, but a paused request that is
-        // never answered is exactly the failure mode this whole block exists to
-        // remove — so never leave one hanging.
         await cdp.send('Fetch.continueRequest', { requestId });
       }
     } catch (e) {
-      // The target can go away mid-flight (navigation, session close); the
-      // request dies with it and there is nothing left to answer.
       log?.('verbose', `[WinZapp] Fetch.requestPaused handling failed: ${e && e.message}`);
     }
   });
@@ -335,7 +259,7 @@ function patchWppconnectVersionPinning() {
     if (version) {
       let body = null;
       try {
-        body = requireWaVersion().getPageContent(version);
+        body = waVersion.getPageContent(version);
       } catch (e) {
         body = null;
       }
@@ -346,7 +270,6 @@ function patchWppconnectVersionPinning() {
             `[WinZapp] Serving pinned WhatsApp Web ${version} via a document-only ` +
             'interception (worker requests left alone).'
           );
-          // Consumed here — WPPConnect must not add its blanket interception.
           version = undefined;
         } catch (e) {
           console.error(
@@ -383,6 +306,12 @@ const finalConfig = {
     ...(configDefault.createOptions || {}),
     ...(customConfig.createOptions || {}),
     browserArgs: optimizedBrowserArgs,
+    executablePath: chromeExecutable || undefined,
+    puppeteerOptions: {
+      ...(configDefault.createOptions?.puppeteerOptions || {}),
+      ...(customConfig.createOptions?.puppeteerOptions || {}),
+      executablePath: chromeExecutable || undefined,
+    },
     disableSpins: true,  // Disables command line spinners (saves CPU)
     updatesLog: false,   // Disables checking for updates on startup
     // undefined => WPPConnect pins nothing and uses the live build (see

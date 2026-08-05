@@ -606,7 +606,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
     const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
     if (!mediaUrl) {
       if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
-        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia with 5s timeout...`);
+        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia with 30s timeout...`);
         try {
           let timer: any;
           const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
@@ -617,9 +617,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
           const timeoutPromise = new Promise<null>((resolve) => {
             timer = setTimeout(() => {
-              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${messageId})`);
               resolve(null);
-            }, 5000);
+            }, 30000);
           });
           let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
@@ -697,9 +697,9 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
           const timeoutPromise = new Promise<null>((resolve) => {
             timer = setTimeout(() => {
-              req.logger.warn(`Timeout 5000ms reached for client.downloadMedia (${messageId})`);
+              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${messageId})`);
               resolve(null);
-            }, 5000);
+            }, 30000);
           });
           let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
           if (base64) {
