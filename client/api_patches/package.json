@@ -30,7 +30,8 @@
     "swagger:copy-json": "shx cp ./src/swagger.json ./swagger-docs",
     "swagger:fix-url": "sed -i \"s|https://petstore.swagger.io/v2/swagger.json|./swagger.json|g\" ./swagger-docs/index.html",
     "swagger:generate": "yarn swagger:copy-assets && yarn swagger:copy-json && yarn swagger:fix-url",
-    "test": "jest"
+    "test": "jest",
+    "postinstall": "npx --yes @puppeteer/browsers install chrome-headless-shell@stable --path ./.cache"
   },
   "engines": {
     "node": "22.22.2"
@@ -66,7 +67,8 @@
     "swagger-autogen": "^2.23.7",
     "swagger-ui-express": "^5.0.1",
     "unzipper": "^0.12.3",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "@puppeteer/browsers": "^2.7.1"
   },
   "devDependencies": {
     "@babel/cli": "^7.28.6",
