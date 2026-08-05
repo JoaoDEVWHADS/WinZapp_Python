@@ -3879,9 +3879,9 @@ class MainWindow(wx.Frame):
 
         self._wpp_log_path = None
         self._wpp_log_fh   = None
-        self._start_wpp_background()
 
         if self.background_mode:
+            self._start_wpp_background()
             deadline = time.time() + 300
             while time.time() < deadline:
                 if self._is_wpp_running():
@@ -3893,6 +3893,7 @@ class MainWindow(wx.Frame):
         from ui.dialogs.api_startup import ApiStartupDialog
         def _show_startup_dlg():
             dlg = ApiStartupDialog(self, self.wpp_port)
+            wx.CallAfter(self._start_wpp_background)
             res = dlg.ShowModal()
             dlg.Destroy()
             return res
