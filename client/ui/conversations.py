@@ -6235,12 +6235,6 @@ class ConversationsPanel(wx.Panel):
                     )
             threading.Thread(target=_revoke, daemon=True).start()
         else:
-            # "Delete for me" used to only remove the row locally, never
-            # telling WhatsApp — the message stayed put on the phone and
-            # every other linked device. Replicate it via the same
-            # delete-message API delete_message_for_everyone() uses, with
-            # onlyLocal=True (WhatsApp's real "delete for me" semantics: it
-            # never removes the message for anyone else, no time limit).
             def _delete_for_me(k=dict(msg_key), j=jid):
                 self.main_window.delete_message_for_me(j, k)
             threading.Thread(target=_delete_for_me, daemon=True).start()
@@ -7424,18 +7418,7 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        # WPPConnect's WhatsApp-imposed limits are 70 MB (media) / 1 GB (docs),
-        # but that's not what WinZapp can actually deliver: sendFile() reads
-        # the whole file, base64-encodes it in memory, and hands the result to
-        # Puppeteer's page.evaluate() as a single argument sent over the
-        # Chrome DevTools Protocol. A large upload (200 MB raw → ~266 MB of
-        # base64) makes that transfer slow enough, and heavy enough on the
-        # Node/Chromium processes, that it has been observed killing the
-        # underlying Puppeteer session outright — which WinZapp then reports
-        # as a permanent offline mode with the message stuck pending, since
-        # there's no live browser tab left to reconnect to. Capping documents
-        # at 100 MB keeps sends inside the range that transport reliably
-        # handles instead of raising WhatsApp's own (much higher) ceiling.
+        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
         _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
         _MAX_DOC_BYTES      = 100 * 1024 * 1024
         i18n = self.main_window.i18n
@@ -8091,18 +8074,6 @@ class ArchivedConversationsPanel(wx.Panel):
         sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(sizer)
-        # Alt+1 (back to the normal conversation list) is registered as a
-        # global accelerator on the main frame, but this panel's own
-        # AcceleratorTable (see create_accelerator_table() below) sits closer
-        # to whichever child control has focus and — unlike Alt+4/Alt+5,
-        # which are only ever pressed from a window that has no accelerator
-        # table of its own — was observed to swallow Alt+1 before it ever
-        # reached the frame's table, leaving the user stuck in Archived with
-        # no way back via the shortcut (the "Conversas" nav-list item still
-        # worked, since that path never goes through this panel's table at
-        # all). EVT_CHAR_HOOK fires before accelerator translation, so
-        # handling it explicitly here guarantees Alt+1 always works from
-        # anywhere inside this panel.
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook_alt1)
 
     def _on_char_hook_alt1(self, event):
