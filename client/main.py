@@ -13685,6 +13685,10 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
+        if not wx.IsMainThread():
+            wx.CallAfter(lambda: self.exception_handler(exc_type, exc_value, exc_traceback))
+            return
+
         #Play error sound
         self.error_sound.play()
 
