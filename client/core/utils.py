@@ -380,3 +380,34 @@ def first_unread_index(displayable, unread_count: int) -> int:
         if seen == unread_count:
             return idx
     return -1
+
+
+def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
+    """Where populate_messages()'s pagination window should start.
+
+    Returns ``(offset, adjusted_sep_idx)``: ``offset`` is how many leading
+    messages to skip (0 when everything fits), and ``adjusted_sep_idx`` is
+    ``unread_sep_idx`` re-based onto the paginated slice (-1 once the
+    separator falls before ``offset``).
+
+    Plain ``max(0, total_len - limit)`` cuts strictly at the configured page
+    size regardless of what it cuts through. When a conversation has more
+    unread messages than the page size allows (e.g. 230 unread against the
+    default 200-message limit), that cut lands ABOVE the unread separator —
+    the separator (and everything after it, i.e. every genuinely unread
+    message) falls entirely outside the window and is silently dropped: no
+    separator to land on, no Alt+3 target, no way to reach messages that are
+    demonstrably still unread. So the window widens — but only while there is
+    something unread to protect (``unread_sep_idx >= 0``); a fully-read
+    conversation still respects the configured limit exactly as before.
+    """
+    effective_limit = limit
+    if unread_sep_idx >= 0:
+        effective_limit = max(limit, total_len - unread_sep_idx)
+    if total_len <= effective_limit:
+        return 0, unread_sep_idx
+    offset = total_len - effective_limit
+    adjusted = unread_sep_idx - offset if unread_sep_idx >= 0 else -1
+    if adjusted < 0:
+        adjusted = -1
+    return offset, adjusted
