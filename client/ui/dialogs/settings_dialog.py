@@ -113,12 +113,84 @@ class _HotkeyCapture(wx.TextCtrl):
         self.SetValue(_vk_mod_to_str(vk, mod))
 
 
+DEFAULT_SETTINGS_FALLBACK = {
+    "connection": {
+        "wpp_server": "http://127.0.0.1",
+        "wpp_port": 6300,
+        "wpp_ws_server": "ws://127.0.0.1",
+        "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
+        "wpp_custom_api": False
+    },
+    "general": {
+        "language": "",
+        "notifications_enabled": True,
+        "updates_enabled": True,
+        "noise_reduction_enabled": False,
+        "first_run": True,
+        "autostart": False,
+        "show_tray_icon": True,
+        "terms_alert_displayed": False,
+        "quick_tip_shown": False
+    },
+    "status": {
+        "messages_set_completed": False
+    },
+    "user_interface": {
+        "messages_page_size": 200,
+        "focus_on_open": "message_field"
+    },
+    "audio_playback": {
+        "audio_default_speed": 1.0
+    },
+    "audio_devices": {
+        "output_device_name": "",
+        "input_device_name": ""
+    },
+    "storage": {
+        "auto_download_media": True,
+        "media_max_days": 30,
+        "media_max_mb": 100
+    }
+}
+
+
+def ensure_default_settings_file():
+    """Ensure settings.json and settings_default.json exist, generating them from fallback dict if missing."""
+    try:
+        from core.utils import data_path, resource_path
+        import shutil
+        import json
+
+        default_file = resource_path("data", "settings_default.json")
+        if not os.path.isfile(default_file):
+            try:
+                os.makedirs(os.path.dirname(default_file), exist_ok=True)
+                with open(default_file, "w", encoding="utf-8") as f:
+                    json.dump(DEFAULT_SETTINGS_FALLBACK, f, indent=4)
+            except Exception:
+                pass
+
+        settings_file = data_path("settings.json")
+        if not os.path.isfile(settings_file):
+            os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+            if os.path.isfile(default_file):
+                shutil.copy2(default_file, settings_file)
+            else:
+                with open(settings_file, "w", encoding="utf-8") as f:
+                    json.dump(DEFAULT_SETTINGS_FALLBACK, f, indent=4)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class SettingsDialog(wx.Dialog):
     """Settings dialog with a General, Connection, and Audio playback tab."""
 
     _AUDIO_SPEED_STEPS = [1.0, 1.5, 2.0]
 
     def __init__(self, parent):
+        ensure_default_settings_file()
         self.main_window = parent
         i18n = self.main_window.i18n
         super().__init__(
