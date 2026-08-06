@@ -696,15 +696,30 @@ class Connect:
         return max(1, box // src)
 
     def display_qrcode_image(self, base64_string):
-        """Decodes and displays the base64 QR-CODE image."""
-        now = time.time()
-        last_update = getattr(self, "_last_qr_code_update_ts", 0)
-        if now - last_update < 15.0:
-            logging.info("[display_qrcode_image] Ignoring rapid QR update (cooldown active: %.1fs remaining).", 15.0 - (now - last_update))
+        """Decodes and displays the base64 QR-CODE image.
+
+        Scaling is nearest-neighbour and by a whole-number factor. Both matter:
+        this used to call Scale(300, 300, wx.IMAGE_QUALITY_HIGH), which resamples
+        with interpolation and stretched the source (264 px from WPPConnect) by
+        a fractional 1.14×. That blurs the black/white module edges and makes
+        their widths uneven — the phone camera then reads it as a damaged code
+        and simply refuses it, which is the "QR Code inválido" users reported.
+        A QR must be magnified in whole pixels with no smoothing, or not at all.
+
+        Repeats are suppressed by comparing the payload, not by a timer. A 15 s
+        cooldown used to sit here instead, and it could drop a genuine rotation:
+        WhatsApp invalidates the previous QR when it issues a new one, so a
+        dropped update leaves an expired code on screen that the phone will
+        never accept. The timestamp also lived on `self`, which outlives the
+        dialog — closing and reopening pairing inside the window rendered no QR
+        at all, just an empty box.
+        """
+        if base64_string == getattr(self, "_last_qr_payload", None):
+            logging.info("[display_qrcode_image] Identical QR payload re-emitted — not redrawing.")
             return
 
         try:
-            self._last_qr_code_update_ts = now
+            self._last_qr_payload = base64_string
             # Remove data URI prefix if present
             if "," in base64_string:
                 base64_string = base64_string.split(",")[1]
@@ -1251,18 +1266,22 @@ class Connect:
         # A destroyed wx.Dialog evaluates to False, covering cancel/close.
         if not dial:
             return
-        # Debounce/cooldown: Ignore code updates coming faster than 15s
-        # to prevent rapid, flickering updates if WhatsApp/WPPConnect rotates too quickly.
-        now = time.time()
-        last_update = getattr(self, "_last_phone_code_update_ts", 0)
-        if now - last_update < 15.0:
-            logging.info("[update_pairing_code] Ignoring rapid code update (cooldown active: %.1fs remaining).", 15.0 - (now - last_update))
-            return
-
+        # Deliberately NOT a time-based cooldown. A 15 s one used to sit here,
+        # meant to stop flicker from rapid rotations — but dropping an update
+        # because it arrived too soon leaves the dialog showing the previous,
+        # now-invalid code, which is precisely the failure this method's
+        # docstring exists to describe: the user types a stale code, pairing
+        # fails, they request another, and WhatsApp's anti-abuse eventually
+        # blocks the account.
+        #
+        # The equality check below already suppresses every *duplicate* emit
+        # (the only thing that can actually flicker) with none of that risk,
+        # and it does so without any state that outlives the dialog — a
+        # timestamp on `self` survives closing and reopening the dialog, so a
+        # retry within the cooldown got no code at all.
         try:
             if not dial.IsShown() or self.pairing_code_field.GetValue() == code:
                 return
-            self._last_phone_code_update_ts = now
             self.pairing_code_field.ChangeValue(code)
         except RuntimeError:
             return  # dialog destroyed between the checks

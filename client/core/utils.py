@@ -91,6 +91,35 @@ def looks_like_binary_blob(value) -> bool:
         return True
     return False
 
+def _clean_mentioned_jid(jid_val):
+    """Normalize one mentionedJid entry to a plain '...@s.whatsapp.net'/'@lid'
+    string. Mirrors WebSocketClient._clean_jid() without needing an instance —
+    entries can arrive as a raw WPPConnect Wid dict instead of a string."""
+    if not jid_val:
+        return ""
+    if isinstance(jid_val, dict):
+        jid_val = jid_val.get("_serialized") or jid_val.get("id") or ""
+    if not isinstance(jid_val, str):
+        jid_val = str(jid_val)
+    return jid_val.replace("@c.us", "@s.whatsapp.net")
+
+
+def _extract_mentioned_jids(quoted):
+    """Pull the quoted message's OWN mentionedJid list out of *quoted*,
+    wherever WPPConnect/Baileys put it — a WPPConnect-style raw quote carries
+    it flat as ``mentionedJidList``; a Baileys-style quotedMessage proto
+    carries it nested under (extendedTextMessage.)contextInfo.mentionedJid."""
+    for src in (
+        quoted,
+        quoted.get("contextInfo") or {},
+        (quoted.get("extendedTextMessage") or {}).get("contextInfo") or {},
+    ):
+        raw = src.get("mentionedJidList") or src.get("mentionedJid")
+        if raw:
+            return [_clean_mentioned_jid(m) for m in raw if m]
+    return []
+
+
 def _slim_quoted_message(quoted):
     """Reduce a quoted-message dict to only what the reply preview needs.
 
@@ -100,6 +129,12 @@ def _slim_quoted_message(quoted):
     UI (the preview only shows a short text or a type label), yet it dominated
     messages.dat and slowed every conversation that had replies. This keeps just
     a capped text preview plus a type marker.
+
+    mentionedJid is the one field kept beyond that: without it, a quoted
+    message's own @mentions render as raw @<phone-or-lid-digits> forever,
+    because the placeholder text survives slimming but the JID list needed to
+    resolve it into a contact name does not — see
+    ConversationsPanel._resolve_mentions_in_text(), the only consumer.
     """
     if not isinstance(quoted, dict):
         return quoted
@@ -130,6 +165,9 @@ def _slim_quoted_message(quoted):
             if k in quoted:
                 slim[k] = {}
                 break
+    mentioned = _extract_mentioned_jids(quoted)
+    if mentioned:
+        slim["mentionedJid"] = mentioned
     return slim
 
 
@@ -380,3 +418,34 @@ def first_unread_index(displayable, unread_count: int) -> int:
         if seen == unread_count:
             return idx
     return -1
+
+
+def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
+    """Where populate_messages()'s pagination window should start.
+
+    Returns ``(offset, adjusted_sep_idx)``: ``offset`` is how many leading
+    messages to skip (0 when everything fits), and ``adjusted_sep_idx`` is
+    ``unread_sep_idx`` re-based onto the paginated slice (-1 once the
+    separator falls before ``offset``).
+
+    Plain ``max(0, total_len - limit)`` cuts strictly at the configured page
+    size regardless of what it cuts through. When a conversation has more
+    unread messages than the page size allows (e.g. 230 unread against the
+    default 200-message limit), that cut lands ABOVE the unread separator —
+    the separator (and everything after it, i.e. every genuinely unread
+    message) falls entirely outside the window and is silently dropped: no
+    separator to land on, no Alt+3 target, no way to reach messages that are
+    demonstrably still unread. So the window widens — but only while there is
+    something unread to protect (``unread_sep_idx >= 0``); a fully-read
+    conversation still respects the configured limit exactly as before.
+    """
+    effective_limit = limit
+    if unread_sep_idx >= 0:
+        effective_limit = max(limit, total_len - unread_sep_idx)
+    if total_len <= effective_limit:
+        return 0, unread_sep_idx
+    offset = total_len - effective_limit
+    adjusted = unread_sep_idx - offset if unread_sep_idx >= 0 else -1
+    if adjusted < 0:
+        adjusted = -1
+    return offset, adjusted

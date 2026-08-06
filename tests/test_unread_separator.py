@@ -20,7 +20,7 @@ approach as tests/test_message_bookmarks.py.
 
 import pytest
 
-from core.utils import first_unread_index
+from core.utils import first_unread_index, paginated_window
 from ui.conversations import ConversationsPanel
 
 
@@ -79,6 +79,55 @@ class TestFirstUnreadIndex:
         msgs = [None, _msg("a"), {"_type": "unread_separator"}, _msg("b")]
         assert first_unread_index(msgs, 1) == 3
         assert first_unread_index(msgs, 2) == 2, "keyless sentinel counts as incoming"
+
+
+# ── Pagination window vs. a large unread backlog ────────────────────────────
+
+
+class TestPaginatedWindow:
+    def test_short_history_is_never_paginated(self):
+        assert paginated_window(total_len=50, limit=200, unread_sep_idx=-1) == (0, -1)
+
+    def test_a_fully_read_conversation_respects_the_configured_limit(self):
+        """No separator (-1) means nothing unread to protect — cut exactly at
+        the configured page size, same as before this fix existed."""
+        offset, sep = paginated_window(total_len=500, limit=200, unread_sep_idx=-1)
+        assert offset == 300
+        assert sep == -1
+
+    def test_the_reported_case_230_unread_against_a_200_limit(self):
+        """The separator sits 230 messages from the end — inside a plain
+        200-message cut that would have dropped it (and every unread message
+        after it) entirely. The window must widen to keep it."""
+        total = 300
+        sep_idx = total - 230  # 230 messages, including the separator, follow
+        offset, sep = paginated_window(total_len=total, limit=200, unread_sep_idx=sep_idx)
+        assert offset <= sep_idx, "the separator must stay inside the window"
+        assert sep == sep_idx - offset
+        assert sep >= 0
+
+    def test_unread_backlog_smaller_than_the_limit_changes_nothing(self):
+        """15 unread against a 200 limit — the old, unwidened cut already
+        keeps the separator, so behaviour must be identical to before."""
+        total = 500
+        sep_idx = total - 15
+        offset, sep = paginated_window(total_len=total, limit=200, unread_sep_idx=sep_idx)
+        assert offset == total - 200
+        assert sep == sep_idx - offset
+
+    def test_unread_backlog_exactly_at_the_limit_is_the_boundary(self):
+        total = 400
+        sep_idx = total - 200
+        offset, sep = paginated_window(total_len=total, limit=200, unread_sep_idx=sep_idx)
+        assert offset == sep_idx
+        assert sep == 0
+
+    def test_widening_still_caps_at_the_full_history(self):
+        """More unread than history even holds — the window can't widen past
+        what actually exists."""
+        offset, sep = paginated_window(total_len=100, limit=50, unread_sep_idx=0)
+        assert offset == 0
+        assert sep == 0
 
 
 # ── When the separator goes away ────────────────────────────────────────────
