@@ -51,7 +51,14 @@ def enumerate_output_devices() -> list:
         if info.flags & BASS_DEVICE_ENABLED:
             name = info.name
             if isinstance(name, bytes):
-                name = name.decode("mbcs")
+                # Modern BASS returns device names as UTF-8; decoding as mbcs
+                # (the Windows ANSI codepage) mangled Polish characters into
+                # mojibake in the device combos. Try UTF-8 first, fall back to
+                # mbcs only for a legacy BASS that really is ANSI.
+                try:
+                    name = name.decode("utf-8")
+                except UnicodeDecodeError:
+                    name = name.decode("mbcs", "replace")
             name = name.replace("(", "").replace(")", "").strip()
             if name.lower() != "default":
                 devices.append((count, name))
