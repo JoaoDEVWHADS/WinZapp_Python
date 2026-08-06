@@ -233,14 +233,35 @@ class SoundSystem:
         """BASS_Init an extra output device on demand so an effect channel can
         be routed to it (the main Output() device is always ready). Returns True
         if the device is usable. Idempotent: 'already initialised' (BASS error
-        14) counts as success."""
+        14) counts as success.
+
+        CRITICAL: BASS_Init(device) also makes `device` BASS's *current* device,
+        which every stream created afterwards inherits — so initialising the
+        effects device would silently send voice/conversation streams to it too
+        (bug: everything ended up on the effects device). Save the current
+        device before BASS_Init and restore it after, so this only ADDS a device
+        without moving where new streams land.
+        """
         try:
-            from sound_lib.external.pybass import BASS_Init
-            bass_call(BASS_Init, device, 44100, 0, 0, None)
+            from sound_lib.external.pybass import BASS_Init, BASS_GetDevice, BASS_SetDevice
+            try:
+                prev = BASS_GetDevice()
+            except Exception:
+                prev = None
+            try:
+                bass_call(BASS_Init, device, 44100, 0, 0, None)
+            except Exception as exc:
+                if not ("14" in str(exc) or "already" in str(exc).lower()):
+                    raise
+            finally:
+                # Restore the current device so we didn't hijack new streams.
+                if prev is not None and prev != device:
+                    try:
+                        BASS_SetDevice(prev)
+                    except Exception:
+                        pass
             return True
         except Exception as exc:
-            if "14" in str(exc) or "already" in str(exc).lower():
-                return True
             logging.warning("[sound_system] BASS_Init failed for effects device %s: %s", device, exc)
             return False
 
