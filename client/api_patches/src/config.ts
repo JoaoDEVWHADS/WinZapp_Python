@@ -45,6 +45,15 @@ export default {
   },
   createOptions: {
     autoClose: 0,
+    // IMPORTANT: index.ts merges this with the config start.js passes to
+    // initServer() using `merge-deep`, and merge-deep UNIONS arrays rather
+    // than replacing them. A flag listed here therefore reaches Chrome no
+    // matter what start.js does — start.js can only ever *add* flags, never
+    // take one away. Removing a browser flag means removing it here as well.
+    // (That is how '--disable-notifications' survived being deleted from
+    // start.js: this list kept putting it back, the Notification API stayed
+    // undefined, and WhatsApp Web still could not get a persistent storage
+    // bucket. See the long comment in start.js for why that matters.)
     browserArgs: [
       '--disable-web-security',
       '--no-sandbox',
@@ -70,7 +79,6 @@ export default {
       '--ignore-certificate-errors-spki-list',
       '--disable-3d-apis',
       '--disable-webgl',
-      '--disable-notifications',
       '--disable-component-update',
       '--disable-speech-api',
       '--disable-voice-input',

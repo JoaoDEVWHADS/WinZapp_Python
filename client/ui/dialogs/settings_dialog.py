@@ -1,11 +1,13 @@
 import ctypes
-import logging
 import os
 import wx
 from core.i18n import LANGUAGE_NAMES
 from core.sound_system import (
     SOUND_EVENTS, ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path,
     DEFAULT_PACK_ID, import_soundpack, AlertPreviewController,
+)
+from core.audio_devices import (
+    enumerate_output_devices, enumerate_input_devices, test_input_device,
 )
 
 # Win32 modifier constants for RegisterHotKey
@@ -166,11 +168,6 @@ class SettingsDialog(wx.Dialog):
             choices=list(LANGUAGE_NAMES.values()),
         )
         gen_sizer.Add(self._lang_combo, 0, wx.EXPAND | wx.ALL, 8)
-
-        self._noise_reduction_check = wx.CheckBox(
-            self._general_page, label=i18n.t("noise_reduction_label")
-        )
-        gen_sizer.Add(self._noise_reduction_check, 0, wx.ALL, 8)
 
         self._notifications_check = wx.CheckBox(
             self._general_page, label=i18n.t("notifications_label")
@@ -368,6 +365,32 @@ class SettingsDialog(wx.Dialog):
 
         self._custom_api_check.Bind(wx.EVT_CHECKBOX, self._on_custom_api_toggle)
 
+        # ── Audio Devices tab ────────────────────────────────────────────────
+        self._audio_devices_page = wx.Panel(self._notebook)
+        adev_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._audio_input_label = wx.StaticText(
+            self._audio_devices_page, label=i18n.t("audio_input_device_label")
+        )
+        adev_sizer.Add(self._audio_input_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._audio_input_combo = wx.ComboBox(self._audio_devices_page, style=wx.CB_READONLY)
+        adev_sizer.Add(self._audio_input_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._audio_output_label = wx.StaticText(
+            self._audio_devices_page, label=i18n.t("audio_output_device_label")
+        )
+        adev_sizer.Add(self._audio_output_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._audio_output_combo = wx.ComboBox(self._audio_devices_page, style=wx.CB_READONLY)
+        adev_sizer.Add(self._audio_output_combo, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._noise_reduction_check = wx.CheckBox(
+            self._audio_devices_page, label=i18n.t("noise_reduction_label")
+        )
+        adev_sizer.Add(self._noise_reduction_check, 0, wx.ALL, 8)
+
+        self._audio_devices_page.SetSizer(adev_sizer)
+        self._notebook.AddPage(self._audio_devices_page, i18n.t("tab_audio_devices"))
+
         # ── Sound Events tab ─────────────────────────────────────────────────
         self._sound_events_page = wx.Panel(self._notebook)
         se_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -480,6 +503,32 @@ class SettingsDialog(wx.Dialog):
         self._alert_page.SetSizer(alert_sizer)
         self._notebook.AddPage(self._alert_page, i18n.t("tab_alert_tones"))
 
+        # ── Storage tab ──────────────────────────────────────────────────────
+        self._storage_page = wx.Panel(self._notebook)
+        storage_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._auto_download_media_check = wx.CheckBox(
+            self._storage_page, label=i18n.t("auto_download_media_label")
+        )
+        storage_sizer.Add(self._auto_download_media_check, 0, wx.ALL, 8)
+
+        self._media_max_days_label = wx.StaticText(
+            self._storage_page, label=i18n.t("media_max_days_label")
+        )
+        storage_sizer.Add(self._media_max_days_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._media_max_days_field = wx.TextCtrl(self._storage_page, style=wx.TE_DONTWRAP)
+        storage_sizer.Add(self._media_max_days_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._media_max_mb_label = wx.StaticText(
+            self._storage_page, label=i18n.t("media_max_mb_label")
+        )
+        storage_sizer.Add(self._media_max_mb_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._media_max_mb_field = wx.TextCtrl(self._storage_page, style=wx.TE_DONTWRAP)
+        storage_sizer.Add(self._media_max_mb_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._storage_page.SetSizer(storage_sizer)
+        self._notebook.AddPage(self._storage_page, i18n.t("tab_storage"))
+
         self._alert_private_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
         self._alert_group_combo.Bind(wx.EVT_COMBOBOX, self._on_alert_choice_changed)
 
@@ -515,40 +564,6 @@ class SettingsDialog(wx.Dialog):
         self._audio_page.SetSizer(audio_sizer)
         self._notebook.AddPage(self._audio_page, i18n.t("tab_audio_playback"))
 
-        # ── Audio devices tab (per-account device selection) ─────────────────
-        import audio_devices as _ad
-        self._audio_dev_page = wx.Panel(self._notebook)
-        dev_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # Enumerate once; "" system-default entry always first. ClientData holds
-        # the stored value ("" = default, otherwise the device name).
-        self._audio_input_names = _ad.enumerate_input_devices()
-        self._audio_output_names = _ad.enumerate_output_devices()
-        default_label = i18n.t("audio_device_default")
-
-        def _add_device_combo(label_key):
-            lbl = wx.StaticText(self._audio_dev_page, label=i18n.t(label_key))
-            dev_sizer.Add(lbl, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
-            combo = wx.ComboBox(self._audio_dev_page, style=wx.CB_READONLY)
-            dev_sizer.Add(combo, 0, wx.EXPAND | wx.ALL, 8)
-            return combo
-
-        self._voice_input_combo = _add_device_combo("audio_device_voice_input")
-        self._voice_output_combo = _add_device_combo("audio_device_voice_output")
-        self._effects_output_combo = _add_device_combo("audio_device_effects_output")
-
-        def _fill_combo(combo, names):
-            combo.Clear()
-            combo.Append(default_label, "")           # "" = system default
-            for n in names:
-                combo.Append(n, n)
-        _fill_combo(self._voice_input_combo, self._audio_input_names)
-        _fill_combo(self._voice_output_combo, self._audio_output_names)
-        _fill_combo(self._effects_output_combo, self._audio_output_names)
-
-        self._audio_dev_page.SetSizer(dev_sizer)
-        self._notebook.AddPage(self._audio_dev_page, i18n.t("tab_audio_devices"))
-
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
         self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("ok"))
@@ -577,9 +592,6 @@ class SettingsDialog(wx.Dialog):
             self._lang_combo.SetSelection(self._lang_codes.index(lang_code))
         else:
             self._lang_combo.SetSelection(0)
-
-        noise_red = self.main_window.settings.get("general", {}).get("noise_reduction_enabled", False)
-        self._noise_reduction_check.SetValue(noise_red)
 
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
@@ -669,6 +681,15 @@ class SettingsDialog(wx.Dialog):
 
         self._update_fields_state()
 
+        # Audio devices
+        audio_devices_cfg = self.main_window.settings.get("audio_devices", {})
+        self._reload_audio_device_choices(
+            prefer_output=audio_devices_cfg.get("output_device_name") or None,
+            prefer_input=audio_devices_cfg.get("input_device_name") or None,
+        )
+        noise_red = self.main_window.settings.get("general", {}).get("noise_reduction_enabled", False)
+        self._noise_reduction_check.SetValue(noise_red)
+
         # Sound events / packs
         self.main_window.refresh_sound_packs()
         self._pack_event_settings = {}
@@ -682,20 +703,11 @@ class SettingsDialog(wx.Dialog):
         self._alert_group_custom_field.SetValue(tones.get("group_custom_path", ""))
         self._update_alert_custom_field_state()
 
-        # Audio devices: select the saved device by ClientData ("" = default).
-        import audio_devices as _ad
-        devs = _ad.normalize_audio_devices(
-            self.main_window.settings.get("audio_devices", {}))
-
-        def _select_device(combo, value):
-            for i in range(combo.GetCount()):
-                if combo.GetClientData(i) == value:
-                    combo.SetSelection(i)
-                    return
-            combo.SetSelection(0)  # fall back to system default
-        _select_device(self._voice_input_combo, devs[_ad.VOICE_INPUT])
-        _select_device(self._voice_output_combo, devs[_ad.VOICE_OUTPUT])
-        _select_device(self._effects_output_combo, devs[_ad.EFFECTS_OUTPUT])
+        # Storage
+        storage = self.main_window.settings.get("storage", {})
+        self._auto_download_media_check.SetValue(storage.get("auto_download_media", True))
+        self._media_max_days_field.SetValue(str(storage.get("media_max_days", 30)))
+        self._media_max_mb_field.SetValue(str(storage.get("media_max_mb", 100)))
 
     def _set_alert_combo(self, combo, choice_key: str):
         try:
@@ -703,6 +715,57 @@ class SettingsDialog(wx.Dialog):
         except ValueError:
             idx = 0
         combo.SetSelection(idx)
+
+    # ── Audio Devices tab ────────────────────────────────────────────────────
+
+    def _current_combo_device_name(self, combo, names):
+        """Friendly name of whatever `combo` currently has selected (None for
+        the "system default" first entry, or no selection at all)."""
+        sel = combo.GetSelection()
+        if sel > 0 and sel - 1 < len(names):
+            return names[sel - 1]
+        return None
+
+    def _select_device_in_combo(self, combo, names, name):
+        if name and name in names:
+            combo.SetSelection(1 + names.index(name))
+        else:
+            combo.SetSelection(0)
+
+    def _reload_audio_device_choices(self, prefer_output=None, prefer_input=None):
+        """(Re)populate the input/output device combos.
+
+        `prefer_output`/`prefer_input` seed the initial selection from stored
+        settings on first load; omit them on later calls (e.g. after a
+        language change) so whatever's currently selected is preserved
+        instead. A configured device that isn't currently enumerated (e.g.
+        temporarily unplugged) is kept as an extra entry rather than silently
+        dropped — reopening Settings while it's briefly unavailable must not
+        wipe it from settings just because it's not in the combo's list.
+        """
+        i18n = self.main_window.i18n
+
+        prev_output = prefer_output if prefer_output is not None else self._current_combo_device_name(
+            self._audio_output_combo, getattr(self, "_audio_output_device_names", [])
+        )
+        self._audio_output_device_names = [name for _idx, name in enumerate_output_devices()]
+        if prev_output and prev_output not in self._audio_output_device_names:
+            self._audio_output_device_names.append(prev_output)
+        self._audio_output_combo.Set(
+            [i18n.t("audio_default_output_device")] + self._audio_output_device_names
+        )
+        self._select_device_in_combo(self._audio_output_combo, self._audio_output_device_names, prev_output)
+
+        prev_input = prefer_input if prefer_input is not None else self._current_combo_device_name(
+            self._audio_input_combo, getattr(self, "_audio_input_device_names", [])
+        )
+        self._audio_input_device_names = [name for _idx, name in enumerate_input_devices()]
+        if prev_input and prev_input not in self._audio_input_device_names:
+            self._audio_input_device_names.append(prev_input)
+        self._audio_input_combo.Set(
+            [i18n.t("audio_default_input_device")] + self._audio_input_device_names
+        )
+        self._select_device_in_combo(self._audio_input_combo, self._audio_input_device_names, prev_input)
 
     # ── Soundpacks (Sound Events tab) ────────────────────────────────────────
 
@@ -989,6 +1052,41 @@ class SettingsDialog(wx.Dialog):
                 self._ws_server_field.SetFocus()
                 return False
 
+        # Storage: media download day/size limits — 0 is the documented
+        # "unlimited" sentinel, so only negative or non-integer values are
+        # rejected.
+        max_days_str = self._media_max_days_field.GetValue().strip()
+        try:
+            max_days = int(max_days_str)
+            if max_days < 0:
+                raise ValueError
+        except ValueError:
+            self._notebook.SetSelection(7)
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_media_max_days"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._media_max_days_field.SetFocus()
+            return False
+
+        max_mb_str = self._media_max_mb_field.GetValue().strip()
+        try:
+            max_mb = int(max_mb_str)
+            if max_mb < 0:
+                raise ValueError
+        except ValueError:
+            self._notebook.SetSelection(7)
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_media_max_mb"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._media_max_mb_field.SetFocus()
+            return False
+
         # Sound events: an ENABLED event's override path, if the user set one,
         # must point to a real file. An empty override is always fine — it
         # just means "use the sound pack's own file for this event" (with a
@@ -1003,7 +1101,7 @@ class SettingsDialog(wx.Dialog):
                 continue
             override = (cfg.get("path") or "").strip()
             if override and not os.path.isfile(override):
-                self._notebook.SetSelection(4)
+                self._notebook.SetSelection(5)
                 self._sound_events_list.SetSelection(idx)
                 self._update_sound_event_path_display()
                 self._sound_event_path_field.SetFocus()
@@ -1020,7 +1118,7 @@ class SettingsDialog(wx.Dialog):
         if self._alert_private_combo.GetSelection() == last_idx:
             path = self._alert_private_custom_field.GetValue().strip()
             if not path or not os.path.isfile(path):
-                self._notebook.SetSelection(5)
+                self._notebook.SetSelection(6)
                 self._alert_private_custom_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
@@ -1032,10 +1130,56 @@ class SettingsDialog(wx.Dialog):
         if self._alert_group_combo.GetSelection() == last_idx:
             path = self._alert_group_custom_field.GetValue().strip()
             if not path or not os.path.isfile(path):
-                self._notebook.SetSelection(5)
+                self._notebook.SetSelection(6)
                 self._alert_group_custom_field.SetFocus()
                 wx.MessageBox(
                     self.main_window.i18n.t("invalid_sound_path"),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                return False
+
+        # Audio devices: a non-default selection must actually open. Checked
+        # last, since output switching happens for real right here (it's the
+        # only way to test it) — on failure the device is left on the system
+        # default by apply_output_device() itself, so nothing needs undoing,
+        # but there's no reason to touch the live output device at all if an
+        # earlier, cheaper check is going to fail this validation anyway.
+        # Input is a plain open+close test — actually starting to record here
+        # would be pointless.
+        # Always call apply_output_device() — even when "default" (index 0)
+        # is selected — so switching back to the default actually happens
+        # live. Guarding this behind "only if a specific device is picked"
+        # used to mean picking "default" here only ever updated settings.json
+        # (correctly retried on next launch) without ever telling BASS to
+        # switch away from whatever non-default device was still active.
+        output_sel = self._audio_output_combo.GetSelection()
+        output_name = self._audio_output_device_names[output_sel - 1] if output_sel > 0 else ""
+        if not self.main_window.sound_system.apply_output_device(output_name):
+            self._notebook.SetSelection(4)
+            self._audio_output_combo.SetFocus()
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_audio_output_device"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return False
+
+        input_sel = self._audio_input_combo.GetSelection()
+        if input_sel > 0:
+            input_name = self._audio_input_device_names[input_sel - 1]
+            input_index = None
+            for idx, name in enumerate_input_devices():
+                if name == input_name:
+                    input_index = idx
+                    break
+            if input_index is None or not test_input_device(input_index):
+                self._notebook.SetSelection(4)
+                self._audio_input_combo.SetFocus()
+                wx.MessageBox(
+                    self.main_window.i18n.t("invalid_audio_input_device"),
                     self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
                     wx.OK | wx.ICON_ERROR,
                     self,
@@ -1141,6 +1285,19 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("connection", {})["wpp_api_key"] = api_key
         self.main_window.wpp_api_key = api_key
 
+        # Audio devices — output was already switched live during _validate()
+        # (that's the only way to test it); here we just persist the choice
+        # and, for input, tell voice-message recording which device to use
+        # from now on.
+        output_sel = self._audio_output_combo.GetSelection()
+        output_name = self._audio_output_device_names[output_sel - 1] if output_sel > 0 else ""
+        self.main_window.settings.setdefault("audio_devices", {})["output_device_name"] = output_name
+
+        input_sel = self._audio_input_combo.GetSelection()
+        input_name = self._audio_input_device_names[input_sel - 1] if input_sel > 0 else ""
+        self.main_window.settings.setdefault("audio_devices", {})["input_device_name"] = input_name
+        self.main_window.effective_input_device_name = input_name
+
         self.main_window.settings.setdefault("general", {})["noise_reduction_enabled"] = (
             self._noise_reduction_check.GetValue()
         )
@@ -1201,27 +1358,6 @@ class SettingsDialog(wx.Dialog):
                 except Exception:
                     pass
 
-        # Audio devices (per-account). Store by name ("" = system default) and
-        # apply the output routing immediately via the sound system; the mic
-        # selection is read on the next recording. Change is instant — no
-        # restart needed (plan choice 3).
-        import audio_devices as _ad
-
-        def _combo_value(combo):
-            sel = combo.GetSelection()
-            return combo.GetClientData(sel) if sel != wx.NOT_FOUND else ""
-        self.main_window.settings["audio_devices"] = {
-            _ad.VOICE_INPUT: _combo_value(self._voice_input_combo),
-            _ad.VOICE_OUTPUT: _combo_value(self._voice_output_combo),
-            _ad.EFFECTS_OUTPUT: _combo_value(self._effects_output_combo),
-        }
-        ss = getattr(self.main_window, "sound_system", None)
-        if ss is not None:
-            try:
-                ss.apply_devices(self.main_window.settings["audio_devices"])
-            except Exception:
-                logging.exception("[settings] applying audio devices failed")
-
         # Global hotkey
         self.main_window.set_global_hotkey(self._hotkey_field._vk, self._hotkey_field._mod)
 
@@ -1245,6 +1381,13 @@ class SettingsDialog(wx.Dialog):
         cache = getattr(self.main_window, "_notification_sound_cache", None)
         if cache is not None:
             cache.clear()
+
+        # Storage
+        self.main_window.settings.setdefault("storage", {}).update({
+            "auto_download_media": self._auto_download_media_check.GetValue(),
+            "media_max_days": int(self._media_max_days_field.GetValue().strip()),
+            "media_max_mb": int(self._media_max_mb_field.GetValue().strip()),
+        })
 
         # Persist and propagate
         self.main_window.save_settings()
@@ -1297,10 +1440,14 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(1, i18n.t("tab_ui"))
         self._notebook.SetPageText(2, i18n.t("tab_speech_content"))
         self._notebook.SetPageText(3, i18n.t("tab_connection"))
-        self._notebook.SetPageText(4, i18n.t("tab_sound_events"))
-        self._notebook.SetPageText(5, i18n.t("tab_alert_tones"))
-        self._notebook.SetPageText(6, i18n.t("tab_audio_playback"))
-        self._notebook.SetPageText(7, i18n.t("tab_audio_devices"))
+        self._notebook.SetPageText(4, i18n.t("tab_audio_devices"))
+        self._notebook.SetPageText(5, i18n.t("tab_sound_events"))
+        self._notebook.SetPageText(6, i18n.t("tab_alert_tones"))
+        self._notebook.SetPageText(7, i18n.t("tab_storage"))
+        self._notebook.SetPageText(8, i18n.t("tab_audio_playback"))
+        self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
+        self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
+        self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
@@ -1372,6 +1519,11 @@ class SettingsDialog(wx.Dialog):
         grp_sel = self._alert_group_combo.GetSelection()
         self._alert_group_combo.Set(alert_choice_labels)
         self._alert_group_combo.SetSelection(grp_sel if grp_sel != wx.NOT_FOUND else 0)
+
+        # Storage tab
+        self._auto_download_media_check.SetLabel(i18n.t("auto_download_media_label"))
+        self._media_max_days_label.SetLabel(i18n.t("media_max_days_label"))
+        self._media_max_mb_label.SetLabel(i18n.t("media_max_mb_label"))
         self._alert_private_preview.refresh_label()
         self._alert_group_preview.refresh_label()
 

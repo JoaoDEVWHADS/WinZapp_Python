@@ -14,10 +14,13 @@ state api/ is actually in:
     1. Download the WPPConnect Server source ZIP from GitHub (no git required)
          • No tag  → branch main  archive
          • With tag → specific tag archive
-    2. Extract into client/api/, preserving our pre-included files (start.js,
-       .env, config.json) and restoring WinZapp's own patched files
+    2. Extract into client/api/, keeping the upstream ZIP away from our own
+       root files (start.js, .env, config.json), then restoring every WinZapp
+       patch from api_patches/ and merging our pinned dependencies into
+       package.json — the same patch set setup_api.py applies, so an end-user
+       install and a developer one end up with identical API code
     3. npm install --no-audit --no-fund      (install all dependencies)
-    4. npm exec puppeteer browsers install chrome (best-effort)
+    4. npm exec puppeteer browsers install chrome-headless-shell (best-effort)
     5. npm run db:generate                   (only if the script is defined)
     6. npm run build                         (compile TypeScript → dist/server.js)
 
@@ -98,6 +101,42 @@ def fetch_latest_wpp_tag(timeout: float = 15) -> str:
 
 # Root-level files whose pre-included content always takes precedence.
 _PRESERVE = {"start.js", ".env", "config.json"}
+
+# Root-level files WinZapp owns outright: they carry no per-install state (the
+# API key and port both come from environment variables _start_wpp_background()
+# injects, never from config.json's own values, and nothing writes either file
+# at runtime), so they are restored from api_patches/ rather than merely
+# preserved. _PRESERVE already stops the upstream ZIP from overwriting them;
+# without this restore step they were simply frozen at whatever an older
+# WinZapp install happened to leave on disk, so a user updating from an old
+# version would silently keep its config.json forever — including any
+# createOptions a newer release changed. `.env` is deliberately absent: it is
+# the one root file that could be genuinely local, and nothing reads it anyway.
+_CUSTOM_ROOT_FILES = ["start.js", "config.json"]
+
+# Only these keys are copied from api_patches/package.json onto whatever the
+# downloaded ZIP produced — same list, and same reasoning, as setup_api.py's
+# _PATCHED_DEPENDENCY_KEYS. Merging the whole "dependencies" block would also
+# roll every OTHER dependency back to whatever was frozen in api_patches/ at
+# some earlier point, and overwriting the file wholesale would freeze
+# WPPConnect's own "version" field — which is what WppUpdateChecker compares
+# against the latest GitHub release — at a value that has nothing to do with
+# the tag actually downloaded here.
+#
+# @wppconnect-team/wppconnect is deliberately NOT in this list. It used to be,
+# pinned to an exact version that went stale within days — this dependency
+# releases multiple times a week, and wppconnect-server's own package.json can
+# (and did) move on to requiring a newer one than whatever WinZapp had frozen,
+# silently running an incompatible pairing with no error anywhere. Leaving it
+# out means upstream's own declared range wins, same as every other unpinned
+# dependency — and @wppconnect/wa-js / @wppconnect/wa-version, which WinZapp
+# never pins directly either, come along transitively at whichever paired
+# version @wppconnect-team/wppconnect itself resolves to.
+_PATCHED_DEPENDENCY_KEYS = [
+    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary — WinZapp's own
+                                  # Python side shells out to it directly to
+                                  # encode voice messages to OGG/Opus.
+]
 
 # Runtime state dirs/files that should survive a re-download.
 _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
@@ -337,6 +376,62 @@ class ApiSetupDialog(wx.Dialog):
 
     # ── Extract helper ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _merge_package_json_dependencies(api_dir: str, patches_dir: str) -> None:
+        """Apply WinZapp's dependency patches onto the downloaded package.json.
+
+        Port of setup_api.py's function of the same name — until this existed,
+        an install done through this dialog (i.e. every end-user install) kept
+        the vanilla upstream package.json, so `npm install` below never
+        installed @ffmpeg-installer/ffmpeg at all (upstream wppconnect-server
+        does not declare it). Only setup_api.py — a developer tool nobody but
+        us runs — applied it.
+
+        Deliberately a merge and not an overwrite; see _PATCHED_DEPENDENCY_KEYS.
+        Never fatal: a missing or unreadable package.json is left exactly as it
+        was, because npm install can still succeed on the upstream file, while
+        writing a half-merged one could not.
+        """
+        pkg_path = os.path.join(api_dir, "package.json")
+        patch_path = os.path.join(patches_dir, "package.json")
+        if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
+            logging.warning(
+                "[api_setup] Skipping package.json dependency merge — "
+                "pkg=%s patch=%s",
+                os.path.isfile(pkg_path), os.path.isfile(patch_path),
+            )
+            return
+        try:
+            with open(pkg_path, encoding="utf-8") as fh:
+                pkg = json.load(fh)
+            with open(patch_path, encoding="utf-8") as fh:
+                patch = json.load(fh)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to read package.json for merge: %s", exc)
+            return
+
+        patch_deps = patch.get("dependencies", {})
+        deps = pkg.setdefault("dependencies", {})
+        applied = []
+        for key in _PATCHED_DEPENDENCY_KEYS:
+            if key in patch_deps:
+                deps[key] = patch_deps[key]
+                applied.append(f"{key}@{patch_deps[key]}")
+        if not applied:
+            return
+        try:
+            with open(pkg_path, "w", encoding="utf-8") as fh:
+                json.dump(pkg, fh, indent=2)
+                fh.write("\n")
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to write merged package.json: %s", exc)
+            return
+        logging.info(
+            "[api_setup] Applied patched dependencies into package.json: %s "
+            "(WPPConnect version kept at %s)",
+            ", ".join(applied), pkg.get("version", "?"),
+        )
+
     def _extract_zip(self, zip_path: str, api_dir: str) -> bool:
         """
         Extract the GitHub source ZIP into *api_dir*.
@@ -460,7 +555,11 @@ class ApiSetupDialog(wx.Dialog):
             path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
 
         api_dir  = resource_path("api")
-        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        # Must be the directory start.js searches and exports as
+        # PUPPETEER_CACHE_DIR (client/api/.cache), not the .cache/puppeteer
+        # subfolder — otherwise the browser this installer downloads and the
+        # browser the server looks for are two different trees.
+        puppeteer_cache = resource_path("api", ".cache")
         npm_env  = {
             **os.environ,
             "PATH": path_env,
@@ -589,7 +688,7 @@ class ApiSetupDialog(wx.Dialog):
                     # api_dir (which may itself be an outdated/broken copy left
                     # by an older install) — see the comment above custom_contents.
                     patches_dir = resource_path("api_patches")
-                    for rel_path in _CUSTOM_SRC_FILES:
+                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
                         pristine_path = os.path.join(patches_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(pristine_path):
                             try:
@@ -619,6 +718,8 @@ class ApiSetupDialog(wx.Dialog):
                                 "[api_setup] Failed to restore custom file %s: %s",
                                 rel_path, exc,
                             )
+
+                    self._merge_package_json_dependencies(api_dir, patches_dir)
 
                 finally:
                     try:
@@ -656,10 +757,16 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 4.5: download chrome if using modern puppeteer ───────
+            # ── Step 4.5: download chrome-headless-shell ──────────────────
+            # Must match what start.js looks for and launches. This used to
+            # fetch full "chrome", and that is how a machine ends up with a
+            # GUI-capable Chrome under .cache/ and no shell at all — the exact
+            # state in which start.js's old any-Chrome-will-do search silently
+            # handed WPPConnect full Chrome forever (see tests/test_headless_shell.py).
+            # The shell is also the smaller download and the faster start.
             self._set_stage(self._i18n.t("api_setup_downloading_chrome"), *stages["chrome"])
             ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
                 cwd=api_dir,
                 env=npm_env,
             )

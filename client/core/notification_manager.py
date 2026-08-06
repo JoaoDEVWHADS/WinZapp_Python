@@ -665,9 +665,22 @@ class NotificationManager:
             return
         try:
             from windows_toasts import Toast, ToastInputTextBox, ToastAudio, ToastDuration
+            from core.utils import effective_unread_count
 
             self.i18n.get_language()
             reply_hint = self.i18n.t("notif_reply_hint")
+
+            chat = self.main_window.chats.get(remote_jid)
+            # A chat WinZapp just discovered via this very live message (see
+            # on_new_message()) starts its local unreadCount at an assumed 0
+            # and counts up from there — the phone may already have a much
+            # larger real backlog for it that no chat-list sync has fetched
+            # yet. Showing that assumed-low count ("1 unread"/"2 unread") is
+            # actively misleading, not just imprecise, so the badge is
+            # omitted entirely until a real sync backs the number (see
+            # get_remote_chats(), which clears this flag).
+            if chat is not None and not chat.get("_unread_count_unsynced"):
+                body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
 
             # Fire the custom sound BEFORE any of the WinRT/COM work below
             # (clearing the previous toast, show_toast() itself). Both of

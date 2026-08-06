@@ -31,5 +31,10 @@
         "voice_input": "",
         "voice_output": "",
         "effects_output": ""
+    },
+    "storage": {
+        "auto_download_media": true,
+        "media_max_days": 30,
+        "media_max_mb": 100
     }
 }

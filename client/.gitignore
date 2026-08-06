@@ -1,0 +1,3 @@
+# Ignore WPPConnect Server runtime directory
+api/
+node/

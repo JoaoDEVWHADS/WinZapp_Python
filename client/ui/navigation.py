@@ -99,6 +99,12 @@ class NavigationPanel(wx.Panel):
 
         if index == 0:
             mw.conversations_panel.Show()
+            # Safety net: if an archived chat's detail pane is still open,
+            # its conversations_list/label were hidden by
+            # ArchivedConversationsPanel.on_conversation_selected() and never
+            # restored (the user got here via this nav item instead of Esc).
+            mw.conversations_panel.conversations_label.Show()
+            mw.conversations_panel.conversations_list.Show()
             mw.content_panel.Layout()
             mw.conversations_panel.conversations_list.SetFocus()
             if (mw.conversations_panel.conversations_list.GetFocusedItem() != -1

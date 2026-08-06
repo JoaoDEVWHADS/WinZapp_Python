@@ -32,6 +32,7 @@ class _FakeMessagesList:
         self.selected_calls = []
         self.ensure_visible_calls = []
         self._count = 0
+        self._focused_idx = -1
 
     def DeleteItem(self, idx):
         self.deleted_indices.append(idx)
@@ -39,6 +40,9 @@ class _FakeMessagesList:
 
     def GetItemCount(self):
         return self._count
+
+    def GetFocusedItem(self):
+        return self._focused_idx
 
     def Focus(self, idx):
         self.focus_calls.append(idx)
@@ -82,6 +86,8 @@ class _RemovalStub:
     """Minimal stand-in for ConversationsPanel, just for remove_messages_by_id."""
 
     remove_messages_by_id = ConversationsPanel.remove_messages_by_id
+    _focused_msg_id = ConversationsPanel._focused_msg_id
+    _is_separator = ConversationsPanel._is_separator
 
     def __init__(self, sorted_messages, conversation=None):
         self._sorted_messages = list(sorted_messages)
@@ -158,6 +164,45 @@ class TestRemoveMessagesById:
 
         assert panel._unread_sep_idx == 1
 
+    def test_a_removal_elsewhere_does_not_move_focus_off_the_surviving_row(self):
+        """The periodic phone-side-deletion poll (_mirror_remote_deletions)
+        must not yank the user's reading position to wherever the earliest
+        removed row happens to sit when the row they're actually on survives
+        the removal untouched."""
+        panel = _RemovalStub([_msg("A"), _msg("B"), _msg("C"), _msg("D")])
+        panel.messages_list._focused_idx = 2  # focused on "C"
+
+        panel.remove_messages_by_id({"A"}, focus_previous=True)
+
+        assert [m["key"]["id"] for m in panel._sorted_messages] == ["B", "C", "D"]
+        # "C" shifted from index 2 to index 1 after "A" was removed above it —
+        # focus must follow it there, not land on index 0 (earliest - 1).
+        assert panel.messages_list.focus_calls == [1]
+        assert panel.messages_list.selected_calls == [(1, True)]
+
+    def test_removal_of_the_focused_row_itself_falls_back_to_just_before_it(self):
+        """The user-initiated single-delete path: the deleted message IS the
+        one that was focused, so landing just before it is correct."""
+        panel = _RemovalStub([_msg("A"), _msg("B"), _msg("C")])
+        panel.messages_list._focused_idx = 1  # focused on "B", the one removed
+
+        panel.remove_messages_by_id({"B"}, focus_previous=True)
+
+        assert panel.messages_list.focus_calls == [0]
+
+    def test_focus_follows_the_unread_separator_when_it_survives(self):
+        separator = {"_type": "unread_separator", "count": 1}
+        panel = _RemovalStub([_msg("A"), _msg("B"), separator, _msg("C")])
+        panel._unread_sep_idx = 2
+        panel.messages_list._focused_idx = 2  # focused on the separator row
+
+        panel.remove_messages_by_id({"A"}, focus_previous=True)
+
+        # The separator shifted from index 2 to index 1 (one row removed above
+        # it); focus must follow it there.
+        assert panel._unread_sep_idx == 1
+        assert panel.messages_list.focus_calls == [1]
+
     def test_empty_id_set_is_a_no_op(self):
         panel = _RemovalStub([_msg("A")])
 
@@ -204,6 +249,7 @@ class _ReconcileStub:
     _reconcile_active_conversation_with_remote = MainWindow._reconcile_active_conversation_with_remote
     _mirror_remote_clear = MainWindow._mirror_remote_clear
     _mirror_remote_deletions = MainWindow._mirror_remote_deletions
+    _REMOTE_CLEAR_CONFIRM_STRIKES = MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES
 
     def __init__(self, chats, conversations_panel, remote_ids, messages_set_completed=True):
         self.chats = chats
@@ -264,7 +310,30 @@ class TestReconcileActiveConversation:
         assert stub.clear_calls == []
         assert stub.conversations_panel.removed is None
 
-    def test_all_messages_gone_mirrors_a_clear(self):
+    def test_all_messages_gone_mirrors_a_clear_after_confirm_strikes(self):
+        """A "clear" is only mirrored once it holds for
+        _REMOTE_CLEAR_CONFIRM_STRIKES consecutive polls — see
+        test_a_single_empty_read_does_not_immediately_clear below for why."""
+        jid = "j@s.whatsapp.net"
+        stub = _ReconcileStub(
+            chats={jid: _chat_with_records("A", "B", "C")},
+            conversations_panel=_FakeConversationsPanel(jid),
+            remote_ids=set(),
+        )
+        for _ in range(MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES):
+            stub._reconcile_active_conversation_with_remote()
+        assert stub.clear_calls == [(jid, False)]  # record_cutoff=False: mirroring, not a new cutoff
+        assert stub.conversations_panel.populate_called is True
+        assert stub._schedule_set_chats_calls == 1
+
+    def test_a_single_empty_read_does_not_immediately_clear(self):
+        """Regression: a valid-but-empty get-messages response (as opposed
+        to None, which already bails out separately) is indistinguishable
+        from a real phone-side clear, but can also come from a transient
+        server-side hiccup — reported live as an actively open group
+        conversation briefly clearing to "no messages available" mid-read,
+        "recovering" only once a new live message forced a repaint. A single
+        bad read must never be enough to wipe a whole conversation."""
         jid = "j@s.whatsapp.net"
         stub = _ReconcileStub(
             chats={jid: _chat_with_records("A", "B", "C")},
@@ -272,9 +341,24 @@ class TestReconcileActiveConversation:
             remote_ids=set(),
         )
         stub._reconcile_active_conversation_with_remote()
-        assert stub.clear_calls == [(jid, False)]  # record_cutoff=False: mirroring, not a new cutoff
-        assert stub.conversations_panel.populate_called is True
-        assert stub._schedule_set_chats_calls == 1
+        assert stub.clear_calls == []
+        assert stub.conversations_panel.removed is None
+        assert stub.conversations_panel.populate_called is False
+
+    def test_a_good_read_in_between_resets_the_clear_strike_count(self):
+        jid = "j@s.whatsapp.net"
+        stub = _ReconcileStub(
+            chats={jid: _chat_with_records("A", "B", "C")},
+            conversations_panel=_FakeConversationsPanel(jid),
+            remote_ids=set(),
+        )
+        stub._reconcile_active_conversation_with_remote()  # strike 1
+        stub._remote_ids = {"A", "B", "C"}
+        stub._reconcile_active_conversation_with_remote()  # nothing missing — resets
+        stub._remote_ids = set()
+        for _ in range(MainWindow._REMOTE_CLEAR_CONFIRM_STRIKES - 1):
+            stub._reconcile_active_conversation_with_remote()
+        assert stub.clear_calls == [], "the reset strike should not have reached the threshold yet"
 
     def test_some_messages_gone_mirrors_individual_deletions(self):
         jid = "j@s.whatsapp.net"

@@ -6,6 +6,37 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     api_dir = os.path.join(base_dir, "client", "api")
     
+    api_patches_dir = os.path.join(base_dir, "client", "api_patches")
+    
+    # 1. Copiar/substituir todos os custom files de client/api_patches para client/api se existirem
+    if os.path.isdir(api_patches_dir):
+        print("[INFO] Syncing custom patch files from client/api_patches to client/api...")
+        synced_count = 0
+        for root, _, files in os.walk(api_patches_dir):
+            for file in files:
+                src_path = os.path.join(root, file)
+                rel_path = os.path.relpath(src_path, api_patches_dir)
+                dest_path = os.path.join(api_dir, rel_path)
+                
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                import shutil
+                shutil.copy2(src_path, dest_path)
+                synced_count += 1
+        print(f"[OK] Synced {synced_count} custom patch file(s).")
+    else:
+        print("[WARN] client/api_patches directory not found. Skipping patch sync.")
+
+    # Copia o patch custom do decrypt.js para node_modules se existir
+    custom_decrypt = os.path.join(api_dir, "decrypt.js")
+    decrypt_js_target = os.path.join(api_dir, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api", "helpers", "decrypt.js")
+    if os.path.isfile(custom_decrypt) and os.path.isdir(os.path.dirname(decrypt_js_target)):
+        try:
+            import shutil
+            shutil.copy2(custom_decrypt, decrypt_js_target)
+            print("[OK] Copied decrypt.js patch to node_modules.")
+        except Exception as e:
+            print(f"[WARNING] Could not copy decrypt.js patch: {e}")
+
     # Resolvendo o caminho do node portátil
     node_exe = None
     npm_cli = None

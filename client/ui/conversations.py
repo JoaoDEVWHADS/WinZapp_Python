@@ -14,6 +14,7 @@ import pyaudio
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
+from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
@@ -32,7 +33,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -153,10 +154,11 @@ class ConversationsPanel(wx.Panel):
         self._pending_open_unread: int = 0
         # True while the separator was placed from the initial open (not from a live message)
         self._sep_from_open: bool = False
-        # One-shot timer: dismiss the separator 2 s after focus reaches it
-        self._unread_sep_dismiss_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_unread_sep_dismiss_timer,
-                  self._unread_sep_dismiss_timer)
+        # Latch so the mark-as-read request fires once per separator, not on
+        # every focus event at or below it. This used to be inferred from the
+        # dismiss timer still running, which no longer exists — see
+        # _should_dismiss_unread_separator().
+        self._unread_sep_marked_read: bool = False
 
 
         # ── Reaction tracking ───────────────────────────────────────────────
@@ -874,8 +876,7 @@ class ConversationsPanel(wx.Panel):
         self._msg_bookmarks = {}  # bookmarks are scoped to the conversation being left
         self._first_unread_msg_id = None
         self._first_unread_count = 0
-        if self._unread_sep_dismiss_timer.IsRunning():
-            self._unread_sep_dismiss_timer.Stop()
+        self._unread_sep_marked_read = False
         self._quoted_message = None
         self._reaction_map   = {}
         self._is_loading_more = False
@@ -1300,8 +1301,20 @@ class ConversationsPanel(wx.Panel):
         if self._editing_message_id is not None:
             msg_id = self._editing_message_id
 
+            # An edit goes through exactly the same @mention pipeline as a new
+            # send. It used to skip it entirely: the raw "@DisplayName" text was
+            # posted verbatim (so WhatsApp highlighted nothing — the mention was
+            # only cosmetic) and the local record was rewritten as a plain
+            # `conversation`, discarding any contextInfo it had. That is why
+            # adding a mention with Alt+E never produced the hyperlinks that
+            # lead to the mentioned person's chat, and why editing a message
+            # that already had mentions silently dropped them.
+            api_text, edit_mentions = self._build_mention_payload(text)
+
             # Call WPPConnect API to update the message
-            self.main_window.edit_message(remote_jid, msg_id, text)
+            self.main_window.edit_message(
+                remote_jid, msg_id, api_text, mentioned_jids=edit_mentions
+            )
 
             # Re-locate the message by ID rather than trusting the row index
             # captured when edit mode was entered: a background sync can call
@@ -1320,17 +1333,42 @@ class ConversationsPanel(wx.Panel):
 
             # Update local state
             if 0 <= idx < len(self._sorted_messages):
-                self._sorted_messages[idx]["message"] = {"conversation": text}
-                self._sorted_messages[idx]["messageType"] = "conversation"
-                self._sorted_messages[idx]["_edited"] = True
+                edited = self._sorted_messages[idx]
+                if edit_mentions:
+                    # Same shape the send path builds for a mentioning message,
+                    # so _get_message_content() rewrites @phone → @DisplayName
+                    # and _extract_mentions() finds the JIDs for the hyperlinks.
+                    edited["message"] = {"extendedTextMessage": {"text": api_text}}
+                    edited["messageType"] = "extendedTextMessage"
+                    ctx = edited.setdefault("contextInfo", {})
+                    ctx["mentionedJid"] = edit_mentions
+                else:
+                    edited["message"] = {"conversation": text}
+                    edited["messageType"] = "conversation"
+                    # An edit that removed every mention must clear the old list
+                    # too, or the stale hyperlinks stay on screen forever.
+                    ctx = edited.get("contextInfo")
+                    if isinstance(ctx, dict):
+                        ctx.pop("mentionedJid", None)
+                        ctx.pop("mentionedJidList", None)
+                edited["_edited"] = True
                 self.messages_list.SetItemText(
-                    idx, self._render_message_line(self._sorted_messages[idx])
+                    idx, self._render_message_line(edited)
                 )
                 # _sorted_messages[idx] is the same dict object held in
                 # main_window.chats[remote_jid]'s records (populate_messages()
                 # builds it from there without copying) — persist it so the
                 # "Editada" marker and new text survive a restart.
                 self.main_window._schedule_save(dirty_jid=remote_jid)
+                # Rebuild the links/mentions panels if the edited row is the one
+                # currently focused — they are only refreshed on a focus change,
+                # so without this the panels below the list keep describing the
+                # message as it was before the edit.
+                if self.messages_list.GetFocusedItem() == idx:
+                    self._update_links_panel(
+                        self._extract_links(self._render_message_line(edited))
+                    )
+                    self._update_mentions_panel(self._extract_mentions(edited))
 
             self._on_cancel_edit()
             return
@@ -1338,28 +1376,7 @@ class ConversationsPanel(wx.Panel):
         # ── Normal send ──────────────────────────────────────────────────────
         # Build a virtual message dict that renders identically to real messages.
         local_id = str(uuid.uuid4())
-        _raw_mentions = list(self._pending_mentions) if self._pending_mentions else []
-        _mentioned = _raw_mentions or None
-        if _mentioned and hasattr(self.main_window, "_canonical_mention_jids"):
-            _mentioned = self.main_window._canonical_mention_jids(_raw_mentions)
-
-        # Build the API text: WhatsApp only highlights a mention when the message
-        # body contains @{phonenumber} (not @{display_name}).  Replace each
-        # @DisplayName with @phone so the official client renders the mention.
-        api_text = text
-        if _raw_mentions:
-            _normalize = getattr(self.main_window, "_normalize_jid", lambda j: j)
-            _lid_map   = getattr(self.main_window, "_lid_to_phone", {})
-            for raw_jid in _raw_mentions:
-                display = self._pending_mention_display_names.get(raw_jid, "")
-                if not display:
-                    continue
-                if raw_jid.endswith("@lid"):
-                    phone = _lid_map.get(raw_jid, raw_jid).split("@")[0]
-                else:
-                    phone = _normalize(raw_jid).split("@")[0]
-                if phone and f"@{display}" in api_text:
-                    api_text = api_text.replace(f"@{display}", f"@{phone}", 1)
+        api_text, _mentioned = self._build_mention_payload(text)
 
         # When mentions are present, use extendedTextMessage so the rendering
         # pipeline can convert @phone → @DisplayName for the local display.
@@ -1425,6 +1442,44 @@ class ConversationsPanel(wx.Panel):
         # list preview updates immediately to show the sent message.
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
+
+    def _build_mention_payload(self, text: str):
+        """Turn the composed text + pending @mentions into what the API needs.
+
+        Returns ``(api_text, mentioned_jids_or_None)``:
+
+        * WhatsApp only highlights a mention when the message body contains
+          ``@{phonenumber}``, never ``@{display_name}`` — so each inserted
+          ``@DisplayName`` is swapped back to ``@phone`` here.
+        * The JID list is canonicalised (``@lid`` → phone) because that is the
+          form the send/edit endpoints tag against.
+
+        Shared by the normal-send and the edit paths so an edit can never again
+        end up posting a mention WhatsApp does not recognise.
+        """
+        raw_mentions = list(self._pending_mentions) if self._pending_mentions else []
+        if not raw_mentions:
+            return text, None
+
+        mentioned = raw_mentions
+        if hasattr(self.main_window, "_canonical_mention_jids"):
+            mentioned = self.main_window._canonical_mention_jids(raw_mentions)
+
+        api_text = text
+        _normalize = getattr(self.main_window, "_normalize_jid", lambda j: j)
+        _lid_map   = getattr(self.main_window, "_lid_to_phone", {})
+        for raw_jid in raw_mentions:
+            display = self._pending_mention_display_names.get(raw_jid, "")
+            if not display:
+                continue
+            if raw_jid.endswith("@lid"):
+                phone = _lid_map.get(raw_jid, raw_jid).split("@")[0]
+            else:
+                phone = _normalize(raw_jid).split("@")[0]
+            if phone and f"@{display}" in api_text:
+                api_text = api_text.replace(f"@{display}", f"@{phone}", 1)
+
+        return api_text, (mentioned or None)
 
     def _register_virtual_msg(self, virtual_msg: dict):
         """
@@ -1620,17 +1675,13 @@ class ConversationsPanel(wx.Panel):
                 self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
 
-        # Try each (rate, channels) combination in preference order.
-        # WhatsApp voice messages are natively 48 kHz Mono. Prioritizing Mono
-        # avoids CPU-intensive downmixing loops in pure Python.
-        _configs = [
-            (48000, 1),   # 48 kHz mono   — native for WhatsApp/Opus, fastest
-            (48000, 2),   # 48 kHz stereo
-            (44100, 1),   # 44.1 kHz mono
-            (44100, 2),   # 44.1 kHz stereo
-        ]
-        opened = False
-        opened = False
+        # Try each (rate, channels) combination in preference order (shared
+        # with core.audio_devices.test_input_device()'s Settings-dialog
+        # validation, so a device that validates there is guaranteed to open
+        # here too). WhatsApp voice messages are natively 48 kHz Mono.
+        # Prioritizing Mono avoids CPU-intensive downmixing loops in pure
+        # Python.
+        _configs = RECORDING_SAMPLE_CONFIGS
         if self._recording_pa is None:
             try:
                 self._recording_pa = pyaudio.PyAudio()
@@ -1638,42 +1689,57 @@ class ConversationsPanel(wx.Panel):
                 logging.error("[audio] Failed to initialize PyAudio: %s", exc)
                 return
         pa = self._recording_pa
-        # Per-account microphone selection: resolve the saved device name to a
-        # PortAudio index (None = system default). Best-effort — a missing
-        # device falls back to default rather than failing to record.
-        mic_index = None
-        try:
-            import audio_devices as ad
-            devs = ad.normalize_audio_devices(
-                self.main_window.settings.get("audio_devices", {}))
-            mic_index = ad.input_device_index(devs.get(ad.VOICE_INPUT, ""))
-        except Exception:
-            mic_index = None
-        for rate, ch in _configs:
-            try:
-                stream = pa.open(
-                    rate=rate,
-                    channels=ch,
-                    format=pyaudio.paInt16,
-                    input=True,
-                    input_device_index=mic_index,
-                    # Larger buffer (~85 ms at 48 kHz) so the Python callback
-                    # can tolerate scheduling delays from background sync/media
-                    # threads without PortAudio dropping samples (choppy audio).
-                    frames_per_buffer=4096,
-                    stream_callback=_callback,
-                )
-                stream.start_stream()
-                self._recording_stream      = stream
-                self._recording_actual_rate = rate
-                self._recording_actual_ch   = ch
-                opened = True
-                break
-            except Exception:
-                self._recording_stream = None
 
-        if not opened:
+        def _try_open(device_index):
+            for rate, ch in _configs:
+                try:
+                    s = pa.open(
+                        rate=rate,
+                        channels=ch,
+                        format=pyaudio.paInt16,
+                        input=True,
+                        input_device_index=device_index,
+                        # Larger buffer (~85 ms at 48 kHz) so the Python callback
+                        # can tolerate scheduling delays from background sync/media
+                        # threads without PortAudio dropping samples (choppy audio).
+                        frames_per_buffer=4096,
+                        stream_callback=_callback,
+                    )
+                    s.start_stream()
+                    return s, rate, ch
+                except Exception:
+                    continue
+            return None, None, None
+
+        # Settings > Audio Devices lets the user pin a specific recording
+        # device (by friendly name — indices aren't stable across reboots).
+        # main_window.effective_input_device_name is "" whenever no device is
+        # configured, or a prior failure this session already fell back to
+        # the system default.
+        configured_name = getattr(self.main_window, "effective_input_device_name", "") or ""
+        input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
+
+        stream, rate, ch = _try_open(input_device_index)
+
+        if stream is None and input_device_index is not None:
+            # The configured device worked earlier this session (at startup,
+            # or since) but just failed to open — e.g. unplugged mid-session.
+            # Keep the stored setting untouched (retried again next launch)
+            # but fall back to the system default for the rest of this run.
+            self.main_window.effective_input_device_name = ""
+            wx.MessageBox(
+                self.main_window.i18n.t("audio_device_failed_input").format(device=configured_name),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_WARNING, self,
+            )
+            stream, rate, ch = _try_open(None)
+
+        if stream is None:
             return
+
+        self._recording_stream      = stream
+        self._recording_actual_rate = rate
+        self._recording_actual_ch   = ch
 
         self._is_recording = True
 
@@ -2016,6 +2082,12 @@ class ConversationsPanel(wx.Panel):
     def _restore_to_archived_list(self, jid: str):
         """Switch back to the archived conversations list and re-select `jid`."""
         mw = self.main_window
+        # Undo the conversations_list/label Hide() from
+        # ArchivedConversationsPanel.on_conversation_selected() so this panel
+        # is back to its normal split-view state the next time it is shown
+        # from the regular "Conversations" nav item.
+        self.conversations_label.Show()
+        self.conversations_list.Show()
         self.Hide()
         mw.archived_conversations_panel.Show()
         mw.content_panel.Layout()
@@ -2077,18 +2149,9 @@ class ConversationsPanel(wx.Panel):
             unmute_item = menu.Append(wx.ID_ANY, f"{i18n.t('unmute_chat')}\tAlt+Shift+S")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_unmute(j), unmute_item)
         else:
-            mute_sub = wx.Menu()
-            for key, secs in [
-                ("mute_1h", 3600), ("mute_3h", 10800),
-                ("mute_8h", 28800), ("mute_1d", 86400), ("mute_always", -1),
-            ]:
-                item = mute_sub.Append(wx.ID_ANY, i18n.t(key))
-                self.Bind(
-                    wx.EVT_MENU,
-                    lambda e, j=jid, s=secs: self._on_menu_mute(j, s),
-                    item,
-                )
-            menu.AppendSubMenu(mute_sub, f"{i18n.t('mute_chat')}\tAlt+Shift+S")
+            menu.AppendSubMenu(
+                self._build_mute_menu(jid), f"{i18n.t('mute_chat')}\tAlt+Shift+S"
+            )
 
         if not is_group:
             menu.AppendSeparator()
@@ -2467,6 +2530,20 @@ class ConversationsPanel(wx.Panel):
             star_item,
         )
 
+        # Pin / Unpin in chat (Ctrl+Shift+P) — the real WhatsApp message-pin
+        # feature, visible to every participant, unlike the local-only star
+        # above. Shares its accelerator with the recording pause/resume
+        # shortcut (_on_ctrl_shift_p): only one is ever applicable at a time
+        # (pause/resume only does anything while actively recording audio).
+        is_pinned = bool(msg.get("pinInChat"))
+        pin_msg_label = i18n.t("unpin_message") if is_pinned else i18n.t("pin_message")
+        pin_msg_item = menu.Append(wx.ID_ANY, f"{pin_msg_label}\tCtrl+Shift+P")
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, m=msg: self._on_menu_pin_message(m),
+            pin_msg_item,
+        )
+
         # Save As (media only, only when the file is already cached locally)
         _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
         clean_msg_id = msg_id
@@ -2615,6 +2692,36 @@ class ConversationsPanel(wx.Panel):
 
     # ── @mention helpers ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _raw_mentioned_jids(msg: dict) -> list:
+        """The message's mentionedJid list, from wherever contextInfo landed."""
+        msg_obj = msg.get("message") or {}
+        ext = (msg_obj.get("extendedTextMessage") or {}) if isinstance(msg_obj, dict) else {}
+        return (
+            (msg.get("contextInfo") or {}).get("mentionedJid")
+            or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
+            or (ext.get("contextInfo") or {}).get("mentionedJid")
+            or []
+        )
+
+    def _mention_identity(self, jid: str) -> str:
+        """One canonical string per person, whichever JID form they arrive as.
+
+        @lid and @s.whatsapp.net are two addresses for the same participant, and
+        which one a mention list carries depends entirely on who sent the
+        message (see _extract_mentions). Resolve @lid through the phone cache —
+        and fall back to the bare digits when the cache doesn't know it yet, so
+        two forms of an unmapped participant at least still collide rather than
+        counting as two different people.
+        """
+        if not jid:
+            return ""
+        mw = self.main_window
+        jid = mw._normalize_jid(jid)
+        if jid.endswith("@lid"):
+            jid = getattr(mw, "_lid_to_phone", {}).get(jid, jid)
+        return jid.rsplit("@", 1)[0].split(":")[0]
+
     def _extract_mentions(self, msg: dict) -> list:
         """Return list of (display_name, jid) for @mentioned JIDs in msg.
 
@@ -2627,26 +2734,30 @@ class ConversationsPanel(wx.Panel):
         something a per-person link helps with. Individual mentions of
         specific people still show their links as before.
         """
-        msg_obj = msg.get("message") or {}
-        ext     = (msg_obj.get("extendedTextMessage") or {}) if isinstance(msg_obj, dict) else {}
-        mentioned = (
-            (msg.get("contextInfo") or {}).get("mentionedJid")
-            or (msg_obj.get("contextInfo") or {}).get("mentionedJid")
-            or ext.get("contextInfo", {}).get("mentionedJid")
-            or []
-        )
+        mentioned = self._raw_mentioned_jids(msg)
         if not mentioned:
             return []
 
         participants = getattr(self, "_group_participants_cache", None)
         if participants:
-            participant_jids = {
-                self.main_window._normalize_jid(jid) for _, jid in participants
-            }
+            # _normalize_jid() alone is NOT enough to compare these two sets:
+            # it only rewrites @c.us → @s.whatsapp.net and leaves @lid untouched.
+            # The participants cache is populated with whatever form the group
+            # metadata uses (@lid on LID-addressed accounts), while a message
+            # WinZapp itself sent carries the phone form — _canonical_mention_jids()
+            # converts every mention through _lid_to_phone before handing it to
+            # the send endpoint. So for our OWN @todos messages the two sets
+            # never intersected at all, the "this is really @everyone" test
+            # always failed, and every participant got their own hyperlink
+            # (dozens of them) — while the identical message received from
+            # someone else, whose mentions arrive still keyed by @lid, was
+            # correctly collapsed. Bridge both sides to one identity first.
+            _ident = self._mention_identity
+            participant_jids = {_ident(jid) for _, jid in participants}
+            participant_jids.discard("")
             if len(participant_jids) > 2:
-                mentioned_norm = {
-                    self.main_window._normalize_jid(jid) for jid in mentioned if jid
-                }
+                mentioned_norm = {_ident(jid) for jid in mentioned if jid}
+                mentioned_norm.discard("")
                 # Allow for the sender themselves not appearing in their own
                 # mention list.
                 if len(mentioned_norm & participant_jids) >= len(participant_jids) - 1:
@@ -3110,11 +3221,11 @@ class ConversationsPanel(wx.Panel):
     def _on_message_focused(self, event):
         idx = event.GetIndex()
 
-        # Unread-separator dismiss logic:
-        # - Focus at or past the separator → start the 2-s dismiss timer once.
-        # Once the timer is armed it is intentionally NOT cancelled when focus
-        # moves back above the separator, so the separator always disappears
-        # after the user has reached the unread region.
+        # Unread-separator logic:
+        # - Focus reaching the separator (or anything below it) marks the
+        #   conversation as read, once.
+        # - Focus moving PAST the separator dismisses the row itself. Merely
+        #   landing on it does not — see _should_dismiss_unread_separator().
         if self._unread_sep_idx >= 0:
             if idx >= self._unread_sep_idx:
                 # Mark as read immediately (first time focus arrives) — but
@@ -3135,12 +3246,10 @@ class ConversationsPanel(wx.Panel):
                 # list/message field. navigate_to_conversation() already
                 # starts its own mark-as-read thread (deferred until after
                 # that focus change) for the "just opened this conversation"
-                # case, so nothing is lost by skipping it here. The dismiss
-                # timer itself still arms normally either way — it only
-                # removes the separator row 2s later and never touches OS
-                # focus, so it isn't part of this race.
-                if (not self._unread_sep_dismiss_timer.IsRunning()
+                # case, so nothing is lost by skipping it here.
+                if (not self._unread_sep_marked_read
                         and not getattr(self, "_populating_messages", False)):
+                    self._unread_sep_marked_read = True
                     if self.conversation is not None:
                         jid = self.conversation.get("remoteJid", "")
                         if jid:
@@ -3149,8 +3258,13 @@ class ConversationsPanel(wx.Panel):
                                 args=(jid,),
                                 daemon=True,
                             ).start()
-                if not self._unread_sep_dismiss_timer.IsRunning():
-                    self._unread_sep_dismiss_timer.StartOnce(2000)
+
+            if (self._should_dismiss_unread_separator(idx, self._unread_sep_idx)
+                    and not getattr(self, "_populating_messages", False)):
+                # Deferred: _dismiss_unread_separator() deletes a row and moves
+                # focus, and we are *inside* that control's own
+                # EVT_LIST_ITEM_FOCUSED handler right now.
+                wx.CallAfter(self._dismiss_unread_separator)
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
@@ -3257,9 +3371,27 @@ class ConversationsPanel(wx.Panel):
         if remainder:
             self.main_window.output(remainder, interrupt=True)
 
-    def _on_unread_sep_dismiss_timer(self, event):
-        """Fired 2 s after focus reached the unread separator — remove it."""
-        self._dismiss_unread_separator()
+    @staticmethod
+    def _should_dismiss_unread_separator(focused_idx: int, sep_idx: int) -> bool:
+        """True once focus has moved past the unread separator, into the unread
+        messages themselves.
+
+        The separator used to be removed by a one-shot 2-second timer armed the
+        moment focus merely *reached* it. So it disappeared out from under a
+        user who was still sitting on it — and for a screen-reader user, who may
+        well take longer than two seconds to hear the row and decide what to do,
+        the one marker showing where the new messages start was simply gone,
+        with nothing having happened to warrant it.
+
+        Tie it to the action it is supposed to represent instead: the separator
+        is dismissed when the user actually steps down past it. Landing on the
+        separator row itself is explicitly not enough — that is where
+        populate_messages() parks focus when the conversation is opened, i.e.
+        before the user has read anything at all.
+        """
+        if sep_idx < 0 or focused_idx < 0:
+            return False
+        return focused_idx > sep_idx
 
     def _dismiss_unread_separator(self):
         """Remove the unread separator row without stealing focus."""
@@ -4042,32 +4174,27 @@ class ConversationsPanel(wx.Panel):
 
         # ── Try decoded stream + Tempo FX (enables speed control) ───────────
         # A decoded stream (BASS_STREAM_DECODE) cannot be played directly; it
-        # must be wrapped by a BASS FX processor such as Tempo.  If the FX
-        # plugin is unavailable, fall back to a plain stream without the effect.
-        stream_ok = False
-        try:
-            self._audio_stream = sl_stream.FileStream(
-                file=self._audio_temp_file, decode=True
-            )
-            self._audio_tempo_ctrl = Tempo(self._audio_stream)
-            _speed = self._audio_speed_steps[self._audio_speed_index]
-            self._audio_tempo_ctrl.tempo = self._audio_tempo_map.get(_speed, 0)
-            stream_ok = True
-        except Exception:
-            # BASS FX not available or format not supported with decode=True;
-            # discard the broken stream and retry without decode.
-            self._audio_tempo_ctrl = None
-            self._audio_stream = None
-
-        if not stream_ok:
+        # must be wrapped by a BASS FX processor such as Tempo. If the FX
+        # plugin is unavailable, fall back to a plain stream without the
+        # effect. Pulled into a helper since a device-switch fallback below
+        # needs to reopen a brand new stream, not just retry the old one.
+        def _open_stream():
             try:
-                self._audio_stream = sl_stream.FileStream(
-                    file=self._audio_temp_file
-                )
-            except Exception as e:
-                logging.exception(f"[UI Audio Playback] Error creating fallback FileStream: {e}")
-                self._stop_audio()
-                return
+                s = sl_stream.FileStream(file=self._audio_temp_file, decode=True)
+                tempo = Tempo(s)
+                _speed = self._audio_speed_steps[self._audio_speed_index]
+                tempo.tempo = self._audio_tempo_map.get(_speed, 0)
+                return s, tempo
+            except Exception:
+                # BASS FX not available or format not supported with decode=True.
+                return sl_stream.FileStream(file=self._audio_temp_file), None
+
+        try:
+            self._audio_stream, self._audio_tempo_ctrl = _open_stream()
+        except Exception as e:
+            logging.exception(f"[UI Audio Playback] Error creating stream: {e}")
+            self._stop_audio()
+            return
 
         # ── Start playback ───────────────────────────────────────────────────
         # When Tempo FX is active the decode stream has no audio output of its
@@ -4077,25 +4204,45 @@ class ConversationsPanel(wx.Panel):
         self._audio_conv_jid   = (
             self.conversation.get("remoteJid", "") if self.conversation else ""
         )
-        try:
-            playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
-            # Route to the account's chosen voice output device before playing.
+        playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+        # Restore saved position (e.g. when another audio preempted this one)
+        saved_pos = self._audio_positions.pop(msg_id, None)
+        if saved_pos:
             try:
-                self.main_window.sound_system.route_voice_channel(playback_ctrl)
+                playback_ctrl.set_position(saved_pos)
             except Exception:
                 pass
-            # Restore saved position (e.g. when another audio preempted this one)
-            saved_pos = self._audio_positions.pop(msg_id, None)
-            if saved_pos:
-                try:
-                    playback_ctrl.set_position(saved_pos)
-                except Exception:
-                    pass
+
+        try:
             playback_ctrl.play()
         except Exception as e:
             logging.exception(f"[UI Audio Playback] Error starting playback: {e}")
-            self._stop_audio()
-            return
+            # The output device may have just been switched (Settings, or a
+            # fallback at startup) — BASS_Free()/BASS_Init() during that
+            # switch invalidates the stream we just tried to play on (a
+            # confirmed BASS behaviour, not a one-off glitch), so retrying
+            # play() on the SAME playback_ctrl would fail again with the
+            # same error. Reopen a fresh stream from the same (still valid)
+            # decrypted temp file instead, and play that.
+            if self.main_window.sound_system.handle_playback_failure():
+                try:
+                    self._audio_stream, self._audio_tempo_ctrl = _open_stream()
+                    playback_ctrl = (
+                        self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+                    )
+                    if saved_pos:
+                        try:
+                            playback_ctrl.set_position(saved_pos)
+                        except Exception:
+                            pass
+                    playback_ctrl.play()
+                except Exception as e2:
+                    logging.exception(f"[UI Audio Playback] Retry after device fallback also failed: {e2}")
+                    self._stop_audio()
+                    return
+            else:
+                self._stop_audio()
+                return
 
         self._is_audio_playing = True
         self._audio_timer.Start(200)
@@ -4129,6 +4276,27 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 pass
             self._audio_temp_file = None
+
+    def on_message_revoked(self, msg_id: str):
+        """A message was deleted for everyone by its sender, detected live
+        (see MainWindow._apply_remote_revoke()). The official client swaps
+        it for "Mensagem apagada" instantly, including stopping playback if
+        you were mid-listen — WinZapp used to leave the original audio/text/
+        media on screen (and audio still playing) until the next periodic
+        remote-deletion poll, which only removes the row outright rather
+        than marking it deleted, and can take a while to even notice.
+
+        Video has no in-app player to stop — "abrir" launches the OS's own
+        default video player as a separate process WinZapp has no handle
+        to, so an already-open video keeps playing there regardless; only
+        the row/controls in WinZapp's own UI are updated here.
+        """
+        if msg_id and self._current_audio_id == msg_id and self._audio_stream is not None:
+            self._stop_audio()
+            self._hide_audio_controls()
+        if msg_id and self._focused_msg_id() == msg_id:
+            self._hide_all_media_controls()
+        self.refresh_active_conversation_messages()
 
     def on_audio_timer(self, event):
         if self._audio_stream is None:
@@ -4592,10 +4760,22 @@ class ConversationsPanel(wx.Panel):
 
             def _name(j: str) -> str:
                 # Our own JID gets the self label ("Eu") rather than a phone
-                # number, exactly as in a normal message line.
+                # number, exactly as in a normal message line. Uses
+                # _get_participant_name() rather than _sender_label(): the
+                # latter can legitimately return "" when a @lid can't be
+                # resolved to a phone number and no contact/chat name is
+                # known for it (the exact case a "so-and-so left the group"
+                # notification hits for a participant nobody has chatted
+                # with directly) — which rendered as a blank name with the
+                # rest of the sentence still attached (" saiu do grupo").
+                # _get_participant_name() is the resolver already used for
+                # group participants elsewhere (reply-privately/converse-with
+                # labels) and always falls back to *something* concrete
+                # (formatted phone number, or the @lid's own digits) instead
+                # of an empty string.
                 if self.main_window._is_self_jid(j):
                     return self.main_window.self_reference_label()
-                return self._sender_label({"key": {"participant": j, "remoteJid": j, "fromMe": False}})
+                return self._get_participant_name(j, notif) or self.main_window.i18n.t("unknown_contact")
 
             author_name = _name(author_jid) if author_jid else ""
             names = ", ".join(_name(j) for j in recipient_jids) if recipient_jids else author_name
@@ -4660,14 +4840,18 @@ class ConversationsPanel(wx.Panel):
                 return i18n.t("group_notif_link_revoked").format(author=author_name)
             if subtype in ("membership_approval_mode", "membership_approval_request"):
                 return i18n.t("group_notif_approval_mode").format(author=author_name)
+            if subtype in ("sub_group_link", "linked_group", "community_link"):
+                # WhatsApp Communities: this group was linked as a sub-group
+                # of a community (or unlinked — WPPConnect does not appear to
+                # distinguish the two directions on this subtype).
+                return i18n.t("group_notif_linked_to_community").format(author=author_name)
             # Unknown subtype: still say who did it and what WhatsApp called it,
             # instead of an anonymous "Atualização do grupo" that tells the user
             # nothing about what actually happened. WhatsApp's raw subtype codes
-            # (e.g. "initial_phash_mismatch", "sub_group_link") are internal
-            # snake_case identifiers never meant for display — a screen reader
-            # spelling out the underscores is worse than useless, so turn them
-            # into plain words. `detail` (from the notification body) is real
-            # WhatsApp-provided text and is left as-is.
+            # are internal snake_case identifiers never meant for display — a
+            # screen reader spelling out the underscores is worse than useless,
+            # so turn them into plain words. `detail` (from the notification
+            # body) is real WhatsApp-provided text and is left as-is.
             label = detail or (subtype.replace("_", " ") if subtype else "")
             if author_name and label:
                 return i18n.t("group_notif_generic_detail").format(
@@ -4722,6 +4906,16 @@ class ConversationsPanel(wx.Panel):
             protocol = (m.get("message") or {}).get("protocolMessage") or {}
             p_type = protocol.get("type")
             return p_type in (3, "REVOKE", "revoke")
+        if msg_type == "groupNotification":
+            # Pure protocol/device-resync housekeeping WhatsApp exchanges
+            # between clients to keep a group's participant hash in sync —
+            # not something any participant did, and never shown by the
+            # official client either. Showing it as "Atualização do grupo:
+            # initial phash mismatch" told the user nothing and looked like
+            # a bug report leaking into the chat.
+            notif = (m.get("message") or {}).get("groupNotification") or {}
+            subtype = (notif.get("subtype") or "").lower()
+            return subtype not in ("initial_phash_mismatch", "phash_mismatch")
         return True
 
     def _map_status(self, msg) -> str:
@@ -4933,7 +5127,15 @@ class ConversationsPanel(wx.Panel):
         if not quoted_msg or not isinstance(quoted_msg, dict):
             return ""
         if "conversation" in quoted_msg:
-            return (quoted_msg.get("conversation") or "")
+            # The common case: _slim_quoted_message() stores a slimmed quoted
+            # message as plain {"conversation": text, "mentionedJid": [...]}
+            # (see core/utils.py) — the flat key mentions live under here, not
+            # nested in a contextInfo the slimming step deliberately drops.
+            text = quoted_msg.get("conversation") or ""
+            mentioned = quoted_msg.get("mentionedJid") or quoted_msg.get("mentionedJidList") or []
+            if mentioned:
+                text = self._resolve_mentions_in_text(text, mentioned)
+            return text
         if "extendedTextMessage" in quoted_msg:
             ext = quoted_msg.get("extendedTextMessage") or {}
             text = ext.get("text") or ""
@@ -5155,6 +5357,8 @@ class ConversationsPanel(wx.Panel):
             pieces = [f"{header}: {body}"]
         if msg.get("starred"):
             pieces[0] = f"★ {pieces[0]}"
+        if msg.get("pinInChat"):
+            pieces[0] = f"📌 {pieces[0]}"
         if time_str:
             pieces.append(f", {time_str}")
         if status:
@@ -5205,9 +5409,23 @@ class ConversationsPanel(wx.Panel):
             self._show_conversation_data()
 
     def _on_ctrl_shift_p(self, event):
-        """Pause/resume recording when active (no-op otherwise)."""
+        """Pause/resume recording when active; otherwise pin/unpin the
+        currently focused message. Both share this one accelerator — they
+        are mutually exclusive contexts (pause/resume only ever does
+        anything while actively recording audio), so there is no real
+        conflict in practice."""
         if self._is_recording:
             self._toggle_pause_recording(event)
+            return
+        index = self.messages_list.GetFirstSelected()
+        if index < 0:
+            index = self.messages_list.GetFocusedItem()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._on_menu_pin_message(msg)
 
     # ── Conversation / group data ────────────────────────────────────────────
 
@@ -5348,6 +5566,57 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_mark_unread(self, jid: str):
         self.main_window.mark_conversation_as_unread(jid)
+
+    # Mute presets, in the order WhatsApp itself offers them. Kept in one place
+    # so the row context menu and the Alt+Shift+S accelerator can never drift
+    # apart — they build the exact same menu from this list.
+    MUTE_PRESETS = (
+        ("mute_1h", 3600),
+        ("mute_3h", 10800),
+        ("mute_8h", 28800),
+        ("mute_1d", 86400),
+        ("mute_1w", 604800),
+        ("mute_always", -1),
+    )
+
+    def _build_mute_menu(self, jid: str) -> wx.Menu:
+        """A wx.Menu of mute durations for *jid*, each wired to _on_menu_mute()."""
+        i18n = self.main_window.i18n
+        mute_sub = wx.Menu()
+        for key, secs in self.MUTE_PRESETS:
+            item = mute_sub.Append(wx.ID_ANY, i18n.t(key))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, j=jid, s=secs: self._on_menu_mute(j, s),
+                item,
+            )
+        return mute_sub
+
+    def _popup_mute_menu(self, jid: str, anchor: wx.Window):
+        """Alt+Shift+S: let the user pick how long to mute for.
+
+        This used to mute for a hardcoded 8 hours with no prompt, so the
+        shortcut could not express any of the durations the context menu
+        offers — and silently picked one the user never chose. Show the same
+        menu instead. Unmuting stays a single keypress: there is nothing to
+        choose, and the context menu shows only "unmute" in that state too.
+        """
+        if self.main_window.is_chat_muted(jid):
+            self._on_menu_unmute(jid)
+            return
+        i18n = self.main_window.i18n
+        menu = wx.Menu(i18n.t("mute_chat_menu_title"))
+        for key, secs in self.MUTE_PRESETS:
+            item = menu.Append(wx.ID_ANY, i18n.t(key))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, j=jid, s=secs: self._on_menu_mute(j, s),
+                item,
+            )
+        # Popped up on the control that has keyboard focus so the screen reader
+        # follows it there instead of to an arbitrary screen position.
+        (anchor or self).PopupMenu(menu)
+        menu.Destroy()
 
     def _on_menu_mute(self, jid: str, duration_secs: int):
         self.main_window.mute_chat(jid, duration_secs)
@@ -5870,6 +6139,43 @@ class ConversationsPanel(wx.Panel):
             self.main_window._schedule_save()
             self.populate_messages(preserve_focus=True)
 
+    def _on_menu_pin_message(self, msg: dict):
+        """Pin/unpin a message via WhatsApp's own message-pin feature.
+
+        Unlike _on_menu_star (a local-only flag), this is visible to every
+        other participant in the chat, so it goes through the WPPConnect API
+        — applied optimistically like conversation pin/unpin
+        (_sync_pin_to_server), and rolled back if the server rejects it.
+        """
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            return
+        pin = not bool(msg.get("pinInChat"))
+        msg["pinInChat"] = pin
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+
+        msg_key = dict(msg.get("key", {}))
+
+        def _do(m=msg, k=msg_key, j=jid, p=pin):
+            ok = self.main_window.pin_message(j, k, p)
+            if not ok:
+                wx.CallAfter(self._on_pin_message_failed, m, p)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_pin_message_failed(self, msg: dict, attempted_pin: bool):
+        """Roll back an optimistic pin/unpin the server rejected (main thread)."""
+        msg["pinInChat"] = not attempted_pin
+        self.main_window._schedule_save()
+        self.populate_messages(preserve_focus=True)
+        i18n = self.main_window.i18n
+        wx.MessageBox(
+            i18n.t("pin_message_failed" if attempted_pin else "unpin_message_failed"),
+            i18n.t("pin_message"),
+            wx.OK | wx.ICON_WARNING,
+        )
+
     def _on_menu_delete_message(self, index: int):
         """Show delete-scope dialog and delete locally or for everyone."""
         if index < 0 or index >= len(self._sorted_messages):
@@ -5917,15 +6223,15 @@ class ConversationsPanel(wx.Panel):
         if result != wx.ID_OK:
             return
 
+        msg_key = msg.get("key", {})
+        jid = msg_key.get("remoteJid", "") or (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
+
         if for_everyone:
             # Revoke for everyone via WPPConnect API (off the UI thread). The
             # message key carries fromMe/participant so the server can build the
             # correct serialized id and actually revoke it.
-            msg_key = msg.get("key", {})
-            jid = msg_key.get("remoteJid", "") or (
-                self.conversation.get("remoteJid", "") if self.conversation else ""
-            )
-
             def _revoke(k=dict(msg_key), j=jid):
                 ok = self.main_window.delete_message_for_everyone(j, k)
                 if not ok:
@@ -5936,6 +6242,10 @@ class ConversationsPanel(wx.Panel):
                         wx.OK | wx.ICON_WARNING,
                     )
             threading.Thread(target=_revoke, daemon=True).start()
+        else:
+            def _delete_for_me(k=dict(msg_key), j=jid):
+                self.main_window.delete_message_for_me(j, k)
+            threading.Thread(target=_delete_for_me, daemon=True).start()
 
         # Always delete locally
         if msg_id:
@@ -5954,13 +6264,19 @@ class ConversationsPanel(wx.Panel):
         and MainWindow._mirror_remote_deletions() (a batch mirrored in from
         a phone-side deletion detected by the periodic poll).
 
-        focus_previous=True moves the list's internal focused/selected row
-        to just before the earliest removed one (or to row 0 if the removal
-        started at the top) once done — WITHOUT calling messages_list.
-        SetFocus(), so a background-triggered removal never steals keyboard
-        focus from wherever the user actually is right now. The caller is
-        already interacting with the list for the user-initiated path, so
-        not stealing focus there either is harmless.
+        focus_previous=True re-focuses whatever row the user was actually on,
+        adjusted for the rows that just disappeared, once done — WITHOUT
+        calling messages_list.SetFocus(), so a background-triggered removal
+        never steals keyboard focus from wherever the user actually is right
+        now (e.g. the message field). Only when the row that was focused is
+        itself one of the removed ones does this fall back to landing just
+        before the earliest removed row (or row 0 if the removal started at
+        the top) — the correct behaviour for the user-initiated single-delete
+        path, where the deleted message IS what was focused. Without this
+        distinction, _mirror_remote_deletions()'s 60s periodic poll yanked the
+        user's focus to wherever the earliest of THAT PASS's removed messages
+        happened to sit — often nowhere near what the user was actually
+        reading — every time it mirrored so much as one stale message.
         """
         if not msg_ids:
             return
@@ -5971,6 +6287,12 @@ class ConversationsPanel(wx.Panel):
         if not indices:
             return
         earliest = indices[0]
+        _preserved_msg_id = self._focused_msg_id() if focus_previous else ""
+        _preserved_idx = self.messages_list.GetFocusedItem() if focus_previous else -1
+        _preserved_was_separator = (
+            focus_previous and self._unread_sep_idx >= 0
+            and _preserved_idx == self._unread_sep_idx
+        )
         # Keep the unread-separator index and the full (unpaginated) message
         # list in sync with the rows that just disappeared. Without this,
         # every later consumer of _unread_sep_idx (focus handling, the
@@ -6020,7 +6342,19 @@ class ConversationsPanel(wx.Panel):
         if focus_previous:
             count = self.messages_list.GetItemCount()
             if count > 0:
-                new_focus = min(max(earliest - 1, 0), count - 1)
+                new_focus = -1
+                if _preserved_msg_id and _preserved_msg_id not in msg_ids:
+                    for idx, m in enumerate(self._sorted_messages):
+                        if isinstance(m, dict) and m.get("key", {}).get("id") == _preserved_msg_id:
+                            new_focus = idx
+                            break
+                elif _preserved_was_separator and self._unread_sep_idx >= 0:
+                    new_focus = self._unread_sep_idx
+                if new_focus < 0:
+                    # The row that was focused is itself among the removed
+                    # ones (or nothing usable was focused) — land just before
+                    # the earliest removed row, same as before this fix.
+                    new_focus = min(max(earliest - 1, 0), count - 1)
                 self.messages_list.Focus(new_focus)
                 self.messages_list.Select(new_focus, True)
                 self.messages_list.EnsureVisible(new_focus)
@@ -6051,6 +6385,22 @@ class ConversationsPanel(wx.Panel):
         self._editing_message_id    = msg.get("key", {}).get("id", "")
         self._editing_message_index = index
 
+        # Seed the pending-mention state from the message being edited. The
+        # pre-filled text shows mentions as "@DisplayName" (that is what
+        # _get_message_content renders), and _build_mention_payload maps those
+        # back to "@phone" on save — but only for JIDs it knows about. Without
+        # this, changing a single word in a message that mentioned someone
+        # stripped every mention from it. Uses the raw list rather than
+        # _extract_mentions() so an @todos message keeps all its participants.
+        self._pending_mentions.clear()
+        self._pending_mention_display_names.clear()
+        for jid in self._raw_mentioned_jids(msg):
+            if not jid or jid in self._pending_mentions:
+                continue
+            self._pending_mentions.append(jid)
+            self._pending_mention_display_names[jid] = self._get_participant_name(jid)
+        self._rebuild_mention_pills()
+
         self.message_field.SetValue(content)
         self.message_field.SetInsertionPointEnd()
         self.message_field.SetFocus()
@@ -6063,6 +6413,13 @@ class ConversationsPanel(wx.Panel):
         """Leave edit mode without saving."""
         self._editing_message_id    = None
         self._editing_message_index = -1
+        # Edit mode seeds these from the message being edited (see
+        # _on_menu_edit_message) — drop them again, or the next ordinary message
+        # typed into the field would inherit the edited message's mentions.
+        self._pending_mentions.clear()
+        self._pending_mention_display_names.clear()
+        self._hide_mention_suggestions()
+        self._rebuild_mention_pills()
         self.message_field.SetValue("")
         self._cancel_edit_btn.Hide()
         self.conversation_panel.Layout()
@@ -6194,10 +6551,7 @@ class ConversationsPanel(wx.Panel):
         jid = chat.get("remoteJid", "")
         if not jid:
             return
-        if self.main_window.is_chat_muted(jid):
-            self._on_menu_unmute(jid)
-        else:
-            self._on_menu_mute(jid, 28800)
+        self._popup_mute_menu(jid, self.conversations_list)
 
     def _on_accel_block_list(self, event):
         chat = self._selected_chat_from_list()
@@ -6382,17 +6736,13 @@ class ConversationsPanel(wx.Panel):
     # ── Alt+Shift+S: mute / unmute conversation ──────────────────────────────
 
     def _on_accel_mute(self, event):
-        """Alt+Shift+S: mute for 8 hours if not muted, otherwise unmute."""
+        """Alt+Shift+S: open the mute-duration menu (or unmute if already muted)."""
         if self.conversation is None:
             return
         jid = self.conversation.get("remoteJid", "")
         if not jid:
             return
-        mw = self.main_window
-        if mw.is_chat_muted(jid):
-            self._on_menu_unmute(jid)
-        else:
-            self._on_menu_mute(jid, 28800)  # 8 hours default
+        self._popup_mute_menu(jid, wx.Window.FindFocus() or self.messages_list)
 
     # ── Ctrl+N: nova conversa ─────────────────────────────────────────────────
 
@@ -7100,9 +7450,22 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
+        # WPPConnect's WhatsApp-imposed limits are 70 MB (media) / 1 GB (docs),
+        # but that's not what WinZapp can actually deliver: sendFile() reads
+        # the whole file, base64-encodes it in memory, and hands the result to
+        # Puppeteer's page.evaluate() as a single argument sent over the
+        # Chrome DevTools Protocol. A large upload (200 MB raw → ~266 MB of
+        # base64) makes that transfer slow enough, and heavy enough on the
+        # Node/Chromium processes, that it has been observed killing the
+        # underlying Puppeteer session outright — which WinZapp then reports
+        # as a permanent offline mode with the message stuck pending, since
+        # there's no live browser tab left to reconnect to. Capping documents
+        # at 100 MB keeps sends inside the range that transport reliably
+        # handles instead of raising WhatsApp's own (much higher) ceiling.
+        # The 1 GB figure below is WhatsApp's ceiling, NOT a target — raising
+        # _MAX_DOC_BYTES towards it reintroduces the dead-session bug.
         _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
-        _MAX_DOC_BYTES      = 1   * 1024 * 1024 * 1024
+        _MAX_DOC_BYTES      = 100 * 1024 * 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
@@ -7110,7 +7473,7 @@ class ConversationsPanel(wx.Panel):
 
             is_doc    = media_type == "document"
             max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
-            max_mb    = 1024 if is_doc else 70
+            max_mb    = 100 if is_doc else 70
 
             try:
                 if os.path.getsize(path) > max_bytes:
@@ -7350,6 +7713,76 @@ class ConversationsPanel(wx.Panel):
     def _clear_populating_messages_flag(self):
         self._populating_messages = False
 
+    def _messages_signature(self):
+        """Cheap fingerprint of everything ``populate_messages()`` would render.
+
+        Deliberately built from the raw records rather than from rendered rows:
+        it has to be cheap enough to run on every background refresh, and every
+        field that can change a row's text is covered here (body, status,
+        star/edit markers, reactions arrive as their own records, and the
+        separator position is pinned by ``_first_unread_msg_id``).
+        """
+        conv = self.conversation or {}
+        records = []
+        container = conv.get("messages")
+        if isinstance(container, dict):
+            inner = container.get("messages")
+            if isinstance(inner, dict) and isinstance(inner.get("records"), list):
+                records = inner["records"]
+        sig = []
+        for m in records:
+            if not isinstance(m, dict):
+                continue
+            key = m.get("key") or {}
+            sig.append((
+                key.get("id", ""),
+                m.get("messageType", ""),
+                m.get("status", ""),
+                bool(m.get("starred")),
+                bool(m.get("pinInChat")),
+                bool(m.get("_edited")),
+                bool(m.get("_local_pending")),
+                self._extract_timestamp(m) or 0,
+                self._get_message_content(m) or "",
+            ))
+        return (
+            conv.get("remoteJid", ""),
+            getattr(self, "_first_unread_msg_id", None),
+            getattr(self, "_pending_open_unread", 0),
+            tuple(sig),
+        )
+
+    def refresh_messages_if_changed(self):
+        """Repopulate the messages list only when its content actually changed.
+
+        Every unattended refresh must come through here rather than calling
+        ``populate_messages(preserve_focus=True)`` directly. That rebuild does a
+        full ``DeleteAllItems()`` + re-``Append()`` of the native ListView, and
+        even with preserve_focus it can only put focus back on the *message* it
+        saved — the moment that message is no longer in the paginated window (or
+        the list was showing the unread separator, or the saved id came back
+        empty) focus lands somewhere else entirely. With a 60s poll calling it
+        unconditionally, the user was thrown to a random message in the middle
+        of the conversation roughly once a minute, mid-read.
+
+        Nothing periodic needs a rebuild when nothing changed, so compare first
+        and skip. When something genuinely did change, the rebuild still runs
+        (and still preserves focus as best it can).
+        """
+        if self.conversation is None:
+            return
+        try:
+            sig = self._messages_signature()
+        except Exception:
+            # Never let a fingerprinting hiccup swallow a real refresh.
+            logging.exception("[refresh_messages_if_changed] signature failed")
+            self.populate_messages(preserve_focus=True)
+            return
+        if sig == getattr(self, "_messages_signature_cache", None):
+            return
+        self._messages_signature_cache = sig
+        self.populate_messages(preserve_focus=True)
+
     def populate_messages(self, preserve_focus: bool = False):
         """Rebuild the messages list from self.conversation.
 
@@ -7486,8 +7919,8 @@ class ConversationsPanel(wx.Panel):
             # Use the snapshot taken before mark_conversation_as_read() zeros the dict.
             unread_count = self._pending_open_unread
             self._pending_open_unread = 0
-            if unread_count > 0 and len(displayable) >= unread_count:
-                first_unread_idx = len(displayable) - unread_count
+            first_unread_idx = first_unread_index(displayable, unread_count)
+            if first_unread_idx >= 0:
                 first_unread_msg = displayable[first_unread_idx]
                 if isinstance(first_unread_msg, dict):
                     self._first_unread_msg_id = first_unread_msg.get("key", {}).get("id")
@@ -7510,16 +7943,10 @@ class ConversationsPanel(wx.Panel):
             limit = int(
                 self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
             )
-            if len(displayable) > limit:
-                self._messages_offset = len(displayable) - limit
-                paginated = displayable[self._messages_offset:]
-                if self._unread_sep_idx >= 0:
-                    self._unread_sep_idx -= self._messages_offset
-                    if self._unread_sep_idx < 0:
-                        self._unread_sep_idx = -1
-            else:
-                self._messages_offset = 0
-                paginated = displayable
+            self._messages_offset, self._unread_sep_idx = paginated_window(
+                len(displayable), limit, self._unread_sep_idx
+            )
+            paginated = displayable[self._messages_offset:]
 
             # A chat with no displayable history (e.g. WhatsApp Web's own store
             # never loaded this conversation's messages, so all WinZapp captured
@@ -7597,6 +8024,14 @@ class ConversationsPanel(wx.Panel):
                         logging.info("[populate_messages] default-select tail: list is empty (last=-1)")
         finally:
             self.messages_list.Thaw()
+            # Snapshot what is now on screen so the next background refresh can
+            # tell "nothing changed" apart from "needs a rebuild" — see
+            # refresh_messages_if_changed(). Taken here, in the finally, because
+            # the body above returns from several places.
+            try:
+                self._messages_signature_cache = self._messages_signature()
+            except Exception:
+                self._messages_signature_cache = None
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────
@@ -7614,6 +8049,7 @@ class ArchivedConversationsPanel(wx.Panel):
         self.chats_list: list = []
         self.chat_names: list = []
         self._init_ui()
+        self.create_accelerator_table()
 
     def restore_selection(self):
         """Select, focus and give keyboard focus to the first archived
@@ -7660,6 +8096,13 @@ class ArchivedConversationsPanel(wx.Panel):
             self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL
         )
         self.conversations_list.InsertColumn(0, i18n.t("archived_chats"), width=250)
+        # The wx.StaticText above is only a visual caption — on Windows a
+        # wx.ListCtrl exposes no accessible name of its own, so NVDA announced
+        # this list as a bare, unnamed "list" and the user had no way to tell
+        # which of the two conversation lists they had landed in. Give it the
+        # same explicit MSAA name treatment the messages list already gets.
+        self._list_accessible = AccessibleMessagesListControl(i18n.t("archived_chats"))
+        self.conversations_list.SetAccessible(self._list_accessible)
         self.conversations_list.Bind(
             wx.EVT_LIST_ITEM_ACTIVATED, self.on_conversation_selected
         )
@@ -7670,6 +8113,153 @@ class ArchivedConversationsPanel(wx.Panel):
         sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(sizer)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook_alt1)
+
+    def _on_char_hook_alt1(self, event):
+        if event.AltDown() and event.GetKeyCode() == ord('1'):
+            self.main_window.on_alt_1(event)
+            return
+        event.Skip()
+
+    # ── Accelerators ─────────────────────────────────────────────────────────
+
+    def create_accelerator_table(self):
+        """Same key combos as ConversationsPanel.create_accelerator_table(),
+        applied to this panel instead. The archived list used to have none of
+        these at all — Delete and Ctrl+Shift+L (clear) worked in the normal
+        list but silently did nothing here, and the row context menu was
+        missing everything except unarchive/clear/delete. Ctrl+F (search) and
+        Ctrl+N (new conversation) are left out: this panel has no search field
+        of its own, and Ctrl+W (close conversation) doesn't apply — there is no
+        split conversation view to close from this list. Ctrl+Q always means
+        "unarchive" here rather than toggling, since every row is archived by
+        definition.
+        """
+        self.ID_DELETE_CONV      = wx.NewIdRef()
+        self.ID_ALT_SHIFT_C_LIST = wx.NewIdRef()
+        self.ID_CONV_DATA_LIST   = wx.NewIdRef()
+        self.ID_TOGGLE_READ_LIST = wx.NewIdRef()
+        self.ID_MUTE_LIST        = wx.NewIdRef()
+        self.ID_BLOCK_LIST       = wx.NewIdRef()
+        self.ID_CLEAR_LIST       = wx.NewIdRef()
+        self.ID_UNARCHIVE_LIST   = wx.NewIdRef()
+        self.ID_PIN_LIST         = wx.NewIdRef()
+        CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
+        AS = wx.ACCEL_ALT | wx.ACCEL_SHIFT
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_NORMAL, wx.WXK_DELETE, self.ID_DELETE_CONV),
+            (AS,              ord("C"),      self.ID_ALT_SHIFT_C_LIST),
+            (CS,              ord("D"),      self.ID_CONV_DATA_LIST),
+            (CS,              ord("M"),      self.ID_TOGGLE_READ_LIST),
+            (AS,              ord("S"),      self.ID_MUTE_LIST),
+            (CS,              ord("B"),      self.ID_BLOCK_LIST),
+            (CS,              ord("L"),      self.ID_CLEAR_LIST),
+            (wx.ACCEL_CTRL,   ord("Q"),      self.ID_UNARCHIVE_LIST),
+            (wx.ACCEL_CTRL,   ord("P"),      self.ID_PIN_LIST),
+        ])
+        self.SetAcceleratorTable(accel_tbl)
+        self.Bind(wx.EVT_MENU, self._on_accel_delete,             id=self.ID_DELETE_CONV)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_number,        id=self.ID_ALT_SHIFT_C_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_conversation_data,  id=self.ID_CONV_DATA_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_toggle_read,        id=self.ID_TOGGLE_READ_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_mute,               id=self.ID_MUTE_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_block,              id=self.ID_BLOCK_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_clear,              id=self.ID_CLEAR_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_unarchive,          id=self.ID_UNARCHIVE_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_pin,                id=self.ID_PIN_LIST)
+
+    def _selected_chat_from_list(self):
+        """Mirrors ConversationsPanel._selected_chat_from_list()."""
+        selected = self.conversations_list.GetFirstSelected()
+        if selected < 0:
+            selected = self.conversations_list.GetFocusedItem()
+        if 0 <= selected < len(self.chats_list):
+            return self.chats_list[selected]
+        return None
+
+    def _on_accel_delete(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_delete(jid)
+
+    def _on_accel_copy_number(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid and not jid.endswith("@g.us"):
+                self._on_copy_number(jid)
+
+    def _on_accel_conversation_data(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            self.main_window.conversations_panel._show_conversation_data(chat=chat)
+
+    def _on_accel_toggle_read(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if int(chat.get("unreadCount") or 0) > 0:
+            self._on_mark_read(jid)
+        else:
+            self._on_mark_unread(jid)
+
+    def _on_accel_mute(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_muted(jid):
+            self._on_unmute(jid)
+        else:
+            i18n = self.main_window.i18n
+            menu = wx.Menu(i18n.t("mute_chat_menu_title"))
+            for key, secs in ConversationsPanel.MUTE_PRESETS:
+                item = menu.Append(wx.ID_ANY, i18n.t(key))
+                self.Bind(wx.EVT_MENU, lambda e, j=jid, s=secs: self._on_mute(j, s), item)
+            self.PopupMenu(menu)
+            menu.Destroy()
+
+    def _on_accel_block(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid or jid.endswith("@g.us") or self.main_window._is_self_jid(jid):
+            return
+        self._on_block(chat, jid, self.main_window.is_contact_blocked(jid))
+
+    def _on_accel_clear(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_clear(jid)
+
+    def _on_accel_unarchive(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_unarchive(jid)
+
+    def _on_accel_pin(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_pinned(jid):
+            self._on_unpin(jid)
+        else:
+            self._on_pin(jid)
 
     # ── Events ────────────────────────────────────────────────────────────────
 
@@ -7710,38 +8300,188 @@ class ArchivedConversationsPanel(wx.Panel):
         # Switch to conversations panel and open the chat there
         mw.archived_conversations_panel.Hide()
         mw.conversations_panel.Show()
+        # ConversationsPanel is a split view: its own chat list sits beside the
+        # conversation detail pane, both shown together normally. Showing the
+        # whole panel here would put that *regular* chat list back on screen
+        # and in the Tab order, even though Esc still correctly returns to
+        # this archived list — so hide it and show only the detail pane.
+        mw.conversations_panel.conversations_label.Hide()
+        mw.conversations_panel.conversations_list.Hide()
         mw.content_panel.Layout()
         mw.conversations_panel.navigate_to_conversation(chat)
 
     def on_context_menu(self, event):
+        """Same menu, in the same order, as ConversationsPanel.on_conversations_context_menu() —
+        this used to offer only Unarchive/Clear/Delete, missing everything
+        else the normal list's row menu already had (data, read/unread, mute,
+        block, copy number, pin, leave group, add member). Two differences
+        from the normal menu: Archive/Unarchive always shows "Desarquivar"
+        (every row here is archived by definition, nothing to toggle), and
+        "Close conversation" is left out — there is no split conversation view
+        to close from this list, unlike the normal one.
+        """
         selected = self.conversations_list.GetFirstSelected()
         if selected < 0 or selected >= len(self.chats_list):
             return
         chat = self.chats_list[selected]
         jid  = chat.get("remoteJid", "")
-        i18n = self.main_window.i18n
+        is_group = jid.endswith("@g.us")
+        mw   = self.main_window
+        is_self = mw._is_self_jid(jid)
+        i18n = mw.i18n
         menu = wx.Menu()
 
-        unarch_item = menu.Append(wx.ID_ANY, i18n.t("unarchive_chat"))
+        # ── Conversation / group data ─────────────────────────────────────
+        data_label = i18n.t("group_data") if is_group else i18n.t("conversation_data")
+        data_item = menu.Append(wx.ID_ANY, f"{data_label}\tCtrl+Shift+D")
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, c=chat: mw.conversations_panel._show_conversation_data(chat=c),
+            data_item,
+        )
+
+        menu.AppendSeparator()
+
+        # ── Read / Unread ───────────────────────────────────────────────────
+        has_unread = int(chat.get("unreadCount") or 0) > 0
+        if has_unread:
+            read_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_read')}\tCtrl+Shift+M")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_mark_read(j), read_item)
+        else:
+            unread_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_unread')}\tCtrl+Shift+M")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_mark_unread(j), unread_item)
+
+        menu.AppendSeparator()
+
+        # ── Mute ──────────────────────────────────────────────────────────
+        if mw.is_chat_muted(jid):
+            unmute_item = menu.Append(wx.ID_ANY, f"{i18n.t('unmute_chat')}\tAlt+Shift+S")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unmute(j), unmute_item)
+        else:
+            mute_sub = wx.Menu()
+            for key, secs in ConversationsPanel.MUTE_PRESETS:
+                item = mute_sub.Append(wx.ID_ANY, i18n.t(key))
+                self.Bind(wx.EVT_MENU, lambda e, j=jid, s=secs: self._on_mute(j, s), item)
+            menu.AppendSubMenu(mute_sub, f"{i18n.t('mute_chat')}\tAlt+Shift+S")
+
+        if not is_group:
+            menu.AppendSeparator()
+            if not is_self:
+                is_blocked = mw.is_contact_blocked(jid)
+                label = "unblock_contact" if is_blocked else "block_contact"
+                block_item = menu.Append(wx.ID_ANY, f"{i18n.t(label)}\tCtrl+Shift+B")
+                self.Bind(
+                    wx.EVT_MENU,
+                    lambda e, c=chat, j=jid, b=is_blocked: self._on_block(c, j, b),
+                    block_item,
+                )
+            copy_num_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_number')}\tAlt+Shift+C")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_copy_number(j), copy_num_item)
+
+        menu.AppendSeparator()
+
+        # ── Unarchive — always, every row here is already archived ─────────
+        unarch_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unarchive(j), unarch_item)
 
+        # ── Pin / Unpin ───────────────────────────────────────────────────
+        if mw.is_chat_pinned(jid):
+            unpin_item = menu.Append(wx.ID_ANY, f"{i18n.t('unpin_chat')}\tCtrl+P")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unpin(j), unpin_item)
+        else:
+            pin_item = menu.Append(wx.ID_ANY, f"{i18n.t('pin_chat')}\tCtrl+P")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_pin(j), pin_item)
+
+        menu.AppendSeparator()
+
+        # ── Clear / Delete / Leave ────────────────────────────────────────
         # Clearing an archived conversation used to require opening it first
         # (there was no direct action here) — unlike the main conversations
         # list, whose row context menu can clear a chat in a single step.
         # Offering the same action directly on the archived row removes that
         # extra "open it, then clear it" round trip.
-        clear_item = menu.Append(wx.ID_ANY, i18n.t("clear_chat"))
+        clear_item = menu.Append(wx.ID_ANY, f"{i18n.t('clear_chat')}\tCtrl+Shift+L")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_clear(j), clear_item)
 
-        del_item = menu.Append(wx.ID_ANY, i18n.t("delete_chat"))
-        self.Bind(
-            wx.EVT_MENU,
-            lambda e, j=jid: self._on_delete(j),
-            del_item,
-        )
+        del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_chat')}\tDelete")
+        self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_delete(j), del_item)
+
+        if is_group:
+            leave_item = menu.Append(wx.ID_ANY, i18n.t("leave_group"))
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_leave_group(j), leave_item)
+            add_member_item = menu.Append(wx.ID_ANY, i18n.t("add_member"))
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, j=jid: mw.conversations_panel._on_menu_add_member(j),
+                add_member_item,
+            )
 
         self.PopupMenu(menu)
         menu.Destroy()
+
+    # ── Context menu / accelerator handlers ─────────────────────────────────
+    # Mirrors ConversationsPanel's own _on_menu_* handlers. Reimplemented here
+    # (rather than delegated to mw.conversations_panel's methods) specifically
+    # because several of them show a wx.MessageBox parented on `self` — that
+    # has to be THIS visible panel, not the hidden ConversationsPanel a plain
+    # delegate call would bind confirmation dialogs to.
+
+    def _on_mark_read(self, jid: str):
+        threading.Thread(
+            target=self.main_window.mark_conversation_as_read,
+            args=(jid,),
+            daemon=True,
+        ).start()
+
+    def _on_mark_unread(self, jid: str):
+        self.main_window.mark_conversation_as_unread(jid)
+
+    def _on_mute(self, jid: str, duration_secs: int):
+        self.main_window.mute_chat(jid, duration_secs)
+
+    def _on_unmute(self, jid: str):
+        self.main_window.unmute_chat(jid)
+
+    def _on_block(self, chat: dict, jid: str, currently_blocked: bool = False):
+        mw = self.main_window
+        name = (
+            mw._resolve_contact_name(chat)
+            or mw.find_name_through_messages(chat)
+            or format_number(jid)
+        )
+        action = "unblock" if currently_blocked else "block"
+        msg_key = "unblock_confirm_msg" if currently_blocked else "block_confirm_msg"
+        title_key = "unblock_contact" if currently_blocked else "block_contact"
+        msg = mw.i18n.t(msg_key).format(name=name)
+        if wx.MessageBox(
+            msg, mw.i18n.t(title_key), wx.YES_NO | wx.ICON_QUESTION, self,
+        ) == wx.YES:
+            threading.Thread(
+                target=mw.block_contact, args=(jid, action), daemon=True,
+            ).start()
+
+    def _on_copy_number(self, jid: str):
+        try:
+            pyperclip.copy(format_number(jid))
+        except Exception:
+            pass
+
+    def _on_pin(self, jid: str):
+        self.main_window.pin_chat(jid)
+
+    def _on_unpin(self, jid: str):
+        self.main_window.unpin_chat(jid)
+
+    def _on_leave_group(self, jid: str):
+        i18n = self.main_window.i18n
+        if wx.MessageBox(
+            i18n.t("leave_group_confirm_msg"), i18n.t("leave_group"),
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
+            return
+        threading.Thread(
+            target=self.main_window.leave_group, args=(jid,), daemon=True,
+        ).start()
 
     def _on_unarchive(self, jid: str):
         self.main_window.unarchive_chat(jid)
@@ -7782,6 +8522,8 @@ class ArchivedConversationsPanel(wx.Panel):
         col = wx.ListItem()
         col.SetText(i18n.t("archived_chats"))
         self.conversations_list.SetColumn(0, col)
+        if getattr(self, "_list_accessible", None) is not None:
+            self._list_accessible._label = i18n.t("archived_chats")
 
         if hasattr(self, "_filter_radio"):
             self._filter_radio.SetLabel(i18n.t("conv_filter_label"))

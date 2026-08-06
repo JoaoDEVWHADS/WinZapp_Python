@@ -71,6 +71,11 @@ routes.get(
   verifyToken,
   SessionController.checkConnectionSession
 );
+routes.post(
+  '/api/:session/reconnect-socket-stream',
+  verifyToken,
+  SessionController.reconnectSocketStream
+);
 routes.get(
   '/api/:session/get-media-by-message/:messageId',
   verifyToken,
@@ -140,6 +145,12 @@ routes.post(
   verifyToken,
   statusConnection,
   MessageController.editMessage
+);
+routes.post(
+  '/api/:session/pin-message',
+  verifyToken,
+  statusConnection,
+  MessageController.pinMessage
 );
 routes.post(
   '/api/:session/send-image',
@@ -485,6 +496,30 @@ routes.get(
   verifyToken,
   statusConnection,
   DeviceController.getMessages
+);
+// Asks the phone for history older than what this device holds — the REST
+// equivalent of WhatsApp Web's "get older messages from your phone" banner.
+// POST because it sends a request out to the primary device.
+routes.post(
+  '/api/:session/request-older-messages/:phone',
+  verifyToken,
+  statusConnection,
+  DeviceController.requestOlderMessages
+);
+// Read-only diagnostic: is WhatsApp Web's history-sync pipeline alive at all?
+routes.get(
+  '/api/:session/history-sync-status',
+  verifyToken,
+  statusConnection,
+  DeviceController.getHistorySyncStatus
+);
+// Frees a history-sync queue stuck behind an on-demand chunk that can never be
+// processed, and restarts the processing loop. No-op on a healthy queue.
+routes.post(
+  '/api/:session/unblock-history-sync',
+  verifyToken,
+  statusConnection,
+  DeviceController.unblockHistorySync
 );
 
 routes.post(

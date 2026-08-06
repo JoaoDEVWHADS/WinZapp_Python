@@ -1,14 +1,39 @@
 const path = require('path');
 const fs = require('fs');
 
-// Auto-instala o Chrome do Puppeteer caso não exista.
-// Procura pelo executável real (chrome.exe / chrome / Chromium), não apenas
-// por uma pasta não-vazia: um antivírus pode ter removido/colocado em
-// quarentena o binário do Chrome sem apagar a pasta inteira, o que faria essa
-// checagem "passar" indefinidamente enquanto o servidor nunca inicia de fato.
-const puppeteerCacheDir = path.join(__dirname, '.cache', 'puppeteer');
+// Garante que o Puppeteer saiba onde encontrar o cache do Chrome
+const puppeteerCacheDir = path.join(__dirname, '.cache');
+process.env.PUPPETEER_CACHE_DIR = puppeteerCacheDir;
 
-function findChromeExecutable(dir, depth) {
+// WinZapp runs chrome-headless-shell, never a GUI-capable Chrome. The shell is
+// a smaller, faster binary with no windowing/UI layer compiled in at all, which
+// is the whole point: nothing can ever pop a visible window in a blind user's
+// face, and startup is measurably quicker.
+//
+// The search is deliberately in TWO passes rather than one loop matching both
+// names. With a single pass the winner is whatever the directory walk happens
+// to reach first, which is not a decision — it is an accident of layout:
+//
+//   .cache/chrome-headless-shell/   <- may exist but be EMPTY (a stub the
+//                                      downloader leaves behind, or a wiped
+//                                      install)
+//   .cache/puppeteer/chrome/win64-*/chrome-win64/chrome.exe   <- full Chrome,
+//                                      left over from before WinZapp switched
+//
+// That is exactly the state this repo was in: the shell directory existed and
+// was empty, the one-pass walk fell through to the leftover full chrome.exe,
+// `hasChrome` came back true, so the chrome-headless-shell install below never
+// ran and WPPConnect was handed full Chrome — the switch to the shell had
+// silently never taken effect on any machine that had ever run the older build.
+//
+// Two passes make the preference explicit and stable: the shell wins whenever a
+// real shell binary exists anywhere under the cache, full Chrome is only ever a
+// fallback for an install that could not fetch the shell, and an empty shell
+// directory triggers the install instead of being papered over.
+const HEADLESS_SHELL_NAMES = ['chrome-headless-shell.exe', 'chrome-headless-shell'];
+const FULL_CHROME_NAMES = ['chrome.exe', 'chrome', 'Chromium'];
+
+function findExecutable(dir, names, depth) {
   if (depth > 6) return null;
   let entries;
   try {
@@ -16,50 +41,74 @@ function findChromeExecutable(dir, depth) {
   } catch (e) {
     return null;
   }
+  const subdirs = [];
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      const found = findChromeExecutable(full, depth + 1);
-      if (found) return found;
-    } else if (
-      entry.name === 'chrome.exe' ||
-      entry.name === 'chrome' ||
-      entry.name === 'Chromium'
-    ) {
+      subdirs.push(full);
+    } else if (names.includes(entry.name)) {
       return full;
     }
+  }
+  // Files in this directory before descending, so a binary sitting right here
+  // is never lost to a deeper one under a sibling folder.
+  for (const sub of subdirs) {
+    const found = findExecutable(sub, names, depth + 1);
+    if (found) return found;
   }
   return null;
 }
 
-const chromeExecutable = fs.existsSync(puppeteerCacheDir)
-  ? findChromeExecutable(puppeteerCacheDir, 0)
-  : null;
-const hasChrome = !!chromeExecutable;
+function findHeadlessShell() {
+  return findExecutable(puppeteerCacheDir, HEADLESS_SHELL_NAMES, 0);
+}
 
-if (!hasChrome) {
-  console.log('[chrome-install] Navegador Chrome do Puppeteer não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
+function findAnyChrome() {
+  return findHeadlessShell() || findExecutable(puppeteerCacheDir, FULL_CHROME_NAMES, 0);
+}
+
+if (!findHeadlessShell()) {
+  console.log('[chrome-install] chrome-headless-shell não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
     const { execSync } = require('child_process');
     const nodeDir = path.dirname(process.execPath);
-    const env = { 
-      ...process.env, 
-      PUPPETEER_CACHE_DIR: puppeteerCacheDir 
+    const env = {
+      ...process.env,
+      PUPPETEER_CACHE_DIR: puppeteerCacheDir
     };
     if (process.platform === 'win32') {
       env.Path = `${nodeDir};${env.Path || ''};${env.PATH || ''}`;
     } else {
       env.PATH = `${nodeDir}:${env.PATH || ''}`;
     }
-    execSync('npx puppeteer browsers install chrome', {
+    // Prefer invoking npm's own npx-cli.js with the Node binary we are already
+    // running under. WinZapp ships a portable Node in client/node/, and on a
+    // machine with no system-wide Node the bare `npx` command simply does not
+    // resolve — prepending nodeDir to PATH above is not enough, because there
+    // is no npx.cmd shim inside the portable extraction on every layout.
+    const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
+    const npxCmd = fs.existsSync(npxCli)
+      ? `"${process.execPath}" "${npxCli}" puppeteer browsers install chrome-headless-shell`
+      : 'npx puppeteer browsers install chrome-headless-shell';
+    execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',
       env: env
     });
-    console.log('[chrome-install] Navegador Chrome do Puppeteer instalado com sucesso!');
+    console.log('[chrome-install] chrome-headless-shell instalado com sucesso!');
   } catch (err) {
-    console.error('[chrome-install] Falha ao instalar o Chrome automaticamente:', err);
+    console.error('[chrome-install] Falha ao instalar o chrome-headless-shell automaticamente:', err);
   }
+}
+
+const chromeExecutable = findAnyChrome();
+if (chromeExecutable && !HEADLESS_SHELL_NAMES.includes(path.basename(chromeExecutable))) {
+  console.warn(
+    `[chrome-install] chrome-headless-shell indisponível; usando ${path.basename(chromeExecutable)} ` +
+    'em modo headless como alternativa. Nenhuma janela será exibida.'
+  );
+} else if (chromeExecutable) {
+  console.log(`[chrome-install] Usando chrome-headless-shell: ${chromeExecutable}`);
 }
 
 // Carrega a configuração padrão compilada
@@ -107,11 +156,6 @@ const optimizedBrowserArgs = [
   '--disable-renderer-accessibility',
   '--disable-web-security',
   '--no-sandbox',
-  '--aggressive-cache-discard',
-  '--disable-cache',
-  '--disable-application-cache',
-  '--disable-offline-load-stale-cache',
-  '--disk-cache-size=0',
   '--disable-background-networking',
   '--disable-default-apps',
   '--disable-extensions',
@@ -128,10 +172,8 @@ const optimizedBrowserArgs = [
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
   '--no-zygote',
-  '--disable-shared-workers',
   '--disable-3d-apis',
   '--disable-webgl',
-  '--disable-notifications',
   '--disable-component-update',
   '--disable-speech-api',
   '--disable-voice-input',
@@ -183,9 +225,29 @@ function requireWaVersion() {
   }
 }
 
+// Resolved once, at module scope, and used by BOTH callers below.
+//
+// This used to be a `const waVersion` local to resolveWhatsappVersion(), while
+// the initWhatsapp wrapper further down reached for a bare `waVersion`
+// identifier that existed nowhere in its scope. That is a ReferenceError, and
+// it was thrown inside the wrapper's `try { body = ... } catch { body = null }`
+// — so it never surfaced as a crash. It surfaced as `body === null`, which the
+// wrapper reads as "wa-version cannot serve this build", which makes it hand
+// the version straight to WPPConnect and let WPPConnect install the blanket
+// request interception this whole file exists to avoid. One undefined
+// identifier silently disabled the entire history-sync fix; keeping the module
+// on one shared binding is what makes that unrepresentable.
+const waVersion = (() => {
+  try {
+    return requireWaVersion();
+  } catch (e) {
+    return null;
+  }
+})();
+
 function resolveWhatsappVersion() {
   try {
-    const waVersion = requireWaVersion();
+    if (!waVersion) throw new Error('@wppconnect/wa-version could not be resolved');
     const available = waVersion.getAvailableVersions();
     if (!Array.isArray(available) || available.length === 0) return undefined;
     const newest = available[available.length - 1];
@@ -206,6 +268,150 @@ function resolveWhatsappVersion() {
 
 const whatsappVersion = resolveWhatsappVersion();
 
+// ── Serving the pinned HTML without breaking WhatsApp Web's workers ─────────
+//
+// WPPConnect serves the pinned build by calling page.setRequestInterception(true)
+// (controllers/browser.js, setWhatsappVersion) and answering the one request for
+// https://web.whatsapp.com/ with wa-version's HTML. That single call is a blanket
+// Fetch.enable over *every* request the target makes — and puppeteer never
+// answers the ones a dedicated Worker issues in CORS mode. They do not fail;
+// they hang forever, with no error anywhere.
+//
+// Measured directly, with plain puppeteer and no WhatsApp involved (a blob
+// Worker doing one cross-origin fetch):
+//
+//   setRequestInterception(false):  worker cors ok 200 (560ms)
+//   setRequestInterception(true):   worker cors HANG (>10s), no-cors and
+//                                   page-issued requests unaffected
+//
+// What that broke: WhatsApp Web boots a dedicated module worker
+// (WAWebBackendWorker) whose init script imports its bundles from
+// https://static.whatsapp.net — cross-origin, CORS mode. Those imports hung, so
+// the worker never posted ww-init-complete, so startBackendWorker() never
+// resolved, so setBackendWorkerBridge() was never called and
+// isBackendWorkerBridgeReady() stayed false for the whole session. Because it
+// hangs rather than throws, WhatsApp Web's own retry path (3 attempts, keyed off
+// the init promise rejecting) never fired either — one silent stall, forever.
+//
+// And every history-sync chunk handler awaits getBackendWorkerBridge() before
+// decoding. So the phone delivered history normally and WhatsApp Web stored it
+// unread: chunks parked at 'notification_stored', its own message store holding
+// ~2 messages per chat. get-messages was returning everything WhatsApp Web had;
+// WhatsApp Web just had almost nothing. That is the "only the last ~15 messages
+// ever load" report, all the way down.
+//
+// Fix: keep the substitution, drop the blanket. A raw-CDP Fetch.enable carrying
+// a urlPattern matching only the document (and check-update, which WPPConnect
+// aborts) pauses those two URLs and nothing else, so worker traffic is never
+// intercepted in the first place. Verified with the same harness: document still
+// substituted, worker cors back to ok 200 (606ms).
+//
+// This is installed by wrapping the controller's exported initWhatsapp — the
+// call site in host.layer.js reads the property off the module namespace at call
+// time, so replacing it here takes effect. Passing version=undefined onward is
+// what keeps WPPConnect from installing its own interception on top of ours.
+//
+// If you ever see "[WinZapp] wa-version cannot serve <v>" in wppconnect.log
+// while "[WinZapp] Pinning WhatsApp Web to <v>" appeared for the same <v> at
+// startup, this wrapper is broken and the blanket interception is back: the
+// pin resolved fine seconds earlier, so the same lookup cannot legitimately
+// fail here.
+const WA_WEB_URL = 'https://web.whatsapp.com/';
+const WA_CHECK_UPDATE = 'https://web.whatsapp.com/check-update';
+
+async function installPinnedPageInterception(page, body, log) {
+  const cdp = await page.createCDPSession();
+  await cdp.send('Fetch.enable', {
+    patterns: [
+      { urlPattern: WA_WEB_URL, requestStage: 'Request' },
+      { urlPattern: WA_CHECK_UPDATE + '*', requestStage: 'Request' },
+    ],
+  });
+  cdp.on('Fetch.requestPaused', async (event) => {
+    const { requestId, request } = event;
+    try {
+      if (request.url.startsWith(WA_CHECK_UPDATE)) {
+        await cdp.send('Fetch.failRequest', { requestId, errorReason: 'Aborted' });
+      } else if (request.url === WA_WEB_URL) {
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+          body: Buffer.from(body).toString('base64'),
+        });
+      } else {
+        // Cannot happen with the patterns above, but a paused request that is
+        // never answered is exactly the failure mode this whole block exists to
+        // remove — so never leave one hanging.
+        await cdp.send('Fetch.continueRequest', { requestId });
+      }
+    } catch (e) {
+      // The target can go away mid-flight (navigation, session close); the
+      // request dies with it and there is nothing left to answer.
+      log?.('verbose', `[WinZapp] Fetch.requestPaused handling failed: ${e && e.message}`);
+    }
+  });
+}
+
+function patchWppconnectVersionPinning() {
+  let browserController;
+  try {
+    const wppEntry = require.resolve('@wppconnect-team/wppconnect/package.json');
+    browserController = require(path.join(
+      path.dirname(wppEntry), 'dist', 'controllers', 'browser'
+    ));
+  } catch (e) {
+    console.error(
+      '[WinZapp] Could not load WPPConnect\'s browser controller to install the ' +
+      `narrow request interception (${e && e.message}). WhatsApp Web's backend ` +
+      'worker will stall and chats will only ever show their newest messages.'
+    );
+    return;
+  }
+  const original = browserController.initWhatsapp;
+  if (typeof original !== 'function') return;
+
+  browserController.initWhatsapp = async function (page, token, clear, version, proxy, log) {
+    if (version) {
+      let body = null;
+      let bodyError = null;
+      try {
+        body = waVersion ? waVersion.getPageContent(version) : null;
+        if (!waVersion) bodyError = '@wppconnect/wa-version could not be resolved';
+      } catch (e) {
+        body = null;
+        bodyError = (e && e.message) || String(e);
+      }
+      if (body) {
+        try {
+          await installPinnedPageInterception(page, body, log);
+          console.log(
+            `[WinZapp] Serving pinned WhatsApp Web ${version} via a document-only ` +
+            'interception (worker requests left alone).'
+          );
+          // Consumed here — WPPConnect must not add its blanket interception.
+          version = undefined;
+        } catch (e) {
+          console.error(
+            '[WinZapp] Failed to install the document-only interception ' +
+            `(${e && e.message}); falling back to WPPConnect's blanket one. ` +
+            'History sync will not work in this session.'
+          );
+        }
+      } else {
+        console.error(
+          `[WinZapp] wa-version cannot serve ${version} (${bodyError}); leaving the pin ` +
+          "to WPPConnect, which installs its blanket request interception. WhatsApp Web's " +
+          'backend worker will stall and chats will only ever show their newest messages.'
+        );
+      }
+    }
+    return original.call(this, page, token, clear, version, proxy, log);
+  };
+}
+
+patchWppconnectVersionPinning();
+
 // Mesclagem simples recursiva para webhooks e outros objetos aninhados
 const finalConfig = {
   ...configDefault,
@@ -222,6 +428,39 @@ const finalConfig = {
     ...(configDefault.createOptions || {}),
     ...(customConfig.createOptions || {}),
     browserArgs: optimizedBrowserArgs,
+    // Both of the next three are pinned here on purpose rather than left to
+    // whatever upstream's defaults happen to be, because all three decide
+    // whether a *visible* browser can ever appear — and every one of them is
+    // currently only right by accident:
+    //
+    //   headless   — wppconnect-server's own config.ts does not set it at all,
+    //                so it falls through to createConfig()'s default. That
+    //                default is true today; nothing but an upstream bump stands
+    //                between that and a Chrome window opening on a blind user's
+    //                screen.
+    //
+    //   useChrome  — false in upstream's config today, and it must stay false.
+    //                When true, initBrowser() calls getChrome() to locate the
+    //                *system-installed* Chrome and then overwrites
+    //                puppeteerOptions.executablePath with it (browser.js ~252),
+    //                throwing away the chrome-headless-shell path chosen above.
+    //                That substitutes a full GUI-capable Chrome for the shell
+    //                with no log line saying so.
+    //
+    //   puppeteerOptions.executablePath — this is the one that actually
+    //                reaches puppeteer. initBrowser() launches with
+    //                `{ headless, devtools, args, ...options.puppeteerOptions }`,
+    //                so only the nested copy is read; the top-level
+    //                createOptions.executablePath below is inert and kept only
+    //                because other WPPConnect code paths read it.
+    headless: true,
+    useChrome: false,
+    executablePath: chromeExecutable || undefined,
+    puppeteerOptions: {
+      ...(configDefault.createOptions?.puppeteerOptions || {}),
+      ...(customConfig.createOptions?.puppeteerOptions || {}),
+      executablePath: chromeExecutable || undefined,
+    },
     disableSpins: true,  // Disables command line spinners (saves CPU)
     updatesLog: false,   // Disables checking for updates on startup
     // undefined => WPPConnect pins nothing and uses the live build (see

@@ -185,11 +185,16 @@ class Connect:
                 logging.warning("[check_connection_status] check-connection-session returned unauthorized (HTTP %s).", check_resp.status_code)
                 if is_paired:
                     self.main_window.error_sound.play()
-                    wx.MessageBox(
-                        self.i18n.t("device_logged_out"),
-                        self.i18n.t("error").format(app_name=self.main_window.app_name),
-                        wx.OK | wx.ICON_ERROR,
-                    )
+                    def _msg1():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(app_name=self.main_window.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                    if wx.IsMainThread():
+                        _msg1()
+                    else:
+                        wx.CallAfter(_msg1)
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
@@ -252,11 +257,16 @@ class Connect:
                 logging.warning("[check_connection_status] status-session returned unauthorized (HTTP %s).", resp.status_code)
                 if is_paired:
                     self.main_window.error_sound.play()
-                    wx.MessageBox(
-                        self.i18n.t("device_logged_out"),
-                        self.i18n.t("error").format(app_name=self.main_window.app_name),
-                        wx.OK | wx.ICON_ERROR,
-                    )
+                    def _msg2():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(app_name=self.main_window.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                    if wx.IsMainThread():
+                        _msg2()
+                    else:
+                        wx.CallAfter(_msg2)
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
@@ -349,19 +359,49 @@ class Connect:
     # ── Connection dialog ──────────────────────────────────────────────────
 
     def show_connection_dial(self):
-        self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_phone").format(app_name=self.main_window.app_name), size=(400, 500))
+        if not wx.IsMainThread():
+            logging.info("[show_connection_dial] Called from non-main thread. Dispatching to main thread via CallAfter...")
+            evt = threading.Event()
+            def _show():
+                try:
+                    self.show_connection_dial()
+                finally:
+                    evt.set()
+            wx.CallAfter(_show)
+            evt.wait()
+            return
+
+        # Wide enough to fit the instructions/QR-CODE side by side (like the
+        # official WhatsApp Web/Desktop layout) — users coming from there are
+        # used to finding the QR-CODE on the right, with instructions on the
+        # left, rather than centered below the text.
+        self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_phone").format(app_name=self.main_window.app_name), size=(640, 480))
 
         # QR-CODE Panel
         self.qrcode_panel = wx.Panel(self.connection_dial)
-        self.qrcode_instructions = wx.StaticText(self.qrcode_panel, label=self.i18n.t("qrcode_instructions"))
+        self.qrcode_instructions = wx.StaticText(
+            self.qrcode_panel, label=self.i18n.t("qrcode_instructions"), style=wx.ST_NO_AUTORESIZE,
+        )
+        self.qrcode_instructions.Wrap(260)
         self.qrcode_image = wx.StaticBitmap(self.qrcode_panel, size=(300, 300))
         self.switch_to_phone_btn = wx.Button(self.qrcode_panel, label=self.i18n.t("connect_with_phone"))
         self.switch_to_phone_btn.Bind(wx.EVT_BUTTON, self.on_switch_to_phone)
 
-        qrcode_sizer = wx.BoxSizer(wx.VERTICAL)
-        qrcode_sizer.Add(self.qrcode_instructions, 0, wx.ALL | wx.CENTER, 10)
-        qrcode_sizer.Add(self.qrcode_image, 0, wx.ALL | wx.CENTER, 10)
-        qrcode_sizer.Add(self.switch_to_phone_btn, 0, wx.ALL | wx.CENTER, 10)
+        # Left column: instructions text, then the phone-number fallback
+        # button — mirrors the official layout's text column, but keeps
+        # switch_to_phone_btn as our own addition (WhatsApp Web doesn't need
+        # one; WinZapp does).
+        qrcode_left_sizer = wx.BoxSizer(wx.VERTICAL)
+        qrcode_left_sizer.Add(self.qrcode_instructions, 0, wx.ALL | wx.EXPAND, 10)
+        qrcode_left_sizer.Add(self.switch_to_phone_btn, 0, wx.ALL, 10)
+
+        # proportion=1 already makes the left column stretch to fill the
+        # remaining horizontal space in this HORIZONTAL sizer — wx.EXPAND
+        # would additionally stretch it vertically too, which conflicts with
+        # (and is rejected by wx for) the wx.ALIGN_CENTER_VERTICAL below.
+        qrcode_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        qrcode_sizer.Add(qrcode_left_sizer, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+        qrcode_sizer.Add(self.qrcode_image, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         self.qrcode_panel.SetSizer(qrcode_sizer)
 
         # Hide QR-CODE panel by default
@@ -689,8 +729,21 @@ class Connect:
         their widths uneven — the phone camera then reads it as a damaged code
         and simply refuses it, which is the "QR Code inválido" users reported.
         A QR must be magnified in whole pixels with no smoothing, or not at all.
+
+        Repeats are suppressed by comparing the payload, not by a timer. A 15 s
+        cooldown used to sit here instead, and it could drop a genuine rotation:
+        WhatsApp invalidates the previous QR when it issues a new one, so a
+        dropped update leaves an expired code on screen that the phone will
+        never accept. The timestamp also lived on `self`, which outlives the
+        dialog — closing and reopening pairing inside the window rendered no QR
+        at all, just an empty box.
         """
+        if base64_string == getattr(self, "_last_qr_payload", None):
+            logging.info("[display_qrcode_image] Identical QR payload re-emitted — not redrawing.")
+            return
+
         try:
+            self._last_qr_payload = base64_string
             # Remove data URI prefix if present
             if "," in base64_string:
                 base64_string = base64_string.split(",")[1]
@@ -1237,6 +1290,19 @@ class Connect:
         # A destroyed wx.Dialog evaluates to False, covering cancel/close.
         if not dial:
             return
+        # Deliberately NOT a time-based cooldown. A 15 s one used to sit here,
+        # meant to stop flicker from rapid rotations — but dropping an update
+        # because it arrived too soon leaves the dialog showing the previous,
+        # now-invalid code, which is precisely the failure this method's
+        # docstring exists to describe: the user types a stale code, pairing
+        # fails, they request another, and WhatsApp's anti-abuse eventually
+        # blocks the account.
+        #
+        # The equality check below already suppresses every *duplicate* emit
+        # (the only thing that can actually flicker) with none of that risk,
+        # and it does so without any state that outlives the dialog — a
+        # timestamp on `self` survives closing and reopening the dialog, so a
+        # retry within the cooldown got no code at all.
         try:
             if not dial.IsShown() or self.pairing_code_field.GetValue() == code:
                 return

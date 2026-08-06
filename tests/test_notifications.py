@@ -52,7 +52,22 @@ class _FakeI18n:
         pass
 
     def t(self, key):
+        if key == "unread_sep_plural":
+            return "{count} [unread_sep_plural]"
         return f"[{key}]"
+
+
+class _FakeMainWindow:
+    def __init__(self, chats=None):
+        self.chats = chats if chats is not None else {}
+
+
+def _chat(unread=0, records=1):
+    return {
+        "unreadCount": unread,
+        "messages": {"messages": {"records": [{"key": {"id": f"M{i}"}}
+                                              for i in range(records)]}},
+    }
 
 
 class _Stub:
@@ -69,14 +84,14 @@ class _Stub:
     def _play_sound(self, remote_jid=""):
         pass
 
-    def __init__(self, toaster=None, interactable=False):
+    def __init__(self, toaster=None, interactable=False, chats=None):
         self._queue = queue.Queue()
         self._toaster = toaster
         self._last_toast = None
         self._last_shown_at = None
         self._interactable = interactable
         self.i18n = _FakeI18n()
-        self.main_window = object()
+        self.main_window = _FakeMainWindow(chats)
 
 
 class TestCoalescePending:
@@ -232,3 +247,77 @@ class TestDispatchLatency:
         mgr._dispatch("title", "body", "j@g.us")
 
         assert mgr._last_shown_at >= before
+
+
+class TestUnreadSuffix:
+    """The unread line is appended at display time, from the live chat map."""
+
+    def _body_of(self, toaster):
+        assert len(toaster.shown_toasts) == 1
+        return toaster.shown_toasts[0].text_fields[1]
+
+    def test_suffix_is_appended_from_the_live_chat(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={"j@g.us": _chat(unread=7, records=20)})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        body = self._body_of(toaster)
+        assert body.startswith("body\n")
+        assert "7" in body
+
+    def test_singular_and_plural_take_different_strings(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={"j@g.us": _chat(unread=1, records=5)})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert "unread_sep_singular" in self._body_of(toaster)
+
+    def test_a_chat_we_do_not_know_yet_still_notifies(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert self._body_of(toaster) == "body"
+
+    def test_a_count_over_an_empty_chat_is_suppressed(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, chats={"j@g.us": _chat(unread=9, records=0)})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert "9" not in self._body_of(toaster)
+
+    def test_a_freshly_discovered_chats_low_count_is_suppressed(self, monkeypatch):
+        """on_new_message() creates a brand-new chat entry with unreadCount=0
+        and counts up from there live — that assumed 0 can be badly wrong if
+        the phone already had a real backlog (e.g. 230 unread) this session
+        just hasn't synced yet. A toast announcing "1 unread"/"2 unread" for
+        that chat is actively misleading, not just imprecise, until a real
+        chat-list sync backs the number (clears _unread_count_unsynced — see
+        get_remote_chats())."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        chat = _chat(unread=2, records=2)
+        chat["_unread_count_unsynced"] = True
+        mgr = _Stub(toaster, chats={"j@g.us": chat})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert self._body_of(toaster) == "body"
+
+    def test_the_count_reappears_once_a_real_sync_clears_the_flag(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        chat = _chat(unread=230, records=200)
+        mgr = _Stub(toaster, chats={"j@g.us": chat})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert "230" in self._body_of(toaster)

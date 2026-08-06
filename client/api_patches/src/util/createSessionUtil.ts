@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 import { create, SocketState, StatusFind } from '@wppconnect-team/wppconnect';
-import { exec } from 'child_process';
+import { exec, execFile, execSync } from 'child_process';
 import { Request } from 'express';
 
 import { download } from '../controller/sessionController';
@@ -24,9 +24,84 @@ import { autoDownload, callWebHook, startHelper } from './functions';
 import { clientsArray, eventEmitter } from './sessionUtil';
 import Factory from './tokenStore/factory';
 
-function forceKillByUserDataDir(userDataDir: string) {
+/**
+ * Kill the actual Puppeteer/Chrome browser process (and its tree of child
+ * renderer/GPU processes) behind `page`, given a live handle to it.
+ *
+ * This is the precise, preferred kill path — used whenever a `page` is
+ * actually available (e.g. closeSession() on an already-created session).
+ * `page.browser().process()` returns Node's own ChildProcess for a
+ * locally-launched browser; Node's `ChildProcess.kill()` alone only signals
+ * that one process on Windows (Windows has no process-group SIGKILL
+ * cascade), so this shells out to `taskkill /T` for the actual tree-kill —
+ * the same thing @puppeteer/browsers' own Process.kill() does internally.
+ * Falls back to forceKillByUserDataDir() (below) when no page/pid is
+ * available, e.g. mid-pairing, before create() has returned.
+ */
+function forceKillBrowserProcess(page: any, logger?: any): boolean {
+  let pid: number | undefined;
+  try {
+    pid = page?.browser?.()?.process?.()?.pid;
+    if (!pid) return false;
+    if (process.platform === 'win32') {
+      execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' });
+    } else {
+      process.kill(pid, 'SIGKILL');
+    }
+    logger?.info?.(`[forceKillBrowserProcess] Killed browser process ${pid} and its tree`);
+    return true;
+  } catch (e: any) {
+    logger?.warn?.(
+      `[forceKillBrowserProcess] Failed to kill browser process ${pid}: ${e?.message || e}`
+    );
+    return false;
+  }
+}
+
+/**
+ * Best-effort fallback: kill whatever process (Chrome + its children) has
+ * this session's userDataDir on its command line, used when there is no
+ * live `page`/`pid` handle to kill precisely (e.g. shouldClose fires inside
+ * catchQR/catchLinkCode, which run synchronously *during* `create()` —
+ * before the `wppClient` it returns is even assigned, so nothing in this
+ * file can reach the browser directly yet).
+ *
+ * This used to be `exec('pkill -9 -f "<userDataDir>"')` unconditionally.
+ * `pkill` does not exist on Windows at all — Node's child_process.exec
+ * spawns it via cmd.exe, which can't find the command, and the callback
+ * here discarded the error — so on Windows this silently killed nothing,
+ * ever. That's the root cause behind WinZapp's WhatsApp Web session
+ * occasionally coming back "logged out" after exiting: closeSession()'s
+ * fast path (see sessionController.ts) skips the graceful
+ * `await client.close()` whenever the session isn't fully CONNECTED and
+ * relies entirely on this function instead — silently doing nothing left
+ * Chrome running, so WinZapp's own exit routine eventually had to
+ * `taskkill /F /T` the whole Node process tree once its grace period ran
+ * out, tearing down Chrome's profile (a LevelDB store) mid-write.
+ */
+function forceKillByUserDataDir(userDataDir: string, logger?: any) {
   if (!userDataDir) return;
-  exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  if (process.platform === 'win32') {
+    // Windows has no built-in "kill by command-line substring" either, so
+    // this uses PowerShell's CIM/WMI process query — the closest equivalent
+    // to `pkill -f` available without a third-party dependency.
+    const psFilter = userDataDir.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    const script =
+      `Get-CimInstance Win32_Process | ` +
+      `Where-Object { $_.CommandLine -like '*${psFilter}*' } | ` +
+      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      (err) => {
+        if (err) {
+          logger?.warn?.(`[forceKillByUserDataDir] PowerShell kill failed: ${err.message}`);
+        }
+      }
+    );
+  } else {
+    exec(`pkill -9 -f "${userDataDir}"`, () => {});
+  }
 }
 
 /**
@@ -103,9 +178,103 @@ async function restoreMsgKeySerialized(
   }
 }
 
+/**
+ * Give WhatsApp Web a durable storage bucket.
+ *
+ * In a headless, freshly-created Chrome profile the persistent-storage
+ * permission defaults to 'prompt', and since there is nobody to answer a
+ * prompt Chrome resolves it to a denial: navigator.storage.persist() returns
+ * false and WhatsApp Web logs
+ *   [storage] storage bucket persistence denied (aquire-persistent-storage-denied)
+ * A non-durable bucket still works — it is merely evictable under storage
+ * pressure — so this is a robustness fix, not the history-sync fix. (What
+ * actually stalled history sync was the blanket request interception hanging
+ * the backend worker's cross-origin imports; see the long note in start.js.)
+ *
+ * Two details, both measured against this exact Chrome build rather than
+ * assumed, because getting either wrong leaves the grant silently ineffective:
+ *
+ *   * The CDP session must stay attached. `Browser.grantPermissions` is a
+ *     session-scoped override — detaching resets the origin straight back to
+ *     'prompt'. The earlier version of this function called cdp.detach()
+ *     immediately after granting, which is why the log kept reporting
+ *     permission 'prompt' and persisted false even though the grant itself
+ *     succeeded. The session is parked on the page so it outlives this call.
+ *
+ *   * No puppeteer overridePermissions() here. That call replaces the whole
+ *     granted set for the origin, so asking for ['notifications'] flips
+ *     durableStorage from 'prompt' to 'denied' — measurably worse than doing
+ *     nothing. The CDP grant below covers notifications anyway.
+ *
+ * Best-effort throughout: never throw from here.
+ */
+async function grantPersistentStorage(page: any, logger: any, session: string) {
+  if (!page) return;
+  const origin = 'https://web.whatsapp.com';
+  try {
+    // durableStorage has no puppeteer-level name, so it goes over raw CDP.
+    // Reuse one session per page: a fresh one per navigation would be fine,
+    // but each detach would revoke what the previous one granted.
+    if (!page.__wzPermissionSession) {
+      page.__wzPermissionSession = await page.createCDPSession();
+    }
+    await page.__wzPermissionSession.send('Browser.grantPermissions', {
+      origin,
+      permissions: ['durableStorage', 'notifications'],
+    });
+  } catch (e: any) {
+    page.__wzPermissionSession = null;
+    logger?.warn?.(
+      `[${session}] Browser.grantPermissions failed: ${e?.message || e}`
+    );
+  }
+  try {
+    const state = await page.evaluate(async () => {
+      const out: any = {};
+      out.notificationApi = typeof (globalThis as any).Notification;
+      try {
+        out.permission = (
+          await navigator.permissions.query({
+            name: 'persistent-storage' as PermissionName,
+          })
+        ).state;
+      } catch (e: any) {
+        out.permission = `query-failed: ${e?.message || e}`;
+      }
+      try {
+        out.persisted = await navigator.storage.persisted();
+        if (!out.persisted) out.granted = await navigator.storage.persist();
+        out.persistedAfter = await navigator.storage.persisted();
+      } catch (e: any) {
+        out.persistError = String(e?.message || e);
+      }
+      return out;
+    });
+    // Logged at info even on success: this single line is the fastest way to
+    // tell a session that can ingest history from one that silently cannot.
+    logger?.info?.(
+      `[${session}] persistent storage: ${JSON.stringify(state)}`
+    );
+    if (!state?.persistedAfter) {
+      logger?.warn?.(
+        `[${session}] WhatsApp Web did NOT get a persistent storage bucket — ` +
+          `its database stays evictable, so Chrome may drop synced history ` +
+          `under storage pressure.`
+      );
+    }
+  } catch (e: any) {
+    logger?.warn?.(
+      `[${session}] Could not verify persistent storage: ${e?.message || e}`
+    );
+  }
+}
+
 export default class CreateSessionUtil {
-  forceKillSession(session: string) {
-    forceKillByUserDataDir(`userDataDir/${session}`);
+  forceKillSession(session: string, logger?: any) {
+    const client: any = clientsArray[session];
+    if (!forceKillBrowserProcess(client?.page, logger)) {
+      forceKillByUserDataDir(`userDataDir/${session}`, logger);
+    }
   }
 
   startChatWootClient(client: any) {
@@ -134,7 +303,22 @@ export default class CreateSessionUtil {
       const tokenData = await myTokenStore.getToken(session);
 
       // we need this to update phone in config every time session starts, so we can ask for code for it again.
-      myTokenStore.setToken(session, tokenData ?? {});
+      //
+      // WinZapp patch: only rewrite the token when we actually read one back.
+      // Upstream writes `tokenData ?? {}`, so ANY failure to read the stored
+      // token — a transient fs error, a file still locked by a previous
+      // instance that was force-killed, a partially-written JSON — is
+      // immediately made permanent by overwriting it with an empty object.
+      // The saved WhatsApp Web credentials are then gone for good and the next
+      // start looks like a logout, even though the phone still lists the linked
+      // device. Reading nothing is not a reason to destroy what is on disk.
+      if (tokenData) {
+        myTokenStore.setToken(session, tokenData);
+      } else {
+        req.logger?.warn?.(
+          `[${session}] Token store returned no data — leaving the stored token untouched.`
+        );
+      }
 
       this.startChatWootClient(client);
 
@@ -150,6 +334,23 @@ export default class CreateSessionUtil {
           req.serverOptions.createOptions.puppeteerOptions || {}
         );
       }
+
+      // Best-effort kill for the shouldClose branches below. `wppClient` is
+      // only assigned once `create()` actually returns — catchLinkCode/
+      // catchQR/statusFind run synchronously *during* create() itself
+      // (before that assignment), so referencing `wppClient` there is a
+      // temporal-dead-zone ReferenceError, silently swallowed by their
+      // existing `try { wppClient.close() } catch {}`. This has the same
+      // problem and stays wrapped for the same reason, but tries the
+      // precise process-tree kill first and only falls back to the
+      // userDataDir scan when no live page/pid is reachable yet.
+      const killBrowserOrFallback = () => {
+        let killed = false;
+        try {
+          killed = forceKillBrowserProcess(wppClient?.page, req.logger);
+        } catch (e) {}
+        if (!killed) forceKillByUserDataDir(`userDataDir/${session}`, req.logger);
+      };
 
       const wppClient = await create(
         Object.assign(
@@ -183,8 +384,7 @@ export default class CreateSessionUtil {
             catchLinkCode: (code: string) => {
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
-                try { wppClient.close(); } catch (e) {}
-                forceKillByUserDataDir(`userDataDir/${session}`);
+                killBrowserOrFallback();
                 clientsArray[session] = undefined;
                 return;
               }
@@ -198,8 +398,7 @@ export default class CreateSessionUtil {
             ) => {
               if ((client as any).shouldClose) {
                 req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
-                try { wppClient.close(); } catch (e) {}
-                forceKillByUserDataDir(`userDataDir/${session}`);
+                killBrowserOrFallback();
                 clientsArray[session] = undefined;
                 return;
               }
@@ -212,8 +411,7 @@ export default class CreateSessionUtil {
               try {
                 if ((client as any).shouldClose) {
                   req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
-                  try { wppClient.close(); } catch (e) {}
-                  forceKillByUserDataDir(`userDataDir/${session}`);
+                  killBrowserOrFallback();
                   clientsArray[session] = undefined;
                   return;
                 }
@@ -246,8 +444,7 @@ export default class CreateSessionUtil {
         if ((client as any).shouldClose) {
           req.logger.info(`[${session}] shouldClose detected by poller. Force-killing browser.`);
           clearInterval(shouldClosePoller);
-          try { wppClient.close(); } catch (e) {}
-          forceKillByUserDataDir(`userDataDir/${session}`);
+          killBrowserOrFallback();
           clientsArray[session] = undefined;
         }
       }, 2000);
@@ -280,8 +477,13 @@ export default class CreateSessionUtil {
         // silently brings the id-less messages back.
         client.page.on('load', () => {
           restoreMsgKeySerialized(client.page, req.logger, session);
+          // The permission grant survives a navigation (it is stored on the
+          // browser context), but the bucket request does not — persist() has
+          // to be asked again by the new document, so re-run the whole thing.
+          grantPersistentStorage(client.page, req.logger, session);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
+        await grantPersistentStorage(client.page, req.logger, session);
       }
       await this.start(req, client);
 
@@ -461,6 +663,70 @@ export default class CreateSessionUtil {
     if (req.serverOptions.webhook.onPresenceChanged) {
       await this.onPresenceChanged(client, req);
     }
+
+    await this.onUnreadCountChanged(client, req);
+  }
+
+  /**
+   * WinZapp patch: forward WA-JS's own `chat.unread_count_changed` event
+   * (fired whenever a chat's unread count changes for ANY reason — including
+   * the user reading it on their phone or another linked device) to
+   * WinZapp's client as a `chats-update` socket event.
+   *
+   * There is no wppconnect-server webhook/event wrapper for this — every
+   * other onXxx() in this file (onReactionMessage, onPollResponse, ...)
+   * relies on an ExposedFn binding wppconnect's own page-injection code sets
+   * up ahead of time, and this event has none. `page.exposeFunction()`
+   * needs no such prior wiring: it lets Node register a callback directly
+   * invocable from the page, so a small `WPP.on(...)` installed here is
+   * self-contained. Without this, WinZapp's own `on_chats_update` handler
+   * (which already exists client-side and does exactly the right thing)
+   * never received a single event — a chat read on the phone stayed shown
+   * as unread in WinZapp until the user happened to open it there too.
+   *
+   * `WPP.on` lives on the page and is re-injected fresh on every WhatsApp
+   * Web reload, same as the msgKey._serialized shim above — re-install on
+   * 'load' too, or the first reload silently drops this listener.
+   */
+  async onUnreadCountChanged(client: WhatsAppServer, req: Request) {
+    try {
+      await client.page.exposeFunction(
+        '__winzappOnUnreadChanged',
+        (chatId: string, unreadCount: number) => {
+          req.io.emit('chats-update', {
+            data: [{ remoteJid: chatId, unreadCount }],
+          });
+        }
+      );
+    } catch (e) {
+      // exposeFunction throws if a prior session already registered this
+      // name on the same page (e.g. a reconnect reusing the browser) —
+      // harmless, the existing binding still works.
+    }
+
+    const installListener = () => {
+      client.page
+        .evaluate(() => {
+          const WPP = (window as any).WPP;
+          if (!WPP || !WPP.on || (window as any).__winzappUnreadListenerInstalled) {
+            return;
+          }
+          (window as any).__winzappUnreadListenerInstalled = true;
+          WPP.on('chat.unread_count_changed', (evt: any) => {
+            const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
+            if (!chatId) return;
+            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount);
+          });
+        })
+        .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));
+    };
+
+    // A page reload gets a fresh JS context (window.__winzappUnreadListenerInstalled
+    // starts undefined again along with everything else wa-js re-injects), so
+    // re-running installListener() here is exactly the reinstall the reload
+    // needs — no separate reset step required.
+    client.page.on('load', installListener);
+    installListener();
   }
 
   /**
