@@ -19,42 +19,8 @@ client/logs/
 /client/node/
 /client/node-v24.15.0-win-x64.zip
 
-/client/api/*
-!/client/api/start.js
-# (no !/client/api/.env here: client/api/.gitignore, which comes from the
-#  upstream wppconnect-server clone, has "/.env" and — being the deeper
-#  .gitignore — wins, so that re-include never took effect. Nothing reads
-#  api/.env anyway; see ensure_api_modules_installed() in client/main.py.)
-!/client/api/package.json
-!/client/api/config.json
-!/client/api/decrypt.js
-
-
-# Custom patches on top of upstream wppconnect-server — setup_api.py stashes
-# and restores these across re-clones, but that only works when they already
-# exist on disk. Without tracking them, a fresh checkout (including the CI
-# release build) has nothing to restore, so the officially published
-# installer/ZIP silently ships vanilla, unpatched WPPConnect Server code.
-!/client/api/src/
-/client/api/src/*
-!/client/api/src/config.ts
-!/client/api/src/index.ts
-!/client/api/src/controller/
-/client/api/src/controller/*
-!/client/api/src/controller/deviceController.ts
-!/client/api/src/controller/messageController.ts
-!/client/api/src/controller/sessionController.ts
-!/client/api/src/middleware/
-/client/api/src/middleware/*
-!/client/api/src/middleware/statusConnection.ts
-!/client/api/src/util/
-/client/api/src/util/*
-!/client/api/src/util/createSessionUtil.ts
-!/client/api/src/util/sessionUtil.ts
-!/client/api/src/util/functions.ts
-!/client/api/src/routes/
-/client/api/src/routes/*
-!/client/api/src/routes/index.ts
+# WPPConnect Server runtime (downloaded dynamically via setup_api.py)
+/client/api/
 
 # Permanent, always-tracked mirror of the same custom patch files above —
 # the single source of truth setup_api.py / ApiSetupDialog restore from

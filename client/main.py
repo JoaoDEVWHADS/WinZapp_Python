@@ -654,24 +654,7 @@ class MainWindow(wx.Frame):
 
         # Handle API execution configuration
         if self.wpp_custom_api:
-            # Delete local node_modules and Puppeteer cache (Chrome) to free space
-            node_modules_path = resource_path("api", "node_modules")
-            if os.path.isdir(node_modules_path):
-                logging.info("MainWindow: Custom API enabled. Cleaning local node_modules...")
-                try:
-                    import shutil
-                    shutil.rmtree(node_modules_path, ignore_errors=True)
-                except Exception as e:
-                    logging.error("MainWindow: Failed to clean local node_modules: %s", e)
-
-            puppeteer_cache_path = resource_path("api", ".cache")
-            if os.path.isdir(puppeteer_cache_path):
-                logging.info("MainWindow: Custom API enabled. Cleaning local Puppeteer cache...")
-                try:
-                    import shutil
-                    shutil.rmtree(puppeteer_cache_path, ignore_errors=True)
-                except Exception as e:
-                    logging.error("MainWindow: Failed to clean local Puppeteer cache: %s", e)
+            logging.info("MainWindow: Custom API enabled — preserving all local API files, cache, and remote session state.")
         else:
             # Check API modules and start WPPConnect Server synchronously BEFORE init_UI
             # so the startup dialog shows first before opening the main conversation list.
@@ -786,119 +769,128 @@ class MainWindow(wx.Frame):
         # blip.
         self._pairing_in_progress = False
 
-        #Check for what window should be shown (skipped in background mode)
-        if not self.background_mode:
-            logging.info("MainWindow: Checking WhatsApp connection status...")
-            if not self.connect.check_connection_status():
-                logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
-                self.connect.show_connection_dial()
-                if not self.connect.check_connection_status():
-                    logging.info("Connection dialog closed without pairing. Exiting application.")
-                    sys.exit()
-                # Do NOT disconnect self.ws here — see the "Initialize
-                # websocket" block below for why this used to cause the
-                # pairing session to crash.
-                self._just_paired = True
-
-        logging.info("MainWindow: Retrieving token...")
-        self.retrieve_token()
-        if not self.token:
-            logging.error("No token retrieved. Exiting application.")
-            sys.exit()
-        #Initialize websocket
-        logging.info("MainWindow: Initializing WebSocketClient...")
-        # A pairing that just succeeded (_just_paired) already leaves self.ws
-        # connected and authenticated — Connect._bg_pairing_flow() created it
-        # and used it to receive the phoneCode/session-logged events that
-        # just completed pairing. Disconnecting it here (unconditionally,
-        # until this fix) and reconnecting from scratch a moment later raced
-        # WPPConnect's own session lifecycle: reported live, disconnecting
-        # the socket mere milliseconds after WPPConnect logged the session as
-        # "Started" reliably closed the WhatsApp Web page/browser
-        # server-side (wppconnect.log showed the socket's "saiu" entry
-        # immediately followed by "Page Closed" / "browserClose") — leaving
-        # WinZapp connected to a server with a dead WhatsApp session inside
-        # it, forever, with no window ever shown, no sync, and no further
-        # event arriving to explain why. Reuse the live connection instead.
-        reuse_existing_ws = (
-            self._just_paired
-            and getattr(self, "ws", None) is not None
-            and getattr(self.ws.sio, "connected", False)
-        )
-        if reuse_existing_ws:
-            logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
-        else:
-            if hasattr(self, 'ws') and self.ws:
-                try:
-                    self.ws.sio.disconnect()
-                except Exception:
-                    pass
-                self.ws = None
-            self.ws = WebSocketClient(self, self.connect, self.token)
-
-        logging.info("MainWindow: Preparing sync...")
-        self.prepare_sync()
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
         # Bounded pool for per-message background work spawned from
         # on_new_message (DB inserts, LID resolution, media downloads).
-        # A burst of incoming messages (reconnect catch-up, big history sync)
-        # used to spawn one raw threading.Thread per message per task, all
-        # contending for the single asyncio DB write lock at once — a small
-        # fixed pool serializes that work sanely instead of thread-storming.
         self._msg_bg_executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="msg-bg"
         )
-        # Cache of resolved background-notification Sound objects, keyed by
-        # absolute file path, so repeated notifications for the same
-        # alert-tone choice don't reopen the file stream every time.
+        # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
-        # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
-        def _connect_bg():
-            # Ensure session is active on WPPConnect Server before connecting WebSocket
-            self.check_wa_connection_http()
-            if reuse_existing_ws:
-                # self.ws is already the live connection from pairing —
-                # connect_websocket() itself unconditionally disconnects
-                # before reconnecting, which is exactly the premature
-                # disconnect this whole path exists to avoid (see the
-                # "Initialize websocket" comment above). Nothing else to do.
-                logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
-                return
-            try:
-                logging.info("MainWindow: Connecting WebSocket...")
-                self.connect_websocket()
-            except Exception as e:
-                logging.exception("MainWindow: Exception during websocket connection")
-                self.error_sound.play()
-                error_str = str(e)
-                # If the instance does not exist on the server (e.g. database recreated/wiped),
-                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
-                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
-                    def _gui_logout():
-                        wx.MessageBox(
-                            self.i18n.t("device_logged_out"),
-                            self.i18n.t("error").format(self.app_name),
-                            wx.OK | wx.ICON_ERROR,
-                        )
-                        self._on_disconnect()
-                    wx.CallAfter(_gui_logout)
-                else:
-                    def _gui_failed():
-                        wx.MessageBox(
-                            self.i18n.t("websocket_failed_reconnect"),
-                            self.i18n.t("connection_error"),
-                            wx.OK | wx.ICON_WARNING,
-                        )
-                        self.connect.show_connection_dial()
-                    wx.CallAfter(_gui_failed)
-                self._just_paired = True
 
-        threading.Thread(target=_connect_bg, daemon=True).start()
-        
-        logging.info("MainWindow: Initializing User Interface...")
+        logging.info("MainWindow: Initializing User Interface immediately...")
+
+        # Define _post_ui_init BEFORE calling init_UI(), because init_UI() ends
+        # with app.MainLoop() which blocks forever — any code placed after
+        # init_UI() is unreachable dead code and will never execute.
+        # The thread is started from inside init_UI(), right before MainLoop().
+        def _post_ui_init():
+            logging.info("[post_ui_init] *** THREAD STARTED ***")
+            try:
+                logging.info("[post_ui_init] STEP 1 — checking background_mode=%s", self.background_mode)
+                if not self.background_mode:
+                    logging.info("[post_ui_init] STEP 1a — calling check_connection_status()...")
+                    _connected = self.connect.check_connection_status()
+                    logging.info("[post_ui_init] STEP 1a — check_connection_status() returned: %s", _connected)
+                    if not _connected:
+                        logging.info("[post_ui_init] STEP 1b — not paired, showing connection dialog...")
+                        self.connect.show_connection_dial()
+                        logging.info("[post_ui_init] STEP 1b — dialog closed. Re-checking connection...")
+                        if not self.connect.check_connection_status():
+                            logging.info("[post_ui_init] STEP 1b — still not paired after dialog. Exiting.")
+                            sys.exit()
+                        logging.info("[post_ui_init] STEP 1b — pairing completed via dialog.")
+                        self._just_paired = True
+
+                logging.info("[post_ui_init] STEP 2 — retrieving token...")
+                self.retrieve_token()
+                logging.info("[post_ui_init] STEP 2 — token retrieved: %s", bool(self.token))
+                if not self.token:
+                    logging.error("[post_ui_init] STEP 2 — NO TOKEN. Exiting application.")
+                    sys.exit()
+
+                logging.info("[post_ui_init] STEP 3 — initializing WebSocketClient (just_paired=%s)...", self._just_paired)
+                reuse_existing_ws = (
+                    self._just_paired
+                    and getattr(self, "ws", None) is not None
+                    and getattr(self.ws.sio, "connected", False)
+                )
+                logging.info("[post_ui_init] STEP 3 — reuse_existing_ws=%s", reuse_existing_ws)
+                if reuse_existing_ws:
+                    logging.info("[post_ui_init] STEP 3 — Reusing the live WebSocketClient established during pairing.")
+                else:
+                    if hasattr(self, 'ws') and self.ws:
+                        logging.info("[post_ui_init] STEP 3 — Disconnecting existing ws before creating new one...")
+                        try:
+                            self.ws.sio.disconnect()
+                        except Exception:
+                            pass
+                        self.ws = None
+                    logging.info("[post_ui_init] STEP 3 — Creating new WebSocketClient instance...")
+                    self.ws = WebSocketClient(self, self.connect, self.token)
+                    logging.info("[post_ui_init] STEP 3 — WebSocketClient created OK.")
+
+                logging.info("[post_ui_init] STEP 4 — calling prepare_sync()...")
+                self.prepare_sync()
+                logging.info("[post_ui_init] STEP 4 — prepare_sync() done. Calling wx.CallAfter(set_chats)...")
+                # Refresh the chat list on the GUI thread now that the DB is populated.
+                wx.CallAfter(self.set_chats)
+                logging.info("[post_ui_init] STEP 4 — set_chats scheduled on GUI thread.")
+
+                logging.info("[post_ui_init] STEP 5 — calling check_wa_connection_http()...")
+                self.check_wa_connection_http()
+                logging.info("[post_ui_init] STEP 5 — check_wa_connection_http() done.")
+
+                if reuse_existing_ws:
+                    logging.info("[post_ui_init] STEP 6 — Skipping WebSocket reconnect — already connected from pairing.")
+                    return
+
+                logging.info("[post_ui_init] STEP 6 — connecting WebSocket...")
+                try:
+                    self.connect_websocket()
+                    logging.info("[post_ui_init] STEP 6 — WebSocket connected successfully.")
+                except Exception as e:
+                    logging.exception("[post_ui_init] STEP 6 — Exception during websocket connection")
+                    self.error_sound.play()
+                    error_str = str(e)
+                    if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                        logging.info("[post_ui_init] STEP 6 — WebSocket namespace invalid (instance not on server). Triggering logout.")
+                        def _gui_logout():
+                            wx.MessageBox(
+                                self.i18n.t("device_logged_out"),
+                                self.i18n.t("error").format(self.app_name),
+                                wx.OK | wx.ICON_ERROR,
+                            )
+                            self._on_disconnect()
+                        wx.CallAfter(_gui_logout)
+                    else:
+                        def _gui_failed():
+                            wx.MessageBox(
+                                self.i18n.t("websocket_failed_reconnect"),
+                                self.i18n.t("connection_error"),
+                                wx.OK | wx.ICON_WARNING,
+                            )
+                            self.connect.show_connection_dial()
+                        wx.CallAfter(_gui_failed)
+                    # On websocket failure, clear the "connecting" status so the
+                    # UI is never left frozen on that label.
+                    wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
+                    self._just_paired = True
+
+                logging.info("[post_ui_init] *** ALL STEPS COMPLETED SUCCESSFULLY ***")
+            except SystemExit:
+                logging.info("[post_ui_init] SystemExit caught — propagating.")
+                raise
+            except Exception:
+                logging.exception("[post_ui_init] *** UNEXPECTED EXCEPTION — see traceback above ***")
+                # Ensure the status is never left stuck at "conectando" on any crash.
+                wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
+
+        # Store the function so init_UI() can start it right before MainLoop().
+        self._post_ui_init_fn = _post_ui_init
+
         self.init_UI()
 
 
@@ -1019,6 +1011,19 @@ class MainWindow(wx.Frame):
 
         # Auto-updater already scheduled early in constructor
 
+        # ── CRITICAL: Start the post-UI background thread HERE, right before
+        # app.MainLoop() — this is the ONLY place this can run.
+        # app.MainLoop() blocks forever; any code placed after it in __init__
+        # is dead code that will never execute.  The _post_ui_init_fn closure
+        # was stored on self by __init__ so we can start it from here.
+        _fn = getattr(self, "_post_ui_init_fn", None)
+        if _fn is not None:
+            logging.info("[init_UI] STARTING post_ui_init background thread — about to enter MainLoop()")
+            threading.Thread(target=_fn, daemon=True, name="post_ui_init").start()
+        else:
+            logging.error("[init_UI] _post_ui_init_fn is MISSING — connection/sync will NOT start! This is a bug.")
+
+        logging.info("[init_UI] Entering app.MainLoop() — main thread will block here until app exits")
         app.MainLoop()
 
     # ── Menu bar ─────────────────────────────────────────────────────────────
@@ -13659,6 +13664,10 @@ class MainWindow(wx.Frame):
             logging.error("Unhandled global exception:\n%s", error_text)
         except Exception:
             pass
+
+        if not wx.IsMainThread():
+            wx.CallAfter(lambda: self.exception_handler(exc_type, exc_value, exc_traceback))
+            return
 
         #Play error sound
         self.error_sound.play()

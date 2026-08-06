@@ -183,11 +183,16 @@ class Connect:
                 logging.warning("[check_connection_status] check-connection-session returned unauthorized (HTTP %s).", check_resp.status_code)
                 if is_paired:
                     self.main_window.error_sound.play()
-                    wx.MessageBox(
-                        self.i18n.t("device_logged_out"),
-                        self.i18n.t("error").format(app_name=self.main_window.app_name),
-                        wx.OK | wx.ICON_ERROR,
-                    )
+                    def _msg1():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(app_name=self.main_window.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                    if wx.IsMainThread():
+                        _msg1()
+                    else:
+                        wx.CallAfter(_msg1)
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
@@ -250,11 +255,16 @@ class Connect:
                 logging.warning("[check_connection_status] status-session returned unauthorized (HTTP %s).", resp.status_code)
                 if is_paired:
                     self.main_window.error_sound.play()
-                    wx.MessageBox(
-                        self.i18n.t("device_logged_out"),
-                        self.i18n.t("error").format(app_name=self.main_window.app_name),
-                        wx.OK | wx.ICON_ERROR,
-                    )
+                    def _msg2():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(app_name=self.main_window.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                    if wx.IsMainThread():
+                        _msg2()
+                    else:
+                        wx.CallAfter(_msg2)
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.settings.setdefault("privateinfo", {}).pop("WA_phone_number", None)
@@ -332,6 +342,18 @@ class Connect:
     # ── Connection dialog ──────────────────────────────────────────────────
 
     def show_connection_dial(self):
+        if not wx.IsMainThread():
+            logging.info("[show_connection_dial] Called from non-main thread. Dispatching to main thread via CallAfter...")
+            evt = threading.Event()
+            def _show():
+                try:
+                    self.show_connection_dial()
+                finally:
+                    evt.set()
+            wx.CallAfter(_show)
+            evt.wait()
+            return
+
         # Wide enough to fit the instructions/QR-CODE side by side (like the
         # official WhatsApp Web/Desktop layout) — users coming from there are
         # used to finding the QR-CODE on the right, with instructions on the
@@ -674,17 +696,15 @@ class Connect:
         return max(1, box // src)
 
     def display_qrcode_image(self, base64_string):
-        """Decodes and displays the base64 QR-CODE image.
+        """Decodes and displays the base64 QR-CODE image."""
+        now = time.time()
+        last_update = getattr(self, "_last_qr_code_update_ts", 0)
+        if now - last_update < 15.0:
+            logging.info("[display_qrcode_image] Ignoring rapid QR update (cooldown active: %.1fs remaining).", 15.0 - (now - last_update))
+            return
 
-        Scaling is nearest-neighbour and by a whole-number factor. Both matter:
-        this used to call Scale(300, 300, wx.IMAGE_QUALITY_HIGH), which resamples
-        with interpolation and stretched the source (264 px from WPPConnect) by
-        a fractional 1.14×. That blurs the black/white module edges and makes
-        their widths uneven — the phone camera then reads it as a damaged code
-        and simply refuses it, which is the "QR Code inválido" users reported.
-        A QR must be magnified in whole pixels with no smoothing, or not at all.
-        """
         try:
+            self._last_qr_code_update_ts = now
             # Remove data URI prefix if present
             if "," in base64_string:
                 base64_string = base64_string.split(",")[1]
@@ -1231,9 +1251,18 @@ class Connect:
         # A destroyed wx.Dialog evaluates to False, covering cancel/close.
         if not dial:
             return
+        # Debounce/cooldown: Ignore code updates coming faster than 15s
+        # to prevent rapid, flickering updates if WhatsApp/WPPConnect rotates too quickly.
+        now = time.time()
+        last_update = getattr(self, "_last_phone_code_update_ts", 0)
+        if now - last_update < 15.0:
+            logging.info("[update_pairing_code] Ignoring rapid code update (cooldown active: %.1fs remaining).", 15.0 - (now - last_update))
+            return
+
         try:
             if not dial.IsShown() or self.pairing_code_field.GetValue() == code:
                 return
+            self._last_phone_code_update_ts = now
             self.pairing_code_field.ChangeValue(code)
         except RuntimeError:
             return  # dialog destroyed between the checks
