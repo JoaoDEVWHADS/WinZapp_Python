@@ -196,3 +196,15 @@ db.sqlite3-journal
 
 # Jupyter
 .ipynb_checkpoints
+
+# 10 Arquivos Intocaveis da Auditoria
+build.py
+updater.py
+config.py
+version.py
+setup_api.py
+package.json
+api_setup.py
+README*
+CHANGELOG*
+release.imo
