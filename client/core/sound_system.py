@@ -38,6 +38,15 @@ class SoundSystem:
         # apply_output_device(), read by handle_playback_failure().
         self._configured_output_device = ""
         self._warned_output_failure = False
+        # Optional SEPARATE output device for one-shot UI effect sounds (the
+        # Sound class), so alerts can play on a different device than voice/
+        # conversation audio. None = route effects to the main output device
+        # like everything else (the maintainer's original single-device model).
+        # A concrete BASS device index means every effect channel is explicitly
+        # routed there on play via BASS_ChannelSetDevice. Set by
+        # apply_effects_device(); an empty configured name leaves it None.
+        self._effects_device = None
+        self._configured_effects_device = ""
         logging.info("[sound_system] sound_dir = %s (exists=%s)", sound_dir, os.path.isdir(sound_dir))
 
     def _load_bass_plugin(self, dll_name: str) -> bool:
@@ -219,6 +228,45 @@ class SoundSystem:
             if warn_on_failure:
                 self._warn_device_failure("output", device_name)
         return ok
+
+    def _ensure_device_inited(self, device: int) -> bool:
+        """BASS_Init an extra output device on demand so an effect channel can
+        be routed to it (the main Output() device is always ready). Returns True
+        if the device is usable. Idempotent: 'already initialised' (BASS error
+        14) counts as success."""
+        try:
+            from sound_lib.external.pybass import BASS_Init
+            bass_call(BASS_Init, device, 44100, 0, 0, None)
+            return True
+        except Exception as exc:
+            if "14" in str(exc) or "already" in str(exc).lower():
+                return True
+            logging.warning("[sound_system] BASS_Init failed for effects device %s: %s", device, exc)
+            return False
+
+    def apply_effects_device(self, device_name: str, warn_on_failure: bool = False) -> bool:
+        """Choose the SEPARATE output device for UI effect sounds. An empty name
+        means "use the main output device" (self._effects_device = None), which
+        is the original single-device behaviour. A named device is resolved to a
+        BASS index, BASS_Init'd, and stored so Sound.play() routes effect
+        channels to it. Returns whether the requested device is active.
+
+        Unlike apply_output_device this never switches the process-wide Output;
+        it only sets up a second device that effect channels are individually
+        routed to, so voice/conversation audio keeps playing on the main output.
+        """
+        self._configured_effects_device = device_name or ""
+        if not device_name:
+            self._effects_device = None
+            return True
+        idx = find_output_device_index(device_name)
+        if idx is not None and self._ensure_device_inited(idx):
+            self._effects_device = idx
+            return True
+        self._effects_device = None
+        if warn_on_failure:
+            self._warn_device_failure("output", device_name)
+        return False
 
     def _warn_device_failure(self, kind: str, device_name: str):
         """Show the "device failed to open" message box, unless running in
@@ -517,6 +565,15 @@ class Sound(stream.FileStream):
             if not pack_events.get(self.event_key, {}).get("enabled", True):
                 return
         try:
+            # Route this effect channel to the separate effects output device
+            # if one is configured (None = play on the main output, unchanged).
+            # Best-effort: a routing failure must never silence the sound.
+            dev = self.sound_system._effects_device
+            if dev is not None:
+                try:
+                    self.set_device(dev)
+                except Exception as exc:
+                    logging.debug("[sound_system] effect set_device(%s) failed: %s", dev, exc)
             super().play()
         except Exception:
             # The configured output device may have gone away mid-session

@@ -28,9 +28,9 @@
         "audio_default_speed": 1.0
     },
     "audio_devices": {
-        "voice_input": "",
-        "voice_output": "",
-        "effects_output": ""
+        "output_device_name": "",
+        "input_device_name": "",
+        "effects_output_device_name": ""
     },
     "storage": {
         "auto_download_media": true,

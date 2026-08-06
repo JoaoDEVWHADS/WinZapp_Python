@@ -557,6 +557,9 @@ class MainWindow(wx.Frame):
         self.sound_system.apply_output_device(
             self.settings.get("audio_devices", {}).get("output_device_name", "")
         )
+        self.sound_system.apply_effects_device(
+            self.settings.get("audio_devices", {}).get("effects_output_device_name", "")
+        )
 
         self.refresh_sound_packs()
         self.load_sounds()
@@ -5990,6 +5993,9 @@ class MainWindow(wx.Frame):
 
         output_name = audio_devices.get("output_device_name", "")
         self.sound_system.apply_output_device(output_name, warn_on_failure=True)
+
+        effects_name = audio_devices.get("effects_output_device_name", "")
+        self.sound_system.apply_effects_device(effects_name, warn_on_failure=True)
 
         input_name = audio_devices.get("input_device_name", "")
         self.effective_input_device_name = ""

@@ -511,6 +511,7 @@
     "tab_audio_devices": "Urządzenia audio",
     "audio_input_device_label": "Urządzenie nagrywające (mikrofon)",
     "audio_output_device_label": "Urządzenie odtwarzające (głośnik)",
+    "audio_effects_output_device_label": "Urządzenie wyjściowe efektów (alerty / dźwięki)",
     "audio_default_input_device": "Domyślne urządzenie nagrywające",
     "audio_default_output_device": "Domyślne urządzenie odtwarzające",
     "invalid_audio_input_device": "Nie udało się uaktywnić wybranego urządzenia nagrywającego.",

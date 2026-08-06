@@ -383,6 +383,13 @@ class SettingsDialog(wx.Dialog):
         self._audio_output_combo = wx.ComboBox(self._audio_devices_page, style=wx.CB_READONLY)
         adev_sizer.Add(self._audio_output_combo, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._audio_effects_label = wx.StaticText(
+            self._audio_devices_page, label=i18n.t("audio_effects_output_device_label")
+        )
+        adev_sizer.Add(self._audio_effects_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+        self._audio_effects_combo = wx.ComboBox(self._audio_devices_page, style=wx.CB_READONLY)
+        adev_sizer.Add(self._audio_effects_combo, 0, wx.EXPAND | wx.ALL, 8)
+
         self._noise_reduction_check = wx.CheckBox(
             self._audio_devices_page, label=i18n.t("noise_reduction_label")
         )
@@ -686,6 +693,7 @@ class SettingsDialog(wx.Dialog):
         self._reload_audio_device_choices(
             prefer_output=audio_devices_cfg.get("output_device_name") or None,
             prefer_input=audio_devices_cfg.get("input_device_name") or None,
+            prefer_effects=audio_devices_cfg.get("effects_output_device_name") or None,
         )
         noise_red = self.main_window.settings.get("general", {}).get("noise_reduction_enabled", False)
         self._noise_reduction_check.SetValue(noise_red)
@@ -732,16 +740,16 @@ class SettingsDialog(wx.Dialog):
         else:
             combo.SetSelection(0)
 
-    def _reload_audio_device_choices(self, prefer_output=None, prefer_input=None):
-        """(Re)populate the input/output device combos.
+    def _reload_audio_device_choices(self, prefer_output=None, prefer_input=None, prefer_effects=None):
+        """(Re)populate the input/output/effects device combos.
 
-        `prefer_output`/`prefer_input` seed the initial selection from stored
-        settings on first load; omit them on later calls (e.g. after a
-        language change) so whatever's currently selected is preserved
-        instead. A configured device that isn't currently enumerated (e.g.
-        temporarily unplugged) is kept as an extra entry rather than silently
-        dropped — reopening Settings while it's briefly unavailable must not
-        wipe it from settings just because it's not in the combo's list.
+        `prefer_output`/`prefer_input`/`prefer_effects` seed the initial
+        selection from stored settings on first load; omit them on later calls
+        (e.g. after a language change) so whatever's currently selected is
+        preserved instead. A configured device that isn't currently enumerated
+        (e.g. temporarily unplugged) is kept as an extra entry rather than
+        silently dropped — reopening Settings while it's briefly unavailable
+        must not wipe it from settings just because it's not in the combo's list.
         """
         i18n = self.main_window.i18n
 
@@ -755,6 +763,19 @@ class SettingsDialog(wx.Dialog):
             [i18n.t("audio_default_output_device")] + self._audio_output_device_names
         )
         self._select_device_in_combo(self._audio_output_combo, self._audio_output_device_names, prev_output)
+
+        # Effects output shares the same output-device list; its own "default"
+        # sentinel means "same device as the main output" (no separate routing).
+        prev_effects = prefer_effects if prefer_effects is not None else self._current_combo_device_name(
+            self._audio_effects_combo, getattr(self, "_audio_effects_device_names", [])
+        )
+        self._audio_effects_device_names = list(self._audio_output_device_names)
+        if prev_effects and prev_effects not in self._audio_effects_device_names:
+            self._audio_effects_device_names.append(prev_effects)
+        self._audio_effects_combo.Set(
+            [i18n.t("audio_default_output_device")] + self._audio_effects_device_names
+        )
+        self._select_device_in_combo(self._audio_effects_combo, self._audio_effects_device_names, prev_effects)
 
         prev_input = prefer_input if prefer_input is not None else self._current_combo_device_name(
             self._audio_input_combo, getattr(self, "_audio_input_device_names", [])
@@ -1167,6 +1188,19 @@ class SettingsDialog(wx.Dialog):
             )
             return False
 
+        effects_sel = self._audio_effects_combo.GetSelection()
+        effects_name = self._audio_effects_device_names[effects_sel - 1] if effects_sel > 0 else ""
+        if not self.main_window.sound_system.apply_effects_device(effects_name):
+            self._notebook.SetSelection(4)
+            self._audio_effects_combo.SetFocus()
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_audio_output_device"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return False
+
         input_sel = self._audio_input_combo.GetSelection()
         if input_sel > 0:
             input_name = self._audio_input_device_names[input_sel - 1]
@@ -1292,6 +1326,11 @@ class SettingsDialog(wx.Dialog):
         output_sel = self._audio_output_combo.GetSelection()
         output_name = self._audio_output_device_names[output_sel - 1] if output_sel > 0 else ""
         self.main_window.settings.setdefault("audio_devices", {})["output_device_name"] = output_name
+
+        effects_sel = self._audio_effects_combo.GetSelection()
+        effects_name = self._audio_effects_device_names[effects_sel - 1] if effects_sel > 0 else ""
+        self.main_window.settings.setdefault("audio_devices", {})["effects_output_device_name"] = effects_name
+        self.main_window.sound_system.apply_effects_device(effects_name)
 
         input_sel = self._audio_input_combo.GetSelection()
         input_name = self._audio_input_device_names[input_sel - 1] if input_sel > 0 else ""
@@ -1447,6 +1486,7 @@ class SettingsDialog(wx.Dialog):
         self._notebook.SetPageText(8, i18n.t("tab_audio_playback"))
         self._audio_input_label.SetLabel(i18n.t("audio_input_device_label"))
         self._audio_output_label.SetLabel(i18n.t("audio_output_device_label"))
+        self._audio_effects_label.SetLabel(i18n.t("audio_effects_output_device_label"))
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))

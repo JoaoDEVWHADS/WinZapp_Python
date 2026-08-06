@@ -511,6 +511,7 @@
     "tab_audio_devices": "Dispositivos de audio",
     "audio_input_device_label": "Dispositivo de grabación (micrófono)",
     "audio_output_device_label": "Dispositivo de reproducción (altavoz)",
+    "audio_effects_output_device_label": "Dispositivo de salida de efectos (alertas / sonidos)",
     "audio_default_input_device": "Dispositivo de grabación predeterminado",
     "audio_default_output_device": "Dispositivo de reproducción predeterminado",
     "invalid_audio_input_device": "No se pudo activar el dispositivo de grabación seleccionado.",

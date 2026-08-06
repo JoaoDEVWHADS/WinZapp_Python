@@ -249,3 +249,43 @@ class TestTestInputDevice:
         monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: fake_pa)
         assert audio_devices_module.test_input_device(5) is False
         assert fake_pa.opened_with == audio_devices_module.RECORDING_SAMPLE_CONFIGS
+
+
+class TestApplyEffectsDevice:
+    """The optional SEPARATE effects-output device: empty name = None (effects
+    play on the main output, unchanged); a named device is resolved + BASS_Init'd
+    and stored so Sound.play() routes effect channels there."""
+
+    def _make(self, monkeypatch, name_to_index, init_ok=True):
+        ss = _make_sound_system(monkeypatch, name_to_index)
+        monkeypatch.setattr(ss, "_ensure_device_inited", lambda idx: init_ok)
+        return ss
+
+    def test_empty_name_means_no_separate_device(self, monkeypatch):
+        ss = self._make(monkeypatch, {})
+        assert ss.apply_effects_device("") is True
+        assert ss._effects_device is None
+        assert ss._configured_effects_device == ""
+
+    def test_known_device_is_routed(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Speakers": 3})
+        assert ss.apply_effects_device("Speakers") is True
+        assert ss._effects_device == 3
+        assert ss._configured_effects_device == "Speakers"
+
+    def test_unknown_device_falls_back_to_main_output(self, monkeypatch):
+        ss = self._make(monkeypatch, {})
+        assert ss.apply_effects_device("Ghost") is False
+        assert ss._effects_device is None
+
+    def test_device_that_fails_to_init_falls_back(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Broken": 4}, init_ok=False)
+        assert ss.apply_effects_device("Broken") is False
+        assert ss._effects_device is None
+
+    def test_switching_away_clears_previous_routing(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Speakers": 3})
+        ss.apply_effects_device("Speakers")
+        assert ss._effects_device == 3
+        assert ss.apply_effects_device("") is True
+        assert ss._effects_device is None
