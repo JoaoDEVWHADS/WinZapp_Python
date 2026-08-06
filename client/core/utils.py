@@ -91,6 +91,35 @@ def looks_like_binary_blob(value) -> bool:
         return True
     return False
 
+def _clean_mentioned_jid(jid_val):
+    """Normalize one mentionedJid entry to a plain '...@s.whatsapp.net'/'@lid'
+    string. Mirrors WebSocketClient._clean_jid() without needing an instance —
+    entries can arrive as a raw WPPConnect Wid dict instead of a string."""
+    if not jid_val:
+        return ""
+    if isinstance(jid_val, dict):
+        jid_val = jid_val.get("_serialized") or jid_val.get("id") or ""
+    if not isinstance(jid_val, str):
+        jid_val = str(jid_val)
+    return jid_val.replace("@c.us", "@s.whatsapp.net")
+
+
+def _extract_mentioned_jids(quoted):
+    """Pull the quoted message's OWN mentionedJid list out of *quoted*,
+    wherever WPPConnect/Baileys put it — a WPPConnect-style raw quote carries
+    it flat as ``mentionedJidList``; a Baileys-style quotedMessage proto
+    carries it nested under (extendedTextMessage.)contextInfo.mentionedJid."""
+    for src in (
+        quoted,
+        quoted.get("contextInfo") or {},
+        (quoted.get("extendedTextMessage") or {}).get("contextInfo") or {},
+    ):
+        raw = src.get("mentionedJidList") or src.get("mentionedJid")
+        if raw:
+            return [_clean_mentioned_jid(m) for m in raw if m]
+    return []
+
+
 def _slim_quoted_message(quoted):
     """Reduce a quoted-message dict to only what the reply preview needs.
 
@@ -100,6 +129,12 @@ def _slim_quoted_message(quoted):
     UI (the preview only shows a short text or a type label), yet it dominated
     messages.dat and slowed every conversation that had replies. This keeps just
     a capped text preview plus a type marker.
+
+    mentionedJid is the one field kept beyond that: without it, a quoted
+    message's own @mentions render as raw @<phone-or-lid-digits> forever,
+    because the placeholder text survives slimming but the JID list needed to
+    resolve it into a contact name does not — see
+    ConversationsPanel._resolve_mentions_in_text(), the only consumer.
     """
     if not isinstance(quoted, dict):
         return quoted
@@ -130,6 +165,9 @@ def _slim_quoted_message(quoted):
             if k in quoted:
                 slim[k] = {}
                 break
+    mentioned = _extract_mentioned_jids(quoted)
+    if mentioned:
+        slim["mentionedJid"] = mentioned
     return slim
 
 

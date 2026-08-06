@@ -293,3 +293,31 @@ class TestUnreadSuffix:
         mgr._dispatch("title", "body", "j@g.us")
 
         assert "9" not in self._body_of(toaster)
+
+    def test_a_freshly_discovered_chats_low_count_is_suppressed(self, monkeypatch):
+        """on_new_message() creates a brand-new chat entry with unreadCount=0
+        and counts up from there live — that assumed 0 can be badly wrong if
+        the phone already had a real backlog (e.g. 230 unread) this session
+        just hasn't synced yet. A toast announcing "1 unread"/"2 unread" for
+        that chat is actively misleading, not just imprecise, until a real
+        chat-list sync backs the number (clears _unread_count_unsynced — see
+        get_remote_chats())."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        chat = _chat(unread=2, records=2)
+        chat["_unread_count_unsynced"] = True
+        mgr = _Stub(toaster, chats={"j@g.us": chat})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert self._body_of(toaster) == "body"
+
+    def test_the_count_reappears_once_a_real_sync_clears_the_flag(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        chat = _chat(unread=230, records=200)
+        mgr = _Stub(toaster, chats={"j@g.us": chat})
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        assert "230" in self._body_of(toaster)

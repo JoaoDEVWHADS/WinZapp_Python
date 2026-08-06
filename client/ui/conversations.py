@@ -5127,7 +5127,15 @@ class ConversationsPanel(wx.Panel):
         if not quoted_msg or not isinstance(quoted_msg, dict):
             return ""
         if "conversation" in quoted_msg:
-            return (quoted_msg.get("conversation") or "")
+            # The common case: _slim_quoted_message() stores a slimmed quoted
+            # message as plain {"conversation": text, "mentionedJid": [...]}
+            # (see core/utils.py) — the flat key mentions live under here, not
+            # nested in a contextInfo the slimming step deliberately drops.
+            text = quoted_msg.get("conversation") or ""
+            mentioned = quoted_msg.get("mentionedJid") or quoted_msg.get("mentionedJidList") or []
+            if mentioned:
+                text = self._resolve_mentions_in_text(text, mentioned)
+            return text
         if "extendedTextMessage" in quoted_msg:
             ext = quoted_msg.get("extendedTextMessage") or {}
             text = ext.get("text") or ""

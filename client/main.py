@@ -2519,6 +2519,18 @@ class MainWindow(wx.Frame):
                     "pages":       1,
                     "currentPage": 1,
                 }},
+                # This chat is brand new to WinZapp — "unreadCount": 0 above is
+                # an assumption, not a fact: the phone may have had a real
+                # backlog for it (e.g. a chat that already had 230 unread
+                # before this session even started) that get_remote_chats()
+                # simply hasn't fetched yet. Live increments below build on top
+                # of that assumed 0, so a toast fired before the real count
+                # lands would announce "1 unread"/"2 unread" while the true
+                # total is far higher. Cleared once a real chat-list sync
+                # merges its own unreadCount for this jid (see get_remote_chats())
+                # — until then, the notification code omits the numeric badge
+                # rather than show a number that's actively misleading.
+                "_unread_count_unsynced": True,
             }
             if remote_jid.endswith("@g.us"):
                 # Unlike chats created by get_remote_chats() at sync time, a
@@ -6534,6 +6546,11 @@ class MainWindow(wx.Frame):
                                         if incoming_t <= read_at_t:
                                             continue
                                         self._locally_read_at.pop(jid, None)
+                                # A real chat-list snapshot now backs this
+                                # chat's unreadCount, whichever way the guards
+                                # above resolved it — the notification code can
+                                # trust the number again.
+                                chats[jid].pop("_unread_count_unsynced", None)
                             chats[jid][k] = v
                         # The incoming chat dict may carry the group's real
                         # name only under groupMetadata.subject (see
