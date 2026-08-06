@@ -6683,6 +6683,12 @@ class MainWindow(wx.Frame):
                                 if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
+                        # If chat exists in self.chats (passed in), preserve any higher unreadCount
+                        if hasattr(self, "chats") and jid in self.chats:
+                            local_unread = int(self.chats[jid].get("unreadCount") or 0)
+                            server_unread = int(chat.get("unreadCount") or 0)
+                            if local_unread > server_unread:
+                                chat["unreadCount"] = local_unread
                         chats[jid] = chat
                     else:
                         for k, v in chat.items():
