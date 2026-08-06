@@ -818,10 +818,20 @@ class UpdateChecker:
         result = dlg.ShowModal()
         dlg.Destroy()
 
-        # Restore main window visibility and focus when dialog closes
-        if hasattr(self._mw, "IsShown") and self._mw.IsShown():
-            self._mw.Raise()
-            self._mw.SetFocus()
+        # Restore focus to whichever window or panel was active
+        def _restore_focus():
+            mw = self._mw
+            if hasattr(mw, "IsShown") and mw.IsShown():
+                mw.Raise()
+                mw.SetFocus()
+                # If conversations panel exists and has list, focus it
+                cp = getattr(mw, "conversations_panel", None)
+                if cp is not None and hasattr(cp, "conversations_list"):
+                    cp.conversations_list.SetFocus()
+                elif hasattr(mw, "navigation_panel"):
+                    mw.navigation_panel.nav_list.SetFocus()
+
+        wx.CallAfter(_restore_focus)
 
         if result == wx.ID_YES:
             self._do_install(remote_version, zip_url, sha256sums_url)
