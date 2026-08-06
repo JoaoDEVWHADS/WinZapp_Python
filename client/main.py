@@ -480,7 +480,33 @@ class MainWindow(wx.Frame):
     def __init__(self):
         import time as _time
         self._t_app_start = _time.perf_counter()
+        is_post_update = "--post-update" in sys.argv
+        logging.info("[STARTUP] ==================================================")
+        logging.info("[STARTUP] WinZapp Application Opened Successfully!")
+        if is_post_update:
+            logging.info("[POST_UPDATE_SUCCESS] *** SUCCESS: APPLICATION SUCCESSFULLY RESTARTED AFTER AUTO-UPDATE! ***")
         logging.info("[STARTUP_TIMING] T+0.000s — MainWindow __init__ started")
+        
+        # Check for update marker file from previous update attempt
+        try:
+            from updater import _outer_exe_dir
+            marker_file = os.path.join(_outer_exe_dir(), "update_failed.marker")
+            if os.path.exists(marker_file):
+                with open(marker_file, "r", encoding="utf-8", errors="ignore") as _mf:
+                    marker_content = _mf.read().strip()
+                logging.error("[UPDATER_STATUS] WARNING: Found update_failed.marker from previous update: %s", marker_content)
+                if is_post_update:
+                    # Clean up old marker on successful post-update start
+                    try:
+                        os.remove(marker_file)
+                        logging.info("[UPDATER_STATUS] Cleaned up old update_failed.marker after successful launch.")
+                    except OSError:
+                        pass
+            else:
+                logging.info("[UPDATER_STATUS] Application started cleanly without update_failed.marker.")
+        except Exception as _me:
+            logging.warning("[UPDATER_STATUS] Error checking update marker: %s", _me)
+        logging.info("[STARTUP] ==================================================")
         super().__init__(None)
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
         self._save_lock = threading.Lock()
