@@ -252,20 +252,28 @@ class TestTestInputDevice:
 
 
 class TestApplyEffectsDevice:
-    """The optional SEPARATE effects-output device: empty name = None (effects
-    play on the main output, unchanged); a named device is resolved + BASS_Init'd
-    and stored so Sound.play() routes effect channels there."""
+    """The effects-output device pins effect sounds to a concrete device so they
+    don't follow the voice output when it's switched. Empty name = the resolved
+    system-default index (NOT None), a named device = its own index."""
 
-    def _make(self, monkeypatch, name_to_index, init_ok=True):
+    def _make(self, monkeypatch, name_to_index, default_idx=1, init_ok=True):
         ss = _make_sound_system(monkeypatch, name_to_index)
         monkeypatch.setattr(ss, "_ensure_device_inited", lambda idx: init_ok)
+        monkeypatch.setattr(
+            sound_system_module, "find_default_output_device_index", lambda: default_idx
+        )
         return ss
 
-    def test_empty_name_means_no_separate_device(self, monkeypatch):
-        ss = self._make(monkeypatch, {})
+    def test_empty_name_pins_to_resolved_default_index(self, monkeypatch):
+        ss = self._make(monkeypatch, {}, default_idx=1)
         assert ss.apply_effects_device("") is True
-        assert ss._effects_device is None
+        assert ss._effects_device == 1
         assert ss._configured_effects_device == ""
+
+    def test_empty_name_falls_back_to_none_if_default_unresolvable(self, monkeypatch):
+        ss = self._make(monkeypatch, {}, default_idx=None)
+        assert ss.apply_effects_device("") is False
+        assert ss._effects_device is None
 
     def test_known_device_is_routed(self, monkeypatch):
         ss = self._make(monkeypatch, {"Speakers": 3})
@@ -273,7 +281,7 @@ class TestApplyEffectsDevice:
         assert ss._effects_device == 3
         assert ss._configured_effects_device == "Speakers"
 
-    def test_unknown_device_falls_back_to_main_output(self, monkeypatch):
+    def test_unknown_device_falls_back(self, monkeypatch):
         ss = self._make(monkeypatch, {})
         assert ss.apply_effects_device("Ghost") is False
         assert ss._effects_device is None
@@ -283,9 +291,9 @@ class TestApplyEffectsDevice:
         assert ss.apply_effects_device("Broken") is False
         assert ss._effects_device is None
 
-    def test_switching_away_clears_previous_routing(self, monkeypatch):
-        ss = self._make(monkeypatch, {"Speakers": 3})
+    def test_switching_from_named_back_to_default_repins_not_clears(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Speakers": 3}, default_idx=1)
         ss.apply_effects_device("Speakers")
         assert ss._effects_device == 3
         assert ss.apply_effects_device("") is True
-        assert ss._effects_device is None
+        assert ss._effects_device == 1  # pinned to default, NOT None

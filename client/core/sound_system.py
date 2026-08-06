@@ -12,7 +12,7 @@ from sound_lib import stream
 from sound_lib.main import bass_call
 import sound_lib.main as _bass_main
 
-from core.audio_devices import find_output_device_index
+from core.audio_devices import find_output_device_index, find_default_output_device_index
 
 
 # ── Import plugin modules (early, so their symbols are available) ─────────────
@@ -245,26 +245,38 @@ class SoundSystem:
             return False
 
     def apply_effects_device(self, device_name: str, warn_on_failure: bool = False) -> bool:
-        """Choose the SEPARATE output device for UI effect sounds. An empty name
-        means "use the main output device" (self._effects_device = None), which
-        is the original single-device behaviour. A named device is resolved to a
-        BASS index, BASS_Init'd, and stored so Sound.play() routes effect
-        channels to it. Returns whether the requested device is active.
+        """Choose the output device for UI effect sounds and PIN effect channels
+        to it so they don't follow the voice output when it's switched.
 
-        Unlike apply_output_device this never switches the process-wide Output;
-        it only sets up a second device that effect channels are individually
-        routed to, so voice/conversation audio keeps playing on the main output.
+        An empty name means "system default device" — but resolved to the
+        CONCRETE default-device index, not left as None. That distinction is the
+        whole fix: with the maintainer's single-process-Output model, switching
+        the voice output frees + re-inits that one BASS device, and effects that
+        weren't pinned to a specific device rode along with it (bug: picking a
+        non-default voice output dragged the effect sounds off the default
+        device too, even though effects were set to "default"). Pinning effects
+        to the resolved default index keeps them there regardless.
+
+        A named device is resolved to its BASS index instead. Either way the
+        device is BASS_Init'd and stored so Sound.play() routes effect channels
+        to it. Returns whether a concrete device was resolved.
+
+        This never switches the process-wide Output; it only sets up a device
+        that effect channels are individually routed to, so voice/conversation
+        audio keeps playing on the main output.
         """
         self._configured_effects_device = device_name or ""
-        if not device_name:
-            self._effects_device = None
-            return True
-        idx = find_output_device_index(device_name)
+        if device_name:
+            idx = find_output_device_index(device_name)
+        else:
+            idx = find_default_output_device_index()
         if idx is not None and self._ensure_device_inited(idx):
             self._effects_device = idx
             return True
+        # Couldn't resolve/init a concrete device — fall back to None (effects
+        # play on the current process device, i.e. the old shared behaviour).
         self._effects_device = None
-        if warn_on_failure:
+        if warn_on_failure and device_name:
             self._warn_device_failure("output", device_name)
         return False
 
@@ -565,12 +577,15 @@ class Sound(stream.FileStream):
             if not pack_events.get(self.event_key, {}).get("enabled", True):
                 return
         try:
-            # Route this effect channel to the separate effects output device
-            # if one is configured (None = play on the main output, unchanged).
-            # Best-effort: a routing failure must never silence the sound.
+            # Route this effect channel to the pinned effects output device
+            # (None = play on the current process device, legacy behaviour).
+            # Switching the voice output frees + re-inits BASS devices, so
+            # re-ensure ours is initialised before routing to it; best-effort —
+            # a routing failure must never silence the sound.
             dev = self.sound_system._effects_device
             if dev is not None:
                 try:
+                    self.sound_system._ensure_device_inited(dev)
                     self.set_device(dev)
                 except Exception as exc:
                     logging.debug("[sound_system] effect set_device(%s) failed: %s", dev, exc)
