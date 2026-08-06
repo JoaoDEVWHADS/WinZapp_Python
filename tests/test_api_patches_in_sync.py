@@ -29,6 +29,7 @@ fluent-ffmpeg used to be patched too, and was never imported anywhere by
 anything — it is checked to confirm it stays gone from every file.
 """
 
+import importlib.util
 import json
 import pathlib
 
@@ -37,6 +38,15 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 API = ROOT / "client" / "api"
 PATCHES = ROOT / "client" / "api_patches"
+
+
+def _setup_api_module():
+    """setup_api.py lives at the repo root, which is not on pytest's pythonpath
+    (pytest.ini puts client/ there), so load it by path."""
+    spec = importlib.util.spec_from_file_location("winzapp_setup_api", ROOT / "setup_api.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 # Mirrors setup_api.py's CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES, minus
 # package.json (see the module docstring).
@@ -151,6 +161,89 @@ def test_the_in_app_installer_refreshes_root_files_rather_than_only_preserving_t
     )
     # ...while still being kept out of the upstream ZIP's way.
     assert '_PRESERVE = {"start.js", ".env", "config.json"}' in dialog
+
+
+class TestRestoreRunsOnEveryPath:
+    """Re-running setup_api.py against an existing client/api/ must repair it.
+
+    The restore used to live inside the `else:` of `if already_cloned:` and
+    inside `if tag:`, so the most common invocation of all — an existing
+    client/api/ and no WPPCONNECT_TAG_VERSION — fell through both and restored
+    nothing. A client/api/ whose patched files had been deleted (which is what
+    `git rm`-ing the client/api/ copies out of this repo does to every
+    developer's working tree on the next pull) could then not be repaired by
+    re-running the script at all: npm install died with ENOENT on the missing
+    package.json, and had it survived, `npm run build` would have compiled
+    vanilla upstream with none of WinZapp's patches in it.
+    """
+
+    def test_the_restore_is_not_nested_inside_a_branch(self):
+        src = (ROOT / "setup_api.py").read_text(encoding="utf-8").splitlines()
+        calls = [ln for ln in src if "_restore_custom_files(custom_contents)" in ln]
+        assert calls, "main() no longer restores the patched files at all"
+        for line in calls:
+            indent = len(line) - len(line.lstrip())
+            assert indent == 4, (
+                f"_restore_custom_files is nested inside a branch ({indent} spaces of "
+                f"indent) — it must run on every path through main(), including an "
+                f"already-cloned client/api/ with no tag pinned"
+            )
+
+    def test_missing_patched_files_are_written_back(self, tmp_path, monkeypatch):
+        setup_api = _setup_api_module()
+        api = tmp_path / "api"
+        api.mkdir()
+        monkeypatch.setattr(setup_api, "CLIENT_API_DIR", str(api))
+        setup_api._restore_custom_files({
+            "start.js": b"// patched start\n",
+            "src/controller/sessionController.ts": b"// patched controller\n",
+        })
+        assert (api / "start.js").read_bytes() == b"// patched start\n"
+        # Subdirectories the clone no longer has must be recreated, not crash.
+        assert (api / "src" / "controller" / "sessionController.ts").exists()
+
+    def test_an_edited_live_copy_is_overwritten(self, tmp_path, monkeypatch):
+        """api_patches/ is the source of truth — editing only client/api/ must
+        not survive a setup_api.py run (see this module's docstring)."""
+        setup_api = _setup_api_module()
+        api = tmp_path / "api"
+        api.mkdir()
+        (api / "start.js").write_bytes(b"// hand-edited, unsaved anywhere else\n")
+        monkeypatch.setattr(setup_api, "CLIENT_API_DIR", str(api))
+        setup_api._restore_custom_files({"start.js": b"// patched start\n"})
+        assert (api / "start.js").read_bytes() == b"// patched start\n"
+
+
+class TestPackageJsonRecovery:
+    """A missing client/api/package.json is fatal to npm install, so it has to
+    be put back before the merge (which only patches a file that exists)."""
+
+    def _api_dir(self, tmp_path, monkeypatch):
+        setup_api = _setup_api_module()
+        api = tmp_path / "api"
+        api.mkdir()
+        monkeypatch.setattr(setup_api, "CLIENT_API_DIR", str(api))
+        monkeypatch.setattr(setup_api, "API_PATCHES_DIR", str(PATCHES))
+        return setup_api, api
+
+    def test_an_existing_package_json_is_left_alone(self, tmp_path, monkeypatch):
+        """Upstream's own file for the tag on disk is the one we want — this
+        must never clobber it with api_patches/' frozen 'version' field."""
+        setup_api, api = self._api_dir(tmp_path, monkeypatch)
+        (api / "package.json").write_text(
+            json.dumps({"version": "2.10.1", "dependencies": {}}), encoding="utf-8"
+        )
+        setup_api._recover_upstream_package_json()
+        assert json.loads((api / "package.json").read_text(encoding="utf-8"))["version"] == "2.10.1"
+
+    def test_it_falls_back_to_api_patches_when_there_is_no_clone(self, tmp_path, monkeypatch):
+        """No .git in client/api/ means no upstream copy to check out — better a
+        frozen package.json than npm install failing with ENOENT."""
+        setup_api, api = self._api_dir(tmp_path, monkeypatch)
+        setup_api._recover_upstream_package_json()
+        assert (api / "package.json").exists()
+        deps = json.loads((api / "package.json").read_text(encoding="utf-8"))["dependencies"]
+        assert "@ffmpeg-installer/ffmpeg" in deps
 
 
 class TestPackageJsonMerge:

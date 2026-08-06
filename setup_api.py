@@ -119,6 +119,68 @@ _PATCHED_DEPENDENCY_KEYS = [
 # same reason ("Rather than hardcoding a version — which rots...").
 
 
+def _recover_upstream_package_json():
+    """Bring client/api/package.json back when it went missing from a clone
+    that already exists.
+
+    _merge_package_json_dependencies() patches the file in place and bails out
+    silently when it isn't there, which is right for a fresh clone (npm install
+    would run against upstream's own file a moment later) but leaves nothing to
+    run at all when the file was deleted from an existing client/api/ — npm
+    then dies with `ENOENT: no such file or directory, open '.../package.json'`
+    and the whole setup aborts. That is not hypothetical: `git rm`-ing the
+    client/api/ copies out of WinZapp's own repo deletes them from every
+    developer's working tree on the next pull, package.json included.
+
+    client/api/ is itself a clone of wppconnect-server, so its own git checkout
+    is the correct source — that restores the real upstream file for the tag on
+    disk, which is exactly what the merge below expects to patch. api_patches/
+    is only a last resort here: its "version" field is a frozen snapshot, and
+    handing that to WppUpdateChecker is the stale-version bug described above.
+    """
+    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
+    if os.path.isfile(pkg_path):
+        return
+    if os.path.isdir(os.path.join(CLIENT_API_DIR, ".git")):
+        print("[WARNING] client/api/package.json is missing — restoring it from the clone.")
+        result = subprocess.run(
+            ["git", "checkout", "--", "package.json"], cwd=CLIENT_API_DIR
+        )
+        if result.returncode == 0 and os.path.isfile(pkg_path):
+            print("[OK] Restored client/api/package.json from upstream.")
+            return
+        print(f"[WARNING] git checkout of package.json failed (exit {result.returncode}).")
+    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
+    if os.path.isfile(patch_path):
+        import shutil as _shutil
+        _shutil.copy2(patch_path, pkg_path)
+        print(
+            "[WARNING] Copied client/api_patches/package.json as a fallback — its "
+            "'version' field is a frozen snapshot and may not match the tag on disk."
+        )
+
+
+def _restore_custom_files(custom_contents: dict):
+    """Write every patched file back into client/api/.
+
+    Runs on EVERY path through main(), not just after a clone or a tag
+    checkout. It used to be called only inside those two branches, so the most
+    common invocation of all — `python setup_api.py` against a client/api/ that
+    already exists, with no WPPCONNECT_TAG_VERSION set — skipped it entirely
+    and rebuilt the API from whatever happened to be on disk. Two ways that
+    bites: a patched file edited/deleted directly in client/api/ was never put
+    back (npm run build then compiled vanilla upstream, silently), and a
+    client/api/ missing its patches could not be repaired by re-running this
+    script at all, which is the one thing it exists to do.
+    """
+    for rel_path, content in custom_contents.items():
+        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        print(f"[INFO] Restored custom file: {rel_path}")
+
+
 def _merge_package_json_dependencies():
     """Apply WinZapp's specific dependency patches onto whatever
     package.json the clone/checkout actually left on disk, instead of
@@ -168,13 +230,15 @@ def main():
     # is worthless as a source the moment client/api/ has already been
     # deleted, which is exactly when this restore matters most.
     #
-    # Loaded up front, before the clone branch, because BOTH consumers need it:
-    # the post-clone restore below and the post-`git checkout <tag>` restore
-    # further down. It used to be populated only on the clone path, so checking
-    # out a tag against an existing client/api/ raised NameError — and had that
-    # line been reached with an empty dict instead, it would have been worse:
-    # `git checkout -f` overwrites the patched files with upstream's, and
-    # nothing would have put ours back.
+    # Loaded up front, before the clone branch, because the single
+    # _restore_custom_files() call at the end of main() consumes it on every
+    # path — including the one that wipes and re-clones client/api/, which is
+    # why it has to be read into memory *before* that happens. It used to be
+    # populated only on the clone path, so checking out a tag against an
+    # existing client/api/ raised NameError — and had that line been reached
+    # with an empty dict instead, it would have been worse: `git checkout -f`
+    # overwrites the patched files with upstream's, and nothing would have put
+    # ours back.
     custom_contents = {}
     for rel_path in CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES:
         patches_path = os.path.join(API_PATCHES_DIR, rel_path)
@@ -221,30 +285,19 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-        # Restore every patched file after cloning
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-            print(f"[INFO] Restored custom file: {rel_path}")
-        _merge_package_json_dependencies()
-
     if tag:
         print(f"[INFO] Checking out tag: {tag}")
         _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
-
-        # Re-restore after checkout just in case git checkout overwrites files
-        for rel_path, content in custom_contents.items():
-            dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(content)
-        _merge_package_json_dependencies()
-        print("[INFO] Re-applied custom files after checking out tag.")
     else:
-        _merge_package_json_dependencies()
         print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
+
+    # Single restore point, deliberately outside every branch above: the clone,
+    # the tag checkout (`git checkout -f` overwrites the patched files with
+    # upstream's) and the plain "client/api/ is already here" path all need the
+    # exact same thing done afterwards, and only the first two used to get it.
+    _recover_upstream_package_json()
+    _restore_custom_files(custom_contents)
+    _merge_package_json_dependencies()
 
     print()
     print("[OK] WPPConnect Server ready at client/api/")
