@@ -1,14 +1,15 @@
-# Manual Trigger Commit - Rollback to edb0388
 name: Release WinZapp
 
+# Manual only. A push trigger here means every commit to main bumps
+# version.py to the current date/time and creates a "vYYYY.MM.DD.HHMM" tag —
+# that's what generated 800+ stray tags in this repo's history and made any
+# manual fix to version.py get silently overwritten by the very next push.
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       version:
-        description: "Versão da Release (Deixe em branco para usar a data/hora atual)"
-        required: false
+        description: "Versão da Release (obrigatório, ex: 0.22.2.0beta)"
+        required: true
         type: string
 
 concurrency:
@@ -32,7 +33,8 @@ jobs:
         run: |
           $ver = "${{ inputs.version }}"
           if ([string]::IsNullOrEmpty($ver)) {
-              $ver = Get-Date -Format "yyyy.MM.dd.HHmm"
+              Write-Error "[ERRO] 'version' é obrigatório — sem fallback para data/hora."
+              exit 1
           }
           echo "RELEASE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Output "[INFO] Versão definida para: $ver"
