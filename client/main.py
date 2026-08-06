@@ -3215,7 +3215,122 @@ class MainWindow(wx.Frame):
 
     # ── First-run module installation ──────────────────────────────────────
 
+    # Must match start.js's HEADLESS_SHELL_NAMES — start.js searches
+    # client/api/.cache for exactly these and launches what it finds.
+    _HEADLESS_SHELL_NAMES = ("chrome-headless-shell.exe", "chrome-headless-shell")
+
+    def find_headless_shell(self):
+        """Path to chrome-headless-shell inside client/api/.cache, or None."""
+        cache_dir = resource_path("api", ".cache")
+        if not os.path.isdir(cache_dir):
+            return None
+        for root, _dirs, files in os.walk(cache_dir):
+            for name in files:
+                if name in self._HEADLESS_SHELL_NAMES:
+                    return os.path.join(root, name)
+        return None
+
+    def ensure_headless_shell_installed(self) -> bool:
+        """Download chrome-headless-shell if client/api/.cache has none.
+
+        This exists because of *where* the download would otherwise happen.
+        start.js has its own execSync fallback, but that runs inside the API
+        process at boot — so the download eats ApiStartupDialog's 300 s budget
+        while the server has not started listening yet, and a slow connection
+        turns a one-off download into "WinZapp failed to start the API".
+        Running it here instead puts it before that timer starts.
+
+        Who actually hits this: not fresh installs (ApiSetupDialog step 4.5
+        downloads the shell), but everyone *updating* from a build that shipped
+        full Chrome. Their client/api/.cache already holds a chrome.exe, so
+        every "is the API set up?" check above passes and nothing would fetch
+        the shell — the browser is the one piece of the install those checks
+        never looked at.
+
+        Best-effort by design: a failure here is logged and start.js's own
+        fallback still gets its turn. Returns True when a shell is present
+        afterwards.
+        """
+        existing = self.find_headless_shell()
+        if existing:
+            logging.info("[headless-shell] Already installed: %s", existing)
+            return True
+
+        logging.info(
+            "[headless-shell] chrome-headless-shell not found in api/.cache — "
+            "downloading it now (before the API startup timer begins)."
+        )
+        if sys.platform == "win32":
+            node_exe = resource_path("node", "node.exe")
+            npm_cli = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            npm_cmd = [node_exe, npm_cli]
+            node_dir = resource_path("node")
+            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+        else:
+            local_node = resource_path("node", "node")
+            node_exe = local_node if os.path.isfile(local_node) else (shutil.which("node") or "node")
+            local_npm = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
+            npm_cmd = [node_exe, local_npm] if os.path.isfile(local_npm) else [shutil.which("npm") or "npm"]
+            node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
+            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
+        api_dir = resource_path("api")
+        if not os.path.isdir(api_dir):
+            logging.info("[headless-shell] api/ not present yet — skipping.")
+            return False
+
+        npm_env = {
+            **os.environ,
+            "PATH": path_env,
+            "PUPPETEER_CACHE_DIR": resource_path("api", ".cache"),
+        }
+        creation_flags = 0
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = subprocess.Popen(
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
+                cwd=api_dir,
+                env=npm_env,
+                creationflags=creation_flags,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=1800)
+            if proc.returncode != 0:
+                logging.error(
+                    "[headless-shell] install failed (exit %s): %s",
+                    proc.returncode,
+                    (stderr_bytes or b"").decode("utf-8", errors="replace")[:500],
+                )
+            else:
+                logging.info(
+                    "[headless-shell] installed: %s",
+                    (stdout_bytes or b"").decode("utf-8", errors="replace").strip()[:300],
+                )
+        except Exception as exc:
+            logging.error("[headless-shell] install error: %s", exc)
+
+        found = self.find_headless_shell()
+        if not found:
+            logging.warning(
+                "[headless-shell] still missing after the install attempt — start.js "
+                "will retry, and falls back to any full Chrome already in the cache."
+            )
+        return bool(found)
+
     def ensure_api_modules_installed(self):
+        """Ensure the API is installed, then that a headless browser exists.
+
+        Split in two on purpose: every check in _ensure_api_modules_installed()
+        looks at api/ (dist/server.js, node_modules) and none of them look at
+        the browser, so "the API is fully set up" was true for an install with
+        no browser at all — see ensure_headless_shell_installed().
+        """
+        self._ensure_api_modules_installed()
+        self.ensure_headless_shell_installed()
+
+    def _ensure_api_modules_installed(self):
         """
         Ensure the WPPConnect is cloned, compiled, and has its node_modules.
 
@@ -3334,11 +3449,24 @@ class MainWindow(wx.Frame):
         # normal "node_modules absent" gate never fires. We compare a list of
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
+        # Resolved rather than just probed for a directory: @ffmpeg-installer
+        # unpacks its binary under a platform-specific subfolder, and WinZapp
+        # also accepts a bundled lib/ copy or one on PATH — so "is the package
+        # folder there?" is the wrong question, "can we actually find an
+        # ffmpeg to run?" is the right one.
+        ffmpeg_bin = self._find_api_ffmpeg()
         _REQUIRED_MARKERS = [
             os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
+            # Without ffmpeg, _convert_wav_to_ogg() returns None and voice
+            # messages go out as raw WAV, which WhatsApp often rejects — a core
+            # accessibility feature degrading silently, with only a warning in
+            # the log. node_modules existing is not evidence this specific
+            # package inside it does, so it gets its own check.
+            if not ffmpeg_bin:
+                missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
@@ -3367,7 +3495,12 @@ class MainWindow(wx.Frame):
                 npm_env  = {
                     **os.environ,
                     "PATH": path_env,
-                    "PUPPETEER_CACHE_DIR": resource_path("api", ".cache", "puppeteer"),
+                    # client/api/.cache — the tree start.js searches for
+                    # chrome-headless-shell and re-exports as PUPPETEER_CACHE_DIR.
+                    # Pointing at the .cache/puppeteer subfolder instead makes
+                    # this installer download into one tree while the server
+                    # looks in another.
+                    "PUPPETEER_CACHE_DIR": resource_path("api", ".cache"),
                 }
                 api_dir  = resource_path("api")
                 creation_flags = 0
@@ -3587,7 +3720,7 @@ class MainWindow(wx.Frame):
             os.environ["AUTHENTICATION_API_KEY"] = self.wpp_api_key
             os.environ["WPP_LID_MODE"] = "false"
             os.environ["PORT"] = str(self.wpp_port)
-            os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache", "puppeteer")
+            os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache")
 
             # Ensure dist/config.js has useChrome:false so WPPConnect always uses
             # Puppeteer's own bundled Chrome/Chromium instead of searching for a
@@ -3939,9 +4072,23 @@ class MainWindow(wx.Frame):
                 time.sleep(1)
             sys.exit(1)
 
+        # A WPPConnect left listening by a previous run (a crash, or an exit
+        # that never got to force-kill it) is already serving this port.
+        # _start_wpp_background() has no guard of its own, so without this the
+        # launch below spawns a second node that cannot bind 6300 and dies —
+        # and the dialog then "succeeds" against the *old* server, which may be
+        # holding a long-dead Chrome. Reuse what is up, or nothing is.
+        if self._is_wpp_running():
+            logging.info("[ensure_wpp_running] WPPConnect already listening on %s — reusing it.",
+                         self.wpp_port)
+            self._check_wpp_version_pin()
+            return
+
         from ui.dialogs.api_startup import ApiStartupDialog
         def _show_startup_dlg():
             dlg = ApiStartupDialog(self, self.wpp_port)
+            # Queued rather than called inline so the dialog is painted (and
+            # announced by the screen reader) before the launch work begins.
             wx.CallAfter(self._start_wpp_background)
             res = dlg.ShowModal()
             dlg.Destroy()
@@ -5812,6 +5959,16 @@ class MainWindow(wx.Frame):
             logging.info("[start_sync] Aborting sync before phase 1: offline mode activated mid-sync.")
             self._sync_completed = False
             return
+        # Before a single get-messages call goes out: unjam WhatsApp Web's
+        # history-sync queue if an earlier run deadlocked it (the notifications
+        # live in its IndexedDB and survive restarts), and record whether it
+        # still has chunks to decode. Both have to happen *here*, not after the
+        # sync: get-messages can only ever return what WhatsApp Web has already
+        # decoded, and _note_backfill_state() uses the pending-chunk flag to
+        # decide whether a chat that came back short is worth re-querying while
+        # the rest of its history is still landing.
+        self.unblock_history_sync()
+        self.refresh_history_still_landing(context="before message sync")
         _sync_phase1_started = time.time()
         self.sync_remote_chats()
         logging.info(
@@ -5936,14 +6093,29 @@ class MainWindow(wx.Frame):
         # loop existed nothing refreshed unread badges in the meantime.
         self.start_periodic_contacts_sync()
 
+        # Before the backfill even starts, record whether WhatsApp Web is in a
+        # state where *any* amount of retrying could help. See
+        # log_history_sync_status() — a dead worker bridge makes the backfill,
+        # the media phase and every future sync equally pointless, and until
+        # this line existed there was no way to tell that from the log.
+        self.log_history_sync_status(context="after initial sync")
+
         # Chats whose history WhatsApp Web had not loaded into its store yet get
         # retried on their own thread — see _backfill_empty_chats(). It runs in
         # parallel with the media phase below because both are silent, best-effort
         # and can take minutes; the backfill's first pass is 30 s away, and the
         # user should not have to wait out the media downloads to get history.
+        # A freshly paired session is the case with nothing pending *yet* and
+        # everything still to come: the phone delivers its history over the
+        # following minutes, and nothing pushes it to WinZapp when it lands. So
+        # the loop starts on either signal — chats to re-query, or history still
+        # on its way — and it is the loop that decides when to stop.
         pending = len(getattr(self, "_chats_awaiting_messages", set()))
-        if pending:
-            logging.info("[backfill] %d chat(s) returned no messages — scheduling backfill.", pending)
+        still_landing = self.refresh_history_still_landing(context="after initial sync")
+        if pending or still_landing:
+            logging.info(
+                "[backfill] Scheduling backfill: %d chat(s) short of a full page, "
+                "history still landing=%s.", pending, still_landing)
             existing = getattr(self, "_backfill_thread", None)
             if existing is None or not existing.is_alive():
                 self._backfill_thread = threading.Thread(
@@ -9174,11 +9346,24 @@ class MainWindow(wx.Frame):
             logging.info("[history-sync] unblock endpoint unavailable: %s", exc)
             return None
 
-    def request_older_messages(self, remote_jid: str, timeout: float = 15) -> bool:
-        """Ask the connected phone to push its next history-sync chunk for remote_jid."""
+    def request_older_messages(self, remote_jid: str, timeout: int = 60) -> bool:
+        """Ask the phone for history older than what this device holds.
+
+        Fire-and-forget by nature: the phone answers with a history-sync chunk
+        minutes later, never in this response, so a True here means "the
+        request went out", not "there are new messages now".
+
+        The 60 s timeout is not generosity — a timeout here returns False, and
+        the caller in fetch_older_messages() reads False as "the request never
+        went out" and drops the chat into _exhausted_chats, which stops it from
+        ever being re-queried this session. Timing out early therefore
+        permanently writes off exactly the chats that still have history coming.
+        """
         if not getattr(self, "_wa_connected", False):
             return False
         jid = self._normalize_jid(remote_jid)
+        # Same @lid-preferred addressing sync_chat_messages() uses, so a chat
+        # the store only knows under its @lid still resolves.
         lid = getattr(self, "_phone_to_lid", {}).get(jid, "")
         if lid:
             phone = lid
@@ -11484,13 +11669,44 @@ class MainWindow(wx.Frame):
                 if not isinstance(wpp_messages, list):
                     wpp_messages = []
                 
-                # If API returned no messages, mark history as exhausted in-memory
+                # No messages left locally — but "locally" is the operative
+                # word. WhatsApp only pushes a bounded window of history to a
+                # linked device and keeps the rest on the phone, so running
+                # out here usually means "this device has no more", not "this
+                # conversation has no more". WhatsApp Web's own UI handles it
+                # with the "get older messages from your phone" banner; do the
+                # same thing, once per chat, before writing the chat off.
+                #
+                # The phone answers asynchronously (a history-sync chunk,
+                # minutes later), so the request cannot help *this* call. What
+                # it must not do is leave the chat in _exhausted_chats, or the
+                # early-return at the top of this method would refuse to look
+                # again even after the messages have landed.
                 if not wpp_messages:
                     if not hasattr(self, "_exhausted_chats"):
                         self._exhausted_chats = set()
-                    self._exhausted_chats.add(remote_jid)
-                    logging.info(f"[fetch_older_messages] Marked history as exhausted in-memory for {remote_jid}")
-                
+                    if not hasattr(self, "_older_requested_chats"):
+                        self._older_requested_chats = set()
+                    already_asked = remote_jid in self._older_requested_chats
+                    requested = False
+                    if not already_asked:
+                        self._older_requested_chats.add(remote_jid)
+                        requested = self.request_older_messages(remote_jid)
+                    if requested:
+                        logging.info(
+                            "[fetch_older_messages] No local history left for %s — "
+                            "asked the phone for older messages; leaving the chat "
+                            "re-queryable so the reply can be picked up.", remote_jid,
+                        )
+                    else:
+                        self._exhausted_chats.add(remote_jid)
+                        logging.info(
+                            "[fetch_older_messages] Marked history as exhausted "
+                            "in-memory for %s (older-message request %s).",
+                            remote_jid,
+                            "already sent earlier" if already_asked else "not sent",
+                        )
+
                 fetched_messages = []
                 for wm in wpp_messages:
                     if isinstance(wm, dict) and self.ws:

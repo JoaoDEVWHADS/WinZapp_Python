@@ -41,6 +41,13 @@ def kill_process_by_name(name):
 if __name__ == "__main__":
     # 1. Encerrar os processos ativos da API e do Chrome/Chromium
     kill_port(6300)
+    # chrome-headless-shell is what WinZapp actually launches now (see
+    # client/api_patches/start.js). `taskkill /IM chrome.exe` does NOT match
+    # chrome-headless-shell.exe — it is a different image name, not a prefix
+    # match — so without this entry the browser survived every "clear
+    # sessions" run and kept its lock on userDataDir/, which is exactly the
+    # folder step 2 below then fails to delete.
+    kill_process_by_name("chrome-headless-shell")
     kill_process_by_name("chrome")
     kill_process_by_name("chromium")
     kill_process_by_name("start.js")

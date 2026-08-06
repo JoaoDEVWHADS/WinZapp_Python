@@ -20,7 +20,7 @@ state api/ is actually in:
        package.json — the same patch set setup_api.py applies, so an end-user
        install and a developer one end up with identical API code
     3. npm install --no-audit --no-fund      (install all dependencies)
-    4. npm exec puppeteer browsers install chrome (best-effort)
+    4. npm exec puppeteer browsers install chrome-headless-shell (best-effort)
     5. npm run db:generate                   (only if the script is defined)
     6. npm run build                         (compile TypeScript → dist/server.js)
 
@@ -555,7 +555,11 @@ class ApiSetupDialog(wx.Dialog):
             path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
 
         api_dir  = resource_path("api")
-        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        # Must be the directory start.js searches and exports as
+        # PUPPETEER_CACHE_DIR (client/api/.cache), not the .cache/puppeteer
+        # subfolder — otherwise the browser this installer downloads and the
+        # browser the server looks for are two different trees.
+        puppeteer_cache = resource_path("api", ".cache")
         npm_env  = {
             **os.environ,
             "PATH": path_env,
@@ -753,10 +757,16 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 4.5: download chrome if using modern puppeteer ───────
+            # ── Step 4.5: download chrome-headless-shell ──────────────────
+            # Must match what start.js looks for and launches. This used to
+            # fetch full "chrome", and that is how a machine ends up with a
+            # GUI-capable Chrome under .cache/ and no shell at all — the exact
+            # state in which start.js's old any-Chrome-will-do search silently
+            # handed WPPConnect full Chrome forever (see tests/test_headless_shell.py).
+            # The shell is also the smaller download and the faster start.
             self._set_stage(self._i18n.t("api_setup_downloading_chrome"), *stages["chrome"])
             ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome"],
+                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
                 cwd=api_dir,
                 env=npm_env,
             )
