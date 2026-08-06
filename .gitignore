@@ -17,7 +17,7 @@ client/logs/
 
 # Bundled Node.js runtime (binary distribution, ~50 MB)
 /client/node/
-/client/node-v24.15.0-win-x64.zip
+/client/node*.zip
 
 # WPPConnect Server runtime (downloaded dynamically via setup_api.py)
 /client/api/
