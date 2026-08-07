@@ -6202,8 +6202,6 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
             try:
                 self.sync_media_for_all_chats()
-                if not self.background_mode:
-                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
             finally:
