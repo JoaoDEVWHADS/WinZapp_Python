@@ -196,9 +196,3 @@ db.sqlite3-journal
 
 # Jupyter
 .ipynb_checkpoints
-
-wppconnect_repos/
-
-# Temporary integration rules
-builder.py
-setup.py
