@@ -480,7 +480,33 @@ class MainWindow(wx.Frame):
     def __init__(self):
         import time as _time
         self._t_app_start = _time.perf_counter()
+        is_post_update = "--post-update" in sys.argv
+        logging.info("[STARTUP] ==================================================")
+        logging.info("[STARTUP] WinZapp Application Opened Successfully!")
+        if is_post_update:
+            logging.info("[POST_UPDATE_SUCCESS] *** SUCCESS: APPLICATION SUCCESSFULLY RESTARTED AFTER AUTO-UPDATE! ***")
         logging.info("[STARTUP_TIMING] T+0.000s — MainWindow __init__ started")
+        
+        # Check for update marker file from previous update attempt
+        try:
+            from updater import _outer_exe_dir
+            marker_file = os.path.join(_outer_exe_dir(), "update_failed.marker")
+            if os.path.exists(marker_file):
+                with open(marker_file, "r", encoding="utf-8", errors="ignore") as _mf:
+                    marker_content = _mf.read().strip()
+                logging.error("[UPDATER_STATUS] WARNING: Found update_failed.marker from previous update: %s", marker_content)
+                if is_post_update:
+                    # Clean up old marker on successful post-update start
+                    try:
+                        os.remove(marker_file)
+                        logging.info("[UPDATER_STATUS] Cleaned up old update_failed.marker after successful launch.")
+                    except OSError:
+                        pass
+            else:
+                logging.info("[UPDATER_STATUS] Application started cleanly without update_failed.marker.")
+        except Exception as _me:
+            logging.warning("[UPDATER_STATUS] Error checking update marker: %s", _me)
+        logging.info("[STARTUP] ==================================================")
         super().__init__(None)
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
         self._save_lock = threading.Lock()
@@ -4548,31 +4574,73 @@ class MainWindow(wx.Frame):
 
     def load_settings(self):
         settings_file = data_path("settings.json")
-        # Bootstrap from default on first run
+        default_file = resource_path("data", "settings_default.json")
+        fallback_dict = {
+            "connection": {
+                "wpp_server": "http://127.0.0.1",
+                "wpp_port": 6300,
+                "wpp_ws_server": "ws://127.0.0.1",
+                "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
+                "wpp_custom_api": False
+            },
+            "general": {
+                "language": "",
+                "notifications_enabled": True,
+                "updates_enabled": True,
+                "noise_reduction_enabled": False,
+                "first_run": True,
+                "autostart": False,
+                "show_tray_icon": True,
+                "terms_alert_displayed": False,
+                "quick_tip_shown": False
+            },
+            "status": {
+                "messages_set_completed": False
+            },
+            "user_interface": {
+                "messages_page_size": 200,
+                "focus_on_open": "message_field"
+            },
+            "audio_playback": {
+                "audio_default_speed": 1.0
+            },
+            "audio_devices": {
+                "output_device_name": "",
+                "input_device_name": ""
+            },
+            "storage": {
+                "auto_download_media": True,
+                "media_max_days": 30,
+                "media_max_mb": 100
+            }
+        }
+
+        # Bootstrap settings.json if missing
         if not os.path.isfile(settings_file):
-            default_file = resource_path("data", "settings_default.json")
+            os.makedirs(os.path.dirname(settings_file), exist_ok=True)
             if os.path.isfile(default_file):
-                os.makedirs(os.path.dirname(settings_file), exist_ok=True)
-                shutil.copy2(default_file, settings_file)
+                try:
+                    shutil.copy2(default_file, settings_file)
+                except Exception:
+                    pass
+            if not os.path.isfile(settings_file):
+                try:
+                    with open(settings_file, "w", encoding="utf-8") as f:
+                        json.dump(fallback_dict, f, indent=4)
+                except Exception:
+                    pass
+
         try:
-            with open(settings_file, "r") as f:
+            with open(settings_file, "r", encoding="utf-8") as f:
                 self.settings = json.load(f)
         except Exception:
-            if hasattr(self, 'i18n'):
-                msg   = self.i18n.t('settings_load_failed')
-                title = self.i18n.t("error").format(app_name=self.app_name)
-            else:
-                # i18n not yet initialised — load pt-BR directly as default
-                from core.i18n import _load_translations
-                _pt   = _load_translations("pt-BR")
-                msg   = _pt.get("settings_load_failed",
-                                "Erro ao carregar o arquivo de configuração:")
-                title = _pt.get("error", "{app_name} Erro").format(
-                    app_name=self.app_name)
-            if hasattr(self, 'error_sound'):
-                self.error_sound.play()
-            wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
-            sys.exit()
+            # If load still fails (e.g. corrupt settings.json), reset to defaults
+            self.settings = dict(fallback_dict)
+            try:
+                with open(settings_file, "w", encoding="utf-8") as f:
+                    json.dump(self.settings, f, indent=4)
+            except Exception:
+                pass
         self._migrate_settings()
 
     def _migrate_settings(self):
@@ -5903,7 +5971,7 @@ class MainWindow(wx.Frame):
             #      locally, which on a reconnection means it is fully warmed up, or
             #  (c) we've exhausted retries.
             settled = server_count > 0 and server_count == prev_server_count
-            covers_cache = has_local_chats and server_count >= local_chat_count
+            covers_cache = has_local_chats and local_chat_count > 0 and server_count >= local_chat_count
             if settled or covers_cache:
                 chat_list_settled = True
                 break
@@ -6131,10 +6199,13 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
             try:
                 self.sync_media_for_all_chats()
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
+            finally:
+                wx.CallAfter(self._set_status, "")
             logging.info("[start_sync] Phase 2 media auto-download finished.")
         else:
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
@@ -6657,6 +6728,12 @@ class MainWindow(wx.Frame):
                                 if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
+                        # If chat exists in self.chats (passed in), preserve any higher unreadCount
+                        if hasattr(self, "chats") and jid in self.chats:
+                            local_unread = int(self.chats[jid].get("unreadCount") or 0)
+                            server_unread = int(chat.get("unreadCount") or 0)
+                            if local_unread > server_unread:
+                                chat["unreadCount"] = local_unread
                         chats[jid] = chat
                     else:
                         for k, v in chat.items():
@@ -8741,15 +8818,15 @@ class MainWindow(wx.Frame):
         return None
 
     def preselect_conversations(self):
-        #Checks if window is still open
+        # Checks if window is still open
         if self.IsShown():
             lst = self.conversations_panel.conversations_list
             if lst.GetItemCount() > 0:
-                # Only preselect if there is no current selection/focus
+                # Only preselect focus if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
-                    lst.Select(0)
                     lst.EnsureVisible(0)
+
 
     def sync_remote_chats(self):
         chats = list(self.chats.values())
@@ -9407,12 +9484,13 @@ class MainWindow(wx.Frame):
 
     def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
-                        "stickerMessage", "videoMessage"}
+                        "stickerMessage", "videoMessage",
+                        "audio", "ptt", "document", "doc", "image", "sticker", "video"}
         tasks = [
             msg
             for chat in self.chats.values()
             for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
-            if msg.get("messageType") in _MEDIA_TYPES
+            if (msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES)
         ]
         if not tasks:
             return
@@ -10000,6 +10078,19 @@ class MainWindow(wx.Frame):
         if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
             return
         message_type = msg.get("messageType", "")
+        if not message_type and msg.get("type"):
+            t = str(msg.get("type"))
+            if t in ("audio", "ptt"):
+                message_type = "audioMessage"
+            elif t == "image":
+                message_type = "imageMessage"
+            elif t == "video":
+                message_type = "videoMessage"
+            elif t in ("document", "doc"):
+                message_type = "documentMessage"
+            elif t == "sticker":
+                message_type = "stickerMessage"
+
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
         if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
             return
