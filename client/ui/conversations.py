@@ -4000,6 +4000,8 @@ class ConversationsPanel(wx.Panel):
         else:
             wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
 
+        logging.info(f"[Save As] msg_id={msg_id}, msg_type={msg_type}, is_ptt={is_ptt}, raw_fileName='{file_name}', mimetype='{mimetype}', default_file='{default_file}', wildcard='{wildcard}'")
+
         dlg_title = (
             self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
             else self.main_window.i18n.t("save_as")
