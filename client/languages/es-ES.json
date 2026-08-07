@@ -639,6 +639,7 @@
     "sound_pack_default_label": "Paquete de sonido predeterminado",
     "import_sound_pack_button": "Importar paquete de sonido",
     "select_folder_dialog_title": "Seleccionar carpeta",
+    "select_soundpack_file_or_folder": "Seleccionar archivo de paquete de sonido (.zip) o carpeta",
     "soundpack_import_success": "Paquete de sonido importado correctamente.",
     "soundpack_import_error_no_folder": "Carpeta no válida.",
     "soundpack_import_error_no_manifest": "La carpeta seleccionada no contiene un archivo de paquete de sonido (.pack.json).",

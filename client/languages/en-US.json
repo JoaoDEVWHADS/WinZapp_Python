@@ -639,6 +639,7 @@
     "sound_pack_default_label": "Default sound pack",
     "import_sound_pack_button": "Import sound pack",
     "select_folder_dialog_title": "Select folder",
+    "select_soundpack_file_or_folder": "Select sound pack file (.zip) or folder",
     "soundpack_import_success": "Sound pack imported successfully.",
     "soundpack_import_error_no_folder": "Invalid folder.",
     "soundpack_import_error_no_manifest": "The selected folder doesn't contain a sound pack file (.pack.json).",
