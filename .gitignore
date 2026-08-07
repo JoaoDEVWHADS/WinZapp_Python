@@ -196,3 +196,5 @@ db.sqlite3-journal
 
 # Jupyter
 .ipynb_checkpoints
+
+wppconnect_repos/
