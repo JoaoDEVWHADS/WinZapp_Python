@@ -336,8 +336,8 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         # Wait for file system to finish writing the new exe before launching it.
         "timeout /t 3 /nobreak >NUL\n"
         f'if exist "{exe_path}" (\n'
-        f'    echo [%date% %time%] [UPDATER_BAT] Launching updated executable: "{exe_path}" --post-update >> "{log_file}"\n'
-        f'    start "" "{exe_path}" --post-update\n'
+        f'    echo [%date% %time%] [UPDATER_BAT] Launching updated executable: "{exe_path}" >> "{log_file}"\n'
+        f'    start "" "{exe_path}"\n'
         ") else (\n"
         f'    echo [%date% %time%] [UPDATER_BAT] ERROR: Executable not found at "{exe_path}"! >> "{log_file}"\n'
         f'    echo WinZapp exe not found after update: {exe_path} >> "{install_dir}\\update_failed.marker"\n'
