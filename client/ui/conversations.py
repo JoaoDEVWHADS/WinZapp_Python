@@ -3899,7 +3899,7 @@ class ConversationsPanel(wx.Panel):
         msg_id   = msg.get("key", {}).get("id", "")
 
         inner = msg_obj.get(msg_type) or {}
-        file_name = inner.get("fileName") or inner.get("title") or inner.get("name") or ""
+        file_name = inner.get("fileName") or inner.get("title") or inner.get("name") or inner.get("caption") or msg.get("caption") or ""
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False))
 
         mimetype = inner.get("mimetype", "") or ""
@@ -3938,6 +3938,9 @@ class ConversationsPanel(wx.Panel):
         else:
             ext = guessed_ext or ".bin"
             default_file = f"arquivo_{msg_id}{ext}"
+
+        # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
+        default_file = re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
 
         dlg_title = (
             self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
