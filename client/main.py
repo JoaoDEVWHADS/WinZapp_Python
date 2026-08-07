@@ -11558,21 +11558,39 @@ class MainWindow(wx.Frame):
             elif t in ("document", "doc"):
                 msg_type = "documentMessage"
 
-        if msg_type and isinstance(msg_inner_obj, dict):
-            inner = msg_inner_obj.get(msg_type)
-            if isinstance(inner, dict):
-                if "mediaKey" in inner and inner["mediaKey"]:
-                    body_data["mediaKey"] = inner["mediaKey"]
-                if "url" in inner and inner["url"]:
-                    body_data["clientUrl"] = inner["url"]
-                if "directPath" in inner and inner["directPath"]:
-                    body_data["directPath"] = inner["directPath"]
-                if "mimetype" in inner and inner["mimetype"]:
-                    body_data["mimetype"] = inner["mimetype"]
-                body_data["type"] = msg_type.replace("Message", "")
+        # Check nested structures as well as top-level keys
+        candidate_objs = []
+        if isinstance(msg_inner_obj, dict):
+            candidate_objs.append(msg_inner_obj)
+            if msg_type and isinstance(msg_inner_obj.get(msg_type), dict):
+                candidate_objs.append(msg_inner_obj.get(msg_type))
+            for k in ("audioMessage", "imageMessage", "videoMessage", "documentMessage", "stickerMessage"):
+                if isinstance(msg_inner_obj.get(k), dict):
+                    candidate_objs.append(msg_inner_obj.get(k))
+        candidate_objs.append(media)
+
+        for obj in candidate_objs:
+            if not body_data.get("mediaKey") and obj.get("mediaKey"):
+                mk = obj.get("mediaKey")
+                if isinstance(mk, bytes):
+                    body_data["mediaKey"] = base64.b64encode(mk).decode("utf-8")
+                elif isinstance(mk, dict) and "data" in mk:
+                    body_data["mediaKey"] = base64.b64encode(bytes(mk["data"])).decode("utf-8")
+                else:
+                    body_data["mediaKey"] = str(mk)
+            if not body_data.get("clientUrl") and (obj.get("url") or obj.get("clientUrl")):
+                body_data["clientUrl"] = obj.get("url") or obj.get("clientUrl")
+            if not body_data.get("directPath") and obj.get("directPath"):
+                body_data["directPath"] = obj.get("directPath")
+            if not body_data.get("mimetype") and obj.get("mimetype"):
+                body_data["mimetype"] = obj.get("mimetype")
+
+        if msg_type:
+            body_data["type"] = msg_type.replace("Message", "")
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
+        has_direct_path = bool(body_data.get("directPath"))
         media_type = body_data.get("type", "")
         logging.info(
             "[get_base64_from_media] Requesting media for msg_id=%s, url=%s, has_mediaKey=%s, has_clientUrl=%s, type=%s",

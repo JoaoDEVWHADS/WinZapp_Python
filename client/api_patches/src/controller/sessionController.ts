@@ -547,21 +547,23 @@ export async function getMediaByMessage(req: Request, res: Response) {
   try {
     let message: any = null;
 
-    // If details are provided in the request body (e.g. POST request with local cache), use them directly.
-    if (req.body && (req.body.mediaKey || req.body.clientUrl || req.body.directPath)) {
-      req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
+    // Only bypass Puppeteer lookup if the body contains a complete media download URL (clientUrl or directPath).
+    // If only mediaKey is present, we must query Puppeteer to retrieve the full message object with valid CDN URLs.
+    const bodyHasUrl = req.body && (req.body.clientUrl || req.body.directPath);
+    if (bodyHasUrl && req.body.mediaKey) {
+      req.logger.info(`Received full media decryption details in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
-      // Normalise key types and structures if needed by decryptFile
       if (typeof message.mediaKey === 'object' && message.mediaKey?.data) {
         message.mediaKey = Buffer.from(message.mediaKey.data);
       } else if (typeof message.mediaKey === 'string') {
         message.mediaKey = Buffer.from(message.mediaKey, 'base64');
       }
     } else {
+      // Lookup in Puppeteer store using cleanMsgId
       try {
         message = await client.getMessageById(cleanMsgId);
       } catch (err: any) {
-        req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
+        req.logger.warn(`client.getMessageById threw error for ${cleanMsgId}: ${err.message || err}. Trying fallback...`);
       }
 
       if (!message && messageId !== cleanMsgId) {
@@ -570,7 +572,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
         } catch (err: any) {}
       }
 
-      // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
+      // Fallback: If message is not found, attempt loadEarlierMessages on the chat
       if (!message && cleanMsgId) {
         const parts = cleanMsgId.split('_');
         if (parts.length >= 2) {
@@ -582,13 +584,36 @@ export async function getMediaByMessage(req: Request, res: Response) {
               try {
                 message = await client.getMessageById(cleanMsgId);
               } catch (retryErr: any) {
-                req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
+                req.logger.warn(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
               }
-            } catch (loadErr) {
-              req.logger.error(`Error executing loadEarlierMessages: ${loadErr}`);
+            } catch (loadErr: any) {
+              req.logger.warn(`Error executing loadEarlierMessages for ${chatId}: ${loadErr.message || loadErr}`);
             }
           }
         }
+      }
+
+      // If Puppeteer could not find the message (or threw Chat not found), check if body contains decryption keys to proceed
+      if (!message && req.body && (req.body.mediaKey || req.body.directPath || req.body.clientUrl || req.body.url)) {
+        req.logger.info(`Puppeteer lookup failed for ${messageId}, falling back to request body payload.`);
+        message = { ...req.body };
+        if (typeof message.mediaKey === 'object' && message.mediaKey?.data) {
+          message.mediaKey = Buffer.from(message.mediaKey.data);
+        } else if (typeof message.mediaKey === 'string') {
+          message.mediaKey = Buffer.from(message.mediaKey, 'base64');
+        }
+      }
+    }
+
+    // Normalise clientUrl and directPath from body fields if present
+    if (message) {
+      if (!message.clientUrl && message.url) {
+        message.clientUrl = message.url;
+      }
+      if (!message.clientUrl && message.directPath) {
+        const path = message.directPath.startsWith('/') ? message.directPath : `/${message.directPath}`;
+        message.clientUrl = `https://mmg.whatsapp.net${path}`;
+        req.logger.info(`Reconstructed clientUrl using directPath for message ${cleanMsgId}: ${message.clientUrl}`);
       }
     }
 
