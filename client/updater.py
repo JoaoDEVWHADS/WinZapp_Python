@@ -813,17 +813,51 @@ class UpdateChecker:
             self._mw,
         )
 
+    def _get_active_parent(self):
+        mw = self._mw
+        # Check if there is an active modal dialog (e.g. connection_dial, pairing_dial, settings)
+        cd = getattr(getattr(mw, "connect", None), "connection_dial", None)
+        if cd is not None and hasattr(cd, "IsShown") and cd.IsShown():
+            pd = getattr(getattr(mw, "connect", None), "pairing_dial", None)
+            if pd is not None and hasattr(pd, "IsShown") and pd.IsShown():
+                return pd
+            return cd
+        # Fallback to focused top-level window or main window
+        focused = wx.Window.FindFocus()
+        if focused:
+            tlw = wx.GetTopLevelParent(focused)
+            if tlw and hasattr(tlw, "IsShown") and tlw.IsShown():
+                return tlw
+        return mw
+
     def _show_update_dialog(self, remote_version: str, changelog: str, zip_url: str, sha256sums_url: str = ""):
-        dlg    = UpdateDialog(self._mw, remote_version, changelog)
+        previously_focused = wx.Window.FindFocus()
+        parent_window = self._get_active_parent()
+
+        dlg    = UpdateDialog(parent_window, remote_version, changelog)
         result = dlg.ShowModal()
         dlg.Destroy()
 
-        # Restore focus to whichever window or panel was active
+        # Restore focus to whichever window or control was active before the dialog appeared
         def _restore_focus():
+            if previously_focused:
+                try:
+                    if hasattr(previously_focused, "IsShownOnScreen") and previously_focused.IsShownOnScreen():
+                        previously_focused.SetFocus()
+                        return
+                except Exception:
+                    pass
+
             mw = self._mw
             if hasattr(mw, "IsShown") and mw.IsShown():
                 mw.Raise()
                 mw.SetFocus()
+                # If connection_dial is active, focus its main element/panel
+                cd = getattr(getattr(mw, "connect", None), "connection_dial", None)
+                if cd is not None and hasattr(cd, "IsShown") and cd.IsShown():
+                    cd.Raise()
+                    cd.SetFocus()
+                    return
                 # If conversations panel exists and has list, focus it
                 cp = getattr(mw, "conversations_panel", None)
                 if cp is not None and hasattr(cp, "conversations_list"):
@@ -840,8 +874,9 @@ class UpdateChecker:
             self._schedule_retry()
 
     def _do_install(self, new_version: str, zip_url: str, sha256sums_url: str = ""):
+        parent_window = self._get_active_parent()
         while True:
-            prog = UpdateProgressDialog(self._mw, new_version, self._mw, zip_url, sha256sums_url)
+            prog = UpdateProgressDialog(parent_window, new_version, self._mw, zip_url, sha256sums_url)
             result = prog.run()
             prog.Destroy()
 
