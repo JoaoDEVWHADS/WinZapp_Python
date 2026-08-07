@@ -8818,15 +8818,15 @@ class MainWindow(wx.Frame):
         return None
 
     def preselect_conversations(self):
-        #Checks if window is still open
+        # Checks if window is still open
         if self.IsShown():
             lst = self.conversations_panel.conversations_list
             if lst.GetItemCount() > 0:
-                # Only preselect if there is no current selection/focus
+                # Only preselect focus if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
-                    lst.Select(0)
                     lst.EnsureVisible(0)
+
 
     def sync_remote_chats(self):
         chats = list(self.chats.values())
