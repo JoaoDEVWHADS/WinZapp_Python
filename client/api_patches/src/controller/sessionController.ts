@@ -540,41 +540,47 @@ export async function getMediaByMessage(req: Request, res: Response) {
     });
   }
 
+  // Clean messageId for WPPConnect store lookups:
+  // e.g. "true_120363409931936700@g.us_3EB056E440332317DE11FA_117841202282688:86@lid" -> "true_120363409931936700@g.us_3EB056E440332317DE11FA"
+  const cleanMsgId = messageId && messageId.includes('_') ? messageId.split('_').slice(0, 3).join('_') : messageId;
+
   try {
     let message: any = null;
 
     // If details are provided in the request body (e.g. POST request with local cache), use them directly.
-    if (req.body && (req.body.mediaKey || req.body.clientUrl)) {
+    if (req.body && (req.body.mediaKey || req.body.clientUrl || req.body.directPath)) {
       req.logger.info(`Received decryption keys in body for message ${messageId}. Bypassing Puppeteer lookup.`);
       message = req.body;
       // Normalise key types and structures if needed by decryptFile
-      if (typeof message.mediaKey === 'object' && message.mediaKey.data) {
+      if (typeof message.mediaKey === 'object' && message.mediaKey?.data) {
         message.mediaKey = Buffer.from(message.mediaKey.data);
       } else if (typeof message.mediaKey === 'string') {
         message.mediaKey = Buffer.from(message.mediaKey, 'base64');
       }
     } else {
       try {
-        message = await client.getMessageById(messageId);
+        message = await client.getMessageById(cleanMsgId);
       } catch (err: any) {
         req.logger.warn(`client.getMessageById threw error: ${err.message || err}. Trying fallback...`);
       }
 
+      if (!message && messageId !== cleanMsgId) {
+        try {
+          message = await client.getMessageById(messageId);
+        } catch (err: any) {}
+      }
+
       // Fallback: If message is not found, it might not be loaded in the WhatsApp Web cache.
-      // Try to parse the chatId from the serialized messageId (format: fromMe_chatId_msgId_participant)
-      // and load earlier messages to force sync it.
-      if (!message && messageId) {
-        const parts = messageId.split('_');
+      if (!message && cleanMsgId) {
+        const parts = cleanMsgId.split('_');
         if (parts.length >= 2) {
           const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
           if (chatId && typeof client.loadEarlierMessages === 'function') {
-            req.logger.info(`Message ${messageId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
+            req.logger.info(`Message ${cleanMsgId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
             try {
-              // Load earlier messages (fetches a batch from WhatsApp server to Web client memory)
               await client.loadEarlierMessages(chatId);
-              // Query again
               try {
-                message = await client.getMessageById(messageId);
+                message = await client.getMessageById(cleanMsgId);
               } catch (retryErr: any) {
                 req.logger.error(`Retry getMessageById failed: ${retryErr.message || retryErr}`);
               }
@@ -602,14 +608,22 @@ export async function getMediaByMessage(req: Request, res: Response) {
       });
     }
 
+    // Reconstruct clientUrl from directPath if clientUrl is missing
+    if (!message.clientUrl && message.directPath) {
+      const path = message.directPath.startsWith('/') ? message.directPath : `/${message.directPath}`;
+      message.clientUrl = `https://mmg.whatsapp.net${path}`;
+      req.logger.info(`Reconstructed clientUrl using directPath for message ${cleanMsgId}: ${message.clientUrl}`);
+    }
+
     // Ensure it contains media properties or has mimetype
-    const mediaUrl = message.clientUrl || message.deprecatedMms3Url;
+    let mediaUrl = message.clientUrl || message.deprecatedMms3Url;
     if (!mediaUrl) {
       if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
-        req.logger.info(`Message ${messageId} does not have clientUrl. Trying client.downloadMedia with 30s timeout...`);
+        req.logger.info(`Message ${cleanMsgId} does not have clientUrl. Trying client.downloadMedia with 30s timeout...`);
         try {
           let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
+          const targetId = cleanMsgId || messageId;
+          const downloadPromise = (client as any).downloadMedia(targetId).catch((err: any) => {
             req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
             return null;
           }).finally(() => {
@@ -617,7 +631,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
           const timeoutPromise = new Promise<null>((resolve) => {
             timer = setTimeout(() => {
-              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${messageId})`);
+              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${targetId})`);
               resolve(null);
             }, 30000);
           });
@@ -655,17 +669,17 @@ export async function getMediaByMessage(req: Request, res: Response) {
       let freshMessage: any = null;
       if (client.page && !client.page.isClosed()) {
         try {
-          freshMessage = await client.getMessageById(messageId);
+          freshMessage = await client.getMessageById(cleanMsgId);
         } catch (err) {}
 
-        if (!freshMessage && messageId) {
-          const parts = messageId.split('_');
+        if (!freshMessage && cleanMsgId) {
+          const parts = cleanMsgId.split('_');
           if (parts.length >= 2) {
             const chatId = parts[1];
             if (chatId && typeof client.loadEarlierMessages === 'function') {
               try {
                 await client.loadEarlierMessages(chatId);
-                freshMessage = await client.getMessageById(messageId);
+                freshMessage = await client.getMessageById(cleanMsgId);
               } catch (err) {}
             }
           }
@@ -674,7 +688,11 @@ export async function getMediaByMessage(req: Request, res: Response) {
 
       if (freshMessage) {
         try {
-          req.logger.info(`Found fresh message in browser for ${messageId}, attempting decryption...`);
+          if (!freshMessage.clientUrl && freshMessage.directPath) {
+            const path = freshMessage.directPath.startsWith('/') ? freshMessage.directPath : `/${freshMessage.directPath}`;
+            freshMessage.clientUrl = `https://mmg.whatsapp.net${path}`;
+          }
+          req.logger.info(`Found fresh message in browser for ${cleanMsgId}, attempting decryption...`);
           const buffer = await client.decryptFile(freshMessage);
           return res.status(200).json({
             base64: buffer.toString('base64'),
@@ -689,7 +707,8 @@ export async function getMediaByMessage(req: Request, res: Response) {
       if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
         try {
           let timer: any;
-          const downloadPromise = (client as any).downloadMedia(messageId).catch((err: any) => {
+          const targetId = cleanMsgId || messageId;
+          const downloadPromise = (client as any).downloadMedia(targetId).catch((err: any) => {
             req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
             return null;
           }).finally(() => {
@@ -697,7 +716,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
           });
           const timeoutPromise = new Promise<null>((resolve) => {
             timer = setTimeout(() => {
-              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${messageId})`);
+              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${targetId})`);
               resolve(null);
             }, 30000);
           });
