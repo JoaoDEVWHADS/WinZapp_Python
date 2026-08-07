@@ -298,51 +298,32 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     os.close(bat_fd)
 
     exe_path = os.path.join(install_dir, exe_name)
-    log_file = os.path.join(install_dir, "logs", "updater_installer.log")
-    
+
     bat = (
         "@echo off\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Starting batch update execution for PID {pid}... >> "{log_file}"\n'
         ":WAIT\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
         "if not errorlevel 1 (\n"
         "    timeout /t 1 /nobreak >NUL\n"
         "    goto WAIT\n"
         ")\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Process PID {pid} has exited. Proceeding to kill residual processes... >> "{log_file}"\n'
         # Give child processes a moment to exit, then kill stragglers holding file locks.
         "timeout /t 2 /nobreak >NUL\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Terminating node.exe, chrome-headless-shell.exe, chrome.exe, chromium.exe... >> "{log_file}"\n'
-        "taskkill /F /IM node.exe >> \"%log_file%\" 2>&1\n"
-        "taskkill /F /IM chrome-headless-shell.exe >> \"%log_file%\" 2>&1\n"
-        "taskkill /F /IM chrome.exe >> \"%log_file%\" 2>&1\n"
-        "taskkill /F /IM chromium.exe >> \"%log_file%\" 2>&1\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Clearing processes listening on ports {api_port} and 5433... >> "{log_file}"\n'
-        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >> \"{log_file}\" 2>&1\n"
-        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >> \"{log_file}\" 2>&1\n"
+        f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
+        "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >NUL 2>&1\n"
         "timeout /t 1 /nobreak >NUL\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Cleaning legacy api directories... >> "{log_file}"\n'
-        f'if exist "{install_dir}\\api\\src" rmdir /s /q "{install_dir}\\api\\src"\n'
-        f'if exist "{install_dir}\\api\\dist" rmdir /s /q "{install_dir}\\api\\dist"\n'
-        f'if exist "{install_dir}\\api_patches" rmdir /s /q "{install_dir}\\api_patches"\n'
-        f'echo [%date% %time%] [UPDATER_BAT] Copying updated files from "{source_dir}" to "{install_dir}"... >> "{log_file}"\n'
-        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\" >> "{log_file}" 2>&1\n'
-        "if errorlevel 1 (\n"
-        f'    echo [%date% %time%] [UPDATER_BAT] ERROR: xcopy failed with errorlevel %errorlevel%! >> "{log_file}"\n'
+        # xcopy's exit code was previously never checked, so a failed copy
+        # (locked file, disk full, permissions) silently relaunched whatever
+        # was already in install_dir — the user saw the app come back and
+        # assumed the update worked. errorlevel 4+ means xcopy itself failed
+        # (as opposed to 0/1, which just mean "nothing to copy"/"success");
+        # leave a marker file WinZapp checks on next startup so the user is
+        # told instead of silently running a stale/partial install.
+        f'xcopy /E /Y /I /H "{source_dir}\\*" "{install_dir}\\"\n'
+        "if errorlevel 4 (\n"
         f'    echo update failed > "{install_dir}\\update_failed.marker"\n'
-        ") else (\n"
-        f'    echo [%date% %time%] [UPDATER_BAT] xcopy completed successfully. >> "{log_file}"\n'
         ")\n"
-        # Wait for file system to finish writing the new exe before launching it.
-        "timeout /t 3 /nobreak >NUL\n"
-        f'if exist "{exe_path}" (\n'
-        f'    echo [%date% %time%] [UPDATER_BAT] Launching updated executable: "{exe_path}" --post-update >> "{log_file}"\n'
-        f'    start "" "{exe_path}" --post-update\n'
-        ") else (\n"
-        f'    echo [%date% %time%] [UPDATER_BAT] ERROR: Executable not found at "{exe_path}"! >> "{log_file}"\n'
-        f'    echo WinZapp exe not found after update: {exe_path} >> "{install_dir}\\update_failed.marker"\n'
-        ")\n"
-        f'echo [%date% %time%] [UPDATER_BAT] Batch update finished. Deleting temporary script. >> "{log_file}"\n'
+        f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
     )
 
@@ -818,21 +799,6 @@ class UpdateChecker:
         result = dlg.ShowModal()
         dlg.Destroy()
 
-        # Restore focus to whichever window or panel was active
-        def _restore_focus():
-            mw = self._mw
-            if hasattr(mw, "IsShown") and mw.IsShown():
-                mw.Raise()
-                mw.SetFocus()
-                # If conversations panel exists and has list, focus it
-                cp = getattr(mw, "conversations_panel", None)
-                if cp is not None and hasattr(cp, "conversations_list"):
-                    cp.conversations_list.SetFocus()
-                elif hasattr(mw, "navigation_panel"):
-                    mw.navigation_panel.nav_list.SetFocus()
-
-        wx.CallAfter(_restore_focus)
-
         if result == wx.ID_YES:
             self._do_install(remote_version, zip_url, sha256sums_url)
         else:
@@ -946,9 +912,12 @@ class WppUpdateChecker:
         return fetch_latest_wpp_tag()
 
     def _check_once(self):
-        logging.info("[WppUpdateChecker] Checking for wppconnect-server commit updates...")
+        logging.info("[WppUpdateChecker] Checking for wppconnect-server updates...")
         installed = self._mw._get_installed_wpp_version()
         if not installed:
+            # Not installed yet (or version unreadable) — the normal
+            # first-run setup / version-gate flow owns that case, not this
+            # checker.
             self._schedule_retry()
             return
 
@@ -958,29 +927,24 @@ class WppUpdateChecker:
             return
         remote_version = tag.lstrip("vV")
 
-        # If installed was read from package.json ("2.10.0") on a fresh install without .commit_sha,
-        # seed .commit_sha with the remote SHA instead of prompting a false positive update dialog.
-        if "." in installed and "." not in remote_version and len(remote_version) <= 12:
-            try:
-                from app_paths import resource_path
-                sha_file = resource_path("api", ".commit_sha")
-                with open(sha_file, "w", encoding="utf-8") as f:
-                    f.write(remote_version)
-                logging.info("[WppUpdateChecker] Seeded .commit_sha with initial remote SHA: %s", remote_version)
-            except Exception:
-                pass
+        try:
+            from packaging.version import Version
+            newer_available = Version(remote_version) > Version(installed)
+        except Exception:
+            logging.warning(
+                "[WppUpdateChecker] Could not compare versions (installed=%r, remote=%r)",
+                installed, remote_version,
+            )
             self._schedule_retry()
             return
 
-        newer_available = (remote_version != installed)
-
         if not newer_available:
-            logging.info("[WppUpdateChecker] wppconnect-server is up to date (commit %s).", installed)
+            logging.info("[WppUpdateChecker] wppconnect-server is up to date (%s).", installed)
             self._schedule_retry()
             return
 
         logging.info(
-            "[WppUpdateChecker] Newer wppconnect-server commit available: %s -> %s",
+            "[WppUpdateChecker] Newer wppconnect-server release available: %s -> %s",
             installed, remote_version,
         )
         wx.CallAfter(self._prompt_update, installed, remote_version, tag)
@@ -998,7 +962,7 @@ class WppUpdateChecker:
             self._schedule_retry()
 
     def _force_reinstall_worker(self):
-        logging.info("[WppUpdateChecker] Force-reinstall requested — fetching latest commit SHA...")
+        logging.info("[WppUpdateChecker] Force-reinstall requested — fetching latest release tag...")
         tag = self._fetch_latest_tag()
         if not tag:
             wx.CallAfter(
