@@ -11431,7 +11431,10 @@ class MainWindow(wx.Frame):
 
         # Persist the updated pushName map to database metadata.
         if _ppm_updated and hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
+            try:
+                self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
+            except Exception as db_err:
+                logging.warning("[on_presence_update] Failed to save presence_pushname_map: %s", db_err)
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
