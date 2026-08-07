@@ -938,16 +938,30 @@ class SettingsDialog(wx.Dialog):
 
     def _on_import_sound_pack(self, event):
         i18n = self.main_window.i18n
-        with wx.DirDialog(
-            self, message=i18n.t("select_folder_dialog_title"),
-            style=wx.DD_DEFAULT_STYLE,
-        ) as dir_dlg:
-            if dir_dlg.ShowModal() != wx.ID_OK:
-                return
-            source_folder = dir_dlg.GetPath()
+        source_path = ""
+
+        # Allow user to pick a ZIP file or a Folder containing a soundpack (.pack.json)
+        dlg = wx.FileDialog(
+            self,
+            message=i18n.t("select_soundpack_file_or_folder"),
+            wildcard="Sound Packs (*.zip)|*.zip|All Files (*.*)|*.*",
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            source_path = dlg.GetPath()
+        dlg.Destroy()
+
+        if not source_path:
+            with wx.DirDialog(
+                self, message=i18n.t("select_folder_dialog_title"),
+                style=wx.DD_DEFAULT_STYLE,
+            ) as dir_dlg:
+                if dir_dlg.ShowModal() != wx.ID_OK:
+                    return
+                source_path = dir_dlg.GetPath()
 
         ok, err_key, new_pack_id = import_soundpack(
-            source_folder, self.main_window.sound_system.sound_dir
+            source_path, self.main_window.sound_system.sound_dir
         )
         if not ok:
             wx.MessageBox(
