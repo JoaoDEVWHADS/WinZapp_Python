@@ -6199,9 +6199,10 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
-            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
             try:
-                self.sync_media_for_all_chats()
+                count = self.sync_media_for_all_chats()
+                if count > 0:
+                    logging.info("[start_sync] Phase 2 downloaded media for %d task(s).", count)
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
             finally:
@@ -9482,7 +9483,7 @@ class MainWindow(wx.Frame):
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
             return False
 
-    def sync_media_for_all_chats(self):
+    def sync_media_for_all_chats(self) -> int:
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
                         "stickerMessage", "videoMessage",
                         "audio", "ptt", "document", "doc", "image", "sticker", "video"}
@@ -9493,7 +9494,7 @@ class MainWindow(wx.Frame):
             if (msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES)
         ]
         if not tasks:
-            return
+            return 0
 
         timeout = self._MEDIA_SYNC_TIMEOUT
         with ThreadPoolExecutor(max_workers=self._MEDIA_SYNC_WORKERS) as pool:
@@ -9506,6 +9507,7 @@ class MainWindow(wx.Frame):
 
         # Persist the set of expired IDs accumulated during this sync run.
         self._save_media_failed_ids()
+        return len(tasks)
 
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
