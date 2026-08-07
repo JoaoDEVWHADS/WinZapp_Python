@@ -4475,9 +4475,10 @@ class ConversationsPanel(wx.Panel):
         try:
             from sound_lib import stream
             s = stream.FileStream(file=path)
-            length_secs = s.get_length()
+            length_bytes = s.get_length()
+            length_secs = s.bytes_to_seconds(length_bytes)
             s.free()
-            if length_secs and length_secs > 0:
+            if length_secs and 0 < length_secs < 86400:
                 return int(length_secs)
         except Exception:
             pass
@@ -4490,7 +4491,9 @@ class ConversationsPanel(wx.Panel):
                     frames = wf.getnframes()
                     rate   = wf.getframerate()
                     if rate > 0:
-                        return int(frames / rate)
+                        sec = int(frames / rate)
+                        if 0 < sec < 86400:
+                            return sec
             except Exception:
                 pass
 
@@ -4498,16 +4501,18 @@ class ConversationsPanel(wx.Panel):
         try:
             ext = os.path.splitext(path)[1].lower()
             if ext == ".mp3":
-                # Rough estimation based on file size and standard MP3 bitrates if metadata unavailable
                 size = os.path.getsize(path)
                 if size > 0:
-                    # Assume typical 128kbps audio bitrate (16KB/s)
-                    return max(1, int(size / 16000))
+                    # Estimate based on standard 128kbps (16000 bytes/sec)
+                    sec = max(1, int(size / 16000))
+                    if 0 < sec < 86400:
+                        return sec
             elif ext in (".ogg", ".opus"):
-                # Rough estimation based on file size (assuming ~48kbps Opus)
                 size = os.path.getsize(path)
                 if size > 0:
-                    return max(1, int(size / 6000))
+                    sec = max(1, int(size / 6000))
+                    if 0 < sec < 86400:
+                        return sec
         except Exception:
             pass
 
