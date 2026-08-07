@@ -11530,6 +11530,15 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
+        remote_jid = _key.get("remoteJid", "") or media.get("from", "")
+        # If remote_jid is phone@c.us and we have an LID mapping for it, prefer LID JID
+        if remote_jid and not remote_jid.endswith("@lid"):
+            norm_phone = self._normalize_jid(remote_jid)
+            alt_lid = getattr(self, "_phone_to_lid", {}).get(norm_phone, "")
+            if alt_lid:
+                _key = dict(_key)
+                _key["remoteJid"] = alt_lid
+
         msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
