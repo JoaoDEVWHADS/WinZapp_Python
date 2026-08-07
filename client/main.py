@@ -4574,31 +4574,73 @@ class MainWindow(wx.Frame):
 
     def load_settings(self):
         settings_file = data_path("settings.json")
-        # Bootstrap from default on first run
+        default_file = resource_path("data", "settings_default.json")
+        fallback_dict = {
+            "connection": {
+                "wpp_server": "http://127.0.0.1",
+                "wpp_port": 6300,
+                "wpp_ws_server": "ws://127.0.0.1",
+                "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
+                "wpp_custom_api": False
+            },
+            "general": {
+                "language": "",
+                "notifications_enabled": True,
+                "updates_enabled": True,
+                "noise_reduction_enabled": False,
+                "first_run": True,
+                "autostart": False,
+                "show_tray_icon": True,
+                "terms_alert_displayed": False,
+                "quick_tip_shown": False
+            },
+            "status": {
+                "messages_set_completed": False
+            },
+            "user_interface": {
+                "messages_page_size": 200,
+                "focus_on_open": "message_field"
+            },
+            "audio_playback": {
+                "audio_default_speed": 1.0
+            },
+            "audio_devices": {
+                "output_device_name": "",
+                "input_device_name": ""
+            },
+            "storage": {
+                "auto_download_media": True,
+                "media_max_days": 30,
+                "media_max_mb": 100
+            }
+        }
+
+        # Bootstrap settings.json if missing
         if not os.path.isfile(settings_file):
-            default_file = resource_path("data", "settings_default.json")
+            os.makedirs(os.path.dirname(settings_file), exist_ok=True)
             if os.path.isfile(default_file):
-                os.makedirs(os.path.dirname(settings_file), exist_ok=True)
-                shutil.copy2(default_file, settings_file)
+                try:
+                    shutil.copy2(default_file, settings_file)
+                except Exception:
+                    pass
+            if not os.path.isfile(settings_file):
+                try:
+                    with open(settings_file, "w", encoding="utf-8") as f:
+                        json.dump(fallback_dict, f, indent=4)
+                except Exception:
+                    pass
+
         try:
-            with open(settings_file, "r") as f:
+            with open(settings_file, "r", encoding="utf-8") as f:
                 self.settings = json.load(f)
         except Exception:
-            if hasattr(self, 'i18n'):
-                msg   = self.i18n.t('settings_load_failed')
-                title = self.i18n.t("error").format(app_name=self.app_name)
-            else:
-                # i18n not yet initialised — load pt-BR directly as default
-                from core.i18n import _load_translations
-                _pt   = _load_translations("pt-BR")
-                msg   = _pt.get("settings_load_failed",
-                                "Erro ao carregar o arquivo de configuração:")
-                title = _pt.get("error", "{app_name} Erro").format(
-                    app_name=self.app_name)
-            if hasattr(self, 'error_sound'):
-                self.error_sound.play()
-            wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
-            sys.exit()
+            # If load still fails (e.g. corrupt settings.json), reset to defaults
+            self.settings = dict(fallback_dict)
+            try:
+                with open(settings_file, "w", encoding="utf-8") as f:
+                    json.dump(self.settings, f, indent=4)
+            except Exception:
+                pass
         self._migrate_settings()
 
     def _migrate_settings(self):
