@@ -9481,12 +9481,13 @@ class MainWindow(wx.Frame):
 
     def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
-                        "stickerMessage", "videoMessage"}
+                        "stickerMessage", "videoMessage",
+                        "audio", "ptt", "document", "doc", "image", "sticker", "video"}
         tasks = [
             msg
             for chat in self.chats.values()
             for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
-            if msg.get("messageType") in _MEDIA_TYPES
+            if (msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES)
         ]
         if not tasks:
             return
@@ -10074,6 +10075,19 @@ class MainWindow(wx.Frame):
         if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
             return
         message_type = msg.get("messageType", "")
+        if not message_type and msg.get("type"):
+            t = str(msg.get("type"))
+            if t in ("audio", "ptt"):
+                message_type = "audioMessage"
+            elif t == "image":
+                message_type = "imageMessage"
+            elif t == "video":
+                message_type = "videoMessage"
+            elif t in ("document", "doc"):
+                message_type = "documentMessage"
+            elif t == "sticker":
+                message_type = "stickerMessage"
+
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
         if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
             return
