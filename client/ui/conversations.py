@@ -3901,28 +3901,41 @@ class ConversationsPanel(wx.Panel):
         inner = msg_obj.get(msg_type) or {}
         media_data = msg.get("mediaData") or {}
 
-        # Deep search for original filename across all Baileys/WPPConnect payload fields
-        file_name = (
-            inner.get("fileName")
-            or inner.get("filename")
-            or inner.get("title")
-            or inner.get("name")
-            or msg.get("fileName")
-            or msg.get("filename")
-            or msg.get("title")
-            or media_data.get("filename")
-            or media_data.get("fileName")
-            or inner.get("caption")
-            or msg.get("caption")
-            or ""
-        )
+        # 1. Search local path properties if message was attached or downloaded locally
+        local_path = msg.get("_attachment_path") or msg.get("media_path") or msg.get("filePath") or ""
+        file_name = ""
+        if local_path and os.path.isfile(local_path):
+            file_name = os.path.basename(local_path)
 
-        # If still no filename, try parsing from clientUrl, url, or directPath
+        # 2. Deep search for original filename across all Baileys/WPPConnect payload fields
+        if not file_name:
+            file_name = (
+                inner.get("fileName")
+                or inner.get("filename")
+                or inner.get("title")
+                or inner.get("name")
+                or msg.get("fileName")
+                or msg.get("filename")
+                or msg.get("title")
+                or media_data.get("filename")
+                or media_data.get("fileName")
+                or inner.get("caption")
+                or msg.get("caption")
+                or ""
+            )
+
+        # 3. If parsing from URL, ignore WhatsApp CDN hashes (.enc, .chk, encrypted blobs)
         if not file_name:
             target_url = inner.get("clientUrl") or inner.get("url") or msg.get("clientUrl") or msg.get("url") or ""
             if target_url and "/" in target_url:
                 url_base = target_url.split("?")[0].split("/")[-1]
-                if url_base and "." in url_base and not url_base.startswith("."):
+                if (
+                    url_base
+                    and "." in url_base
+                    and not url_base.startswith(".")
+                    and not url_base.lower().endswith((".enc", ".chk"))
+                    and not re.match(r"^\d+_\d+_\d+_n", url_base)
+                ):
                     file_name = url_base
 
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
@@ -3937,9 +3950,15 @@ class ConversationsPanel(wx.Panel):
         if guessed_ext == ".jpe": guessed_ext = ".jpg"
         if guessed_ext == ".oga": guessed_ext = ".ogg"
 
+        # Friendly timestamp suffix for fallbacks (e.g. 2026-08-07_03h55)
+        msg_ts = int(msg.get("messageTimestamp", 0) or time.time())
+        if msg_ts > 1_000_000_000_000:
+            msg_ts //= 1000
+        time_str = datetime.fromtimestamp(msg_ts).strftime("%Y%m%d_%H%M%S") if msg_ts > 0 else ""
+
         if msg_type == "audioMessage" and is_ptt:
             # Recorded voice messages: default to .ogg
-            default_file = f"mensagem_de_voz_{msg_id}.ogg"
+            default_file = f"mensagem_de_voz_{time_str or msg_id}.ogg"
         elif file_name:
             # Preserve original filename and extension
             if "." in file_name and not file_name.endswith("."):
@@ -3950,19 +3969,19 @@ class ConversationsPanel(wx.Panel):
                 default_file = file_name
         elif msg_type == "documentMessage":
             ext = guessed_ext or ".bin"
-            default_file = f"documento_{msg_id}{ext}"
+            default_file = f"documento_{time_str or msg_id}{ext}"
         elif msg_type == "imageMessage":
             ext = guessed_ext or ".jpg"
-            default_file = f"imagem_{msg_id}{ext}"
+            default_file = f"imagem_{time_str or msg_id}{ext}"
         elif msg_type == "videoMessage":
             ext = guessed_ext or ".mp4"
-            default_file = f"video_{msg_id}{ext}"
+            default_file = f"video_{time_str or msg_id}{ext}"
         elif msg_type == "audioMessage":
             ext = guessed_ext or ".mp3"
-            default_file = f"audio_{msg_id}{ext}"
+            default_file = f"audio_{time_str or msg_id}{ext}"
         else:
             ext = guessed_ext or ".bin"
-            default_file = f"arquivo_{msg_id}{ext}"
+            default_file = f"arquivo_{time_str or msg_id}{ext}"
 
         # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
         default_file = re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
