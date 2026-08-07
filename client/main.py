@@ -6199,16 +6199,27 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
-            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-            if not self.background_mode:
-                wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
             self._media_sync_running = True
             try:
+                # Verifica se existem mídias a serem baixadas antes de anunciar
+                _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
+                                "stickerMessage", "videoMessage",
+                                "audio", "ptt", "document", "doc", "image", "sticker", "video"}
+                has_media = any(
+                    msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES
+                    for chat in self.chats.values()
+                    for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
+                )
+                if has_media:
+                    wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+                    if not self.background_mode:
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+
                 count = self.sync_media_for_all_chats()
                 if count > 0:
                     logging.info("[start_sync] Phase 2 downloaded media for %d task(s).", count)
-                if not self.background_mode:
-                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
+                    if not self.background_mode:
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
                 if not self.background_mode:
