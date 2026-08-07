@@ -33,7 +33,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -5127,7 +5127,15 @@ class ConversationsPanel(wx.Panel):
         if not quoted_msg or not isinstance(quoted_msg, dict):
             return ""
         if "conversation" in quoted_msg:
-            return (quoted_msg.get("conversation") or "")
+            # The common case: _slim_quoted_message() stores a slimmed quoted
+            # message as plain {"conversation": text, "mentionedJid": [...]}
+            # (see core/utils.py) — the flat key mentions live under here, not
+            # nested in a contextInfo the slimming step deliberately drops.
+            text = quoted_msg.get("conversation") or ""
+            mentioned = quoted_msg.get("mentionedJid") or quoted_msg.get("mentionedJidList") or []
+            if mentioned:
+                text = self._resolve_mentions_in_text(text, mentioned)
+            return text
         if "extendedTextMessage" in quoted_msg:
             ext = quoted_msg.get("extendedTextMessage") or {}
             text = ext.get("text") or ""
@@ -6256,13 +6264,19 @@ class ConversationsPanel(wx.Panel):
         and MainWindow._mirror_remote_deletions() (a batch mirrored in from
         a phone-side deletion detected by the periodic poll).
 
-        focus_previous=True moves the list's internal focused/selected row
-        to just before the earliest removed one (or to row 0 if the removal
-        started at the top) once done — WITHOUT calling messages_list.
-        SetFocus(), so a background-triggered removal never steals keyboard
-        focus from wherever the user actually is right now. The caller is
-        already interacting with the list for the user-initiated path, so
-        not stealing focus there either is harmless.
+        focus_previous=True re-focuses whatever row the user was actually on,
+        adjusted for the rows that just disappeared, once done — WITHOUT
+        calling messages_list.SetFocus(), so a background-triggered removal
+        never steals keyboard focus from wherever the user actually is right
+        now (e.g. the message field). Only when the row that was focused is
+        itself one of the removed ones does this fall back to landing just
+        before the earliest removed row (or row 0 if the removal started at
+        the top) — the correct behaviour for the user-initiated single-delete
+        path, where the deleted message IS what was focused. Without this
+        distinction, _mirror_remote_deletions()'s 60s periodic poll yanked the
+        user's focus to wherever the earliest of THAT PASS's removed messages
+        happened to sit — often nowhere near what the user was actually
+        reading — every time it mirrored so much as one stale message.
         """
         if not msg_ids:
             return
@@ -6273,6 +6287,12 @@ class ConversationsPanel(wx.Panel):
         if not indices:
             return
         earliest = indices[0]
+        _preserved_msg_id = self._focused_msg_id() if focus_previous else ""
+        _preserved_idx = self.messages_list.GetFocusedItem() if focus_previous else -1
+        _preserved_was_separator = (
+            focus_previous and self._unread_sep_idx >= 0
+            and _preserved_idx == self._unread_sep_idx
+        )
         # Keep the unread-separator index and the full (unpaginated) message
         # list in sync with the rows that just disappeared. Without this,
         # every later consumer of _unread_sep_idx (focus handling, the
@@ -6322,7 +6342,19 @@ class ConversationsPanel(wx.Panel):
         if focus_previous:
             count = self.messages_list.GetItemCount()
             if count > 0:
-                new_focus = min(max(earliest - 1, 0), count - 1)
+                new_focus = -1
+                if _preserved_msg_id and _preserved_msg_id not in msg_ids:
+                    for idx, m in enumerate(self._sorted_messages):
+                        if isinstance(m, dict) and m.get("key", {}).get("id") == _preserved_msg_id:
+                            new_focus = idx
+                            break
+                elif _preserved_was_separator and self._unread_sep_idx >= 0:
+                    new_focus = self._unread_sep_idx
+                if new_focus < 0:
+                    # The row that was focused is itself among the removed
+                    # ones (or nothing usable was focused) — land just before
+                    # the earliest removed row, same as before this fix.
+                    new_focus = min(max(earliest - 1, 0), count - 1)
                 self.messages_list.Focus(new_focus)
                 self.messages_list.Select(new_focus, True)
                 self.messages_list.EnsureVisible(new_focus)
@@ -7418,7 +7450,20 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        # WPPConnect limits: media (image/video/audio) = 70 MB, documents = 1 GB.
+        # WPPConnect's WhatsApp-imposed limits are 70 MB (media) / 1 GB (docs),
+        # but that's not what WinZapp can actually deliver: sendFile() reads
+        # the whole file, base64-encodes it in memory, and hands the result to
+        # Puppeteer's page.evaluate() as a single argument sent over the
+        # Chrome DevTools Protocol. A large upload (200 MB raw → ~266 MB of
+        # base64) makes that transfer slow enough, and heavy enough on the
+        # Node/Chromium processes, that it has been observed killing the
+        # underlying Puppeteer session outright — which WinZapp then reports
+        # as a permanent offline mode with the message stuck pending, since
+        # there's no live browser tab left to reconnect to. Capping documents
+        # at 100 MB keeps sends inside the range that transport reliably
+        # handles instead of raising WhatsApp's own (much higher) ceiling.
+        # The 1 GB figure below is WhatsApp's ceiling, NOT a target — raising
+        # _MAX_DOC_BYTES towards it reintroduces the dead-session bug.
         _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
         _MAX_DOC_BYTES      = 100 * 1024 * 1024
         i18n = self.main_window.i18n
@@ -7898,16 +7943,10 @@ class ConversationsPanel(wx.Panel):
             limit = int(
                 self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
             )
-            if len(displayable) > limit:
-                self._messages_offset = len(displayable) - limit
-                paginated = displayable[self._messages_offset:]
-                if self._unread_sep_idx >= 0:
-                    self._unread_sep_idx -= self._messages_offset
-                    if self._unread_sep_idx < 0:
-                        self._unread_sep_idx = -1
-            else:
-                self._messages_offset = 0
-                paginated = displayable
+            self._messages_offset, self._unread_sep_idx = paginated_window(
+                len(displayable), limit, self._unread_sep_idx
+            )
+            paginated = displayable[self._messages_offset:]
 
             # A chat with no displayable history (e.g. WhatsApp Web's own store
             # never loaded this conversation's messages, so all WinZapp captured

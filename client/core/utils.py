@@ -91,6 +91,35 @@ def looks_like_binary_blob(value) -> bool:
         return True
     return False
 
+def _clean_mentioned_jid(jid_val):
+    """Normalize one mentionedJid entry to a plain '...@s.whatsapp.net'/'@lid'
+    string. Mirrors WebSocketClient._clean_jid() without needing an instance —
+    entries can arrive as a raw WPPConnect Wid dict instead of a string."""
+    if not jid_val:
+        return ""
+    if isinstance(jid_val, dict):
+        jid_val = jid_val.get("_serialized") or jid_val.get("id") or ""
+    if not isinstance(jid_val, str):
+        jid_val = str(jid_val)
+    return jid_val.replace("@c.us", "@s.whatsapp.net")
+
+
+def _extract_mentioned_jids(quoted):
+    """Pull the quoted message's OWN mentionedJid list out of *quoted*,
+    wherever WPPConnect/Baileys put it — a WPPConnect-style raw quote carries
+    it flat as ``mentionedJidList``; a Baileys-style quotedMessage proto
+    carries it nested under (extendedTextMessage.)contextInfo.mentionedJid."""
+    for src in (
+        quoted,
+        quoted.get("contextInfo") or {},
+        (quoted.get("extendedTextMessage") or {}).get("contextInfo") or {},
+    ):
+        raw = src.get("mentionedJidList") or src.get("mentionedJid")
+        if raw:
+            return [_clean_mentioned_jid(m) for m in raw if m]
+    return []
+
+
 def _slim_quoted_message(quoted):
     """Reduce a quoted-message dict to only what the reply preview needs.
 
@@ -100,6 +129,12 @@ def _slim_quoted_message(quoted):
     UI (the preview only shows a short text or a type label), yet it dominated
     messages.dat and slowed every conversation that had replies. This keeps just
     a capped text preview plus a type marker.
+
+    mentionedJid is the one field kept beyond that: without it, a quoted
+    message's own @mentions render as raw @<phone-or-lid-digits> forever,
+    because the placeholder text survives slimming but the JID list needed to
+    resolve it into a contact name does not — see
+    ConversationsPanel._resolve_mentions_in_text(), the only consumer.
     """
     if not isinstance(quoted, dict):
         return quoted
@@ -130,6 +165,9 @@ def _slim_quoted_message(quoted):
             if k in quoted:
                 slim[k] = {}
                 break
+    mentioned = _extract_mentioned_jids(quoted)
+    if mentioned:
+        slim["mentionedJid"] = mentioned
     return slim
 
 
@@ -203,40 +241,19 @@ def prune_chats_messages(chats) -> bool:
 
 
 def effective_unread_count(chat) -> int:
-    """A chat's unread count, suppressed only when it would open empty.
+    """A chat's unread count, as reported by the server.
 
-    The problem this guards against: a chat-list sync can report e.g.
-    unreadCount=2 for a chat whose per-chat message fetch previously failed (or
-    hasn't run yet), leaving 0 messages in the local store — showing "2 unread"
-    on a conversation that opens completely empty.
-
-    This used to return ``min(reported, local_count)``, which fixed that case
-    but silently capped every count at however many messages the last fetch
-    happened to bring back. WhatsApp Web's message store only holds a handful
-    of messages per chat right after a pairing (measured: ~15), so a group with
-    5747 unread announced "15" — badly wrong for a screen-reader user deciding
-    what to open, and indistinguishable from a group with exactly 15.
-
-    Having *some* history is enough to know the conversation is real and opens
-    with content; beyond that, the server's own count is the honest number, and
-    the one the app should report. Callers that need a count bounded by what is
-    actually on screen (the unread separator in conversations.py) already check
-    that themselves.
+    Preserves server unread counts even when local_count is 0 during
+    initial background sync, preventing offline unread messages from being
+    suppressed locally.
     """
     if not isinstance(chat, dict):
         return 0
     reported = int(chat.get("unreadCount") or 0)
     if reported <= 0:
         return 0
-    try:
-        local_count = len(
-            chat.get("messages", {}).get("messages", {}).get("records", []) or []
-        )
-    except AttributeError:
-        local_count = 0
-    if local_count == 0:
-        return 0
     return reported
+
 
 
 _CC_SORTED: list[str] | None = None
@@ -380,3 +397,34 @@ def first_unread_index(displayable, unread_count: int) -> int:
         if seen == unread_count:
             return idx
     return -1
+
+
+def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
+    """Where populate_messages()'s pagination window should start.
+
+    Returns ``(offset, adjusted_sep_idx)``: ``offset`` is how many leading
+    messages to skip (0 when everything fits), and ``adjusted_sep_idx`` is
+    ``unread_sep_idx`` re-based onto the paginated slice (-1 once the
+    separator falls before ``offset``).
+
+    Plain ``max(0, total_len - limit)`` cuts strictly at the configured page
+    size regardless of what it cuts through. When a conversation has more
+    unread messages than the page size allows (e.g. 230 unread against the
+    default 200-message limit), that cut lands ABOVE the unread separator —
+    the separator (and everything after it, i.e. every genuinely unread
+    message) falls entirely outside the window and is silently dropped: no
+    separator to land on, no Alt+3 target, no way to reach messages that are
+    demonstrably still unread. So the window widens — but only while there is
+    something unread to protect (``unread_sep_idx >= 0``); a fully-read
+    conversation still respects the configured limit exactly as before.
+    """
+    effective_limit = limit
+    if unread_sep_idx >= 0:
+        effective_limit = max(limit, total_len - unread_sep_idx)
+    if total_len <= effective_limit:
+        return 0, unread_sep_idx
+    offset = total_len - effective_limit
+    adjusted = unread_sep_idx - offset if unread_sep_idx >= 0 else -1
+    if adjusted < 0:
+        adjusted = -1
+    return offset, adjusted
