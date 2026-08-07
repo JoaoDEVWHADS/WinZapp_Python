@@ -6303,6 +6303,35 @@ class ConversationsPanel(wx.Panel):
         msg_id = msg.get("key", {}).get("id", "")
         i18n   = self.main_window.i18n
 
+        msg_key = msg.get("key", {})
+        from_me = msg_key.get("fromMe", False)
+        can_delete_for_all = from_me
+
+        if not can_delete_for_all and self.conversation:
+            conv_jid = self.conversation.get("remoteJid", "")
+            if conv_jid.endswith("@g.us"):
+                group_meta = self.conversation.get("groupMetadata", {})
+                participants = group_meta.get("participants") or self.conversation.get("participants") or []
+
+                def _phone_part(j: str) -> str:
+                    return j.rsplit("@", 1)[0].split(":")[0] if isinstance(j, str) else ""
+
+                my_phone = _phone_part(getattr(self.main_window, "my_jid", ""))
+                my_lid   = _phone_part(getattr(self.main_window, "my_lid", ""))
+
+                for p in participants:
+                    if isinstance(p, dict):
+                        p_id = p.get("id", "")
+                        if isinstance(p_id, dict):
+                            p_id = p_id.get("_serialized", "")
+                        p_digits = _phone_part(p_id)
+                        if p_digits:
+                            is_me = (my_phone and self.main_window._phone_digits_equivalent(p_digits, my_phone)) or (my_lid and p_digits == my_lid)
+                            if is_me:
+                                if p.get("admin") or p.get("isAdmin"):
+                                    can_delete_for_all = True
+                                break
+
         # ── Ask the user: delete for me only, or for everyone ─────────────────
         dlg = wx.Dialog(
             self,
@@ -6312,11 +6341,14 @@ class ConversationsPanel(wx.Panel):
         panel  = wx.Panel(dlg)
         sizer  = wx.BoxSizer(wx.VERTICAL)
 
-        rb_me  = wx.RadioButton(panel, label=i18n.t("delete_for_me"),    style=wx.RB_GROUP)
-        rb_all = wx.RadioButton(panel, label=i18n.t("delete_for_everyone"))
+        rb_me  = wx.RadioButton(panel, label=i18n.t("delete_for_me"), style=wx.RB_GROUP)
         rb_me.SetValue(True)
-        sizer.Add(rb_me,  0, wx.ALL, 8)
-        sizer.Add(rb_all, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sizer.Add(rb_me, 0, wx.ALL, 8)
+
+        rb_all = None
+        if can_delete_for_all:
+            rb_all = wx.RadioButton(panel, label=i18n.t("delete_for_everyone"))
+            sizer.Add(rb_all, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         btn_sizer = wx.StdDialogButtonSizer()
         ok_btn     = wx.Button(panel, wx.ID_OK,     label=i18n.t("delete_message"))
@@ -6333,8 +6365,8 @@ class ConversationsPanel(wx.Panel):
         dlg.Fit()
         dlg.CentreOnParent()
 
-        result     = dlg.ShowModal()
-        for_everyone = rb_all.GetValue()
+        result       = dlg.ShowModal()
+        for_everyone = rb_all.GetValue() if rb_all else False
         dlg.Destroy()
 
         if result != wx.ID_OK:

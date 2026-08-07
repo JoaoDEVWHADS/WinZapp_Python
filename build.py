@@ -234,6 +234,43 @@ def _find_opus_dll():
 
 OPUS_DLL = _find_opus_dll()
 
+
+def _prepare_ffmpeg():
+    """Find or download ffmpeg.exe and place it in client/lib/ for bundling."""
+    lib_dir = os.path.join(CLIENT_DIR, "lib")
+    os.makedirs(lib_dir, exist_ok=True)
+    dst = os.path.join(lib_dir, "ffmpeg.exe")
+    if os.path.isfile(dst):
+        return dst
+
+    import glob as _glob
+    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
+    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
+    if not hits:
+        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
+    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
+
+    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+        try:
+            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
+            import zipfile, tempfile, urllib.request
+            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
+            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
+            urllib.request.urlretrieve(dl_url, temp_zip)
+            with zipfile.ZipFile(temp_zip, "r") as zf:
+                zf.extract("ffmpeg.exe", lib_dir)
+            if os.path.isfile(dst):
+                return dst
+        except Exception as dl_err:
+            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
+
+    if ffmpeg_src and os.path.isfile(ffmpeg_src):
+        shutil.copy2(ffmpeg_src, dst)
+        return dst
+    return None
+
+FFMPEG_EXE = _prepare_ffmpeg()
+
 # Directories inside api/ that must NOT be copied
 API_EXCLUDE_DIRS  = {
     "wppconnect_tokens", "userDataDir", ".git", "__pycache__", "node_modules",
@@ -443,6 +480,8 @@ def pyinstaller_compile():
         # libopus DLL must be bundled as a binary so ctypes can load it at runtime
         if OPUS_DLL:
             cmd += ["--add-binary", f"{OPUS_DLL};lib"]
+        if FFMPEG_EXE:
+            cmd += ["--add-binary", f"{FFMPEG_EXE};lib"]
 
     cmd.append(os.path.join(CLIENT_DIR, "main.py"))
 
@@ -523,38 +562,10 @@ def assemble_staging():
         print("  [WARN] bassopus.dll not found in client/lib — OGG Opus audio playback will fail")
 
     # Copy ffmpeg binary to staging/lib/ to support audio conversion on remote API setups
-    import glob as _glob
-    installer_root = os.path.join(CLIENT_DIR, "api", "node_modules", "@ffmpeg-installer")
-    hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg.exe"), recursive=True)
-    if not hits:
-        hits = _glob.glob(os.path.join(installer_root, "**", "ffmpeg"), recursive=True)
-
-    ffmpeg_src = hits[0] if hits else shutil.which("ffmpeg")
-
-    if not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
-        try:
-            print("  [INFO] Downloading portable ffmpeg.exe for release bundle...")
-            import zipfile
-            import tempfile
-            import urllib.request
-            dl_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
-            temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_build_win.zip")
-            urllib.request.urlretrieve(dl_url, temp_zip)
-            with zipfile.ZipFile(temp_zip, "r") as zf:
-                zf.extract("ffmpeg.exe", lib_dir)
-            ffmpeg_dst = os.path.join(lib_dir, "ffmpeg.exe")
-            if os.path.isfile(ffmpeg_dst):
-                ffmpeg_src = ffmpeg_dst
-                print(f"  -> lib/ffmpeg.exe (downloaded prebuilt binary)")
-        except Exception as dl_err:
-            print(f"  [WARN] Failed to download prebuilt ffmpeg: {dl_err}")
-
-    if ffmpeg_src and os.path.isfile(ffmpeg_src) and ffmpeg_src != os.path.join(lib_dir, "ffmpeg.exe"):
-        ext = ".exe" if sys.platform == "win32" or ffmpeg_src.lower().endswith(".exe") else ""
-        ffmpeg_dst = os.path.join(lib_dir, f"ffmpeg{ext}")
-        shutil.copy2(ffmpeg_src, ffmpeg_dst)
-        print(f"  -> lib/ffmpeg{ext} (from {ffmpeg_src})")
-    elif not (ffmpeg_src and os.path.isfile(ffmpeg_src)):
+    if FFMPEG_EXE:
+        shutil.copy2(FFMPEG_EXE, os.path.join(lib_dir, "ffmpeg.exe"))
+        print(f"  -> lib/ffmpeg.exe")
+    else:
         print("  [WARN] ffmpeg binary not found — remote API setups will not be able to convert audio messages")
 
     print(f"  -> lib/  ({dll_count} DLLs total)")
