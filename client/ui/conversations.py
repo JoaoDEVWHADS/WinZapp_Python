@@ -3899,10 +3899,35 @@ class ConversationsPanel(wx.Panel):
         msg_id   = msg.get("key", {}).get("id", "")
 
         inner = msg_obj.get(msg_type) or {}
-        file_name = inner.get("fileName") or inner.get("title") or inner.get("name") or inner.get("caption") or msg.get("caption") or ""
-        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False))
+        media_data = msg.get("mediaData") or {}
 
-        mimetype = inner.get("mimetype", "") or ""
+        # Deep search for original filename across all Baileys/WPPConnect payload fields
+        file_name = (
+            inner.get("fileName")
+            or inner.get("filename")
+            or inner.get("title")
+            or inner.get("name")
+            or msg.get("fileName")
+            or msg.get("filename")
+            or msg.get("title")
+            or media_data.get("filename")
+            or media_data.get("fileName")
+            or inner.get("caption")
+            or msg.get("caption")
+            or ""
+        )
+
+        # If still no filename, try parsing from clientUrl, url, or directPath
+        if not file_name:
+            target_url = inner.get("clientUrl") or inner.get("url") or msg.get("clientUrl") or msg.get("url") or ""
+            if target_url and "/" in target_url:
+                url_base = target_url.split("?")[0].split("/")[-1]
+                if url_base and "." in url_base and not url_base.startswith("."):
+                    file_name = url_base
+
+        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+
+        mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
         clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
         guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
         if not guessed_ext and "/" in clean_mime:
@@ -3942,6 +3967,20 @@ class ConversationsPanel(wx.Panel):
         # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
         default_file = re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
 
+        # Build specific wildcard filter based on target file extension
+        ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
+        i18n = self.main_window.i18n
+        if ext_clean:
+            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
+        elif msg_type == "audioMessage":
+            wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
+        elif msg_type == "imageMessage":
+            wildcard = "Imagens (*.jpg;*.png;*.webp;*.gif)|*.jpg;*.png;*.webp;*.gif|*.*|*.*"
+        elif msg_type == "videoMessage":
+            wildcard = "Vídeos (*.mp4;*.mkv;*.avi;*.mov)|*.mp4;*.mkv;*.avi;*.mov|*.*|*.*"
+        else:
+            wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
+
         dlg_title = (
             self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
             else self.main_window.i18n.t("save_as")
@@ -3950,6 +3989,7 @@ class ConversationsPanel(wx.Panel):
             self,
             dlg_title,
             defaultFile=default_file,
+            wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         ) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
