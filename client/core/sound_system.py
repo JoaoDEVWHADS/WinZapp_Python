@@ -457,32 +457,61 @@ def validate_soundpack_folder(folder: str):
     return True, "", {"name": str(data["name"]), "events": events, "alerts": alerts}
 
 
-def import_soundpack(source_folder: str, sounds_root: str):
-    """Validate `source_folder` as a soundpack, then copy it into
-    `sounds_root` as a new subfolder (named after the source folder,
-    de-duplicated if one with that name already exists).
+import tempfile
+import zipfile
+
+def import_soundpack(source_path: str, sounds_root: str):
+    """Validate `source_path` (folder or .zip archive) as a soundpack, then
+    copy/extract it into `sounds_root` as a new subfolder.
 
     Returns (ok: bool, error_i18n_key: str, new_pack_id: str|None).
     """
-    ok, err_key, _data = validate_soundpack_folder(source_folder)
-    if not ok:
-        return False, err_key, None
+    if not source_path:
+        return False, "soundpack_import_error_no_folder", None
 
-    base_name = os.path.basename(os.path.normpath(source_folder)) or "soundpack"
-    safe_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")) or "soundpack"
-    dest_id = safe_name
-    suffix = 2
-    while os.path.exists(os.path.join(sounds_root, dest_id)):
-        dest_id = f"{safe_name}_{suffix}"
-        suffix += 1
+    temp_dir_obj = None
+    source_folder = source_path
 
-    dest_folder = os.path.join(sounds_root, dest_id)
+    # If user selected a .zip file, extract it to a temporary folder first
+    if os.path.isfile(source_path) and source_path.lower().endswith(".zip"):
+        try:
+            temp_dir_obj = tempfile.TemporaryDirectory()
+            with zipfile.ZipFile(source_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir_obj.name)
+            source_folder = temp_dir_obj.name
+            # If the zip extracted a single root folder containing the pack, use that subfolder
+            entries = [os.path.join(source_folder, e) for e in os.listdir(source_folder)]
+            dirs = [e for e in entries if os.path.isdir(e)]
+            if len(dirs) == 1 and not _find_pack_manifest(source_folder):
+                source_folder = dirs[0]
+        except Exception:
+            if temp_dir_obj:
+                temp_dir_obj.cleanup()
+            return False, "soundpack_import_error_bad_manifest", None
+
     try:
-        shutil.copytree(source_folder, dest_folder)
-    except OSError:
-        return False, "soundpack_import_error_copy_failed", None
+        ok, err_key, _data = validate_soundpack_folder(source_folder)
+        if not ok:
+            return False, err_key, None
 
-    return True, "", dest_id
+        base_name = os.path.splitext(os.path.basename(os.path.normpath(source_path)))[0] or "soundpack"
+        safe_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")) or "soundpack"
+        dest_id = safe_name
+        suffix = 2
+        while os.path.exists(os.path.join(sounds_root, dest_id)):
+            dest_id = f"{safe_name}_{suffix}"
+            suffix += 1
+
+        dest_folder = os.path.join(sounds_root, dest_id)
+        try:
+            shutil.copytree(source_folder, dest_folder)
+        except OSError:
+            return False, "soundpack_import_error_copy_failed", None
+
+        return True, "", dest_id
+    finally:
+        if temp_dir_obj:
+            temp_dir_obj.cleanup()
 
 
 class NullSound:
