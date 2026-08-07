@@ -572,11 +572,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
         } catch (err: any) {}
       }
 
-      // Fallback: If message is not found, attempt loadEarlierMessages on the chat
+      // Fallback: If message is not found, attempt loadEarlierMessages on the chat or resolve LID/JID mapping
       if (!message && cleanMsgId) {
         const parts = cleanMsgId.split('_');
-        if (parts.length >= 2) {
-          const chatId = parts[1]; // e.g. 120363420948134065@g.us or phone@c.us
+        if (parts.length >= 3) {
+          const fromMe = parts[0];
+          const chatId = parts[1]; // e.g. 553195679326@c.us or 120363420948134065@g.us
+          const msgStanzaId = parts[2];
+
           if (chatId && typeof client.loadEarlierMessages === 'function') {
             req.logger.info(`Message ${cleanMsgId} not found in cache. Attempting loadEarlierMessages for ${chatId}`);
             try {
@@ -588,6 +591,91 @@ export async function getMediaByMessage(req: Request, res: Response) {
               }
             } catch (loadErr: any) {
               req.logger.warn(`Error executing loadEarlierMessages for ${chatId}: ${loadErr.message || loadErr}`);
+            }
+          }
+
+          // If still not found, try using client.getMessages to force loading chat messages into Puppeteer store
+          if (!message && chatId && typeof (client as any).getMessages === 'function') {
+            try {
+              req.logger.info(`Attempting client.getMessages to populate store for ${chatId}`);
+              await (client as any).getMessages(chatId, { count: 100 });
+              try {
+                message = await client.getMessageById(cleanMsgId);
+              } catch (retryErr: any) {}
+            } catch (getMsgsErr: any) {}
+          }
+
+          // If still not found and chatId is @c.us or @lid, try finding the corresponding LID/phone chat JID in listChats() or via Puppeteer evaluation
+          if (!message) {
+            try {
+              let resolvedJid: string | null = null;
+
+              // 1. Try resolving LID using Puppeteer page evaluation directly from WhatsApp Web Contact/Chat Store
+              if (client.page && !client.page.isClosed()) {
+                try {
+                  resolvedJid = await client.page.evaluate((targetChatId: string) => {
+                    try {
+                      // Check WPP/WAPI contact or chat stores
+                      const phoneDigits = targetChatId.split('@')[0].replace(/\D/g, '');
+                      const chatStore = (window as any).Store?.Chat || (window as any).WPP?.whatsapp?.ChatStore;
+                      const contactStore = (window as any).Store?.Contact || (window as any).WPP?.whatsapp?.ContactStore;
+
+                      if (contactStore && typeof contactStore.get === 'function') {
+                        const cnt = contactStore.get(targetChatId) || contactStore.get(`${phoneDigits}@c.us`);
+                        if (cnt && cnt.lid) {
+                          return cnt.lid._serialized || cnt.lid.toString();
+                        }
+                      }
+
+                      if (chatStore && chatStore.models) {
+                        const match = chatStore.models.find((m: any) => {
+                          const idStr = (m.id?._serialized || m.id || '').toString();
+                          const phoneStr = (m.phoneNumber || m.contact?.phoneNumber || m.contact?.id?._serialized || '').toString();
+                          return phoneDigits && (idStr.includes(phoneDigits) || phoneStr.includes(phoneDigits));
+                        });
+                        if (match) {
+                          return match.id?._serialized || match.id.toString();
+                        }
+                      }
+                    } catch (e) {}
+                    return null;
+                  }, chatId);
+                } catch (evalErr: any) {
+                  req.logger.warn(`Page evaluate JID resolution failed for ${chatId}: ${evalErr.message || evalErr}`);
+                }
+              }
+
+              // 2. Fallback to listChats search inspecting contact phone numbers
+              if (!resolvedJid) {
+                const listChatsFn = typeof (client as any).listChats === 'function' ? (client as any).listChats.bind(client) : (typeof (client as any).getAllChats === 'function' ? (client as any).getAllChats.bind(client) : null);
+                if (listChatsFn) {
+                  const allChats: any[] = await listChatsFn();
+                  const phoneDigits = chatId.split('@')[0].replace(/\D/g, '');
+                  const altChat = Array.isArray(allChats) ? allChats.find((c: any) => {
+                    const cId = (c.id?._serialized || c.id || '').toString();
+                    const phoneStr = (c.phoneNumber || c.contact?.phoneNumber || c.contact?.id?._serialized || '').toString();
+                    return phoneDigits && (cId.includes(phoneDigits) || phoneStr.includes(phoneDigits));
+                  }) : null;
+                  if (altChat) {
+                    resolvedJid = altChat.id?._serialized || altChat.id;
+                  }
+                }
+              }
+
+              if (resolvedJid && resolvedJid !== chatId) {
+                const altMsgId = `${fromMe}_${resolvedJid}_${msgStanzaId}`;
+                req.logger.info(`Resolved alternative JID ${resolvedJid} for ${chatId}. Populating messages and retrying getMessageById for ${altMsgId}`);
+                if (typeof (client as any).getMessages === 'function') {
+                  try { await (client as any).getMessages(resolvedJid, { count: 100 }); } catch (e: any) {}
+                }
+                try {
+                  message = await client.getMessageById(altMsgId);
+                } catch (altErr: any) {
+                  req.logger.warn(`getMessageById with alt JID ${altMsgId} failed: ${altErr.message || altErr}`);
+                }
+              }
+            } catch (chatLookupErr: any) {
+              req.logger.warn(`Failed to resolve alternative chat JID: ${chatLookupErr.message || chatLookupErr}`);
             }
           }
         }
