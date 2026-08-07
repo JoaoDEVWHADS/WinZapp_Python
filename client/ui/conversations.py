@@ -3898,24 +3898,46 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        if msg_type == "documentMessage":
-            default_file = (msg_obj.get("documentMessage") or {}).get(
-                "fileName", f"documento_{msg_id}"
-            )
+        inner = msg_obj.get(msg_type) or {}
+        file_name = inner.get("fileName") or inner.get("title") or inner.get("name") or ""
+        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False))
+
+        mimetype = inner.get("mimetype", "") or ""
+        clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
+        guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
+        if not guessed_ext and "/" in clean_mime:
+            guessed_ext = f".{clean_mime.split('/')[-1]}"
+
+        # Standardise common extension guesses
+        if guessed_ext == ".jpe": guessed_ext = ".jpg"
+        if guessed_ext == ".oga": guessed_ext = ".ogg"
+
+        if msg_type == "audioMessage" and is_ptt:
+            # Recorded voice messages: default to .ogg
+            default_file = f"mensagem_de_voz_{msg_id}.ogg"
+        elif file_name:
+            # Preserve original filename and extension
+            if "." in file_name and not file_name.endswith("."):
+                default_file = file_name
+            elif guessed_ext:
+                default_file = f"{file_name}{guessed_ext}"
+            else:
+                default_file = file_name
+        elif msg_type == "documentMessage":
+            ext = guessed_ext or ".bin"
+            default_file = f"documento_{msg_id}{ext}"
         elif msg_type == "imageMessage":
-            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
-            ext  = mime.split("/")[-1] if "/" in mime else "jpg"
-            default_file = f"foto_{msg_id}.{ext}"
+            ext = guessed_ext or ".jpg"
+            default_file = f"imagem_{msg_id}{ext}"
         elif msg_type == "videoMessage":
-            mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
-            ext  = mime.split("/")[-1] if "/" in mime else "mp4"
-            default_file = f"video_{msg_id}.{ext}"
+            ext = guessed_ext or ".mp4"
+            default_file = f"video_{msg_id}{ext}"
         elif msg_type == "audioMessage":
-            mime = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
-            ext  = mime.split("/")[-1].split(";")[0].strip() if "/" in mime else "ogg"
-            default_file = f"audio_{msg_id}.{ext or 'ogg'}"
+            ext = guessed_ext or ".mp3"
+            default_file = f"audio_{msg_id}{ext}"
         else:
-            return
+            ext = guessed_ext or ".bin"
+            default_file = f"arquivo_{msg_id}{ext}"
 
         dlg_title = (
             self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
