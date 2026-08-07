@@ -5971,7 +5971,7 @@ class MainWindow(wx.Frame):
             #      locally, which on a reconnection means it is fully warmed up, or
             #  (c) we've exhausted retries.
             settled = server_count > 0 and server_count == prev_server_count
-            covers_cache = has_local_chats and server_count >= local_chat_count
+            covers_cache = has_local_chats and local_chat_count > 0 and server_count >= local_chat_count
             if settled or covers_cache:
                 chat_list_settled = True
                 break
@@ -6199,10 +6199,15 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
             try:
                 self.sync_media_for_all_chats()
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
+            finally:
+                wx.CallAfter(self._set_status, "")
             logging.info("[start_sync] Phase 2 media auto-download finished.")
         else:
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
