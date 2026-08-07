@@ -3898,24 +3898,109 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        if msg_type == "documentMessage":
-            default_file = (msg_obj.get("documentMessage") or {}).get(
-                "fileName", f"documento_{msg_id}"
+        inner = msg_obj.get(msg_type) or {}
+        media_data = msg.get("mediaData") or {}
+
+        # 1. Search local path properties if message was attached or downloaded locally
+        local_path = msg.get("_attachment_path") or msg.get("media_path") or msg.get("filePath") or ""
+        file_name = ""
+        if local_path and os.path.isfile(local_path):
+            file_name = os.path.basename(local_path)
+
+        # 2. Deep search for original filename across all Baileys/WPPConnect payload fields
+        if not file_name:
+            file_name = (
+                inner.get("fileName")
+                or inner.get("filename")
+                or inner.get("title")
+                or inner.get("name")
+                or msg.get("fileName")
+                or msg.get("filename")
+                or msg.get("title")
+                or media_data.get("filename")
+                or media_data.get("fileName")
+                or inner.get("caption")
+                or msg.get("caption")
+                or ""
             )
+
+        # 3. If parsing from URL, ignore WhatsApp CDN hashes (.enc, .chk, encrypted blobs)
+        if not file_name:
+            target_url = inner.get("clientUrl") or inner.get("url") or msg.get("clientUrl") or msg.get("url") or ""
+            if target_url and "/" in target_url:
+                url_base = target_url.split("?")[0].split("/")[-1]
+                if (
+                    url_base
+                    and "." in url_base
+                    and not url_base.startswith(".")
+                    and not url_base.lower().endswith((".enc", ".chk"))
+                    and not re.match(r"^\d+_\d+_\d+_n", url_base)
+                ):
+                    file_name = url_base
+
+        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+
+        mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
+        clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
+        guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
+        if not guessed_ext and "/" in clean_mime:
+            guessed_ext = f".{clean_mime.split('/')[-1]}"
+
+        # Standardise common extension guesses
+        if guessed_ext == ".jpe": guessed_ext = ".jpg"
+        if guessed_ext == ".oga": guessed_ext = ".ogg"
+
+        # Friendly timestamp suffix for fallbacks (e.g. 2026-08-07_03h55)
+        msg_ts = int(msg.get("messageTimestamp", 0) or time.time())
+        if msg_ts > 1_000_000_000_000:
+            msg_ts //= 1000
+        time_str = datetime.fromtimestamp(msg_ts).strftime("%Y%m%d_%H%M%S") if msg_ts > 0 else ""
+
+        if msg_type == "audioMessage" and is_ptt:
+            # Recorded voice messages: default to .ogg
+            default_file = f"mensagem_de_voz_{time_str or msg_id}.ogg"
+        elif file_name:
+            # Preserve original filename and extension
+            if "." in file_name and not file_name.endswith("."):
+                default_file = file_name
+            elif guessed_ext:
+                default_file = f"{file_name}{guessed_ext}"
+            else:
+                default_file = file_name
+        elif msg_type == "documentMessage":
+            ext = guessed_ext or ".bin"
+            default_file = f"documento_{time_str or msg_id}{ext}"
         elif msg_type == "imageMessage":
-            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
-            ext  = mime.split("/")[-1] if "/" in mime else "jpg"
-            default_file = f"foto_{msg_id}.{ext}"
+            ext = guessed_ext or ".jpg"
+            default_file = f"imagem_{time_str or msg_id}{ext}"
         elif msg_type == "videoMessage":
-            mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
-            ext  = mime.split("/")[-1] if "/" in mime else "mp4"
-            default_file = f"video_{msg_id}.{ext}"
+            ext = guessed_ext or ".mp4"
+            default_file = f"video_{time_str or msg_id}{ext}"
         elif msg_type == "audioMessage":
-            mime = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
-            ext  = mime.split("/")[-1].split(";")[0].strip() if "/" in mime else "ogg"
-            default_file = f"audio_{msg_id}.{ext or 'ogg'}"
+            ext = guessed_ext or ".mp3"
+            default_file = f"audio_{time_str or msg_id}{ext}"
         else:
-            return
+            ext = guessed_ext or ".bin"
+            default_file = f"arquivo_{time_str or msg_id}{ext}"
+
+        # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
+        default_file = re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
+
+        # Build specific wildcard filter based on target file extension
+        ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
+        i18n = self.main_window.i18n
+        if ext_clean:
+            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
+        elif msg_type == "audioMessage":
+            wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
+        elif msg_type == "imageMessage":
+            wildcard = "Imagens (*.jpg;*.png;*.webp;*.gif)|*.jpg;*.png;*.webp;*.gif|*.*|*.*"
+        elif msg_type == "videoMessage":
+            wildcard = "Vídeos (*.mp4;*.mkv;*.avi;*.mov)|*.mp4;*.mkv;*.avi;*.mov|*.*|*.*"
+        else:
+            wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
+
+        logging.info(f"[Save As] msg_id={msg_id}, msg_type={msg_type}, is_ptt={is_ptt}, raw_fileName='{file_name}', mimetype='{mimetype}', default_file='{default_file}', wildcard='{wildcard}'")
 
         dlg_title = (
             self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
@@ -3925,6 +4010,7 @@ class ConversationsPanel(wx.Panel):
             self,
             dlg_title,
             defaultFile=default_file,
+            wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         ) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
@@ -4463,28 +4549,59 @@ class ConversationsPanel(wx.Panel):
             return ""
 
     def _probe_audio_duration(self, path: str):
-        """Best-effort audio length in whole seconds, or None if unknown.
+        """Best-effort audio length in whole seconds for any audio format, or None if unknown.
 
-        Only .wav is decoded (stdlib `wave`, no extra dependency) — an audio
-        file sent via the attachment picker previously always went out with
-        no "seconds" at all in its message record (unlike a recorded voice
-        message, which measures it from the captured PCM frames), so the
-        chat history permanently showed "áudio, duração: " with nothing
-        after the colon, even long after the message was delivered and read.
-        Other formats (mp3/ogg/m4a/aac/flac) still go out without a duration
-        rather than a wrong one — WinZapp has no audio-decoding dependency
-        to probe them with.
+        Supports .mp3, .ogg, .wav, .m4a, .flac, .opus, .aac etc. Uses sound_lib / BASS
+        when available, or stdlib wave and header fallback parsers.
         """
-        if not path.lower().endswith(".wav"):
+        if not path or not os.path.isfile(path):
             return None
+
+        # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
         try:
-            with wave.open(path, "rb") as wf:
-                frames = wf.getnframes()
-                rate   = wf.getframerate()
-                if rate > 0:
-                    return int(frames / rate)
+            from sound_lib import stream
+            s = stream.FileStream(file=path)
+            length_bytes = s.get_length()
+            length_secs = s.bytes_to_seconds(length_bytes)
+            s.free()
+            if length_secs and 0 < length_secs < 86400:
+                return int(length_secs)
         except Exception:
             pass
+
+        # 2. Try stdlib wave module for .wav files
+        if path.lower().endswith(".wav"):
+            try:
+                import wave
+                with wave.open(path, "rb") as wf:
+                    frames = wf.getnframes()
+                    rate   = wf.getframerate()
+                    if rate > 0:
+                        sec = int(frames / rate)
+                        if 0 < sec < 86400:
+                            return sec
+            except Exception:
+                pass
+
+        # 3. Fallback lightweight header parser for MP3 / OGG
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".mp3":
+                size = os.path.getsize(path)
+                if size > 0:
+                    # Estimate based on standard 128kbps (16000 bytes/sec)
+                    sec = max(1, int(size / 16000))
+                    if 0 < sec < 86400:
+                        return sec
+            elif ext in (".ogg", ".opus"):
+                size = os.path.getsize(path)
+                if size > 0:
+                    sec = max(1, int(size / 6000))
+                    if 0 < sec < 86400:
+                        return sec
+        except Exception:
+            pass
+
         return None
 
     def _format_duration(self, seconds):

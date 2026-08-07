@@ -6199,13 +6199,22 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+            if not self.background_mode:
+                wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+            self._media_sync_running = True
             try:
                 count = self.sync_media_for_all_chats()
                 if count > 0:
                     logging.info("[start_sync] Phase 2 downloaded media for %d task(s).", count)
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
             finally:
+                self._media_sync_running = False
                 wx.CallAfter(self._set_status, "")
             logging.info("[start_sync] Phase 2 media auto-download finished.")
         else:
@@ -11530,6 +11539,15 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
+        remote_jid = _key.get("remoteJid", "") or media.get("from", "")
+        # If remote_jid is phone@c.us and we have an LID mapping for it, prefer LID JID
+        if remote_jid and not remote_jid.endswith("@lid"):
+            norm_phone = self._normalize_jid(remote_jid)
+            alt_lid = getattr(self, "_phone_to_lid", {}).get(norm_phone, "")
+            if alt_lid:
+                _key = dict(_key)
+                _key["remoteJid"] = alt_lid
+
         msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
@@ -11558,21 +11576,39 @@ class MainWindow(wx.Frame):
             elif t in ("document", "doc"):
                 msg_type = "documentMessage"
 
-        if msg_type and isinstance(msg_inner_obj, dict):
-            inner = msg_inner_obj.get(msg_type)
-            if isinstance(inner, dict):
-                if "mediaKey" in inner and inner["mediaKey"]:
-                    body_data["mediaKey"] = inner["mediaKey"]
-                if "url" in inner and inner["url"]:
-                    body_data["clientUrl"] = inner["url"]
-                if "directPath" in inner and inner["directPath"]:
-                    body_data["directPath"] = inner["directPath"]
-                if "mimetype" in inner and inner["mimetype"]:
-                    body_data["mimetype"] = inner["mimetype"]
-                body_data["type"] = msg_type.replace("Message", "")
+        # Check nested structures as well as top-level keys
+        candidate_objs = []
+        if isinstance(msg_inner_obj, dict):
+            candidate_objs.append(msg_inner_obj)
+            if msg_type and isinstance(msg_inner_obj.get(msg_type), dict):
+                candidate_objs.append(msg_inner_obj.get(msg_type))
+            for k in ("audioMessage", "imageMessage", "videoMessage", "documentMessage", "stickerMessage"):
+                if isinstance(msg_inner_obj.get(k), dict):
+                    candidate_objs.append(msg_inner_obj.get(k))
+        candidate_objs.append(media)
+
+        for obj in candidate_objs:
+            if not body_data.get("mediaKey") and obj.get("mediaKey"):
+                mk = obj.get("mediaKey")
+                if isinstance(mk, bytes):
+                    body_data["mediaKey"] = base64.b64encode(mk).decode("utf-8")
+                elif isinstance(mk, dict) and "data" in mk:
+                    body_data["mediaKey"] = base64.b64encode(bytes(mk["data"])).decode("utf-8")
+                else:
+                    body_data["mediaKey"] = str(mk)
+            if not body_data.get("clientUrl") and (obj.get("url") or obj.get("clientUrl")):
+                body_data["clientUrl"] = obj.get("url") or obj.get("clientUrl")
+            if not body_data.get("directPath") and obj.get("directPath"):
+                body_data["directPath"] = obj.get("directPath")
+            if not body_data.get("mimetype") and obj.get("mimetype"):
+                body_data["mimetype"] = obj.get("mimetype")
+
+        if msg_type:
+            body_data["type"] = msg_type.replace("Message", "")
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
+        has_direct_path = bool(body_data.get("directPath"))
         media_type = body_data.get("type", "")
         logging.info(
             "[get_base64_from_media] Requesting media for msg_id=%s, url=%s, has_mediaKey=%s, has_clientUrl=%s, type=%s",
