@@ -581,12 +581,14 @@ class UpdateDialog(wx.Dialog):
     Buttons: Sim | Nao | Quais as novidades? (hidden when no changelog)
     """
 
-    def __init__(self, parent, new_version: str, changelog: str):
-        self._main_window = parent
-        i18n = parent.i18n
+    def __init__(self, parent, new_version: str, changelog: str, main_window=None):
+        mw = main_window or getattr(parent, "_main_window", None) or getattr(parent, "main_window", None) or parent
+        self._main_window = mw
+        i18n = getattr(mw, "i18n", None)
+        title = i18n.t("update_available_title") if i18n else "Atualização disponível"
         super().__init__(
             parent,
-            title=i18n.t("update_available_title"),
+            title=title,
             style=wx.DEFAULT_DIALOG_STYLE,
         )
         self._new_version = new_version
@@ -834,7 +836,7 @@ class UpdateChecker:
         previously_focused = wx.Window.FindFocus()
         parent_window = self._get_active_parent()
 
-        dlg    = UpdateDialog(parent_window, remote_version, changelog)
+        dlg    = UpdateDialog(parent_window, remote_version, changelog, main_window=self._mw)
         result = dlg.ShowModal()
         dlg.Destroy()
 
