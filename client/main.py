@@ -6199,13 +6199,22 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+            if not self.background_mode:
+                wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+            self._media_sync_running = True
             try:
                 count = self.sync_media_for_all_chats()
                 if count > 0:
                     logging.info("[start_sync] Phase 2 downloaded media for %d task(s).", count)
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
+                if not self.background_mode:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
             finally:
+                self._media_sync_running = False
                 wx.CallAfter(self._set_status, "")
             logging.info("[start_sync] Phase 2 media auto-download finished.")
         else:
