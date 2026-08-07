@@ -2447,12 +2447,9 @@ class ConversationsPanel(wx.Panel):
                 copy_item,
             )
 
-        # Copy file (for image, video, document, and non-voice audio messages)
-        inner_msg = (msg.get("message") or {}).get(msg_type) or {}
-        media_data_msg = msg.get("mediaData") or {}
-        is_ptt_msg = bool(inner_msg.get("ptt", False) or inner_msg.get("isPtt", False) or media_data_msg.get("ptt", False))
-        _MEDIA_TYPES = ("imageMessage", "videoMessage", "documentMessage")
-        if msg_type in _MEDIA_TYPES or (msg_type == "audioMessage" and not is_ptt_msg):
+        # Copy file (for image, video, document, and audio/voice messages)
+        _MEDIA_TYPES = ("imageMessage", "videoMessage", "documentMessage", "audioMessage")
+        if msg_type in _MEDIA_TYPES:
             copy_file_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_file')}\tCtrl+C")
             self.Bind(
                 wx.EVT_MENU,
@@ -5931,8 +5928,6 @@ class ConversationsPanel(wx.Panel):
 
         if msg_type not in ("documentMessage", "imageMessage", "videoMessage", "audioMessage"):
             return
-        if msg_type == "audioMessage" and is_ptt:
-            return
 
         default_file = self._resolve_media_filename(msg)
         media_path = data_path("media", f"{msg_id}.wzmedia")
@@ -6736,7 +6731,7 @@ class ConversationsPanel(wx.Panel):
         media_data = msg.get("mediaData") or {}
         is_ptt   = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
-        if msg_type in ("imageMessage", "videoMessage", "documentMessage") or (msg_type == "audioMessage" and not is_ptt):
+        if msg_type in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
             self._on_menu_copy_file(msg)
         else:
             self._on_menu_copy_message(msg)
