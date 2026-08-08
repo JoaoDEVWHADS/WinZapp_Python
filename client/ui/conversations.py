@@ -89,6 +89,16 @@ class ConversationsPanel(wx.Panel):
         self._audio_tempo_ctrl = None
         self._is_audio_playing = False
         self._is_in_audio_chain = False
+        # Handles to the wx.CallLater timers scheduled by the auto-chain
+        # (see _auto_chain_next_audio). They MUST be cancelled whenever
+        # playback stops, a new audio starts manually, or the user leaves the
+        # conversation — otherwise a stale timer fires up to ~1 s later and
+        # starts an audio the user didn't ask for (reported live as the
+        # sequence "keeping playing audios from above" after the last audio
+        # finished / after jumping to a different message).
+        self._chain_play_timer = None
+        self._chain_start_timer = None
+        self._chain_end_timer = None
         self._audio_stream_duration = 0
         self._audio_temp_file = None
         self._audio_speed_steps = [1.0, 1.5, 2.0]
@@ -863,6 +873,10 @@ class ConversationsPanel(wx.Panel):
             return
         self._stop_typing_for_current_conversation()
         self._cancel_active_recording()
+        # Leaving the conversation invalidates any pending auto-chain timers —
+        # they captured a target_msg from THIS conversation's list and would
+        # otherwise start stale audio (possibly in the wrong chat) later.
+        self._cancel_pending_chain_timers()
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -4453,6 +4467,9 @@ class ConversationsPanel(wx.Panel):
             self.audio_speed_btn.SetLabel(self._format_speed(_speed))
 
     def _stop_audio(self):
+        # A manual stop (or a different audio taking over) invalidates any
+        # still-pending auto-chain timers — never let them start a stale audio.
+        self._cancel_pending_chain_timers()
         if self._audio_timer.IsRunning():
             self._audio_timer.Stop()
         # Stop the Tempo FX controller first (it owns the audio output channel)
@@ -4526,12 +4543,33 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             pass
 
+    def _cancel_pending_chain_timers(self):
+        """Cancel any still-scheduled auto-chain wx.CallLater timers.
+
+        The chain schedules _play_next/_start_audio (and _play_end) with
+        wx.CallLater; if the user stops playback, starts a different audio, or
+        navigates away before those fire, the pending timers would otherwise
+        still run and start audio from an earlier point in the sequence.
+        """
+        for attr in ("_chain_play_timer", "_chain_start_timer", "_chain_end_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.Stop()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
     def _auto_chain_next_audio(self, finished_id: str):
         """
         After an audio message finishes playing, automatically start the next
         consecutive audio message if one exists immediately after in the list.
         Stops at the first non-audio (or separator) message.
         """
+        # Cancel any timers left over from a previous chain step before
+        # scheduling new ones — a stale timer must never start audio after
+        # the user has already stopped/jumped elsewhere.
+        self._cancel_pending_chain_timers()
         # Don't chain if the user has navigated to a different conversation —
         # _sorted_messages belongs to the current conversation, not the one
         # where the audio was playing.
@@ -4605,8 +4643,8 @@ class ConversationsPanel(wx.Panel):
                         )
                     finally:
                         self._in_auto_chain_transition = False
-                wx.CallLater(500, _start_audio)
-            wx.CallLater(500, _play_next)
+                self._chain_start_timer = wx.CallLater(500, _start_audio)
+            self._chain_play_timer = wx.CallLater(500, _play_next)
         else:
             if getattr(self, "_is_in_audio_chain", False):
                 def _play_end():
@@ -4617,7 +4655,7 @@ class ConversationsPanel(wx.Panel):
                         except Exception as e:
                             logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
                     self._is_in_audio_chain = False
-                wx.CallLater(500, _play_end)
+                self._chain_end_timer = wx.CallLater(500, _play_end)
             else:
                 self._is_in_audio_chain = False
 

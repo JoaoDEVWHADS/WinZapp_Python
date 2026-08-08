@@ -2000,15 +2000,19 @@ class MainWindow(wx.Frame):
         Uses Win32 ShowWindow + SetForegroundWindow directly to avoid wx
         state-drift: _on_close hides the window via SW_HIDE which bypasses
         wx's internal visibility tracking, so wx-level Show()/Raise() calls
-        may silently no-op. SW_RESTORE also handles any minimized state.
+        may silently no-op. SW_SHOWMAXIMIZED both un-hides/un-minimizes the
+        window and (unlike SW_RESTORE, which reopens at whatever size it had
+        before being hidden) always brings it back maximized — the size the
+        app is meant to run at, and the one restore-from-tray is expected to
+        return to.
         Also refreshes the chat list in case sync updates happened while the
         window was hidden.
         """
         import ctypes
         hwnd = self.GetHandle()
-        SW_RESTORE = 9
+        SW_SHOWMAXIMIZED = 3
         user32 = ctypes.windll.user32
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_SHOWMAXIMIZED)
         # SetForegroundWindow() alone silently fails when another application
         # holds the foreground lock (Win32 foreground-stealing prevention). When
         # that happened the window stayed hidden/behind and the global hotkey
@@ -11512,6 +11516,16 @@ class MainWindow(wx.Frame):
         normalized = self._normalize_jid(jid)
         chat = self.chats.get(normalized)
         if chat is None:
+            return
+        # During the initial sync the WPPConnect handshake can emit
+        # chats-update with unreadCount=0 BEFORE get_remote_chats() has
+        # fetched the real list — accepting that would wipe the locally
+        # stored (never-read) badge and persist the 0 to the DB, so every
+        # conversation the user hasn't actually read shows as read right
+        # after opening the app. The list-chats merge in get_remote_chats()
+        # is the authoritative source for the real counts; ignore live
+        # chats.update while it (or the initial sync) is still running.
+        if getattr(self, "_initial_sync_running", False) or not getattr(self, "_sync_completed", False):
             return
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:

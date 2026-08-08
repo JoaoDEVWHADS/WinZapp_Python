@@ -632,7 +632,7 @@
     "sound_event_message_current": "Message in the current chat",
     "sound_event_message_foreground": "Message in another chat (app in foreground)",
     "sound_event_message_sent": "Message sent",
-    "sound_event_message_background": "Background message",
+    "sound_event_message_background": "Message while the program is in the background",
     "sound_event_audio_transition_next": "Transition to next voice message",
     "sound_event_audio_transition_end": "Voice message sequence end",
     "sound_event_state_enabled": "Enabled",
