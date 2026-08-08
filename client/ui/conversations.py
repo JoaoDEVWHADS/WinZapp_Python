@@ -4417,7 +4417,7 @@ class ConversationsPanel(wx.Panel):
             self._audio_stream = None
         self._is_audio_playing = False
         self._current_audio_id = None
-        if not getattr(self, "_in_auto_chain_transition", False):
+        if not getattr(self, "_in_auto_chain_transition", False) and not getattr(self, "_in_auto_timer_stop", False):
             self._is_in_audio_chain = False
         if self._audio_temp_file and os.path.exists(self._audio_temp_file):
             try:
@@ -4458,7 +4458,11 @@ class ConversationsPanel(wx.Panel):
                 if pos >= total:
                     # Save the ID before _stop_audio() clears it
                     finished_id = self._current_audio_id
-                    self._stop_audio()
+                    self._in_auto_timer_stop = True
+                    try:
+                        self._stop_audio()
+                    finally:
+                        self._in_auto_timer_stop = False
                     self._hide_audio_controls()
                     # Try to auto-play the next consecutive audio message
                     if finished_id:
@@ -4546,7 +4550,7 @@ class ConversationsPanel(wx.Panel):
                     )
                 finally:
                     self._in_auto_chain_transition = False
-            wx.CallLater(10, _play_next)
+            wx.CallLater(20, _play_next)
         else:
             if getattr(self, "_is_in_audio_chain", False):
                 def _play_end():
@@ -4555,7 +4559,7 @@ class ConversationsPanel(wx.Panel):
                             self.main_window.audio_transition_end_sound.play()
                     except Exception as e:
                         logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
-                wx.CallLater(5, _play_end)
+                wx.CallLater(10, _play_end)
             self._is_in_audio_chain = False
 
     def _is_voice_message(self, msg: dict) -> bool:
