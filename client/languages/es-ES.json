@@ -530,7 +530,7 @@
     "ui_message_list_mode_label": "Mostrar la lista de mensajes como:",
     "ui_message_list_mode_classic": "Lista de mensajes clásica (predeterminado, límite de 512 caracteres)",
     "ui_message_list_mode_listbox": "Cuadro de lista (mensajes completos, el lector de pantalla no anuncia la posición ni la cantidad de elementos)",
-    "ui_show_listbox_item_count": "Mostrar posición y cantidad de elementos en el cuadro de lista (ej. \", 1 de 200\")",
+    "ui_show_listbox_item_count": "Mostrar posición y cantidad de elementos al usar el modo Cuadro de lista (Válido solo en modo Cuadro de lista)",
     "ui_self_reference_label": "¿Cómo debo referirme a mí?",
     "ui_self_reference_voce": "Tú",
     "ui_self_reference_other": "Otro",
