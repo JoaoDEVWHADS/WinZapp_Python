@@ -3691,11 +3691,12 @@ class ConversationsPanel(wx.Panel):
         total = self.messages_list.GetItemCount()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
 
-        step = self.main_window.settings.get("user_interface", {}).get("page_up_down_step", 10)
+        ui_cfg = self.main_window.settings.get("user_interface", {})
+        raw_step = ui_cfg.get("page_jump_size", ui_cfg.get("page_up_down_step", 15))
         try:
-            step = max(1, int(step))
+            step = max(1, int(raw_step))
         except (ValueError, TypeError):
-            step = 10
+            step = 15
 
         if key == wx.WXK_SPACE:
             if idx >= 0:
