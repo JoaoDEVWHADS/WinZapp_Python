@@ -530,7 +530,7 @@
     "ui_message_list_mode_label": "Display the messages list as:",
     "ui_message_list_mode_classic": "Classic message list (default, 512-character limit)",
     "ui_message_list_mode_listbox": "List box (full messages, screen reader does not announce position or item count)",
-    "ui_show_listbox_item_count": "Display item position and count in list box (e.g. \", 1 of 200\")",
+    "ui_show_listbox_item_count": "Display item position and count when using List box mode (Only applies when List box mode is selected)",
     "ui_self_reference_label": "How should I be referred to?",
     "ui_self_reference_voce": "You",
     "ui_self_reference_other": "Other",
