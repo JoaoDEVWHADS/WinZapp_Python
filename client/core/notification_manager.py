@@ -523,8 +523,8 @@ class NotificationManager:
                 break
             if dropped:
                 print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
-            title, body, remote_jid = item
-            self._dispatch(title, body, remote_jid)
+            title, body, remote_jid, msg_key = item
+            self._dispatch(title, body, remote_jid, msg_key)
 
     def _coalesce_pending(self, item):
         """Collapse everything already queued down to the newest notification.
