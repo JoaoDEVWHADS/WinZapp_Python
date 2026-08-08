@@ -749,14 +749,17 @@ class NotificationManager:
             msg_key_snapshot = msg_key
 
             if self._interactable:
-                # `caption` (-> the toast XML's `title` attribute) is meant to
-                # be the field's visible label, but Windows' own toast/Action
-                # Center accessibility tree only reliably exposes
-                # `placeholder` (-> `placeHolderContent`) as the edit
-                # control's accessible Name — leaving placeholder empty (as
-                # this did) is why NVDA announced the reply box with no
-                # label at all. Set both so it's labelled either way.
-                reply_box = ToastInputTextBox("reply_box", reply_hint, reply_hint)
+                # `caption` (-> the toast XML's `title` attribute) renders as
+                # its own visible line ABOVE the field — setting it to the
+                # same text as `placeholder` (-> `placeHolderContent`, the
+                # text shown inside the empty box, and what Windows' toast/
+                # Action Center accessibility tree exposes as the edit
+                # control's accessible Name) doubled up "Responder..." on
+                # screen once the real accessibility fix — a non-empty
+                # placeholder — was in place. Leave caption unset; the
+                # "Enviar resposta" button right next to it already gives
+                # sighted users a visible label for what the field is for.
+                reply_box = ToastInputTextBox("reply_box", "", reply_hint)
                 toast.AddInput(reply_box)
                 # Without an explicit action tied to it (relatedInput), the
                 # reply box had no real button in the toast's XML at all —
@@ -801,7 +804,7 @@ class NotificationManager:
                         return
                     reply_text = (inputs.get("reply_box") or "").strip()
                     if reply_text:
-                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
+                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text, msg_key_snapshot)
                     else:
                         wx.CallAfter(self._do_open, jid_snapshot)
 
@@ -838,11 +841,18 @@ class NotificationManager:
         elif hasattr(self.main_window, "message_background_sound"):
             self.main_window.message_background_sound.play()
 
-    def _do_reply(self, jid: str, text: str):
+    def _do_reply(self, jid: str, text: str, msg_key: dict = None):
         if not text:
             return
         local_id = str(uuid.uuid4())
-        pm = PendingMessage(local_id=local_id, jid=jid, text=text)
+        # quoted needs a "message"-shaped dict wrapping the key — matches
+        # what _serialize_quoted_id()/send_text_message() (main.py) expect;
+        # msg_key alone (a bare key.id/remoteJid/fromMe dict) previously went
+        # straight into PendingMessage with no "quoted" at all, so replying
+        # from a toast always sent a brand new message instead of an actual
+        # WhatsApp reply.
+        quoted = {"key": msg_key} if msg_key else None
+        pm = PendingMessage(local_id=local_id, jid=jid, text=text, quoted=quoted)
         self.main_window.message_queue.enqueue(pm)
 
     def _do_react(self, jid: str, msg_key: dict, emoji: str):

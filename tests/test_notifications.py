@@ -57,9 +57,18 @@ class _FakeI18n:
         return f"[{key}]"
 
 
+class _FakeMessageQueue:
+    def __init__(self):
+        self.enqueued = []
+
+    def enqueue(self, pm):
+        self.enqueued.append(pm)
+
+
 class _FakeMainWindow:
     def __init__(self, chats=None):
         self.chats = chats if chats is not None else {}
+        self.message_queue = _FakeMessageQueue()
 
 
 def _chat(unread=0, records=1):
@@ -81,6 +90,7 @@ class _Stub:
     _coalesce_pending     = NotificationManager._coalesce_pending
     _clear_active_toasts  = NotificationManager._clear_active_toasts
     _dispatch             = NotificationManager._dispatch
+    _do_reply             = NotificationManager._do_reply
 
     def _play_sound(self, remote_jid=""):
         pass
@@ -342,7 +352,11 @@ class TestInteractableAccessibility:
     ToastButton at all, so nothing for Tab to land on). Also covers the new
     "Reagir" quick-action, added beside it when a msg_key is available."""
 
-    def test_reply_box_has_both_caption_and_placeholder_set(self, monkeypatch):
+    def test_reply_box_placeholder_is_set_and_caption_is_not(self, monkeypatch):
+        """placeholder is what Windows exposes as the field's accessible
+        Name — that's the actual NVDA fix. caption renders as a separate
+        visible line above the field; setting it to the same text doubled
+        up "Responder..." on screen once placeholder was no longer empty."""
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
         toaster = _FakeToaster()
         mgr = _Stub(toaster, interactable=True)
@@ -352,8 +366,8 @@ class TestInteractableAccessibility:
         toast = toaster.shown_toasts[0]
         reply_inputs = [i for i in toast.inputs if i.input_id == "reply_box"]
         assert len(reply_inputs) == 1
-        assert reply_inputs[0].caption
         assert reply_inputs[0].placeholder
+        assert not reply_inputs[0].caption
 
     def test_reply_box_has_a_related_send_button(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -429,3 +443,50 @@ class TestInteractableAccessibility:
 
         toast.on_activated(_Event())
         assert reacted == [("j@g.us", {"id": "ABC123"}, "👍")]
+
+    def test_activating_with_reply_text_quotes_the_triggering_message(self, monkeypatch):
+        """A reply from the toast used to always send as a brand new
+        message — msg_key never made it into the enqueued PendingMessage's
+        "quoted" field, so WhatsApp had nothing to attach the reply to."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123", "fromMe": False})
+
+        toast = toaster.shown_toasts[0]
+
+        class _Event:
+            arguments = "do_reply"
+            inputs = {"reply_box": "valeu!"}
+
+        toast.on_activated(_Event())
+
+        [pm] = mgr.main_window.message_queue.enqueued
+        assert pm.text == "valeu!"
+        assert pm.quoted == {"key": {"id": "ABC123", "fromMe": False}}
+
+
+class TestDoReply:
+    def test_quotes_the_message_key_when_given(self):
+        mgr = _Stub()
+        mgr._do_reply("j@g.us", "oi", {"id": "M1", "fromMe": False})
+
+        [pm] = mgr.main_window.message_queue.enqueued
+        assert pm.jid == "j@g.us"
+        assert pm.text == "oi"
+        assert pm.quoted == {"key": {"id": "M1", "fromMe": False}}
+
+    def test_sends_plain_when_no_message_key(self):
+        """_maybe_notify_reaction() notifications carry no msg_key — a
+        reply from one of those has nothing to quote."""
+        mgr = _Stub()
+        mgr._do_reply("j@g.us", "oi")
+
+        [pm] = mgr.main_window.message_queue.enqueued
+        assert pm.quoted is None
+
+    def test_empty_text_is_a_no_op(self):
+        mgr = _Stub()
+        mgr._do_reply("j@g.us", "", {"id": "M1"})
+        assert mgr.main_window.message_queue.enqueued == []
