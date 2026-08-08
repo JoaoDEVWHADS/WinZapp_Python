@@ -6942,10 +6942,11 @@ class ConversationsPanel(wx.Panel):
         count = self.messages_list.GetItemCount()
         if count > 0:
             last = count - 1
+            if not self.messages_list.HasFocus():
+                self.messages_list.SetFocus()
             self.messages_list.Focus(last)
             self.messages_list.Select(last, True)
             self.messages_list.EnsureVisible(last)
-            self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
 
@@ -6954,10 +6955,11 @@ class ConversationsPanel(wx.Panel):
         if self._unread_sep_idx < 0 or self._unread_sep_idx >= self.messages_list.GetItemCount():
             self.main_window.output(i18n.t("no_unread_in_conv"), interrupt=True)
             return
+        if not self.messages_list.HasFocus():
+            self.messages_list.SetFocus()
         self.messages_list.Focus(self._unread_sep_idx)
         self.messages_list.Select(self._unread_sep_idx, True)
         self.messages_list.EnsureVisible(self._unread_sep_idx)
-        self.messages_list.SetFocus()
         # mark_conversation_as_read is triggered by _on_message_focused which
         # fires when Focus() is called above — no need to call it here again.
 
