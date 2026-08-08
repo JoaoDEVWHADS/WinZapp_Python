@@ -3740,6 +3740,10 @@ class ConversationsPanel(wx.Panel):
             if idx >= 0:
                 self.conversations_list.Select(idx)
                 self.on_conversation_selected_by_index(idx)
+        elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
+            self._jump_list_by(self.conversations_list, -self._page_jump_size())
+        elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
+            self._jump_list_by(self.conversations_list, self._page_jump_size())
         elif ctrl and key == ord("P"):
             idx = self.conversations_list.GetFocusedItem()
             if 0 <= idx < len(self.chats_list):
