@@ -2576,7 +2576,8 @@ class MainWindow(wx.Frame):
                 self._resolve_group_name_async(remote_jid)
 
         chat = self.chats[remote_jid]
-        
+        self._apply_group_subject_change(remote_jid, chat, msg)
+
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
             msg_ts //= 1000
@@ -2959,6 +2960,8 @@ class MainWindow(wx.Frame):
             if remote_jid.endswith("@g.us"):
                 chat["name"] = self._fill_group_name(remote_jid)
             self.chats[remote_jid] = chat
+
+        self._apply_group_subject_change(remote_jid, chat, msg)
 
         records_wrapper = chat.setdefault("messages", {})
         if not isinstance(records_wrapper, dict):
@@ -7436,6 +7439,34 @@ class MainWindow(wx.Frame):
             self._schedule_save(dirty_jid=jid)
             wx.CallAfter(self._schedule_set_chats)
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
+        """Rename an already-known group chat when its WhatsApp subject changes.
+
+        The "gp2"/subject-change system message (subtype "subject", new name
+        in "body" — see WebSocketClient's gp2 handling) already got rendered
+        as an in-chat notification, but nothing updated chat["name"] itself:
+        the group kept showing its old name everywhere else (chat list,
+        window title, tray tooltip, dialogs) until the next full sync
+        happened to re-fetch group-info, which could be minutes/hours away
+        or never for a group with no other activity. Applying it immediately
+        here — from the same event that already told us the new name — keeps
+        the chat list in sync instead of looking like the renamed group
+        vanished.
+        """
+        if not remote_jid.endswith("@g.us"):
+            return
+        if msg.get("messageType") != "groupNotification":
+            return
+        notif = (msg.get("message") or {}).get("groupNotification") or {}
+        if notif.get("subtype") != "subject":
+            return
+        new_name = (notif.get("body") or "").strip()
+        if not new_name or chat.get("name") == new_name:
+            return
+        chat["name"] = new_name
+        self._group_name_cache = getattr(self, "_group_name_cache", {})
+        self._group_name_cache[remote_jid] = new_name
 
     def _resolve_missing_group_names(self):
         """Retry group-info lookups for groups still unnamed after sync.
