@@ -4648,6 +4648,24 @@ class MainWindow(wx.Frame):
         if "ui" in self.settings and "user_interface" not in self.settings:
             self.settings["user_interface"] = self.settings.pop("ui")
             changed = True
+        # sound_events: flat {event_key: {...}} (pre-soundpack) → nested
+        # {pack_id: {event_key: {...}}}. Sound.play() only ever reads the
+        # nested shape (settings["sound_events"][pack_id][event_key]); an
+        # install that had "sound_events" saved before soundpacks existed
+        # still has the flat shape on disk, so every lookup under a real
+        # pack_id came back empty and silently defaulted "enabled" to True —
+        # any event a user had disabled before that restructuring (e.g. the
+        # startup sound) started playing again despite still showing as
+        # "disabled" in Settings, because nothing ever migrated it into the
+        # new nested shape. Detect the old shape by an unmistakable signal:
+        # a top-level key that is itself a known event name (pack ids never
+        # collide with those) rather than a soundpack id.
+        events = self.settings.get("sound_events")
+        if isinstance(events, dict):
+            event_keys = {key for key, _ in SOUND_EVENTS}
+            if event_keys & events.keys():
+                self.settings["sound_events"] = {DEFAULT_PACK_ID: events}
+                changed = True
         if changed:
             self.save_settings()
 
