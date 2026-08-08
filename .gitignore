@@ -198,3 +198,34 @@ db.sqlite3-journal
 .ipynb_checkpoints
 
 wppconnect_repos/
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔒 BLOCO EXCLUSIVO — BRANCH DE AUDITORIA (audit-gabriel-sync)
+# ─────────────────────────────────────────────────────────────────────────────
+# ESTES 10 ARQUIVOS SÃO ESTRITAMENTE PROTEGIDOS E NÃO PODEM SER
+# SOBRESCRITOS, MODIFICADOS OU ALTERADOS EM HIPÓTESE ALGUMA.
+# Eles pertencem à base personalizada do Joao (main) e NÃO devem ser
+# tocados por qualquer operação realizada nesta branch de auditoria.
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. build.py
+/build.py
+# 2. updater.py
+/client/updater.py
+# 3. config.py
+/client/config.py
+# 4. version.py
+/client/version.py
+# 5. setup_api.py
+/setup_api.py
+# 6. package.json  (mirror versionado dos patches da API)
+/client/api_patches/package.json
+# 7. api_setup.py
+/client/ui/dialogs/api_setup.py
+# 8. README
+/README.md
+# 9. CHANGELOG  (ambas as grafias — no repo do Gabriel é changelog.md)
+/CHANGELOG.md
+/changelog.md
+# 10. release.yml  (o "release.imo" não existe; o arquivo real de release é este)
+/.github/workflows/release.yml
+# ═══════════════════════════════════════════════════════════════════════════
