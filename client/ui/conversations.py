@@ -4550,7 +4550,7 @@ class ConversationsPanel(wx.Panel):
                     )
                 finally:
                     self._in_auto_chain_transition = False
-            wx.CallLater(20, _play_next)
+            wx.CallLater(100, _play_next)
         else:
             if getattr(self, "_is_in_audio_chain", False):
                 def _play_end():
