@@ -655,15 +655,18 @@ class NotificationManager:
     # the emojis WhatsApp's own official client offers from a notification
     # (a subset of the fuller picker in ConversationsPanel._on_menu_react,
     # which doesn't fit/isn't needed in a one-line toast dropdown).
-    _TOAST_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+    # Windows toasts realistically support ~5 actions total (buttons +
+    # inputs combined) before the shell starts clipping/misbehaving — kept
+    # to 2 so "1 reply input + 1 send button + N reaction buttons" has
+    # comfortable margin.
+    _TOAST_REACTIONS = ["👍", "❤️"]
 
     def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
         if not self._toaster:
             return
         try:
             from windows_toasts import (
-                Toast, ToastInputTextBox, ToastInputSelectionBox, ToastSelection,
-                ToastButton, ToastAudio, ToastDuration,
+                Toast, ToastInputTextBox, ToastButton, ToastAudio, ToastDuration,
             )
             from core.utils import effective_unread_count
 
@@ -766,29 +769,33 @@ class NotificationManager:
                     tooltip=self.i18n.t("notif_send_reply"),
                 ))
 
+                # One button per emoji rather than a second input (a
+                # selection dropdown) alongside the reply text box: combining
+                # two different input controls in the same toast was the
+                # prime suspect for a live regression reported right after
+                # this shipped — notifications came back with no accessible
+                # content at all (NVDA fell back to reading the generic "New
+                # notification" wrapper) and Windows' own default sound
+                # instead of the app's, i.e. the whole custom toast getting
+                # rejected/replaced wholesale rather than one control simply
+                # rendering oddly. A row of plain ToastButtons is the
+                # standard, widely-supported "quick react" shape (same idea
+                # as the reply button above) and keeps the action count (1
+                # input + 1 button + N reaction buttons) comfortably under
+                # the ~5 actions a toast can show.
                 if msg_key_snapshot:
-                    react_selections = [
-                        ToastSelection(emoji, emoji) for emoji in self._TOAST_REACTIONS
-                    ]
-                    react_box = ToastInputSelectionBox(
-                        "react_box",
-                        self.i18n.t("notif_react_hint"),
-                        react_selections,
-                        react_selections[0],
-                    )
-                    toast.AddInput(react_box)
-                    toast.AddAction(ToastButton(
-                        content=self.i18n.t("notif_send_reaction"),
-                        arguments="do_react",
-                        relatedInput=react_box,
-                        tooltip=self.i18n.t("notif_send_reaction"),
-                    ))
+                    for emoji in self._TOAST_REACTIONS:
+                        toast.AddAction(ToastButton(
+                            content=emoji,
+                            arguments=f"do_react:{emoji}",
+                            tooltip=self.i18n.t("notif_react_with").format(emoji=emoji),
+                        ))
 
                 def on_activated(event):
                     args   = getattr(event, "arguments", "") or ""
                     inputs = getattr(event, "inputs", {}) or {}
-                    if args == "do_react":
-                        emoji = inputs.get("react_box")
+                    if args.startswith("do_react:"):
+                        emoji = args.split(":", 1)[1]
                         if emoji and msg_key_snapshot:
                             wx.CallAfter(self._do_react, jid_snapshot, msg_key_snapshot, emoji)
                         return

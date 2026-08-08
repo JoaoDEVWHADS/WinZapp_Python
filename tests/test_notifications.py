@@ -368,7 +368,7 @@ class TestInteractableAccessibility:
         reply_box = next(i for i in toast.inputs if i.input_id == "reply_box")
         assert send_buttons[0].relatedInput is reply_box
 
-    def test_no_react_action_without_a_message_key(self, monkeypatch):
+    def test_no_react_buttons_without_a_message_key(self, monkeypatch):
         """_maybe_notify_reaction() (reacting to your own message) has no
         message to quick-react to — msg_key stays None there."""
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -378,10 +378,15 @@ class TestInteractableAccessibility:
         mgr._dispatch("title", "body", "j@g.us", None)
 
         toast = toaster.shown_toasts[0]
-        assert not any(i.input_id == "react_box" for i in toast.inputs)
-        assert not any(a.arguments == "do_react" for a in toast.actions)
+        assert not any(a.arguments.startswith("do_react:") for a in toast.actions)
 
-    def test_react_action_present_with_a_message_key(self, monkeypatch):
+    def test_react_buttons_present_with_a_message_key(self, monkeypatch):
+        """One plain ToastButton per emoji — not a second input control
+        (a selection dropdown) alongside the reply text box. Combining two
+        different input types in one toast was the prime suspect for a live
+        regression (notifications losing all accessible content and playing
+        Windows' default sound instead of the app's), so reactions are kept
+        to independent buttons, same shape as the reply button."""
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
         toaster = _FakeToaster()
         mgr = _Stub(toaster, interactable=True)
@@ -389,12 +394,23 @@ class TestInteractableAccessibility:
         mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123", "fromMe": False})
 
         toast = toaster.shown_toasts[0]
-        react_inputs = [i for i in toast.inputs if i.input_id == "react_box"]
-        assert len(react_inputs) == 1
-        assert len(react_inputs[0].selections) > 0
-        react_buttons = [a for a in toast.actions if a.arguments == "do_react"]
-        assert len(react_buttons) == 1
-        assert react_buttons[0].relatedInput is react_inputs[0]
+        assert not any(i.input_id == "react_box" for i in toast.inputs)
+        react_buttons = [a for a in toast.actions if a.arguments.startswith("do_react:")]
+        assert len(react_buttons) == len(NotificationManager._TOAST_REACTIONS)
+        assert {a.arguments.split(":", 1)[1] for a in react_buttons} == set(NotificationManager._TOAST_REACTIONS)
+
+    def test_total_action_count_stays_within_the_toast_budget(self, monkeypatch):
+        """Windows toasts realistically render at most ~5 actions (buttons +
+        inputs combined) reliably — 1 reply input + 1 send button + the
+        reaction buttons must stay comfortably under that."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123"})
+
+        toast = toaster.shown_toasts[0]
+        assert len(toast.inputs) + len(toast.actions) <= 5
 
     def test_activating_with_do_react_arguments_sends_the_chosen_emoji(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
@@ -408,8 +424,8 @@ class TestInteractableAccessibility:
         toast = toaster.shown_toasts[0]
 
         class _Event:
-            arguments = "do_react"
-            inputs = {"react_box": "👍"}
+            arguments = "do_react:👍"
+            inputs = {}
 
         toast.on_activated(_Event())
         assert reacted == [("j@g.us", {"id": "ABC123"}, "👍")]
