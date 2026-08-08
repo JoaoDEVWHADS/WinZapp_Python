@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.08.0108"
+=======
+__version__ = "0.22.2.0beta"
+>>>>>>> 0d38ec1d (chore(version): restaura versão para 0.22.2.0beta)
