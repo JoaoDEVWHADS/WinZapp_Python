@@ -22,7 +22,16 @@
     },
     "user_interface": {
         "messages_page_size": 200,
-        "focus_on_open": "message_field"
+        "page_jump_size": 15,
+        "focus_on_open": "message_field",
+        "voice_record_focus": "send",
+        "message_list_mode": "classic",
+        "self_reference_mode": "eu",
+        "self_reference_custom_word": ""
+    },
+    "speech_content": {
+        "announce_typing": true,
+        "announce_recording": true
     },
     "audio_playback": {
         "audio_default_speed": 1.0
@@ -30,6 +39,14 @@
     "audio_devices": {
         "output_device_name": "",
         "input_device_name": ""
+    },
+    "active_sound_pack": "default",
+    "sound_events": {},
+    "alert_tones": {
+        "private": "default",
+        "private_custom_path": "",
+        "group": "default",
+        "group_custom_path": ""
     },
     "storage": {
         "auto_download_media": true,

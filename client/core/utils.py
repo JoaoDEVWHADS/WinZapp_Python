@@ -5,6 +5,68 @@ import base64
 import requests
 from cryptography.fernet import Fernet
 
+# Single source of truth for settings.json's shape, used both to bootstrap a
+# missing/corrupt settings.json (MainWindow.load_settings()) and to backfill
+# settings_default.json when the dialog needs it (settings_dialog.py). Keeping
+# one copy avoids the two call sites drifting apart when a new settings key
+# is added to only one of them.
+DEFAULT_SETTINGS = {
+    "connection": {
+        "wpp_server": "http://127.0.0.1",
+        "wpp_port": 6300,
+        "wpp_ws_server": "ws://127.0.0.1",
+        "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
+        "wpp_custom_api": False
+    },
+    "general": {
+        "language": "",
+        "notifications_enabled": True,
+        "updates_enabled": True,
+        "noise_reduction_enabled": False,
+        "first_run": True,
+        "autostart": False,
+        "show_tray_icon": True,
+        "terms_alert_displayed": False,
+        "quick_tip_shown": False
+    },
+    "status": {
+        "messages_set_completed": False
+    },
+    "user_interface": {
+        "messages_page_size": 200,
+        "page_jump_size": 15,
+        "focus_on_open": "message_field",
+        "voice_record_focus": "send",
+        "message_list_mode": "classic",
+        "self_reference_mode": "eu",
+        "self_reference_custom_word": ""
+    },
+    "speech_content": {
+        "announce_typing": True,
+        "announce_recording": True
+    },
+    "audio_playback": {
+        "audio_default_speed": 1.0
+    },
+    "audio_devices": {
+        "output_device_name": "",
+        "input_device_name": ""
+    },
+    "active_sound_pack": "default",
+    "sound_events": {},
+    "alert_tones": {
+        "private": "default",
+        "private_custom_path": "",
+        "group": "default",
+        "group_custom_path": ""
+    },
+    "storage": {
+        "auto_download_media": True,
+        "media_max_days": 30,
+        "media_max_mb": 100
+    }
+}
+
 def generate_and_save_key(filepath):
     key = Fernet.generate_key()
     with open(filepath, 'wb') as key_file:
@@ -241,18 +303,41 @@ def prune_chats_messages(chats) -> bool:
 
 
 def effective_unread_count(chat) -> int:
-    """A chat's unread count, as reported by the server.
+    """A chat's unread count, suppressed only when it would open empty.
 
-    Preserves server unread counts even when local_count is 0 during
-    initial background sync, preventing offline unread messages from being
-    suppressed locally.
+    The problem this guards against: a chat-list sync can report e.g.
+    unreadCount=2 for a chat whose per-chat message fetch previously failed (or
+    hasn't run yet), leaving 0 messages in the local store — showing "2 unread"
+    on a conversation that opens completely empty.
+
+    This used to return ``min(reported, local_count)``, which fixed that case
+    but silently capped every count at however many messages the last fetch
+    happened to bring back. WhatsApp Web's message store only holds a handful
+    of messages per chat right after a pairing (measured: ~15), so a group with
+    5747 unread announced "15" — badly wrong for a screen-reader user deciding
+    what to open, and indistinguishable from a group with exactly 15.
+
+    Having *some* history is enough to know the conversation is real and opens
+    with content; beyond that, the server's own count is the honest number, and
+    the one the app should report. Callers that need a count bounded by what is
+    actually on screen (the unread separator in conversations.py) already check
+    that themselves.
     """
     if not isinstance(chat, dict):
         return 0
     reported = int(chat.get("unreadCount") or 0)
     if reported <= 0:
         return 0
+    try:
+        local_count = len(
+            chat.get("messages", {}).get("messages", {}).get("records", []) or []
+        )
+    except AttributeError:
+        local_count = 0
+    if local_count == 0:
+        return 0
     return reported
+
 
 
 

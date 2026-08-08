@@ -523,8 +523,12 @@ class NotificationManager:
                 break
             if dropped:
                 print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
-            title, body, remote_jid = item
-            self._dispatch(title, body, remote_jid)
+            if len(item) == 4:
+                title, body, remote_jid, msg_key = item
+                self._dispatch(title, body, remote_jid, msg_key)
+            else:
+                title, body, remote_jid = item
+                self._dispatch(title, body, remote_jid)
 
     def _coalesce_pending(self, item):
         """Collapse everything already queued down to the newest notification.
@@ -651,11 +655,11 @@ class NotificationManager:
         except Exception:
             pass
 
-    def _dispatch(self, title: str, body: str, remote_jid: str):
+    def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
         if not self._toaster:
             return
         try:
-            from windows_toasts import Toast, ToastInputTextBox, ToastAudio, ToastDuration
+            from windows_toasts import Toast, ToastInputTextBox, ToastAudio, ToastDuration, ToastButton
             from core.utils import effective_unread_count
 
             self.i18n.get_language()
@@ -718,19 +722,53 @@ class NotificationManager:
             toast.tag      = self.TOAST_TAG
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
-            toast.text_fields = [title, body]
+            unread_suffix = ""
+            if chat is not None and not chat.get("_unread_count_unsynced"):
+                unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
+
+            # Fire the custom sound BEFORE any of the WinRT/COM work below
+            # (clearing the previous toast, show_toast() itself). Both of
+            # those trigger system-wide COM IPC, which under load (a rapid
+            # sequence of notifications) can stall the worker thread for
+            # ~20-50ms each before the sound plays — making audio playback
+            # feel sluggish relative to when the message actually arrived.
+            self._play_sound(remote_jid)
+
+            toast.text_fields = [title, body, unread_suffix] if unread_suffix else [title, body]
             toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
             jid_snapshot = remote_jid
+            msg_key_snapshot = msg_key
 
             if self._interactable:
-                toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
+                reply_box = ToastInputTextBox("reply_box", "", reply_hint)
+                toast.AddInput(reply_box)
+                toast.AddAction(ToastButton(
+                    content=self.i18n.t("notif_send_reply"),
+                    arguments="do_reply",
+                    relatedInput=reply_box,
+                    tooltip=self.i18n.t("notif_send_reply"),
+                ))
+
+                if msg_key_snapshot:
+                    for emoji in self._TOAST_REACTIONS:
+                        toast.AddAction(ToastButton(
+                            content=emoji,
+                            arguments=f"do_react:{emoji}",
+                            tooltip=self.i18n.t("notif_react_with").format(emoji=emoji),
+                        ))
 
                 def on_activated(event):
-                    inputs     = getattr(event, "inputs", {}) or {}
+                    args   = getattr(event, "arguments", "") or ""
+                    inputs = getattr(event, "inputs", {}) or {}
+                    if args.startswith("do_react:"):
+                        emoji = args.split(":", 1)[1]
+                        if emoji and msg_key_snapshot:
+                            wx.CallAfter(self._do_react, jid_snapshot, msg_key_snapshot, emoji)
+                        return
                     reply_text = (inputs.get("reply_box") or "").strip()
                     if reply_text:
-                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
+                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text, msg_key_snapshot)
                     else:
                         wx.CallAfter(self._do_open, jid_snapshot)
 
@@ -750,9 +788,14 @@ class NotificationManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def send(self, title: str, body: str, remote_jid: str):
-        """Enqueue a toast notification (non-blocking)."""
-        self._queue.put((title, body, remote_jid))
+    def send(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
+        """Enqueue a toast notification (non-blocking).
+
+        msg_key: the triggering message's `key` dict, if available — lets the
+        toast's "Reagir" action react to that specific message instead of
+        needing to look one up later.
+        """
+        self._queue.put((title, body, remote_jid, msg_key))
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
@@ -762,12 +805,20 @@ class NotificationManager:
         elif hasattr(self.main_window, "message_background_sound"):
             self.main_window.message_background_sound.play()
 
-    def _do_reply(self, jid: str, text: str):
+    def _do_reply(self, jid: str, text: str, msg_key: dict = None):
         if not text:
             return
         local_id = str(uuid.uuid4())
-        pm = PendingMessage(local_id=local_id, jid=jid, text=text)
+        quoted = {"key": msg_key} if msg_key else None
+        pm = PendingMessage(local_id=local_id, jid=jid, text=text, quoted=quoted)
         self.main_window.message_queue.enqueue(pm)
+
+    def _do_react(self, jid: str, msg_key: dict, emoji: str):
+        threading.Thread(
+            target=self.main_window.send_reaction,
+            args=(jid, msg_key, emoji),
+            daemon=True,
+        ).start()
 
     def _do_open(self, jid: str):
         self.main_window.restore_window()
