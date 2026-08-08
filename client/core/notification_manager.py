@@ -850,6 +850,12 @@ class NotificationManager:
         if not text:
             return
         local_id = str(uuid.uuid4())
+        # quoted needs a "message"-shaped dict wrapping the key — matches
+        # what _serialize_quoted_id()/send_text_message() (main.py) expect;
+        # msg_key alone (a bare key.id/remoteJid/fromMe dict) previously went
+        # straight into PendingMessage with no "quoted" at all, so replying
+        # from a toast always sent a brand new message instead of an actual
+        # WhatsApp reply.
         quoted = {"key": msg_key} if msg_key else None
         pm = PendingMessage(local_id=local_id, jid=jid, text=text, quoted=quoted)
         self.main_window.message_queue.enqueue(pm)

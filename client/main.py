@@ -8899,6 +8899,7 @@ class MainWindow(wx.Frame):
                 # Only preselect focus if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
+                    lst.Select(0)
                     lst.EnsureVisible(0)
 
 
