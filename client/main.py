@@ -2823,7 +2823,7 @@ class MainWindow(wx.Frame):
             # worker thread got around to actually dispatching it. Reported
             # live as the toast's "✉️ N não lidas" line reading much lower
             # than what Alt+3 announced moments later in the same chat.
-            self.notification_manager.send(title, body, remote_jid)
+            self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
@@ -9588,6 +9588,37 @@ class MainWindow(wx.Frame):
         self._save_media_failed_ids()
         return len(tasks)
 
+    def _refresh_open_conversation_after_sync(self, remote_jid: str, chat: dict) -> None:
+        """Repaint the open conversation after sync_chat_messages() replaces
+        its backing dict.
+
+        sync_chat_messages() does `self.chats[remote_jid] = chat` — a NEW
+        dict object, not a mutation of the old one. ConversationsPanel.
+        conversation, if this chat happens to be open, is still holding that
+        now-orphaned old object: its message list kept showing exactly what
+        was loaded before this sync (e.g. before the app went offline) no
+        matter how many messages this sync just merged in, until the user
+        closed (Esc) and reopened the conversation to pick up
+        self.chats[remote_jid] fresh. Point it at the new object and force a
+        repaint instead — same pattern as the @lid-merge case elsewhere.
+
+        Runs on a ThreadPoolExecutor worker thread (see sync_remote_chats()),
+        so the swap-and-repaint is marshalled onto the main thread as one
+        unit, re-checking the panel still has this jid open at that point
+        (the user may have navigated away in the meantime).
+        """
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        if cp.conversation.get("remoteJid") != remote_jid:
+            return
+
+        def _apply(new_chat=chat):
+            if cp.conversation is not None and cp.conversation.get("remoteJid") == remote_jid:
+                cp.conversation = new_chat
+                cp.refresh_messages_if_changed()
+        wx.CallAfter(_apply)
+
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
@@ -9849,6 +9880,17 @@ class MainWindow(wx.Frame):
 
         self.chats[remote_jid] = chat
         self._note_backfill_state(remote_jid, chat, api_ok)
+
+        # This replaces self.chats[remote_jid] with a NEW dict object rather
+        # than mutating the old one in place — if the conversation is open
+        # right now, ConversationsPanel.conversation is still holding that
+        # now-orphaned old object, so its message list kept showing exactly
+        # what was loaded before this sync (e.g. before the app went
+        # offline) no matter how many messages this sync just merged in,
+        # until the user closed (Esc) and reopened the conversation to pick
+        # up self.chats[remote_jid] fresh. Point it at the new object and
+        # force a repaint here, same as the @lid-merge case above.
+        self._refresh_open_conversation_after_sync(remote_jid, chat)
 
         if not getattr(self, "_initial_sync_running", False):
             wx.CallAfter(self._schedule_set_chats)

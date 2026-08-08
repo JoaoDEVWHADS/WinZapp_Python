@@ -523,8 +523,8 @@ class NotificationManager:
                 break
             if dropped:
                 print(f"[NotificationManager] coalesced {dropped} queued toast(s)")
-            title, body, remote_jid = item
-            self._dispatch(title, body, remote_jid)
+            title, body, remote_jid, msg_key = item
+            self._dispatch(title, body, remote_jid, msg_key)
 
     def _coalesce_pending(self, item):
         """Collapse everything already queued down to the newest notification.
@@ -651,11 +651,20 @@ class NotificationManager:
         except Exception:
             pass
 
-    def _dispatch(self, title: str, body: str, remote_jid: str):
+    # Curated quick-reaction set for the toast's "Reagir" action — mirrors
+    # the emojis WhatsApp's own official client offers from a notification
+    # (a subset of the fuller picker in ConversationsPanel._on_menu_react,
+    # which doesn't fit/isn't needed in a one-line toast dropdown).
+    _TOAST_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
+    def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
         if not self._toaster:
             return
         try:
-            from windows_toasts import Toast, ToastInputTextBox, ToastAudio, ToastDuration
+            from windows_toasts import (
+                Toast, ToastInputTextBox, ToastInputSelectionBox, ToastSelection,
+                ToastButton, ToastAudio, ToastDuration,
+            )
             from core.utils import effective_unread_count
 
             self.i18n.get_language()
@@ -669,9 +678,15 @@ class NotificationManager:
             # yet. Showing that assumed-low count ("1 unread"/"2 unread") is
             # actively misleading, not just imprecise, so the badge is
             # omitted entirely until a real sync backs the number (see
-            # get_remote_chats(), which clears this flag).
+            # get_remote_chats(), which clears this flag). It's still only a
+            # snapshot taken right before this toast is shown — a burst still
+            # arriving after that (each message bumping the real count
+            # further) can leave the toast reporting fewer unread than what
+            # Alt+3/the chat itself shows moments later; there is no single
+            # later point to re-sample from once the banner is already up.
+            unread_suffix = ""
             if chat is not None and not chat.get("_unread_count_unsynced"):
-                body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
+                unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
 
             # Fire the custom sound BEFORE any of the WinRT/COM work below
             # (clearing the previous toast, show_toast() itself). Both of
@@ -718,16 +733,65 @@ class NotificationManager:
             toast.tag      = self.TOAST_TAG
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
-            toast.text_fields = [title, body]
+            # Each toast.text_fields entry becomes its own <text> element in
+            # the notification's XML — an embedded "\n" inside a single entry
+            # does NOT force a line break (Windows' toast renderer collapses
+            # it), which is why the "✉️ N não lidas" line used to run
+            # straight into the message body instead of appearing below it.
+            # A separate list entry is a real second line.
+            toast.text_fields = [title, body, unread_suffix] if unread_suffix else [title, body]
             toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
             jid_snapshot = remote_jid
+            msg_key_snapshot = msg_key
 
             if self._interactable:
-                toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
+                # `caption` (-> the toast XML's `title` attribute) is meant to
+                # be the field's visible label, but Windows' own toast/Action
+                # Center accessibility tree only reliably exposes
+                # `placeholder` (-> `placeHolderContent`) as the edit
+                # control's accessible Name — leaving placeholder empty (as
+                # this did) is why NVDA announced the reply box with no
+                # label at all. Set both so it's labelled either way.
+                reply_box = ToastInputTextBox("reply_box", reply_hint, reply_hint)
+                toast.AddInput(reply_box)
+                # Without an explicit action tied to it (relatedInput), the
+                # reply box had no real button in the toast's XML at all —
+                # nothing for Tab to land on, just whatever bare Enter-to-
+                # submit behaviour Windows happens to give a lone input.
+                toast.AddAction(ToastButton(
+                    content=self.i18n.t("notif_send_reply"),
+                    arguments="do_reply",
+                    relatedInput=reply_box,
+                    tooltip=self.i18n.t("notif_send_reply"),
+                ))
+
+                if msg_key_snapshot:
+                    react_selections = [
+                        ToastSelection(emoji, emoji) for emoji in self._TOAST_REACTIONS
+                    ]
+                    react_box = ToastInputSelectionBox(
+                        "react_box",
+                        self.i18n.t("notif_react_hint"),
+                        react_selections,
+                        react_selections[0],
+                    )
+                    toast.AddInput(react_box)
+                    toast.AddAction(ToastButton(
+                        content=self.i18n.t("notif_send_reaction"),
+                        arguments="do_react",
+                        relatedInput=react_box,
+                        tooltip=self.i18n.t("notif_send_reaction"),
+                    ))
 
                 def on_activated(event):
-                    inputs     = getattr(event, "inputs", {}) or {}
+                    args   = getattr(event, "arguments", "") or ""
+                    inputs = getattr(event, "inputs", {}) or {}
+                    if args == "do_react":
+                        emoji = inputs.get("react_box")
+                        if emoji and msg_key_snapshot:
+                            wx.CallAfter(self._do_react, jid_snapshot, msg_key_snapshot, emoji)
+                        return
                     reply_text = (inputs.get("reply_box") or "").strip()
                     if reply_text:
                         wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
@@ -750,9 +814,14 @@ class NotificationManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def send(self, title: str, body: str, remote_jid: str):
-        """Enqueue a toast notification (non-blocking)."""
-        self._queue.put((title, body, remote_jid))
+    def send(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
+        """Enqueue a toast notification (non-blocking).
+
+        msg_key: the triggering message's `key` dict, if available — lets the
+        toast's "Reagir" action react to that specific message instead of
+        needing to look one up later.
+        """
+        self._queue.put((title, body, remote_jid, msg_key))
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
@@ -768,6 +837,13 @@ class NotificationManager:
         local_id = str(uuid.uuid4())
         pm = PendingMessage(local_id=local_id, jid=jid, text=text)
         self.main_window.message_queue.enqueue(pm)
+
+    def _do_react(self, jid: str, msg_key: dict, emoji: str):
+        threading.Thread(
+            target=self.main_window.send_reaction,
+            args=(jid, msg_key, emoji),
+            daemon=True,
+        ).start()
 
     def _do_open(self, jid: str):
         self.main_window.restore_window()
