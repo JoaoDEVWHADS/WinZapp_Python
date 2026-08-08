@@ -3693,11 +3693,13 @@ class ConversationsPanel(wx.Panel):
                     self._load_older_messages()
             elif total > 0 and idx > 0:
                 target_idx = max(0, idx - step)
+                self.messages_list.Focus(target_idx)
                 self.messages_list.Select(target_idx, True)
                 self.messages_list.EnsureVisible(target_idx)
         elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
             if total > 0 and idx >= 0:
                 target_idx = min(total - 1, idx + step)
+                self.messages_list.Focus(target_idx)
                 self.messages_list.Select(target_idx, True)
                 self.messages_list.EnsureVisible(target_idx)
         elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_HOME):
