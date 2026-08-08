@@ -276,12 +276,12 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
         self.Clear()
 
     def Focus(self, row):
-        if 0 <= row < self.GetCount():
+        if 0 <= row < self.GetCount() and self.GetSelection() != row:
             self.SetSelection(row)
 
     def Select(self, row, select=True):
         if select:
-            if 0 <= row < self.GetCount():
+            if 0 <= row < self.GetCount() and self.GetSelection() != row:
                 self.SetSelection(row)
         else:
             self.Deselect(row)

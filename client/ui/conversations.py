@@ -6944,7 +6944,6 @@ class ConversationsPanel(wx.Panel):
             last = count - 1
             if not self.messages_list.HasFocus():
                 self.messages_list.SetFocus()
-            self.messages_list.Focus(last)
             self.messages_list.Select(last, True)
             self.messages_list.EnsureVisible(last)
 
@@ -6957,7 +6956,6 @@ class ConversationsPanel(wx.Panel):
             return
         if not self.messages_list.HasFocus():
             self.messages_list.SetFocus()
-        self.messages_list.Focus(self._unread_sep_idx)
         self.messages_list.Select(self._unread_sep_idx, True)
         self.messages_list.EnsureVisible(self._unread_sep_idx)
         # mark_conversation_as_read is triggered by _on_message_focused which
