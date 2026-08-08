@@ -450,6 +450,10 @@ class Connect:
         main_sizer.Add(self.quit_btn, 0, wx.ALL | wx.CENTER, 5)
         self.connection_dial.SetSizer(main_sizer)
 
+        # No parent (main window isn't shown yet on first run) means wx
+        # otherwise places this at the OS default position — usually the
+        # screen's top-left corner — instead of where the user is looking,
+        # which is part of why the QR-code was reported as hard to find/scan.
         self.connection_dial.CentreOnScreen()
 
         logging.info("[show_connection_dial] Entering connection_dial modal loop.")
