@@ -825,12 +825,20 @@ export async function getMediaByMessage(req: Request, res: Response) {
           let base64: string | null = await client.page.evaluate(async (msgId: string) => {
             try {
               const w = window as any;
-              if (w.WPP && w.WPP.chat && typeof w.WPP.chat.downloadMedia === 'function') {
-                const downloadPromise = w.WPP.chat.downloadMedia(msgId);
-                const timeoutPromise = new Promise((res) => setTimeout(() => res(null), 5000));
-                const blob = await Promise.race([downloadPromise, timeoutPromise]);
-                if (blob && w.WPP.util && typeof w.WPP.util.blobToBase64 === 'function') {
-                  return await w.WPP.util.blobToBase64(blob);
+              if (w.WPP && w.WPP.chat) {
+                // Find message to get its chat ID
+                const msg = typeof w.WPP.chat.getMessageById === 'function' ? await w.WPP.chat.getMessageById(msgId).catch(() => null) : null;
+                const chatId = msg?.chatId?._serialized || msg?.from || (msgId.split('_')[1]);
+                if (chatId && typeof w.WPP.chat.openChatAt === 'function') {
+                  await w.WPP.chat.openChatAt(chatId).catch(() => null);
+                }
+                if (typeof w.WPP.chat.downloadMedia === 'function') {
+                  const downloadPromise = w.WPP.chat.downloadMedia(msgId);
+                  const timeoutPromise = new Promise((res) => setTimeout(() => res(null), 8000));
+                  const blob = await Promise.race([downloadPromise, timeoutPromise]);
+                  if (blob && w.WPP.util && typeof w.WPP.util.blobToBase64 === 'function') {
+                    return await w.WPP.util.blobToBase64(blob);
+                  }
                 }
               }
             } catch (e) {
