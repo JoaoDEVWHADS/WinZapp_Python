@@ -752,10 +752,11 @@ class SettingsDialog(wx.Dialog):
         page_step = self.main_window.settings.get("user_interface", {}).get(
             "page_up_down_step", 10
         )
-        try:
-            self._page_step_spin.SetValue(str(int(page_step)))
-        except (ValueError, TypeError):
-            self._page_step_spin.SetValue("10")
+        if hasattr(self, "_page_step_spin"):
+            try:
+                self._page_step_spin.SetValue(str(int(page_step)))
+            except (ValueError, TypeError):
+                self._page_step_spin.SetValue("10")
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1389,13 +1390,14 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "show_listbox_item_count"
         ] = self._show_listbox_count_cb.GetValue()
-        try:
-            _step_val = max(1, int(self._page_step_spin.GetValue()))
-        except (ValueError, TypeError):
-            _step_val = 10
-        self.main_window.settings.setdefault("user_interface", {})[
-            "page_up_down_step"
-        ] = _step_val
+        if hasattr(self, "_page_step_spin"):
+            try:
+                _step_val = max(1, int(self._page_step_spin.GetValue()))
+            except (ValueError, TypeError):
+                _step_val = 10
+            self.main_window.settings.setdefault("user_interface", {})[
+                "page_up_down_step"
+            ] = _step_val
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
