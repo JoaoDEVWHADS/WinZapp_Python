@@ -531,6 +531,8 @@
     "ui_message_list_mode_classic": "Classic message list (default, 512-character limit)",
     "ui_message_list_mode_listbox": "List box (full messages, screen reader does not announce position or item count)",
     "ui_show_listbox_item_count": "Display item position and count when using List box mode (Only applies when List box mode is selected)",
+    "ui_page_step_box_label": "Page navigation in messages",
+    "ui_page_up_down_step_label": "Messages to jump forward/backward with Page Up and Page Down:",
     "ui_self_reference_label": "How should I be referred to?",
     "ui_self_reference_voce": "You",
     "ui_self_reference_other": "Other",

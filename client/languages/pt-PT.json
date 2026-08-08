@@ -531,6 +531,8 @@
     "ui_message_list_mode_classic": "Lista de mensagens clássica (padrão, limite de 512 caracteres)",
     "ui_message_list_mode_listbox": "Caixa de lista (mensagens completas, o leitor de ecrã não anuncia a posição nem a quantidade de itens)",
     "ui_show_listbox_item_count": "Exibir posição e quantidade de itens ao usar o modo Caixa de lista (Válido apenas no modo Caixa de lista)",
+    "ui_page_step_box_label": "Navegação por página nas mensagens",
+    "ui_page_up_down_step_label": "Mensagens a avançar/recuar com Page Up e Page Down:",
     "ui_self_reference_label": "Como se referir a mim?",
     "ui_self_reference_voce": "Você",
     "ui_self_reference_other": "Outro",
