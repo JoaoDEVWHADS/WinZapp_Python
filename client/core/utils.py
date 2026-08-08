@@ -35,7 +35,13 @@ DEFAULT_SETTINGS = {
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
-        "focus_on_open": "message_field"
+        "focus_on_open": "message_field",
+        "voice_record_focus": "send_button",
+        "message_list_mode": "classic",
+        "show_listbox_item_count": False,
+        "page_up_down_step": 10,
+        "self_reference_mode": "eu",
+        "self_reference_custom_word": ""
     },
     "audio_playback": {
         "audio_default_speed": 1.0
@@ -43,6 +49,17 @@ DEFAULT_SETTINGS = {
     "audio_devices": {
         "output_device_name": "",
         "input_device_name": ""
+    },
+    "speech_content": {
+        "announce_typing": True,
+        "announce_recording": True
+    },
+    "active_sound_pack": "default",
+    "alert_tones": {
+        "private": "default",
+        "private_custom_path": "",
+        "group": "default",
+        "group_custom_path": ""
     },
     "storage": {
         "auto_download_media": True,
