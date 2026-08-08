@@ -7466,7 +7466,19 @@ class MainWindow(wx.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
-        """Rename an already-known group chat when its WhatsApp subject changes."""
+        """Rename an already-known group chat when its WhatsApp subject changes.
+
+        The "gp2"/subject-change system message (subtype "subject", new name
+        in "body" — see WebSocketClient's gp2 handling) already got rendered
+        as an in-chat notification, but nothing updated chat["name"] itself:
+        the group kept showing its old name everywhere else (chat list,
+        window title, tray tooltip, dialogs) until the next full sync
+        happened to re-fetch group-info, which could be minutes/hours away
+        or never for a group with no other activity. Applying it immediately
+        here — from the same event that already told us the new name — keeps
+        the chat list in sync instead of looking like the renamed group
+        vanished.
+        """
         if not remote_jid.endswith("@g.us"):
             return
         if msg.get("messageType") != "groupNotification":
