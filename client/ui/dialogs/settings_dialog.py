@@ -360,20 +360,6 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(msg_list_mode_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
-        # Page Up / Page Down step
-        self._page_step_box = wx.StaticBox(
-            self._ui_page, label=i18n.t("ui_page_step_box_label")
-        )
-        page_step_sizer = wx.StaticBoxSizer(self._page_step_box, wx.HORIZONTAL)
-        self._page_step_label = wx.StaticText(
-            self._ui_page, label=i18n.t("ui_page_up_down_step_label")
-        )
-        self._page_step_spin = wx.TextCtrl(
-            self._ui_page, value="10"
-        )
-        page_step_sizer.Add(self._page_step_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        page_step_sizer.Add(self._page_step_spin, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        ui_sizer.Add(page_step_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
 
         self._self_ref_box = wx.StaticBox(
@@ -727,7 +713,10 @@ class SettingsDialog(wx.Dialog):
         page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
 
-        page_jump_size = self.main_window.settings.get("user_interface", {}).get("page_jump_size", 15)
+        page_jump_size = self.main_window.settings.get("user_interface", {}).get(
+            "page_jump_size",
+            self.main_window.settings.get("user_interface", {}).get("page_up_down_step", 15)
+        )
         self._page_jump_size_field.SetValue(str(page_jump_size))
 
         focus_on_open = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
@@ -1364,6 +1353,7 @@ class SettingsDialog(wx.Dialog):
         # UI: Page Up/Page Down jump size
         page_jump_size = int(self._page_jump_size_field.GetValue().strip())
         self.main_window.settings.setdefault("user_interface", {})["page_jump_size"] = page_jump_size
+        self.main_window.settings.setdefault("user_interface", {})["page_up_down_step"] = page_jump_size
 
         # UI: focus on open
         focus_on_open = (
