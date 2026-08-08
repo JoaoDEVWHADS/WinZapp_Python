@@ -17,7 +17,9 @@
         "message_current": "message_current.ogg",
         "message_foreground": "message_foreground.ogg",
         "message_sent": "message_sent.ogg",
-        "message_background": "message_background.ogg"
+        "message_background": "message_background.ogg",
+        "audio_transition_next": "audio_transition_next.ogg",
+        "audio_transition_end": "audio_transition_end.ogg"
     },
     "alerts": {
         "alert_1": "alerts/Alert-01.ogg",
