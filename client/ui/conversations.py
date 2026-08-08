@@ -2766,9 +2766,15 @@ class ConversationsPanel(wx.Panel):
             if len(participant_jids) > 2:
                 mentioned_norm = {_ident(jid) for jid in mentioned if jid}
                 mentioned_norm.discard("")
-                # Allow for the sender themselves not appearing in their own
-                # mention list.
-                if len(mentioned_norm & participant_jids) >= len(participant_jids) - 1:
+                # Primary check: JID intersection (works for received messages).
+                # Fallback: count-based check — if mentioned count covers almost
+                # all participants, it's @todos regardless of JID format mismatch
+                # (happens for messages WinZapp itself sent, where phone-form JIDs
+                # don't intersect the @lid-keyed participant cache).
+                intersect_size = len(mentioned_norm & participant_jids)
+                threshold = len(participant_jids) - 1
+                count_match = len(mentioned_norm) >= threshold
+                if intersect_size >= threshold or count_match:
                     return []
 
         out = []
