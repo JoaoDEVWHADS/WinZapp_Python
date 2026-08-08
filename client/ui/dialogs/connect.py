@@ -322,10 +322,25 @@ class Connect:
                     threading.Thread(target=_close, daemon=True).start()
                 return False
         except Exception as exc:
-            # If the API is unreachable (still starting up), only assume the token is valid
-            # when the user has previously completed pairing. If paired=False, the connection
-            # dialog must be shown — the exception could have been an AttributeError or timeout
-            # that masked a stale/mid-pairing token.
+            # Connection-level failures (timeout, refused, DNS) almost always
+            # mean the WPPConnect server is still starting up — common on
+            # Windows boot when the app autostarts alongside the server, where
+            # Chrome headless + profile load can take 10-30s+. That is NOT
+            # evidence of a logout: destroying the token here makes the very
+            # next launch show the pairing dialog even though the session was
+            # perfectly fine. Preserve the token and let the normal flow
+            # connect via WebSocket once the server finishes starting.
+            import requests as _requests
+            if isinstance(exc, (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout)):
+                logging.warning(
+                    "[check_connection_status] API not reachable yet (%s) — "
+                    "assuming server still starting; preserving token.",
+                    exc,
+                )
+                return True
+            # Non-connection error (e.g. AttributeError, parsing failure): fall
+            # back to the previous behaviour — only trust the token when the
+            # user has previously completed pairing.
             logging.warning("[check_connection_status] Could not reach API to validate token: %s", exc)
             is_paired = self.main_window.settings.get("privateinfo", {}).get("paired", False)
             if is_paired:
