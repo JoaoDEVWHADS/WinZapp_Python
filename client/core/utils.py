@@ -36,6 +36,7 @@ DEFAULT_SETTINGS = {
     "user_interface": {
         "messages_page_size": 200,
         "page_jump_size": 15,
+        "page_up_down_step": 15,
         "focus_on_open": "message_field",
         "voice_record_focus": "send",
         "message_list_mode": "classic",
