@@ -741,8 +741,22 @@ class NotificationManager:
             msg_key_snapshot = msg_key
 
             if self._interactable:
+                # `caption` (-> the toast XML's `title` attribute) renders as
+                # its own visible line ABOVE the field — setting it to the
+                # same text as `placeholder` (-> `placeHolderContent`, the
+                # text shown inside the empty box, and what Windows' toast/
+                # Action Center accessibility tree exposes as the edit
+                # control's accessible Name) doubled up "Responder..." on
+                # screen once the real accessibility fix — a non-empty
+                # placeholder — was in place. Leave caption unset; the
+                # "Enviar resposta" button right next to it already gives
+                # sighted users a visible label for what the field is for.
                 reply_box = ToastInputTextBox("reply_box", "", reply_hint)
                 toast.AddInput(reply_box)
+                # Without an explicit action tied to it (relatedInput), the
+                # reply box had no real button in the toast's XML at all —
+                # nothing for Tab to land on, just whatever bare Enter-to-
+                # submit behaviour Windows happens to give a lone input.
                 toast.AddAction(ToastButton(
                     content=self.i18n.t("notif_send_reply"),
                     arguments="do_reply",
@@ -750,6 +764,20 @@ class NotificationManager:
                     tooltip=self.i18n.t("notif_send_reply"),
                 ))
 
+                # One button per emoji rather than a second input (a
+                # selection dropdown) alongside the reply text box: combining
+                # two different input controls in the same toast was the
+                # prime suspect for a live regression reported right after
+                # this shipped — notifications came back with no accessible
+                # content at all (NVDA fell back to reading the generic "New
+                # notification" wrapper) and Windows' own default sound
+                # instead of the app's, i.e. the whole custom toast getting
+                # rejected/replaced wholesale rather than one control simply
+                # rendering oddly. A row of plain ToastButtons is the
+                # standard, widely-supported "quick react" shape (same idea
+                # as the reply button above) and keeps the action count (1
+                # input + 1 button + N reaction buttons) comfortably under
+                # the ~5 actions a toast can show.
                 if msg_key_snapshot:
                     for emoji in self._TOAST_REACTIONS:
                         toast.AddAction(ToastButton(
