@@ -113,51 +113,13 @@ class _HotkeyCapture(wx.TextCtrl):
         self.SetValue(_vk_mod_to_str(vk, mod))
 
 
-DEFAULT_SETTINGS_FALLBACK = {
-    "connection": {
-        "wpp_server": "http://127.0.0.1",
-        "wpp_port": 6300,
-        "wpp_ws_server": "ws://127.0.0.1",
-        "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
-        "wpp_custom_api": False
-    },
-    "general": {
-        "language": "",
-        "notifications_enabled": True,
-        "updates_enabled": True,
-        "noise_reduction_enabled": False,
-        "first_run": True,
-        "autostart": False,
-        "show_tray_icon": True,
-        "terms_alert_displayed": False,
-        "quick_tip_shown": False
-    },
-    "status": {
-        "messages_set_completed": False
-    },
-    "user_interface": {
-        "messages_page_size": 200,
-        "focus_on_open": "message_field"
-    },
-    "audio_playback": {
-        "audio_default_speed": 1.0
-    },
-    "audio_devices": {
-        "output_device_name": "",
-        "input_device_name": ""
-    },
-    "storage": {
-        "auto_download_media": True,
-        "media_max_days": 30,
-        "media_max_mb": 100
-    }
-}
+from core.utils import DEFAULT_SETTINGS
 
 
 def ensure_default_settings_file():
     """Ensure settings.json and settings_default.json exist, generating them from fallback dict if missing."""
     try:
-        from core.utils import data_path, resource_path
+        from app_paths import data_path, resource_path
         import shutil
         import json
 
@@ -166,7 +128,7 @@ def ensure_default_settings_file():
             try:
                 os.makedirs(os.path.dirname(default_file), exist_ok=True)
                 with open(default_file, "w", encoding="utf-8") as f:
-                    json.dump(DEFAULT_SETTINGS_FALLBACK, f, indent=4)
+                    json.dump(DEFAULT_SETTINGS, f, indent=4)
             except Exception:
                 pass
 
@@ -177,7 +139,7 @@ def ensure_default_settings_file():
                 shutil.copy2(default_file, settings_file)
             else:
                 with open(settings_file, "w", encoding="utf-8") as f:
-                    json.dump(DEFAULT_SETTINGS_FALLBACK, f, indent=4)
+                    json.dump(DEFAULT_SETTINGS, f, indent=4)
             return True
     except Exception:
         pass
@@ -286,6 +248,13 @@ class SettingsDialog(wx.Dialog):
         )
         self._messages_page_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         ui_sizer.Add(self._messages_page_size_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        ui_sizer.Add(
+            wx.StaticText(self._ui_page, label=i18n.t("ui_page_jump_size_label")),
+            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        )
+        self._page_jump_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
+        ui_sizer.Add(self._page_jump_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
         # Wrap radio buttons in a StaticBox so NVDA reads the group label when
         # the user tabs into them.
@@ -720,6 +689,9 @@ class SettingsDialog(wx.Dialog):
         page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
 
+        page_jump_size = self.main_window.settings.get("user_interface", {}).get("page_jump_size", 15)
+        self._page_jump_size_field.SetValue(str(page_jump_size))
+
         focus_on_open = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_on_open == "unread_or_last":
             self._focus_unread_or_last_rb.SetValue(True)
@@ -1149,6 +1121,21 @@ class SettingsDialog(wx.Dialog):
             self._messages_page_size_field.SetFocus()
             return False
 
+        page_jump_size_str = self._page_jump_size_field.GetValue().strip()
+        try:
+            page_jump_size = int(page_jump_size_str)
+            if page_jump_size < 1:
+                raise ValueError
+        except ValueError:
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_page_jump_size"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._page_jump_size_field.SetFocus()
+            return False
+
         port_str = self._port_field.GetValue().strip()
         try:
             port = int(port_str)
@@ -1335,6 +1322,10 @@ class SettingsDialog(wx.Dialog):
         # UI: messages page size
         page_size = int(self._messages_page_size_field.GetValue().strip())
         self.main_window.settings.setdefault("user_interface", {})["messages_page_size"] = page_size
+
+        # UI: Page Up/Page Down jump size
+        page_jump_size = int(self._page_jump_size_field.GetValue().strip())
+        self.main_window.settings.setdefault("user_interface", {})["page_jump_size"] = page_jump_size
 
         # UI: focus on open
         focus_on_open = (
