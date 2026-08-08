@@ -5454,7 +5454,7 @@ class ConversationsPanel(wx.Panel):
             return False
         return msg.get("messageType") == "groupNotification"
 
-    def _render_message_line(self, msg) -> str:
+    def _render_message_line(self, msg, index: int | None = None, total: int | None = None) -> str:
         """Produce the full display string for a single message row."""
         if isinstance(msg, dict) and msg.get("_type") == "empty_placeholder":
             return self.main_window.i18n.t("no_messages_in_conversation")
@@ -5513,6 +5513,21 @@ class ConversationsPanel(wx.Panel):
             for emoji, count in reactions.items():
                 r_parts.append(f"{emoji}, {count} {i18n.t('total_label')}")
             pieces.append(f". {i18n.t('reactions_label')} {', '.join(r_parts)}.")
+
+        # In listbox mode, native Win32 LISTBOX controls don't announce item position
+        # (e.g. "1 de 200") to screen readers. Append position info to the line text so
+        # screen readers announce item position and total count without truncation.
+        if getattr(self, "_message_list_mode", "classic") == "listbox":
+            if index is None and hasattr(self, "_sorted_messages"):
+                try:
+                    index = self._sorted_messages.index(msg)
+                except ValueError:
+                    index = None
+            if total is None and hasattr(self, "_sorted_messages"):
+                total = len(self._sorted_messages)
+
+            if index is not None and total is not None and total > 0:
+                pieces.append(f", {index + 1} {i18n.t('of')} {total}")
 
         return " ".join(pieces)
 
