@@ -1628,8 +1628,10 @@ class SettingsDialog(wx.Dialog):
         self._msg_list_mode_classic_rb.SetLabel(i18n.t("ui_message_list_mode_classic"))
         self._msg_list_mode_listbox_rb.SetLabel(i18n.t("ui_message_list_mode_listbox"))
         self._show_listbox_count_cb.SetLabel(i18n.t("ui_show_listbox_item_count"))
-        self._page_step_box.SetLabel(i18n.t("ui_page_step_box_label"))
-        self._page_step_label.SetLabel(i18n.t("ui_page_up_down_step_label"))
+        if hasattr(self, "_page_step_box"):
+            self._page_step_box.SetLabel(i18n.t("ui_page_step_box_label"))
+        if hasattr(self, "_page_step_label"):
+            self._page_step_label.SetLabel(i18n.t("ui_page_up_down_step_label"))
         self._self_ref_box.SetLabel(i18n.t("ui_self_reference_label"))
         self._self_ref_eu_rb.SetLabel(i18n.t("sender_you"))
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
