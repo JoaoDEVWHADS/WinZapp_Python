@@ -27,7 +27,8 @@ DEFAULT_SETTINGS = {
         "autostart": False,
         "show_tray_icon": True,
         "terms_alert_displayed": False,
-        "quick_tip_shown": False
+        "quick_tip_shown": False,
+        "global_hotkey": ""
     },
     "status": {
         "messages_set_completed": False
