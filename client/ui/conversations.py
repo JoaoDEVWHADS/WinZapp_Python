@@ -5521,9 +5521,15 @@ class ConversationsPanel(wx.Panel):
             pieces.append(f". {i18n.t('reactions_label')} {', '.join(r_parts)}.")
 
         # In listbox mode, native Win32 LISTBOX controls don't announce item position
-        # (e.g. "1 de 200") to screen readers. Append position info to the line text so
-        # screen readers announce item position and total count without truncation.
-        if getattr(self, "_message_list_mode", "classic") == "listbox":
+        # (e.g. "1 de 200") to screen readers. Append position info ONLY when
+        # enabled in User Interface settings ("show_listbox_item_count", default False).
+        show_count = False
+        if hasattr(self, "main_window") and hasattr(self.main_window, "settings"):
+            show_count = self.main_window.settings.get("user_interface", {}).get(
+                "show_listbox_item_count", False
+            )
+
+        if show_count and getattr(self, "_message_list_mode", "classic") == "listbox":
             if index is None and hasattr(self, "_sorted_messages"):
                 try:
                     index = self._sorted_messages.index(msg)
