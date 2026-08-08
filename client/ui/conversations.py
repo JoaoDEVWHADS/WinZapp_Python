@@ -701,6 +701,7 @@ class ConversationsPanel(wx.Panel):
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
         self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
+        self.ID_ALT_U           = wx.NewIdRef()  # jump to unread sep      (Alt+U)
         # ── Message bookmarks ────────────────────────────────────────────────
         self.ID_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Ctrl+0..9)
         self.ID_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Shift+0..9)
@@ -773,6 +774,8 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("L"),          self.ID_CTRL_SHIFT_L),
             (CS,               ord("F"),          self.ID_CTRL_SHIFT_F),
             (wx.ACCEL_ALT,     ord("3"),          self.ID_ALT_3),
+            (wx.ACCEL_ALT,     ord("U"),          self.ID_ALT_U),
+            (wx.ACCEL_ALT,     ord("u"),          self.ID_ALT_U),
             (AS,               ord("R"),          self.ID_ALT_SHIFT_R),
             (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
@@ -813,6 +816,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_clear,               id=self.ID_CTRL_SHIFT_L)
         self.Bind(wx.EVT_MENU, self._on_accel_open_search,         id=self.ID_CTRL_SHIFT_F)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_3)
+        self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_U)
         self.Bind(wx.EVT_MENU, self._on_accel_reply_private,       id=self.ID_ALT_SHIFT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_number_speak,   id=self.ID_ALT_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
@@ -3259,12 +3263,10 @@ class ConversationsPanel(wx.Panel):
                                 daemon=True,
                             ).start()
 
-            if (self._should_dismiss_unread_separator(idx, self._unread_sep_idx)
-                    and not getattr(self, "_populating_messages", False)):
-                # Deferred: _dismiss_unread_separator() deletes a row and moves
-                # focus, and we are *inside* that control's own
-                # EVT_LIST_ITEM_FOCUSED handler right now.
-                wx.CallAfter(self._dismiss_unread_separator)
+            # Keep the unread separator visible throughout navigation while the
+            # conversation is open, allowing the user to jump back to it at any time
+            # using Alt+U or Alt+3. It is reset only when opening/closing conversations.
+            pass
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
