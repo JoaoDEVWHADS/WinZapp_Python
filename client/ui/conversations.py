@@ -4205,7 +4205,7 @@ class ConversationsPanel(wx.Panel):
                     self._stop_audio()
                     return
                 self._is_audio_playing = True
-                self._audio_timer.Start(200)
+                self._audio_timer.Start(30)
             return
 
         # Save position of the outgoing audio before the stream is destroyed so
@@ -4392,7 +4392,7 @@ class ConversationsPanel(wx.Panel):
                 return
 
         self._is_audio_playing = True
-        self._audio_timer.Start(200)
+        self._audio_timer.Start(30)
         # Show controls only if the playing message is currently focused in the list.
         _speed = self._audio_speed_steps[self._audio_speed_index]
         if self._focused_msg_id() == msg_id:
@@ -4522,11 +4522,12 @@ class ConversationsPanel(wx.Panel):
         if has_next_audio and target_msg is not None:
             self._is_in_audio_chain = True
             def _play_next():
-                try:
-                    if hasattr(self.main_window, "audio_transition_next_sound"):
-                        self.main_window.audio_transition_next_sound.play()
-                except Exception as e:
-                    logging.exception(f"[UI Audio Chaining] Error playing audio_transition_next_sound: {e}")
+                snd = getattr(self.main_window, "audio_transition_next_sound", None)
+                if snd is not None:
+                    try:
+                        snd.play()
+                    except Exception as e:
+                        logging.exception(f"[UI Audio Chaining] Error playing audio_transition_next_sound: {e}")
 
                 def _start_audio():
                     msg_id   = target_msg.get("key", {}).get("id", "")
@@ -4556,13 +4557,16 @@ class ConversationsPanel(wx.Panel):
         else:
             if getattr(self, "_is_in_audio_chain", False):
                 def _play_end():
-                    try:
-                        if hasattr(self.main_window, "audio_transition_end_sound"):
-                            self.main_window.audio_transition_end_sound.play()
-                    except Exception as e:
-                        logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
+                    snd = getattr(self.main_window, "audio_transition_end_sound", None)
+                    if snd is not None:
+                        try:
+                            snd.play()
+                        except Exception as e:
+                            logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
+                    self._is_in_audio_chain = False
                 wx.CallLater(10, _play_end)
-            self._is_in_audio_chain = False
+            else:
+                self._is_in_audio_chain = False
 
     def _is_voice_message(self, msg: dict) -> bool:
         """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
