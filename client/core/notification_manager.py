@@ -739,14 +739,12 @@ class NotificationManager:
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
 
-            # Fire the custom sound BEFORE any of the WinRT/COM work below
-            # (clearing the previous toast, show_toast() itself). Both of
-            # those trigger system-wide COM IPC, which under load (a rapid
-            # sequence of notifications) can stall the worker thread for
-            # ~20-50ms each before the sound plays — making audio playback
-            # feel sluggish relative to when the message actually arrived.
-            self._play_sound(remote_jid)
-
+            # Each toast.text_fields entry becomes its own <text> element in
+            # the notification's XML — an embedded "\n" inside a single entry
+            # does NOT force a line break (Windows' toast renderer collapses
+            # it), which is why the "✉️ N não lidas" line used to run
+            # straight into the message body instead of appearing below it.
+            # A separate list entry is a real second line.
             toast.text_fields = [title, body, unread_suffix] if unread_suffix else [title, body]
             toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
