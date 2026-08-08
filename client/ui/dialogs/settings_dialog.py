@@ -9,7 +9,6 @@ from core.sound_system import (
 from core.audio_devices import (
     enumerate_output_devices, enumerate_input_devices, test_input_device,
 )
-from core.utils import DEFAULT_SETTINGS
 
 # Win32 modifier constants for RegisterHotKey
 _MOD_ALT     = 0x0001
@@ -112,6 +111,9 @@ class _HotkeyCapture(wx.TextCtrl):
         self._mod = mod
         from main import _vk_mod_to_str
         self.SetValue(_vk_mod_to_str(vk, mod))
+
+
+from core.utils import DEFAULT_SETTINGS
 
 
 def ensure_default_settings_file():
@@ -255,18 +257,17 @@ class SettingsDialog(wx.Dialog):
         ui_sizer.Add(self._page_jump_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
         # Wrap radio buttons in a StaticBox so NVDA reads the group label when
-        # the user tabs into them.  A plain StaticText label is not sufficient
-        # for screen readers to announce group membership.
+        # the user tabs into them.
         self._focus_box = wx.StaticBox(self._ui_page, label=i18n.t("ui_focus_label"))
         focus_sizer = wx.StaticBoxSizer(self._focus_box, wx.VERTICAL)
 
         self._focus_message_field_rb = wx.RadioButton(
-            self._focus_box, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
+            self._ui_page, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
         )
         focus_sizer.Add(self._focus_message_field_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._focus_unread_or_last_rb = wx.RadioButton(
-            self._focus_box, label=i18n.t("ui_focus_unread_or_last")
+            self._ui_page, label=i18n.t("ui_focus_unread_or_last")
         )
         focus_sizer.Add(self._focus_unread_or_last_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
@@ -278,14 +279,14 @@ class SettingsDialog(wx.Dialog):
         voice_focus_sizer = wx.StaticBoxSizer(self._voice_focus_box, wx.VERTICAL)
 
         self._voice_focus_send_rb = wx.RadioButton(
-            self._voice_focus_box,
+            self._ui_page,
             label=i18n.t("ui_voice_record_focus_send"),
             style=wx.RB_GROUP,
         )
         voice_focus_sizer.Add(self._voice_focus_send_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._voice_focus_discard_rb = wx.RadioButton(
-            self._voice_focus_box, label=i18n.t("ui_voice_record_focus_discard")
+            self._ui_page, label=i18n.t("ui_voice_record_focus_discard")
         )
         voice_focus_sizer.Add(
             self._voice_focus_discard_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
@@ -299,20 +300,28 @@ class SettingsDialog(wx.Dialog):
         msg_list_mode_sizer = wx.StaticBoxSizer(self._msg_list_mode_box, wx.VERTICAL)
 
         self._msg_list_mode_classic_rb = wx.RadioButton(
-            self._msg_list_mode_box,
+            self._ui_page,
             label=i18n.t("ui_message_list_mode_classic"),
             style=wx.RB_GROUP,
         )
         msg_list_mode_sizer.Add(self._msg_list_mode_classic_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._msg_list_mode_listbox_rb = wx.RadioButton(
-            self._msg_list_mode_box, label=i18n.t("ui_message_list_mode_listbox")
+            self._ui_page, label=i18n.t("ui_message_list_mode_listbox")
         )
         msg_list_mode_sizer.Add(
-            self._msg_list_mode_listbox_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+            self._msg_list_mode_listbox_rb, 0, wx.LEFT | wx.TOP, 5
+        )
+
+        self._show_listbox_count_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_listbox_item_count")
+        )
+        msg_list_mode_sizer.Add(
+            self._show_listbox_count_cb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
         )
 
         ui_sizer.Add(msg_list_mode_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
 
         self._self_ref_box = wx.StaticBox(
             self._ui_page, label=i18n.t("ui_self_reference_label")
@@ -320,27 +329,27 @@ class SettingsDialog(wx.Dialog):
         self_ref_sizer = wx.StaticBoxSizer(self._self_ref_box, wx.VERTICAL)
 
         self._self_ref_eu_rb = wx.RadioButton(
-            self._self_ref_box, label=i18n.t("sender_you"), style=wx.RB_GROUP
+            self._ui_page, label=i18n.t("sender_you"), style=wx.RB_GROUP
         )
         self_ref_sizer.Add(self._self_ref_eu_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._self_ref_voce_rb = wx.RadioButton(
-            self._self_ref_box, label=i18n.t("ui_self_reference_voce")
+            self._ui_page, label=i18n.t("ui_self_reference_voce")
         )
         self_ref_sizer.Add(self._self_ref_voce_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._self_ref_other_rb = wx.RadioButton(
-            self._self_ref_box, label=i18n.t("ui_self_reference_other")
+            self._ui_page, label=i18n.t("ui_self_reference_other")
         )
         self_ref_sizer.Add(self._self_ref_other_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         self._self_ref_custom_label = wx.StaticText(
-            self._self_ref_box, label=i18n.t("ui_self_reference_custom_label")
+            self._ui_page, label=i18n.t("ui_self_reference_custom_label")
         )
         self_ref_sizer.Add(
             self._self_ref_custom_label, 0, wx.LEFT | wx.RIGHT, 8
         )
-        self._self_ref_custom_field = wx.TextCtrl(self._self_ref_box, style=wx.TE_DONTWRAP)
+        self._self_ref_custom_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         self_ref_sizer.Add(
             self._self_ref_custom_field, 0, wx.EXPAND | wx.ALL, 8
         )
@@ -665,7 +674,8 @@ class SettingsDialog(wx.Dialog):
         page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
 
-        page_jump_size = self.main_window.settings.get("user_interface", {}).get("page_jump_size", 15)
+        ui_settings = self.main_window.settings.get("user_interface", {})
+        page_jump_size = ui_settings.get("page_jump_size", ui_settings.get("page_up_down_step", 15))
         self._page_jump_size_field.SetValue(str(page_jump_size))
 
         focus_on_open = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
@@ -692,6 +702,12 @@ class SettingsDialog(wx.Dialog):
             self._msg_list_mode_listbox_rb.SetValue(True)
         else:
             self._msg_list_mode_classic_rb.SetValue(True)
+
+        show_listbox_count = self.main_window.settings.get("user_interface", {}).get(
+            "show_listbox_item_count", False
+        )
+        self._show_listbox_count_cb.SetValue(bool(show_listbox_count))
+
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1286,9 +1302,10 @@ class SettingsDialog(wx.Dialog):
         page_size = int(self._messages_page_size_field.GetValue().strip())
         self.main_window.settings.setdefault("user_interface", {})["messages_page_size"] = page_size
 
-        # UI: Page Up/Page Down jump size
+        # UI: Page Up/Page Down jump size (synced to both keys for full compatibility)
         page_jump_size = int(self._page_jump_size_field.GetValue().strip())
         self.main_window.settings.setdefault("user_interface", {})["page_jump_size"] = page_jump_size
+        self.main_window.settings.setdefault("user_interface", {})["page_up_down_step"] = page_jump_size
 
         # UI: focus on open
         focus_on_open = (
@@ -1321,6 +1338,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "message_list_mode"
         ] = new_message_list_mode
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_listbox_item_count"
+        ] = self._show_listbox_count_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -1550,6 +1570,7 @@ class SettingsDialog(wx.Dialog):
         self._msg_list_mode_box.SetLabel(i18n.t("ui_message_list_mode_label"))
         self._msg_list_mode_classic_rb.SetLabel(i18n.t("ui_message_list_mode_classic"))
         self._msg_list_mode_listbox_rb.SetLabel(i18n.t("ui_message_list_mode_listbox"))
+        self._show_listbox_count_cb.SetLabel(i18n.t("ui_show_listbox_item_count"))
         self._self_ref_box.SetLabel(i18n.t("ui_self_reference_label"))
         self._self_ref_eu_rb.SetLabel(i18n.t("sender_you"))
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))

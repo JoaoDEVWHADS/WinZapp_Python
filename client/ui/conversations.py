@@ -88,6 +88,17 @@ class ConversationsPanel(wx.Panel):
         self._audio_stream = None
         self._audio_tempo_ctrl = None
         self._is_audio_playing = False
+        self._is_in_audio_chain = False
+        # Handles to the wx.CallLater timers scheduled by the auto-chain
+        # (see _auto_chain_next_audio). They MUST be cancelled whenever
+        # playback stops, a new audio starts manually, or the user leaves the
+        # conversation — otherwise a stale timer fires up to ~1 s later and
+        # starts an audio the user didn't ask for (reported live as the
+        # sequence "keeping playing audios from above" after the last audio
+        # finished / after jumping to a different message).
+        self._chain_play_timer = None
+        self._chain_start_timer = None
+        self._chain_end_timer = None
         self._audio_stream_duration = 0
         self._audio_temp_file = None
         self._audio_speed_steps = [1.0, 1.5, 2.0]
@@ -701,6 +712,7 @@ class ConversationsPanel(wx.Panel):
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
         self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
+        self.ID_ALT_U           = wx.NewIdRef()  # jump to unread sep      (Alt+U)
         # ── Message bookmarks ────────────────────────────────────────────────
         self.ID_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Ctrl+0..9)
         self.ID_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Shift+0..9)
@@ -773,6 +785,10 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("L"),          self.ID_CTRL_SHIFT_L),
             (CS,               ord("F"),          self.ID_CTRL_SHIFT_F),
             (wx.ACCEL_ALT,     ord("3"),          self.ID_ALT_3),
+            (wx.ACCEL_ALT,     ord("U"),          self.ID_ALT_U),
+            (wx.ACCEL_ALT,     ord("u"),          self.ID_ALT_U),
+            (wx.ACCEL_CTRL,    ord("L"),          self.ID_ALT_U),
+            (wx.ACCEL_CTRL,    ord("l"),          self.ID_ALT_U),
             (AS,               ord("R"),          self.ID_ALT_SHIFT_R),
             (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
@@ -813,6 +829,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_clear,               id=self.ID_CTRL_SHIFT_L)
         self.Bind(wx.EVT_MENU, self._on_accel_open_search,         id=self.ID_CTRL_SHIFT_F)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_3)
+        self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_U)
         self.Bind(wx.EVT_MENU, self._on_accel_reply_private,       id=self.ID_ALT_SHIFT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_number_speak,   id=self.ID_ALT_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
@@ -856,6 +873,10 @@ class ConversationsPanel(wx.Panel):
             return
         self._stop_typing_for_current_conversation()
         self._cancel_active_recording()
+        # Leaving the conversation invalidates any pending auto-chain timers —
+        # they captured a target_msg from THIS conversation's list and would
+        # otherwise start stale audio (possibly in the wrong chat) later.
+        self._cancel_pending_chain_timers()
         # Audio keeps playing across conversation switches.  Save the current
         # position so it can be restored if the same message is played again
         # after a different audio has taken over and closed the stream.
@@ -1498,6 +1519,8 @@ class ConversationsPanel(wx.Panel):
         _sorted_messages, clearing _local_pending later (in _mark_message_sent)
         automatically updates the records entry too.
         """
+        if self._unread_sep_idx >= 0:
+            self._dismiss_unread_separator()
         remote_jid = virtual_msg.get("key", {}).get("remoteJid", "")
         if not remote_jid:
             return
@@ -2763,12 +2786,23 @@ class ConversationsPanel(wx.Panel):
             _ident = self._mention_identity
             participant_jids = {_ident(jid) for _, jid in participants}
             participant_jids.discard("")
-            if len(participant_jids) > 2:
+            if len(participant_jids) >= 2:
                 mentioned_norm = {_ident(jid) for jid in mentioned if jid}
                 mentioned_norm.discard("")
-                # Allow for the sender themselves not appearing in their own
-                # mention list.
-                if len(mentioned_norm & participant_jids) >= len(participant_jids) - 1:
+                # Primary check: JID intersection (works for received messages).
+                # Fallback: count-based check — if mentioned count covers almost
+                # all participants, it's @todos regardless of JID format mismatch
+                # (happens for messages WinZapp itself sent, where phone-form JIDs
+                # don't intersect the @lid-keyed participant cache).
+                intersect_size = len(mentioned_norm & participant_jids)
+                threshold = len(participant_jids) - 1
+                # count_match requires >= 2 mentions AND near-full coverage to
+                # avoid suppressing individual mentions in small groups.
+                count_match = (
+                    len(mentioned_norm) >= 2
+                    and len(mentioned_norm) >= threshold
+                )
+                if intersect_size >= threshold or count_match:
                     return []
 
         out = []
@@ -3016,9 +3050,12 @@ class ConversationsPanel(wx.Panel):
             # every group participant JID to the pending mentions list.
             all_kw = i18n.t("mention_all_keyword")   # "todos" or "all"
             replacement = f"@{all_kw} "
-            for _, p_jid in self._group_participants_cache:
+            for p_name, p_jid in self._group_participants_cache:
                 if p_jid not in self._pending_mentions:
                     self._pending_mentions.append(p_jid)
+                # Always store the display name so pill buttons show names, not LIDs.
+                if p_jid not in self._pending_mention_display_names:
+                    self._pending_mention_display_names[p_jid] = p_name or p_jid.rsplit("@", 1)[0]
         else:
             replacement = f"@{display_name} "
             if jid not in self._pending_mentions:
@@ -3267,12 +3304,10 @@ class ConversationsPanel(wx.Panel):
                                 daemon=True,
                             ).start()
 
-            if (self._should_dismiss_unread_separator(idx, self._unread_sep_idx)
-                    and not getattr(self, "_populating_messages", False)):
-                # Deferred: _dismiss_unread_separator() deletes a row and moves
-                # focus, and we are *inside* that control's own
-                # EVT_LIST_ITEM_FOCUSED handler right now.
-                wx.CallAfter(self._dismiss_unread_separator)
+            # Keep the unread separator visible throughout navigation while the
+            # conversation is open, allowing the user to jump back to it at any time
+            # using Alt+U or Alt+3. It is reset only when opening/closing conversations.
+            pass
 
         # Show audio controls only when the focused item IS the playing audio.
         if self._current_audio_id is not None and self._audio_stream is not None:
@@ -3711,12 +3746,20 @@ class ConversationsPanel(wx.Panel):
 
     def _on_messages_list_key_down(self, event):
         """Make Space fire the same activation as Enter / double-click.
-        Trigger loading older messages on Arrow Up / Page Up when at the top (index 0).
-        Page Up/Down jump the configured Settings > User Interface amount
-        (default _DEFAULT_PAGE_JUMP_SIZE) instead of the native single-row step."""
+        Page Up / Page Down jump by a configurable number of messages (page_up_down_step setting).
+        Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
         key = event.GetKeyCode()
         idx = self.messages_list.GetFocusedItem()
+        total = self.messages_list.GetItemCount()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
+
+        ui_cfg = self.main_window.settings.get("user_interface", {})
+        raw_step = ui_cfg.get("page_jump_size", ui_cfg.get("page_up_down_step", 15))
+        try:
+            step = max(1, int(raw_step))
+        except (ValueError, TypeError):
+            step = 15
+
         if key == wx.WXK_SPACE:
             if idx >= 0:
                 self._do_activate_message(idx)
@@ -3726,10 +3769,17 @@ class ConversationsPanel(wx.Panel):
                     self._load_more_messages()
                 else:
                     self._load_older_messages()
-            else:
-                self._jump_list_by(self.messages_list, -self._page_jump_size())
+            elif total > 0 and idx > 0:
+                target_idx = max(0, idx - step)
+                self.messages_list.Focus(target_idx)
+                self.messages_list.Select(target_idx, True)
+                self.messages_list.EnsureVisible(target_idx)
         elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
-            self._jump_list_by(self.messages_list, self._page_jump_size())
+            if total > 0 and idx >= 0:
+                target_idx = min(total - 1, idx + step)
+                self.messages_list.Focus(target_idx)
+                self.messages_list.Select(target_idx, True)
+                self.messages_list.EnsureVisible(target_idx)
         elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_HOME):
             if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
@@ -3741,11 +3791,10 @@ class ConversationsPanel(wx.Panel):
         else:
             event.Skip()
 
+
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
-        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives.
-        Page Up/Down jump the configured Settings > User Interface amount
-        (default _DEFAULT_PAGE_JUMP_SIZE) instead of the native single-row step."""
+        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives."""
         key  = event.GetKeyCode()
         ctrl = event.ControlDown()
 
@@ -3961,7 +4010,12 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        inner = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
 
         # 1. Search local path properties if message was attached or downloaded locally
@@ -4058,7 +4112,12 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        inner = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
         mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
@@ -4069,7 +4128,7 @@ class ConversationsPanel(wx.Panel):
         ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
         i18n = self.main_window.i18n
         if ext_clean:
-            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files')} (*.*)|*.*"
+            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
         elif msg_type == "audioMessage":
             wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
         elif msg_type == "imageMessage":
@@ -4223,7 +4282,7 @@ class ConversationsPanel(wx.Panel):
                     self._stop_audio()
                     return
                 self._is_audio_playing = True
-                self._audio_timer.Start(200)
+                self._audio_timer.Start(30)
             return
 
         # Save position of the outgoing audio before the stream is destroyed so
@@ -4410,7 +4469,7 @@ class ConversationsPanel(wx.Panel):
                 return
 
         self._is_audio_playing = True
-        self._audio_timer.Start(200)
+        self._audio_timer.Start(30)
         # Show controls only if the playing message is currently focused in the list.
         _speed = self._audio_speed_steps[self._audio_speed_index]
         if self._focused_msg_id() == msg_id:
@@ -4418,6 +4477,9 @@ class ConversationsPanel(wx.Panel):
             self.audio_speed_btn.SetLabel(self._format_speed(_speed))
 
     def _stop_audio(self):
+        # A manual stop (or a different audio taking over) invalidates any
+        # still-pending auto-chain timers — never let them start a stale audio.
+        self._cancel_pending_chain_timers()
         if self._audio_timer.IsRunning():
             self._audio_timer.Stop()
         # Stop the Tempo FX controller first (it owns the audio output channel)
@@ -4435,6 +4497,8 @@ class ConversationsPanel(wx.Panel):
             self._audio_stream = None
         self._is_audio_playing = False
         self._current_audio_id = None
+        if not getattr(self, "_in_auto_chain_transition", False) and not getattr(self, "_in_auto_timer_stop", False):
+            self._is_in_audio_chain = False
         if self._audio_temp_file and os.path.exists(self._audio_temp_file):
             try:
                 os.unlink(self._audio_temp_file)
@@ -4474,7 +4538,11 @@ class ConversationsPanel(wx.Panel):
                 if pos >= total:
                     # Save the ID before _stop_audio() clears it
                     finished_id = self._current_audio_id
-                    self._stop_audio()
+                    self._in_auto_timer_stop = True
+                    try:
+                        self._stop_audio()
+                    finally:
+                        self._in_auto_timer_stop = False
                     self._hide_audio_controls()
                     # Try to auto-play the next consecutive audio message
                     if finished_id:
@@ -4485,12 +4553,33 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             pass
 
+    def _cancel_pending_chain_timers(self):
+        """Cancel any still-scheduled auto-chain wx.CallLater timers.
+
+        The chain schedules _play_next/_start_audio (and _play_end) with
+        wx.CallLater; if the user stops playback, starts a different audio, or
+        navigates away before those fire, the pending timers would otherwise
+        still run and start audio from an earlier point in the sequence.
+        """
+        for attr in ("_chain_play_timer", "_chain_start_timer", "_chain_end_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.Stop()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
     def _auto_chain_next_audio(self, finished_id: str):
         """
         After an audio message finishes playing, automatically start the next
         consecutive audio message if one exists immediately after in the list.
         Stops at the first non-audio (or separator) message.
         """
+        # Cancel any timers left over from a previous chain step before
+        # scheduling new ones — a stale timer must never start audio after
+        # the user has already stopped/jumped elsewhere.
+        self._cancel_pending_chain_timers()
         # Don't chain if the user has navigated to a different conversation —
         # _sorted_messages belongs to the current conversation, not the one
         # where the audio was playing.
@@ -4500,44 +4589,100 @@ class ConversationsPanel(wx.Panel):
 
         # Find the index of the just-finished message
         current_idx = -1
+        finished_msg = None
         for i, msg in enumerate(self._sorted_messages):
             if not self._is_separator(msg) and msg.get("key", {}).get("id") == finished_id:
                 current_idx = i
+                finished_msg = msg
                 break
-        if current_idx < 0:
+        if current_idx < 0 or finished_msg is None:
+            return
+
+        # Sequential playback and transition sounds ONLY apply to voice notes (PTT),
+        # not to generic attached audio/music files.
+        if not self._is_voice_message(finished_msg):
+            self._is_in_audio_chain = False
             return
 
         # Walk forward, skipping separators, to find the next message
         next_idx = current_idx + 1
+        has_next_audio = False
+        target_msg = None
+        target_idx = -1
         while next_idx < len(self._sorted_messages):
-            next_msg = self._sorted_messages[next_idx]
-            if self._is_separator(next_msg):
+            candidate = self._sorted_messages[next_idx]
+            if self._is_separator(candidate):
                 next_idx += 1
                 continue
-            # Only auto-play if the next message is also an audio message
-            if next_msg.get("messageType") == "audioMessage":
-                msg_id   = next_msg.get("key", {}).get("id", "")
-                duration = (
-                    (next_msg.get("message") or {}).get("audioMessage") or {}
-                ).get("seconds", 0) or 0
-                # Only move list focus to the next audio if the user hasn't
-                # already scrolled past it — avoids disrupting reading when
-                # sequential audio plays in the background.
-                current_focus = self.messages_list.GetFocusedItem()
-                if current_focus < 0 or current_focus <= next_idx:
-                    self.messages_list.Focus(next_idx)
-                    self.messages_list.Select(next_idx, True)
-                    self.messages_list.EnsureVisible(next_idx)
-                clean_msg_id = msg_id
-                if "_" in msg_id:
-                    parts = msg_id.split("_")
-                    clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-                self._toggle_playback(
-                    msg_id, duration, next_msg,
-                    file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
-                    audio_ext=".ogg",
-                )
-            break  # stop regardless (either play next or not)
+            if candidate.get("messageType") == "audioMessage" and self._is_voice_message(candidate):
+                has_next_audio = True
+                target_msg = candidate
+                target_idx = next_idx
+            break
+
+        if has_next_audio and target_msg is not None:
+            self._is_in_audio_chain = True
+            def _play_next():
+                snd = getattr(self.main_window, "audio_transition_next_sound", None)
+                if snd is not None:
+                    try:
+                        snd.play()
+                    except Exception as e:
+                        logging.exception(f"[UI Audio Chaining] Error playing audio_transition_next_sound: {e}")
+
+                def _start_audio():
+                    msg_id   = target_msg.get("key", {}).get("id", "")
+                    duration = (
+                        (target_msg.get("message") or {}).get("audioMessage") or {}
+                    ).get("seconds", 0) or 0
+                    # Only move list focus to the next audio when the user is
+                    # EXCLUSIVELY focused on the audio that just finished
+                    # playing (current_idx). If they've moved focus one row
+                    # above/below (or anywhere else) while listening, keep the
+                    # chain playing but never steal their focus back.
+                    current_focus = self.messages_list.GetFocusedItem()
+                    if current_focus == current_idx:
+                        self.messages_list.Focus(target_idx)
+                        self.messages_list.Select(target_idx, True)
+                        self.messages_list.EnsureVisible(target_idx)
+                    clean_msg_id = msg_id
+                    if "_" in msg_id:
+                        parts = msg_id.split("_")
+                        clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+                    self._in_auto_chain_transition = True
+                    try:
+                        self._toggle_playback(
+                            msg_id, duration, target_msg,
+                            file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
+                            audio_ext=".ogg",
+                        )
+                    finally:
+                        self._in_auto_chain_transition = False
+                self._chain_start_timer = wx.CallLater(100, _start_audio)
+            self._chain_play_timer = wx.CallLater(100, _play_next)
+        else:
+            if getattr(self, "_is_in_audio_chain", False):
+                def _play_end():
+                    snd = getattr(self.main_window, "audio_transition_end_sound", None)
+                    if snd is not None:
+                        try:
+                            snd.play()
+                        except Exception as e:
+                            logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
+                    self._is_in_audio_chain = False
+                self._chain_end_timer = wx.CallLater(100, _play_end)
+            else:
+                self._is_in_audio_chain = False
+
+    def _is_voice_message(self, msg: dict) -> bool:
+        """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
+        if not isinstance(msg, dict) or msg.get("messageType") != "audioMessage":
+            return False
+        msg_obj = msg.get("message") or {}
+        inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+        media_data = msg.get("mediaData") or {}
+        return bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+
 
     def on_audio_speed_btn(self, event):
         self._audio_speed_index = (self._audio_speed_index + 1) % len(
@@ -5520,7 +5665,7 @@ class ConversationsPanel(wx.Panel):
             return False
         return msg.get("messageType") == "groupNotification"
 
-    def _render_message_line(self, msg) -> str:
+    def _render_message_line(self, msg, index: int | None = None, total: int | None = None) -> str:
         """Produce the full display string for a single message row."""
         if isinstance(msg, dict) and msg.get("_type") == "empty_placeholder":
             return self.main_window.i18n.t("no_messages_in_conversation")
@@ -5579,6 +5724,27 @@ class ConversationsPanel(wx.Panel):
             for emoji, count in reactions.items():
                 r_parts.append(f"{emoji}, {count} {i18n.t('total_label')}")
             pieces.append(f". {i18n.t('reactions_label')} {', '.join(r_parts)}.")
+
+        # In listbox mode, native Win32 LISTBOX controls don't announce item position
+        # (e.g. "1 de 200") to screen readers. Append position info ONLY when
+        # enabled in User Interface settings ("show_listbox_item_count", default False).
+        show_count = False
+        if hasattr(self, "main_window") and hasattr(self.main_window, "settings"):
+            show_count = self.main_window.settings.get("user_interface", {}).get(
+                "show_listbox_item_count", False
+            )
+
+        if show_count and getattr(self, "_message_list_mode", "classic") == "listbox":
+            if index is None and hasattr(self, "_sorted_messages"):
+                try:
+                    index = self._sorted_messages.index(msg)
+                except ValueError:
+                    index = None
+            if total is None and hasattr(self, "_sorted_messages"):
+                total = len(self._sorted_messages)
+
+            if index is not None and total is not None and total > 0:
+                pieces.append(f", {index + 1} {i18n.t('of')} {total}")
 
         return " ".join(pieces)
 
@@ -5988,7 +6154,12 @@ class ConversationsPanel(wx.Panel):
         if not msg_id:
             return
 
-        inner = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
@@ -6825,7 +6996,12 @@ class ConversationsPanel(wx.Panel):
             return
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
-        inner    = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
         is_ptt   = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
@@ -6987,10 +7163,10 @@ class ConversationsPanel(wx.Panel):
         count = self.messages_list.GetItemCount()
         if count > 0:
             last = count - 1
-            self.messages_list.Focus(last)
+            if not self.messages_list.HasFocus():
+                self.messages_list.SetFocus()
             self.messages_list.Select(last, True)
             self.messages_list.EnsureVisible(last)
-            self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
 

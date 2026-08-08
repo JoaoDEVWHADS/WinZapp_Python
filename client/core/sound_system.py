@@ -293,6 +293,8 @@ SOUND_EVENTS: list[tuple[str, str]] = [
     ("message_foreground", "message_foreground.ogg"),
     ("message_background", "message_background.ogg"),
     ("message_sent", "message_sent.ogg"),
+    ("audio_transition_next", "audio_transition_next.ogg"),
+    ("audio_transition_end", "audio_transition_end.ogg"),
 ]
 
 # ── Alert tone registry (background notification sound choices) ────────────

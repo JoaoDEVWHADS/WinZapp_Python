@@ -8901,7 +8901,7 @@ class MainWindow(wx.Frame):
         if self.IsShown():
             lst = self.conversations_panel.conversations_list
             if lst.GetItemCount() > 0:
-                # Only preselect if there is no current selection/focus
+                # Only preselect focus if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
                     lst.Select(0)
@@ -11541,6 +11541,16 @@ class MainWindow(wx.Frame):
         normalized = self._normalize_jid(jid)
         chat = self.chats.get(normalized)
         if chat is None:
+            return
+        # During the initial sync the WPPConnect handshake can emit
+        # chats-update with unreadCount=0 BEFORE get_remote_chats() has
+        # fetched the real list — accepting that would wipe the locally
+        # stored (never-read) badge and persist the 0 to the DB, so every
+        # conversation the user hasn't actually read shows as read right
+        # after opening the app. The list-chats merge in get_remote_chats()
+        # is the authoritative source for the real counts; ignore live
+        # chats.update while it (or the initial sync) is still running.
+        if getattr(self, "_initial_sync_running", False) or not getattr(self, "_sync_completed", False):
             return
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:

@@ -182,6 +182,11 @@ class AccessibleMessagesListControl(wx.Accessible):
             return (wx.ACC_OK, self._label)
         return (wx.ACC_NOT_IMPLEMENTED, "")
 
+    def GetRole(self, childId):
+        if childId == 0:
+            return (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
+        return (wx.ACC_NOT_IMPLEMENTED, 0)
+
 
 class AccessibleAudioSlider(wx.Accessible):
     def __init__(self, conversations_panel):
@@ -271,12 +276,12 @@ class CompatListBoxMessagesCtrl(wx.ListBox):
         self.Clear()
 
     def Focus(self, row):
-        if 0 <= row < self.GetCount():
+        if 0 <= row < self.GetCount() and self.GetSelection() != row:
             self.SetSelection(row)
 
     def Select(self, row, select=True):
         if select:
-            if 0 <= row < self.GetCount():
+            if 0 <= row < self.GetCount() and self.GetSelection() != row:
                 self.SetSelection(row)
         else:
             self.Deselect(row)
