@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
         "focus_on_open": "message_field",
         "voice_record_focus": "send",
         "message_list_mode": "classic",
+        "show_listbox_item_count": False,
         "self_reference_mode": "eu",
         "self_reference_custom_word": ""
     },
