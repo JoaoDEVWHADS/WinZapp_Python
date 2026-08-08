@@ -88,6 +88,7 @@ class ConversationsPanel(wx.Panel):
         self._audio_stream = None
         self._audio_tempo_ctrl = None
         self._is_audio_playing = False
+        self._is_in_audio_chain = False
         self._audio_stream_duration = 0
         self._audio_temp_file = None
         self._audio_speed_steps = [1.0, 1.5, 2.0]
@@ -4416,6 +4417,8 @@ class ConversationsPanel(wx.Panel):
             self._audio_stream = None
         self._is_audio_playing = False
         self._current_audio_id = None
+        if not getattr(self, "_in_auto_chain_transition", False):
+            self._is_in_audio_chain = False
         if self._audio_temp_file and os.path.exists(self._audio_temp_file):
             try:
                 os.unlink(self._audio_temp_file)
@@ -4505,6 +4508,7 @@ class ConversationsPanel(wx.Panel):
             break
 
         if has_next_audio and target_msg is not None:
+            self._is_in_audio_chain = True
             def _play_next():
                 try:
                     if hasattr(self.main_window, "audio_transition_next_sound"):
@@ -4525,20 +4529,26 @@ class ConversationsPanel(wx.Panel):
                 if "_" in msg_id:
                     parts = msg_id.split("_")
                     clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-                self._toggle_playback(
-                    msg_id, duration, target_msg,
-                    file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
-                    audio_ext=".ogg",
-                )
+                self._in_auto_chain_transition = True
+                try:
+                    self._toggle_playback(
+                        msg_id, duration, target_msg,
+                        file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
+                        audio_ext=".ogg",
+                    )
+                finally:
+                    self._in_auto_chain_transition = False
             wx.CallLater(10, _play_next)
         else:
-            def _play_end():
-                try:
-                    if hasattr(self.main_window, "audio_transition_end_sound"):
-                        self.main_window.audio_transition_end_sound.play()
-                except Exception as e:
-                    logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
-            wx.CallLater(5, _play_end)
+            if getattr(self, "_is_in_audio_chain", False):
+                def _play_end():
+                    try:
+                        if hasattr(self.main_window, "audio_transition_end_sound"):
+                            self.main_window.audio_transition_end_sound.play()
+                    except Exception as e:
+                        logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
+                wx.CallLater(5, _play_end)
+            self._is_in_audio_chain = False
 
 
     def on_audio_speed_btn(self, event):
