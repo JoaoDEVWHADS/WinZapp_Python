@@ -2811,7 +2811,7 @@ class MainWindow(wx.Frame):
             # worker thread got around to actually dispatching it. Reported
             # live as the toast's "✉️ N não lidas" line reading much lower
             # than what Alt+3 announced moments later in the same chat.
-            self.notification_manager.send(title, body, remote_jid)
+            self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
@@ -8911,6 +8911,7 @@ class MainWindow(wx.Frame):
                 # Only preselect focus if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
+                    lst.Select(0)
                     lst.EnsureVisible(0)
 
 
@@ -10752,7 +10753,7 @@ class MainWindow(wx.Frame):
 
             if ogg_bytes is None:
                 # If conversion failed, do not send raw WAV as it breaks WhatsApp (silent failure)
-                err_msg = "Falha ao converter áudio. FFmpeg ausente ou indisponível no sistema."
+                err_msg = self.i18n.t("audio_convert_failed")
                 logging.error("[send_audio_message] %s", err_msg)
                 return {"ok": False, "error": err_msg, "retry": False}
             logging.info("[VOICE_TIMING] fallback encode+read done in %.3fs",
