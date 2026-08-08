@@ -1497,6 +1497,8 @@ class ConversationsPanel(wx.Panel):
         _sorted_messages, clearing _local_pending later (in _mark_message_sent)
         automatically updates the records entry too.
         """
+        if self._unread_sep_idx >= 0:
+            self._dismiss_unread_separator()
         remote_jid = virtual_msg.get("key", {}).get("remoteJid", "")
         if not remote_jid:
             return
