@@ -7655,6 +7655,7 @@ class ConversationsPanel(wx.Panel):
                             quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+        self.main_window.mark_conversation_as_read(remote_jid)
 
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()

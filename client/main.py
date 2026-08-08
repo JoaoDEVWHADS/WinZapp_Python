@@ -44,7 +44,7 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path
@@ -2811,7 +2811,7 @@ class MainWindow(wx.Frame):
             # worker thread got around to actually dispatching it. Reported
             # live as the toast's "✉️ N não lidas" line reading much lower
             # than what Alt+3 announced moments later in the same chat.
-            self.notification_manager.send(title, body, remote_jid)
+            self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
@@ -2948,6 +2948,8 @@ class MainWindow(wx.Frame):
             if remote_jid.endswith("@g.us"):
                 chat["name"] = self._fill_group_name(remote_jid)
             self.chats[remote_jid] = chat
+
+        self._apply_group_subject_change(remote_jid, chat, msg)
 
         records_wrapper = chat.setdefault("messages", {})
         if not isinstance(records_wrapper, dict):
@@ -4575,45 +4577,7 @@ class MainWindow(wx.Frame):
     def load_settings(self):
         settings_file = data_path("settings.json")
         default_file = resource_path("data", "settings_default.json")
-        fallback_dict = {
-            "connection": {
-                "wpp_server": "http://127.0.0.1",
-                "wpp_port": 6300,
-                "wpp_ws_server": "ws://127.0.0.1",
-                "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
-                "wpp_custom_api": False
-            },
-            "general": {
-                "language": "",
-                "notifications_enabled": True,
-                "updates_enabled": True,
-                "noise_reduction_enabled": False,
-                "first_run": True,
-                "autostart": False,
-                "show_tray_icon": True,
-                "terms_alert_displayed": False,
-                "quick_tip_shown": False
-            },
-            "status": {
-                "messages_set_completed": False
-            },
-            "user_interface": {
-                "messages_page_size": 200,
-                "focus_on_open": "message_field"
-            },
-            "audio_playback": {
-                "audio_default_speed": 1.0
-            },
-            "audio_devices": {
-                "output_device_name": "",
-                "input_device_name": ""
-            },
-            "storage": {
-                "auto_download_media": True,
-                "media_max_days": 30,
-                "media_max_mb": 100
-            }
-        }
+        fallback_dict = DEFAULT_SETTINGS
 
         # Bootstrap settings.json if missing
         if not os.path.isfile(settings_file):
