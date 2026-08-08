@@ -44,7 +44,7 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path
@@ -1017,6 +1017,13 @@ class MainWindow(wx.Frame):
         # In background mode the window is intentionally hidden; it can be
         # restored later by a second instance or a future tray-icon action.
         if not self.background_mode:
+            # Reported by several users: the window used to open at wx's
+            # computed "best size" (small, based on the sizer contents)
+            # instead of maximized, which is especially awkward for the
+            # QR-pairing flow launched right after this and for screen-reader
+            # users navigating a cramped layout. Maximize before Show() so it
+            # appears already full-size instead of visibly resizing.
+            self.Maximize(True)
             self.Show()
             import time as _time
             _t_show = _time.perf_counter() - getattr(self, "_t_app_start", _time.perf_counter())
@@ -1993,15 +2000,19 @@ class MainWindow(wx.Frame):
         Uses Win32 ShowWindow + SetForegroundWindow directly to avoid wx
         state-drift: _on_close hides the window via SW_HIDE which bypasses
         wx's internal visibility tracking, so wx-level Show()/Raise() calls
-        may silently no-op. SW_RESTORE also handles any minimized state.
+        may silently no-op. SW_SHOWMAXIMIZED both un-hides/un-minimizes the
+        window and (unlike SW_RESTORE, which reopens at whatever size it had
+        before being hidden) always brings it back maximized — the size the
+        app is meant to run at, and the one restore-from-tray is expected to
+        return to.
         Also refreshes the chat list in case sync updates happened while the
         window was hidden.
         """
         import ctypes
         hwnd = self.GetHandle()
-        SW_RESTORE = 9
+        SW_SHOWMAXIMIZED = 3
         user32 = ctypes.windll.user32
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_SHOWMAXIMIZED)
         # SetForegroundWindow() alone silently fails when another application
         # holds the foreground lock (Win32 foreground-stealing prevention). When
         # that happened the window stayed hidden/behind and the global hotkey
@@ -4575,45 +4586,7 @@ class MainWindow(wx.Frame):
     def load_settings(self):
         settings_file = data_path("settings.json")
         default_file = resource_path("data", "settings_default.json")
-        fallback_dict = {
-            "connection": {
-                "wpp_server": "http://127.0.0.1",
-                "wpp_port": 6300,
-                "wpp_ws_server": "ws://127.0.0.1",
-                "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
-                "wpp_custom_api": False
-            },
-            "general": {
-                "language": "",
-                "notifications_enabled": True,
-                "updates_enabled": True,
-                "noise_reduction_enabled": False,
-                "first_run": True,
-                "autostart": False,
-                "show_tray_icon": True,
-                "terms_alert_displayed": False,
-                "quick_tip_shown": False
-            },
-            "status": {
-                "messages_set_completed": False
-            },
-            "user_interface": {
-                "messages_page_size": 200,
-                "focus_on_open": "message_field"
-            },
-            "audio_playback": {
-                "audio_default_speed": 1.0
-            },
-            "audio_devices": {
-                "output_device_name": "",
-                "input_device_name": ""
-            },
-            "storage": {
-                "auto_download_media": True,
-                "media_max_days": 30,
-                "media_max_mb": 100
-            }
-        }
+        fallback_dict = DEFAULT_SETTINGS
 
         # Bootstrap settings.json if missing
         if not os.path.isfile(settings_file):
@@ -4635,12 +4608,29 @@ class MainWindow(wx.Frame):
                 self.settings = json.load(f)
         except Exception:
             # If load still fails (e.g. corrupt settings.json), reset to defaults
-            self.settings = dict(fallback_dict)
+            # rather than crashing the app — but tell the user, since this
+            # silently discards any customization (language, hotkeys, audio
+            # devices, etc.) they had saved.
+            logging.error("[load_settings] settings.json unreadable, resetting to defaults", exc_info=True)
+            self.settings = json.loads(json.dumps(fallback_dict))
             try:
                 with open(settings_file, "w", encoding="utf-8") as f:
                     json.dump(self.settings, f, indent=4)
             except Exception:
                 pass
+            if hasattr(self, "i18n"):
+                msg   = self.i18n.t("settings_load_failed")
+                title = self.i18n.t("error").format(app_name=self.app_name)
+            else:
+                from core.i18n import _load_translations
+                _pt   = _load_translations("pt-BR")
+                msg   = _pt.get("settings_load_failed",
+                                "Erro ao carregar o arquivo de configuração:")
+                title = _pt.get("error", "{app_name} Erro").format(app_name=self.app_name)
+            if hasattr(self, "error_sound"):
+                self.error_sound.play()
+            if not self.background_mode:
+                wx.CallAfter(wx.MessageBox, f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_WARNING)
         self._migrate_settings()
 
     def _migrate_settings(self):
@@ -8862,9 +8852,10 @@ class MainWindow(wx.Frame):
         if self.IsShown():
             lst = self.conversations_panel.conversations_list
             if lst.GetItemCount() > 0:
-                # Only preselect focus if there is no current selection/focus
+                # Only preselect if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
+                    lst.Select(0)
                     lst.EnsureVisible(0)
 
 
@@ -10689,7 +10680,7 @@ class MainWindow(wx.Frame):
 
             if ogg_bytes is None:
                 # If conversion failed, do not send raw WAV as it breaks WhatsApp (silent failure)
-                err_msg = "Falha ao converter áudio. FFmpeg ausente ou indisponível no sistema."
+                err_msg = self.i18n.t("audio_convert_failed")
                 logging.error("[send_audio_message] %s", err_msg)
                 return {"ok": False, "error": err_msg, "retry": False}
             logging.info("[VOICE_TIMING] fallback encode+read done in %.3fs",

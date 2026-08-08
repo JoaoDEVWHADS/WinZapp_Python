@@ -4003,7 +4003,7 @@ class ConversationsPanel(wx.Panel):
         ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
         i18n = self.main_window.i18n
         if ext_clean:
-            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
+            wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files')} (*.*)|*.*"
         elif msg_type == "audioMessage":
             wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
         elif msg_type == "imageMessage":

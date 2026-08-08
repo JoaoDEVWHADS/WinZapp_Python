@@ -134,6 +134,8 @@
     "open_image": "Abrir imagem",
     "save_as": "Salvar como...",
     "save_audio_as": "Salvar áudio como...",
+    "all_files": "Todos os arquivos",
+    "audio_convert_failed": "Falha ao converter áudio. FFmpeg ausente ou indisponível no sistema.",
     "downloading_progress": "baixando, {pct}% concluído",
     "discard_voice_message": "Descartar mensagem de voz",
     "pause_recording": "Pausar gravação",

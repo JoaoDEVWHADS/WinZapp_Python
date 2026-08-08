@@ -134,6 +134,8 @@
     "open_image": "Abrir imagen",
     "save_as": "Guardar como...",
     "save_audio_as": "Guardar audio como...",
+    "all_files": "Todos los archivos",
+    "audio_convert_failed": "Error al convertir el audio. FFmpeg no está disponible en este sistema.",
     "downloading_progress": "descargando, {pct}% completado",
     "discard_voice_message": "Descartar mensaje de voz",
     "pause_recording": "Pausar grabación",
