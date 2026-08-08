@@ -62,7 +62,9 @@ CLIENT_DIR    = os.path.join(ROOT_DIR, "client")
 INSTALLER_DIR = os.path.join(ROOT_DIR, "installer")
 BUILD_DIR     = os.path.join(ROOT_DIR, "build")
 DIST_DIR      = os.path.join(ROOT_DIR, "dist")
-VENV_DIR      = os.path.join(ROOT_DIR, "venv")
+# VENV_DIR defaults to ./venv but can be overridden via WINZAPP_VENV so a
+# Windows build venv can coexist with a separate (e.g. WSL/Linux) test venv.
+VENV_DIR      = os.environ.get("WINZAPP_VENV") or os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets
 NODE_DIR         = os.path.join(CLIENT_DIR, "node")
@@ -323,6 +325,15 @@ def pyinstaller_compile():
         for src, dst in add_data_pairs:
             if os.path.exists(src):
                 cmd += ["--add-data", f"{src};{dst}"]
+
+    # Multi-account modules that may be reached only via lazy imports — pin them
+    # as hidden imports so PyInstaller always bundles them even if a top-level
+    # static import path doesn't reach them (e.g. session_store is imported only
+    # from the live session flow). Belt-and-suspenders; harmless if already found.
+    for _hm in ("accounts", "coord_locks", "node_coord", "ipc", "update_coord",
+                "app_settings", "account_migration", "account_bootstrap",
+                "account_launcher", "account_ui", "session_store", "window_title"):
+        cmd += ["--hidden-import", _hm]
 
     cmd.append(os.path.join(CLIENT_DIR, "main.py"))
 

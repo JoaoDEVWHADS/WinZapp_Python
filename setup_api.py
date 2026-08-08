@@ -14,6 +14,7 @@ Usage:
   venv\\Scripts\\python.exe setup_api.py
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -35,7 +36,16 @@ WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 # reported live as every patch silently regressing to whatever old snapshot
 # happened to get stashed months earlier) — client/api_patches/ never has
 # that problem since it's never inside the folder that gets deleted.
-CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+# package.json is NOT in this list — see _merge_package_json_dependencies().
+# It used to be a full-file overwrite like the others, which meant its
+# "version" field (WPPConnect Server's own self-reported version — what
+# WppUpdateChecker compares against the latest GitHub release) came from
+# whatever was checked into api_patches/package.json at the time, not from
+# whatever tag was actually cloned/checked out here. Reported live: WinZapp
+# insisting its installed version was still 2.10.0 on a build that had
+# genuinely cloned/built 2.10.1, because api_patches/package.json's own
+# "version" field had gone stale.
+CUSTOM_ROOT_FILES = ["start.js", "config.json"]
 CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",
@@ -118,6 +128,120 @@ def ensure_portable_git():
 
     if os.path.isfile(git_exe):
         os.environ["PATH"] = f"{git_cmd_dir};{git_bin_dir};" + os.environ.get("PATH", "")
+
+
+# The only dependency entries WinZapp actually overrides on top of whatever
+# upstream wppconnect-server ships for a given tag. Deliberately a narrow,
+# explicit list rather than merging api_patches/package.json's entire
+# "dependencies" block wholesale — the latter would also silently roll back
+# every OTHER dependency to whatever version happened to be frozen in
+# api_patches/ at some earlier point, undoing legitimate upstream bumps on
+# every future tag this script prepares.
+_PATCHED_DEPENDENCY_KEYS = [
+    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary via npm — WinZapp's
+                                  # own Python side shells out to it directly
+                                  # (main.py: _find_api_ffmpeg/_convert_wav_to_ogg)
+                                  # to encode voice messages to OGG/Opus; upstream
+                                  # wppconnect-server does not declare it at all.
+]
+
+
+def _recover_upstream_package_json():
+    """Bring client/api/package.json back when it went missing from a clone
+    that already exists.
+
+    _merge_package_json_dependencies() patches the file in place and bails out
+    silently when it isn't there, which is right for a fresh clone (npm install
+    would run against upstream's own file a moment later) but leaves nothing to
+    run at all when the file was deleted from an existing client/api/ — npm
+    then dies with `ENOENT: no such file or directory, open '.../package.json'`
+    and the whole setup aborts. That is not hypothetical: `git rm`-ing the
+    client/api/ copies out of WinZapp's own repo deletes them from every
+    developer's working tree on the next pull, package.json included.
+
+    client/api/ is itself a clone of wppconnect-server, so its own git checkout
+    is the correct source — that restores the real upstream file for the tag on
+    disk, which is exactly what the merge below expects to patch. api_patches/
+    is only a last resort here: its "version" field is a frozen snapshot, and
+    handing that to WppUpdateChecker is the stale-version bug described above.
+    """
+    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
+    if os.path.isfile(pkg_path):
+        return
+    if os.path.isdir(os.path.join(CLIENT_API_DIR, ".git")):
+        print("[WARNING] client/api/package.json is missing — restoring it from the clone.")
+        result = subprocess.run(
+            ["git", "checkout", "--", "package.json"], cwd=CLIENT_API_DIR
+        )
+        if result.returncode == 0 and os.path.isfile(pkg_path):
+            print("[OK] Restored client/api/package.json from upstream.")
+            return
+        print(f"[WARNING] git checkout of package.json failed (exit {result.returncode}).")
+    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
+    if os.path.isfile(patch_path):
+        import shutil as _shutil
+        _shutil.copy2(patch_path, pkg_path)
+        print(
+            "[WARNING] Copied client/api_patches/package.json as a fallback — its "
+            "'version' field is a frozen snapshot and may not match the tag on disk."
+        )
+
+
+def _restore_custom_files(custom_contents: dict):
+    """Write every patched file back into client/api/.
+
+    Runs on EVERY path through main(), not just after a clone or a tag
+    checkout. It used to be called only inside those two branches, so the most
+    common invocation of all — `python setup_api.py` against a client/api/ that
+    already exists, with no WPPCONNECT_TAG_VERSION set — skipped it entirely
+    and rebuilt the API from whatever happened to be on disk. Two ways that
+    bites: a patched file edited/deleted directly in client/api/ was never put
+    back (npm run build then compiled vanilla upstream, silently), and a
+    client/api/ missing its patches could not be repaired by re-running this
+    script at all, which is the one thing it exists to do.
+    """
+    for rel_path, content in custom_contents.items():
+        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        print(f"[INFO] Restored custom file: {rel_path}")
+
+
+def _merge_package_json_dependencies():
+    """Apply WinZapp's specific dependency patches onto whatever
+    package.json the clone/checkout actually left on disk, instead of
+    overwriting the whole file. Only the keys in _PATCHED_DEPENDENCY_KEYS are
+    copied in from client/api_patches/package.json — "version", "name",
+    scripts, and every other dependency all come from the real checked-out
+    file, so WinZapp's own version-check (WppUpdateChecker /
+    _get_installed_wpp_version()) keeps reflecting whatever was genuinely
+    cloned/built rather than a value frozen in api_patches/ at some earlier
+    point in time.
+    """
+    pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
+    patch_path = os.path.join(API_PATCHES_DIR, "package.json")
+    if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
+        return
+    try:
+        with open(pkg_path, encoding="utf-8") as f:
+            pkg = json.load(f)
+        with open(patch_path, encoding="utf-8") as f:
+            patch = json.load(f)
+    except Exception as e:
+        print(f"[WARNING] Failed to merge package.json dependency patches: {e}")
+        return
+    patch_deps = patch.get("dependencies", {})
+    deps = pkg.setdefault("dependencies", {})
+    applied = 0
+    for key in _PATCHED_DEPENDENCY_KEYS:
+        if key in patch_deps:
+            deps[key] = patch_deps[key]
+            applied += 1
+    with open(pkg_path, "w", encoding="utf-8") as f:
+        json.dump(pkg, f, indent=2)
+        f.write("\n")
+    print(f"[INFO] Applied {applied} patched dependencies into package.json (version kept at {pkg.get('version', '?')})")
 
 
 def main():
@@ -218,13 +342,20 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
-    # Always restore every patched file from client/api_patches/ on every run
-    for rel_path, content in custom_contents.items():
-        dest_path = os.path.join(CLIENT_API_DIR, rel_path)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        with open(dest_path, "wb") as f:
-            f.write(content)
-        print(f"[INFO] Synced custom patch: {rel_path}")
+    # Check out the pinned tag (if any) after cloning/on existing client/api/
+    if tag:
+        print(f"[INFO] Checking out tag: {tag}")
+        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+    else:
+        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
+
+    # Single restore point, deliberately outside every branch above: the clone,
+    # the tag checkout (`git checkout -f` overwrites the patched files with
+    # upstream's) and the plain "client/api/ is already here" path all need the
+    # exact same thing done afterwards.
+    _recover_upstream_package_json()
+    _restore_custom_files(custom_contents)
+    _merge_package_json_dependencies()
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
@@ -289,6 +420,15 @@ def main():
                 print("[WARNING] Custom decrypt.js patch not found in client/api. Skipping patch.")
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
+
+        # Download Chromium (Puppeteer postinstall)
+        print("[INFO] Downloading Chromium (Puppeteer)...")
+        install_js = os.path.join(CLIENT_API_DIR, "node_modules", "puppeteer", "install.mjs")
+        if os.path.isfile(install_js):
+            _run([node_bin, install_js], cwd=CLIENT_API_DIR)
+        else:
+            print("[WARNING] puppeteer install.mjs not found. Attempting fallback browser download...")
+            _run([npm_bin, "run", "postinstall"], cwd=CLIENT_API_DIR)
 
         # Run npm run build
         print("[INFO] Compiling WPPConnect Server...")
