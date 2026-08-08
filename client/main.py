@@ -10688,14 +10688,10 @@ class MainWindow(wx.Frame):
                         pass
 
             if ogg_bytes is None:
-                # If conversion failed, try reading WAV directly as a fallback (may fail at API level)
-                logging.warning("[send_audio_message] FFmpeg conversion failed or OGG empty, trying raw WAV fallback")
-                try:
-                    with open(wav_path, "rb") as fh:
-                        ogg_bytes = fh.read()
-                except Exception as exc:
-                    logging.error("[send_audio_message] cannot read WAV %s: %s", wav_path, exc)
-                    return {"ok": False, "error": str(exc)[:200], "retry": False}
+                # If conversion failed, do not send raw WAV as it breaks WhatsApp (silent failure)
+                err_msg = "Falha ao converter áudio. FFmpeg ausente ou indisponível no sistema."
+                logging.error("[send_audio_message] %s", err_msg)
+                return {"ok": False, "error": err_msg, "retry": False}
             logging.info("[VOICE_TIMING] fallback encode+read done in %.3fs",
                          _time.perf_counter() - _t_fallback)
 
