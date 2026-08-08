@@ -11492,6 +11492,14 @@ class MainWindow(wx.Frame):
         cp = getattr(self, "conversations_panel", None)
         if normalized == getattr(cp, "_last_open_jid", ""):
             unread_count = 0
+        else:
+            read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
+            if read_at_t is not None:
+                incoming_t = int(chat.get("t", 0) or 0)
+                if incoming_t <= read_at_t:
+                    unread_count = 0
+                else:
+                    self._locally_read_at.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
