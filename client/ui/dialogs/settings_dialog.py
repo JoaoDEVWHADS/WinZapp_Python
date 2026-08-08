@@ -341,7 +341,14 @@ class SettingsDialog(wx.Dialog):
             self._ui_page, label=i18n.t("ui_message_list_mode_listbox")
         )
         msg_list_mode_sizer.Add(
-            self._msg_list_mode_listbox_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+            self._msg_list_mode_listbox_rb, 0, wx.LEFT | wx.TOP, 5
+        )
+
+        self._show_listbox_count_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_listbox_item_count")
+        )
+        msg_list_mode_sizer.Add(
+            self._show_listbox_count_cb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
         )
 
         ui_sizer.Add(msg_list_mode_sizer, 0, wx.EXPAND | wx.ALL, 8)
@@ -721,6 +728,11 @@ class SettingsDialog(wx.Dialog):
             self._msg_list_mode_listbox_rb.SetValue(True)
         else:
             self._msg_list_mode_classic_rb.SetValue(True)
+
+        show_listbox_count = self.main_window.settings.get("user_interface", {}).get(
+            "show_listbox_item_count", False
+        )
+        self._show_listbox_count_cb.SetValue(bool(show_listbox_count))
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1331,6 +1343,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "message_list_mode"
         ] = new_message_list_mode
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_listbox_item_count"
+        ] = self._show_listbox_count_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -1560,6 +1575,7 @@ class SettingsDialog(wx.Dialog):
         self._msg_list_mode_box.SetLabel(i18n.t("ui_message_list_mode_label"))
         self._msg_list_mode_classic_rb.SetLabel(i18n.t("ui_message_list_mode_classic"))
         self._msg_list_mode_listbox_rb.SetLabel(i18n.t("ui_message_list_mode_listbox"))
+        self._show_listbox_count_cb.SetLabel(i18n.t("ui_show_listbox_item_count"))
         self._self_ref_box.SetLabel(i18n.t("ui_self_reference_label"))
         self._self_ref_eu_rb.SetLabel(i18n.t("sender_you"))
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
