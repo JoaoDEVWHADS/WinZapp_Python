@@ -185,7 +185,7 @@ class AccessibleMessagesListControl(wx.Accessible):
     def GetRole(self, childId):
         if childId == 0:
             return (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
-        return (wx.ACC_OK, wx.ROLE_SYSTEM_LISTITEM)
+        return (wx.ACC_NOT_IMPLEMENTED, 0)
 
 
 class AccessibleAudioSlider(wx.Accessible):
