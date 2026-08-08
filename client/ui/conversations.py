@@ -3669,38 +3669,14 @@ class ConversationsPanel(wx.Panel):
 
     def _on_messages_list_key_down(self, event):
         """Make Space fire the same activation as Enter / double-click.
-        Page Up / Page Down jump by a configurable number of messages (page_up_down_step setting).
         Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
         key = event.GetKeyCode()
         idx = self.messages_list.GetFocusedItem()
-        total = self.messages_list.GetItemCount()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
-
-        step = self.main_window.settings.get("user_interface", {}).get("page_up_down_step", 10)
-        try:
-            step = max(1, int(step))
-        except (ValueError, TypeError):
-            step = 10
-
         if key == wx.WXK_SPACE:
             if idx >= 0:
                 self._do_activate_message(idx)
-        elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
-            if idx <= 0 and not self._is_loading_more:
-                if self._messages_offset > 0:
-                    self._load_more_messages()
-                else:
-                    self._load_older_messages()
-            elif total > 0 and idx > 0:
-                target_idx = max(0, idx - step)
-                self.messages_list.Select(target_idx, True)
-                self.messages_list.EnsureVisible(target_idx)
-        elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
-            if total > 0 and idx >= 0:
-                target_idx = min(total - 1, idx + step)
-                self.messages_list.Select(target_idx, True)
-                self.messages_list.EnsureVisible(target_idx)
-        elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_HOME):
+        elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_HOME):
             if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
                     self._load_more_messages()
@@ -3710,7 +3686,6 @@ class ConversationsPanel(wx.Panel):
                 event.Skip()
         else:
             event.Skip()
-
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
