@@ -180,12 +180,12 @@ class AccessibleMessagesListControl(wx.Accessible):
     def GetName(self, childId):
         if childId == 0:
             return (wx.ACC_OK, self._label)
-        return (wx.ACC_OK, "")
+        return (wx.ACC_NOT_IMPLEMENTED, "")
 
     def GetRole(self, childId):
         if childId == 0:
             return (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
-        return (wx.ACC_OK, wx.ROLE_SYSTEM_STATICTEXT)
+        return (wx.ACC_NOT_IMPLEMENTED, 0)
 
 
 class AccessibleAudioSlider(wx.Accessible):
