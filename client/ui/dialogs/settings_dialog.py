@@ -288,18 +288,17 @@ class SettingsDialog(wx.Dialog):
         ui_sizer.Add(self._messages_page_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
         # Wrap radio buttons in a StaticBox so NVDA reads the group label when
-        # the user tabs into them.  A plain StaticText label is not sufficient
-        # for screen readers to announce group membership.
+        # the user tabs into them.
         self._focus_box = wx.StaticBox(self._ui_page, label=i18n.t("ui_focus_label"))
         focus_sizer = wx.StaticBoxSizer(self._focus_box, wx.VERTICAL)
 
         self._focus_message_field_rb = wx.RadioButton(
-            self._focus_box, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
+            self._ui_page, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
         )
         focus_sizer.Add(self._focus_message_field_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._focus_unread_or_last_rb = wx.RadioButton(
-            self._focus_box, label=i18n.t("ui_focus_unread_or_last")
+            self._ui_page, label=i18n.t("ui_focus_unread_or_last")
         )
         focus_sizer.Add(self._focus_unread_or_last_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
@@ -311,14 +310,14 @@ class SettingsDialog(wx.Dialog):
         voice_focus_sizer = wx.StaticBoxSizer(self._voice_focus_box, wx.VERTICAL)
 
         self._voice_focus_send_rb = wx.RadioButton(
-            self._voice_focus_box,
+            self._ui_page,
             label=i18n.t("ui_voice_record_focus_send"),
             style=wx.RB_GROUP,
         )
         voice_focus_sizer.Add(self._voice_focus_send_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._voice_focus_discard_rb = wx.RadioButton(
-            self._voice_focus_box, label=i18n.t("ui_voice_record_focus_discard")
+            self._ui_page, label=i18n.t("ui_voice_record_focus_discard")
         )
         voice_focus_sizer.Add(
             self._voice_focus_discard_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
@@ -332,14 +331,14 @@ class SettingsDialog(wx.Dialog):
         msg_list_mode_sizer = wx.StaticBoxSizer(self._msg_list_mode_box, wx.VERTICAL)
 
         self._msg_list_mode_classic_rb = wx.RadioButton(
-            self._msg_list_mode_box,
+            self._ui_page,
             label=i18n.t("ui_message_list_mode_classic"),
             style=wx.RB_GROUP,
         )
         msg_list_mode_sizer.Add(self._msg_list_mode_classic_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._msg_list_mode_listbox_rb = wx.RadioButton(
-            self._msg_list_mode_box, label=i18n.t("ui_message_list_mode_listbox")
+            self._ui_page, label=i18n.t("ui_message_list_mode_listbox")
         )
         msg_list_mode_sizer.Add(
             self._msg_list_mode_listbox_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
@@ -353,27 +352,27 @@ class SettingsDialog(wx.Dialog):
         self_ref_sizer = wx.StaticBoxSizer(self._self_ref_box, wx.VERTICAL)
 
         self._self_ref_eu_rb = wx.RadioButton(
-            self._self_ref_box, label=i18n.t("sender_you"), style=wx.RB_GROUP
+            self._ui_page, label=i18n.t("sender_you"), style=wx.RB_GROUP
         )
         self_ref_sizer.Add(self._self_ref_eu_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._self_ref_voce_rb = wx.RadioButton(
-            self._self_ref_box, label=i18n.t("ui_self_reference_voce")
+            self._ui_page, label=i18n.t("ui_self_reference_voce")
         )
         self_ref_sizer.Add(self._self_ref_voce_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._self_ref_other_rb = wx.RadioButton(
-            self._self_ref_box, label=i18n.t("ui_self_reference_other")
+            self._ui_page, label=i18n.t("ui_self_reference_other")
         )
         self_ref_sizer.Add(self._self_ref_other_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         self._self_ref_custom_label = wx.StaticText(
-            self._self_ref_box, label=i18n.t("ui_self_reference_custom_label")
+            self._ui_page, label=i18n.t("ui_self_reference_custom_label")
         )
         self_ref_sizer.Add(
             self._self_ref_custom_label, 0, wx.LEFT | wx.RIGHT, 8
         )
-        self._self_ref_custom_field = wx.TextCtrl(self._self_ref_box, style=wx.TE_DONTWRAP)
+        self._self_ref_custom_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         self_ref_sizer.Add(
             self._self_ref_custom_field, 0, wx.EXPAND | wx.ALL, 8
         )
