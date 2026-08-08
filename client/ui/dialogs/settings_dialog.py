@@ -361,8 +361,8 @@ class SettingsDialog(wx.Dialog):
         self._page_step_label = wx.StaticText(
             self._ui_page, label=i18n.t("ui_page_up_down_step_label")
         )
-        self._page_step_spin = wx.SpinCtrl(
-            self._ui_page, value="10", min=1, max=1000
+        self._page_step_spin = wx.TextCtrl(
+            self._ui_page, value="10"
         )
         page_step_sizer.Add(self._page_step_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         page_step_sizer.Add(self._page_step_spin, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
@@ -754,9 +754,9 @@ class SettingsDialog(wx.Dialog):
             "page_up_down_step", 10
         )
         try:
-            self._page_step_spin.SetValue(int(page_step))
+            self._page_step_spin.SetValue(str(int(page_step)))
         except (ValueError, TypeError):
-            self._page_step_spin.SetValue(10)
+            self._page_step_spin.SetValue("10")
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
             "self_reference_mode", "eu"
@@ -1370,9 +1370,13 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "show_listbox_item_count"
         ] = self._show_listbox_count_cb.GetValue()
+        try:
+            _step_val = max(1, int(self._page_step_spin.GetValue()))
+        except (ValueError, TypeError):
+            _step_val = 10
         self.main_window.settings.setdefault("user_interface", {})[
             "page_up_down_step"
-        ] = self._page_step_spin.GetValue()
+        ] = _step_val
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
