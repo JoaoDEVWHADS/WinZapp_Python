@@ -14,13 +14,10 @@ state api/ is actually in:
     1. Download the WPPConnect Server source ZIP from GitHub (no git required)
          • No tag  → branch main  archive
          • With tag → specific tag archive
-    2. Extract into client/api/, keeping the upstream ZIP away from our own
-       root files (start.js, .env, config.json), then restoring every WinZapp
-       patch from api_patches/ and merging our pinned dependencies into
-       package.json — the same patch set setup_api.py applies, so an end-user
-       install and a developer one end up with identical API code
+    2. Extract into client/api/, preserving our pre-included files (start.js,
+       .env, config.json) and restoring WinZapp's own patched files
     3. npm install --no-audit --no-fund      (install all dependencies)
-    4. npm exec puppeteer browsers install chrome-headless-shell (best-effort)
+    4. npm exec puppeteer browsers install chrome (best-effort)
     5. npm run db:generate                   (only if the script is defined)
     6. npm run build                         (compile TypeScript → dist/server.js)
 
@@ -67,24 +64,38 @@ _REPO_ZIP_MAIN = (
 )
 _REPO_ZIP_TAG  = (
     "https://github.com/wppconnect-team/wppconnect-server"
-    "/archive/refs/tags/{tag}.zip"
+    "/archive/{tag}.zip"
 )
 WPP_GITHUB_API_LATEST_RELEASE = (
     "https://api.github.com/repos/wppconnect-team/wppconnect-server/releases/latest"
 )
+WPP_GITHUB_API_LATEST_COMMIT = (
+    "https://api.github.com/repos/wppconnect-team/wppconnect-server/commits/main"
+)
+
+
+def fetch_latest_wpp_commit_sha(timeout: float = 15) -> str:
+    """Return the short SHA of the latest commit on wppconnect-server main branch."""
+    try:
+        resp = requests.get(
+            WPP_GITHUB_API_LATEST_COMMIT,
+            headers={"User-Agent": "WinZapp"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        sha = (data.get("sha") or "").strip()
+        return sha[:7] if sha else ""
+    except Exception as exc:
+        logging.warning("[api_setup] Failed to fetch latest wppconnect-server commit SHA: %s", exc)
+        return ""
 
 
 def fetch_latest_wpp_tag(timeout: float = 15) -> str:
-    """Return the tag name of the latest wppconnect-server GitHub release, or "".
-
-    Used so a fresh install (and the update flows) always land on whatever is
-    actually the newest tagged release instead of a version number baked into
-    WinZapp's own .env at build time — a WPPCONNECT_TAG_VERSION pin only ever
-    gets updated when WinZapp itself ships a new build, so a version fixed
-    that way is stale from the day it's set. Returns "" on any failure so
-    callers can fall back to the previous fixed-tag/main-branch behaviour
-    instead of failing setup outright over a GitHub API hiccup.
-    """
+    """Return the short SHA or tag name of the latest wppconnect-server GitHub commit/release."""
+    sha = fetch_latest_wpp_commit_sha(timeout=timeout)
+    if sha:
+        return sha
     try:
         resp = requests.get(
             WPP_GITHUB_API_LATEST_RELEASE,
@@ -99,44 +110,9 @@ def fetch_latest_wpp_tag(timeout: float = 15) -> str:
         logging.warning("[api_setup] Failed to fetch latest wppconnect-server release tag: %s", exc)
         return ""
 
+
 # Root-level files whose pre-included content always takes precedence.
 _PRESERVE = {"start.js", ".env", "config.json"}
-
-# Root-level files WinZapp owns outright: they carry no per-install state (the
-# API key and port both come from environment variables _start_wpp_background()
-# injects, never from config.json's own values, and nothing writes either file
-# at runtime), so they are restored from api_patches/ rather than merely
-# preserved. _PRESERVE already stops the upstream ZIP from overwriting them;
-# without this restore step they were simply frozen at whatever an older
-# WinZapp install happened to leave on disk, so a user updating from an old
-# version would silently keep its config.json forever — including any
-# createOptions a newer release changed. `.env` is deliberately absent: it is
-# the one root file that could be genuinely local, and nothing reads it anyway.
-_CUSTOM_ROOT_FILES = ["start.js", "config.json"]
-
-# Only these keys are copied from api_patches/package.json onto whatever the
-# downloaded ZIP produced — same list, and same reasoning, as setup_api.py's
-# _PATCHED_DEPENDENCY_KEYS. Merging the whole "dependencies" block would also
-# roll every OTHER dependency back to whatever was frozen in api_patches/ at
-# some earlier point, and overwriting the file wholesale would freeze
-# WPPConnect's own "version" field — which is what WppUpdateChecker compares
-# against the latest GitHub release — at a value that has nothing to do with
-# the tag actually downloaded here.
-#
-# @wppconnect-team/wppconnect is deliberately NOT in this list. It used to be,
-# pinned to an exact version that went stale within days — this dependency
-# releases multiple times a week, and wppconnect-server's own package.json can
-# (and did) move on to requiring a newer one than whatever WinZapp had frozen,
-# silently running an incompatible pairing with no error anywhere. Leaving it
-# out means upstream's own declared range wins, same as every other unpinned
-# dependency — and @wppconnect/wa-js / @wppconnect/wa-version, which WinZapp
-# never pins directly either, come along transitively at whichever paired
-# version @wppconnect-team/wppconnect itself resolves to.
-_PATCHED_DEPENDENCY_KEYS = [
-    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary — WinZapp's own
-                                  # Python side shells out to it directly to
-                                  # encode voice messages to OGG/Opus.
-]
 
 # Runtime state dirs/files that should survive a re-download.
 _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
@@ -162,6 +138,7 @@ _CUSTOM_SRC_FILES = [
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
     "src/routes/index.ts",
+    "dist/controller/sessionController.js",
     "decrypt.js",
 ]
 
@@ -205,13 +182,15 @@ class ApiSetupDialog(wx.Dialog):
     }
     _STAGES_MODULES_ONLY = {
         "npm_install": (0, 55),
-        "chrome":      (55, 80),
-        "db_generate": (80, 99),
+        "chrome":      (55, 75),
+        "db_generate": (75, 88),
+        "build":       (88, 99),
     }
 
     def __init__(self, parent, title_override=None, forced_tag=None):
-        self._i18n = parent.i18n
-        title = title_override or self._i18n.t("api_setup_dialog_title")
+        title = (title_override
+                 or "WinZapp | Baixando e instalando os módulos necessários para o funcionamento do programa. "
+                    "Isso pode levar alguns minutos.")
         style = wx.DEFAULT_DIALOG_STYLE & ~wx.CLOSE_BOX
         super().__init__(parent, title=title, style=style)
 
@@ -238,12 +217,12 @@ class ApiSetupDialog(wx.Dialog):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._status_lbl = wx.StaticText(self, label=self._i18n.t("api_setup_status_label"))
+        self._status_lbl = wx.StaticText(self, label="Aguarde enquanto os módulos necessários para o funcionamento do WinZapp são instalados e configurados.")
 
         self._gauge = wx.Gauge(self, range=100,
                                style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
 
-        cancel_btn = wx.Button(self, wx.ID_CANCEL, label=self._i18n.t("api_setup_cancel"))
+        cancel_btn = wx.Button(self, wx.ID_CANCEL, label="&Cancelar")
         cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -333,7 +312,7 @@ class ApiSetupDialog(wx.Dialog):
             if not self._cancelled:
                 wx.CallAfter(
                     self._finish_error,
-                    self._i18n.t("api_setup_error_download_start").format(details=exc),
+                    f"Falha ao iniciar o download:\n\n{exc}",
                 )
             return False
 
@@ -356,81 +335,24 @@ class ApiSetupDialog(wx.Dialog):
                         pct = start_pct + (end_pct - start_pct) * (downloaded / total)
                         wx.CallAfter(self._gauge.SetValue, int(min(end_pct, pct)))
                         self._set_status(
-                            self._i18n.t("api_setup_downloading").format(
-                                downloaded=f"{mb_down:.1f}", total=f"{mb_total:.1f}"
-                            )
+                            f"Baixando WPPConnect Server... "
+                            f"{mb_down:.1f} MB / {mb_total:.1f} MB"
                         )
                     else:
                         self._set_status(
-                            self._i18n.t("api_setup_downloading_no_total").format(downloaded=f"{mb_down:.1f}")
+                            f"Baixando WPPConnect Server... {mb_down:.1f} MB"
                         )
         except Exception as exc:
             if not self._cancelled:
                 wx.CallAfter(
                     self._finish_error,
-                    self._i18n.t("api_setup_error_download").format(details=exc),
+                    f"Erro durante o download:\n\n{exc}",
                 )
             return False
 
         return not self._cancelled
 
     # ── Extract helper ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _merge_package_json_dependencies(api_dir: str, patches_dir: str) -> None:
-        """Apply WinZapp's dependency patches onto the downloaded package.json.
-
-        Port of setup_api.py's function of the same name — until this existed,
-        an install done through this dialog (i.e. every end-user install) kept
-        the vanilla upstream package.json, so `npm install` below never
-        installed @ffmpeg-installer/ffmpeg at all (upstream wppconnect-server
-        does not declare it). Only setup_api.py — a developer tool nobody but
-        us runs — applied it.
-
-        Deliberately a merge and not an overwrite; see _PATCHED_DEPENDENCY_KEYS.
-        Never fatal: a missing or unreadable package.json is left exactly as it
-        was, because npm install can still succeed on the upstream file, while
-        writing a half-merged one could not.
-        """
-        pkg_path = os.path.join(api_dir, "package.json")
-        patch_path = os.path.join(patches_dir, "package.json")
-        if not (os.path.isfile(pkg_path) and os.path.isfile(patch_path)):
-            logging.warning(
-                "[api_setup] Skipping package.json dependency merge — "
-                "pkg=%s patch=%s",
-                os.path.isfile(pkg_path), os.path.isfile(patch_path),
-            )
-            return
-        try:
-            with open(pkg_path, encoding="utf-8") as fh:
-                pkg = json.load(fh)
-            with open(patch_path, encoding="utf-8") as fh:
-                patch = json.load(fh)
-        except Exception as exc:
-            logging.warning("[api_setup] Failed to read package.json for merge: %s", exc)
-            return
-
-        patch_deps = patch.get("dependencies", {})
-        deps = pkg.setdefault("dependencies", {})
-        applied = []
-        for key in _PATCHED_DEPENDENCY_KEYS:
-            if key in patch_deps:
-                deps[key] = patch_deps[key]
-                applied.append(f"{key}@{patch_deps[key]}")
-        if not applied:
-            return
-        try:
-            with open(pkg_path, "w", encoding="utf-8") as fh:
-                json.dump(pkg, fh, indent=2)
-                fh.write("\n")
-        except Exception as exc:
-            logging.warning("[api_setup] Failed to write merged package.json: %s", exc)
-            return
-        logging.info(
-            "[api_setup] Applied patched dependencies into package.json: %s "
-            "(WPPConnect version kept at %s)",
-            ", ".join(applied), pkg.get("version", "?"),
-        )
 
     def _extract_zip(self, zip_path: str, api_dir: str) -> bool:
         """
@@ -443,7 +365,7 @@ class ApiSetupDialog(wx.Dialog):
         Root-level entries matching _PRESERVE are skipped so our pre-included
         start.js and .env are never overwritten.
         """
-        self._set_status(self._i18n.t("api_setup_extracting"))
+        self._set_status("Extraindo arquivos da API...")
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 members = zf.infolist()
@@ -483,18 +405,28 @@ class ApiSetupDialog(wx.Dialog):
                     if dest_abs != api_dir_abs and not dest_abs.startswith(api_dir_abs + os.sep):
                         raise ValueError(f"Unsafe zip member path: {member.filename!r}")
 
-                    if member.is_dir() or rel.endswith("/"):
+                    if member.is_dir():
                         os.makedirs(dest, exist_ok=True)
                     else:
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with zf.open(member) as src_fh, open(dest, "wb") as dst_fh:
-                            shutil.copyfileobj(src_fh, dst_fh)
+                        with zf.open(member) as sf, open(dest, "wb") as df:
+                            shutil.copyfileobj(sf, df)
+
+            # Save installed commit SHA tag
+            if hasattr(self, "_active_tag") and self._active_tag:
+                try:
+                    with open(os.path.join(api_dir, ".commit_sha"), "w", encoding="utf-8") as f:
+                        f.write(self._active_tag)
+                except Exception:
+                    pass
+
+            return True
 
         except Exception as exc:
             if not self._cancelled:
                 wx.CallAfter(
                     self._finish_error,
-                    self._i18n.t("api_setup_error_extract").format(details=exc),
+                    f"Falha ao extrair o arquivo ZIP:\n\n{exc}",
                 )
             return False
 
@@ -539,7 +471,8 @@ class ApiSetupDialog(wx.Dialog):
             npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
             npm_cmd  = [node_exe, npm_cli]
             node_dir = resource_path("node")
-            path_env = node_dir + os.pathsep + os.environ.get("PATH", "")
+            git_dir  = resource_path("git", "cmd")
+            path_env = git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")
         else:
             local_node = resource_path("node", "node")
             if os.path.isfile(local_node):
@@ -552,14 +485,12 @@ class ApiSetupDialog(wx.Dialog):
             else:
                 npm_cmd = [shutil.which("npm") or "npm"]
             node_dir = os.path.dirname(node_exe) if os.path.isabs(node_exe) else ""
-            path_env = (node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+            git_dir = resource_path("git", "bin")
+            path_env = (git_dir + os.pathsep + node_dir + os.pathsep + os.environ.get("PATH", "")) if node_dir else os.environ.get("PATH", "")
+
 
         api_dir  = resource_path("api")
-        # Must be the directory start.js searches and exports as
-        # PUPPETEER_CACHE_DIR (client/api/.cache), not the .cache/puppeteer
-        # subfolder — otherwise the browser this installer downloads and the
-        # browser the server looks for are two different trees.
-        puppeteer_cache = resource_path("api", ".cache")
+        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
         npm_env  = {
             **os.environ,
             "PATH": path_env,
@@ -571,47 +502,13 @@ class ApiSetupDialog(wx.Dialog):
         # existing means api/ was already cloned and built; all that's
         # missing is node_modules (never bundled in WinZapp.zip), so there's
         # nothing to download/extract/rebuild, just dependencies to install.
-        #
-        # That heuristic breaks for the update/force-reinstall flow though —
-        # _update_wpp_server() and WppUpdateChecker always pass forced_tag
-        # for a specific *newer* version, but dist/server.js from the
-        # currently-installed *older* version is still sitting right there,
-        # so modules_only used to come back True and the download/extract/
-        # build steps below (guarded by `if not modules_only`) were skipped
-        # entirely — npm install just reinstalled dependencies for the same
-        # old source tree. The user would confirm the update, WinZapp would
-        # restart the API, and the "new version available" prompt came right
-        # back because nothing had actually changed. A forced_tag always
-        # means "fetch and build this specific version", never "just repair
-        # node_modules for whatever happens to be on disk".
         dist_server   = os.path.join(api_dir, "dist", "server.js")
-        modules_only  = os.path.isfile(dist_server) and self._forced_tag is None
+        modules_only  = os.path.isfile(dist_server)
         stages        = self._STAGES_MODULES_ONLY if modules_only else self._STAGES_FULL
 
         try:
             if not modules_only:
-                self._set_stage(self._i18n.t("api_setup_resolving_tag"), *stages["resolve_tag"])
-                tag = self._forced_tag if self._forced_tag is not None else self._read_env_value("WPPCONNECT_TAG_VERSION")
-                if not tag:
-                    # No explicit tag was requested and .env doesn't pin one — resolve
-                    # the actual latest GitHub release instead of defaulting straight
-                    # to the main branch head. A fixed WPPCONNECT_TAG_VERSION only
-                    # ever changes when WinZapp itself ships a new build, so it is
-                    # stale from the moment it's set; a brand-new install deserves
-                    # whatever is genuinely newest today, not a version already
-                    # behind by the time the user installs it. Falls through to the
-                    # main branch (the previous behaviour) if the API is unreachable.
-                    tag = fetch_latest_wpp_tag()
-                    if tag:
-                        logging.info("[api_setup] Using latest released wppconnect-server tag: %s", tag)
-                    else:
-                        logging.warning("[api_setup] Could not resolve latest release tag — falling back to main branch")
-
-                # ── Step 1: download source ZIP ───────────────────────────────
-                if tag:
-                    url = _REPO_ZIP_TAG.format(tag=tag)
-                else:
-                    url = _REPO_ZIP_MAIN
+                url = _REPO_ZIP_MAIN
 
                 tmp_zip = tempfile.mktemp(suffix=".zip", prefix="winzapp_api_")
                 try:
@@ -649,7 +546,7 @@ class ApiSetupDialog(wx.Dialog):
                                 )
 
                     # ── Step 2: clean previous partial setup ──────────────────
-                    self._set_stage(self._i18n.t("api_setup_preparing_folder"), *stages["clean"])
+                    self._set_stage("Preparando pasta da API...", *stages["clean"])
                     # api_dir won't exist at all if the user (or a broken
                     # install) deleted the whole api/ folder — os.listdir() on a
                     # missing directory raises FileNotFoundError ([WinError 3] on
@@ -676,7 +573,7 @@ class ApiSetupDialog(wx.Dialog):
                         return
 
                     # ── Step 3: extract ZIP into client/api/ ──────────────────
-                    self._set_stage(self._i18n.t("api_setup_extracting"), *stages["extract"])
+                    self._set_stage("Extraindo arquivos da API...", *stages["extract"])
                     ok = self._extract_zip(tmp_zip, api_dir)
                     if not ok:
                         return
@@ -688,7 +585,7 @@ class ApiSetupDialog(wx.Dialog):
                     # api_dir (which may itself be an outdated/broken copy left
                     # by an older install) — see the comment above custom_contents.
                     patches_dir = resource_path("api_patches")
-                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
+                    for rel_path in _CUSTOM_SRC_FILES:
                         pristine_path = os.path.join(patches_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(pristine_path):
                             try:
@@ -719,8 +616,6 @@ class ApiSetupDialog(wx.Dialog):
                                 rel_path, exc,
                             )
 
-                    self._merge_package_json_dependencies(api_dir, patches_dir)
-
                 finally:
                     try:
                         os.remove(tmp_zip)
@@ -731,48 +626,17 @@ class ApiSetupDialog(wx.Dialog):
                     return
 
             # ── Step 4: npm install ───────────────────────────────────────
-            self._set_stage(self._i18n.t("api_setup_npm_install"), *stages["npm_install"])
-            # puppeteer's own postinstall script (node_modules/puppeteer/install.mjs)
-            # otherwise downloads Chrome silently as part of `npm install` — a
-            # multi-hundred-MB download with zero progress feedback, hidden
-            # behind the generic "Instalando dependências" label and this
-            # stage's indeterminate trickle. On a slow connection or an old
-            # HDD this was reported as the install "hanging" for anywhere from
-            # a couple of minutes to 30+, always around the same 51-54% mark —
-            # right in the middle of the npm_install stage's progress range.
-            # Skip it here; step 4.5 below downloads Chrome explicitly, with
-            # its own status text, right after npm install actually finishes.
-            npm_install_env = {**npm_env, "PUPPETEER_SKIP_DOWNLOAD": "true"}
+            self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])
             ok, err = self._run_subprocess(
                 npm_cmd + ["install", "--no-audit", "--no-fund", "--include=optional", "--legacy-peer-deps"],
                 cwd=api_dir,
-                env=npm_install_env,
+                env=npm_env,
             )
             if not ok:
                 if not self._cancelled:
                     wx.CallAfter(self._finish_error,
-                                 self._i18n.t("api_setup_error_npm_install").format(details=err))
+                                 f"Falha em npm install:\n\n{err}")
                 return
-
-            if self._cancelled:
-                return
-
-            # ── Step 4.5: download chrome-headless-shell ──────────────────
-            # Must match what start.js looks for and launches. This used to
-            # fetch full "chrome", and that is how a machine ends up with a
-            # GUI-capable Chrome under .cache/ and no shell at all — the exact
-            # state in which start.js's old any-Chrome-will-do search silently
-            # handed WPPConnect full Chrome forever (see tests/test_headless_shell.py).
-            # The shell is also the smaller download and the faster start.
-            self._set_stage(self._i18n.t("api_setup_downloading_chrome"), *stages["chrome"])
-            ok, err = self._run_subprocess(
-                npm_cmd + ["exec", "puppeteer", "browsers", "install", "chrome-headless-shell"],
-                cwd=api_dir,
-                env=npm_env,
-            )
-            # Do not fail hard if this step fails (e.g. offline setup where Chrome was pre-copied)
-            if not ok:
-                logging.warning(f"Failed to install Chrome browser via Puppeteer CLI: {err}")
 
             if self._cancelled:
                 return
@@ -792,7 +656,7 @@ class ApiSetupDialog(wx.Dialog):
                 pass
 
             if has_db_generate:
-                self._set_stage(self._i18n.t("api_setup_db_generate"), *stages["db_generate"])
+                self._set_stage("Gerando cliente do banco de dados (npm run db:generate)...", *stages["db_generate"])
                 db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
                 ok, err = self._run_subprocess(
                     npm_cmd + ["run", "db:generate"],
@@ -802,25 +666,30 @@ class ApiSetupDialog(wx.Dialog):
                 if not ok:
                     if not self._cancelled:
                         wx.CallAfter(self._finish_error,
-                                     self._i18n.t("api_setup_error_db_generate").format(details=err))
+                                     f"Falha em npm run db:generate:\n\n{err}")
                     return
 
                 if self._cancelled:
                     return
 
-            if not modules_only:
-                # ── Step 5: npm run build ─────────────────────────────────────
-                self._set_stage(self._i18n.t("api_setup_building"), *stages["build"])
-                ok, err = self._run_subprocess(
-                    npm_cmd + ["run", "build"],
-                    cwd=api_dir,
-                    env=npm_env,
-                )
-                if not ok:
-                    if not self._cancelled:
-                        wx.CallAfter(self._finish_error,
-                                     self._i18n.t("api_setup_error_build").format(details=err))
-                    return
+            # ── Step 5: npm run build ─────────────────────────────────────
+            self._set_stage(
+                "Compilando o WPPConnect Server (npm run build) — "
+                "isso pode levar alguns minutos...",
+                *stages["build"]
+            )
+            ok, err = self._run_subprocess(
+                npm_cmd + ["run", "build"],
+                cwd=api_dir,
+                env=npm_env,
+            )
+            dist_server_path = os.path.join(api_dir, "dist", "server.js")
+            # If server.js exists, build actually succeeded regardless of non-fatal npm warnings/stderr logs
+            if not ok and not os.path.isfile(dist_server_path):
+                if not self._cancelled:
+                    wx.CallAfter(self._finish_error,
+                                 f"Falha em npm run build:\n\n{err}")
+                return
 
             if not self._cancelled:
                 wx.CallAfter(self._finish_success)
@@ -866,8 +735,9 @@ class ApiSetupDialog(wx.Dialog):
         self._trickling = False
         self._gauge.SetValue(100)
         wx.MessageBox(
-            self._i18n.t("api_setup_success_message"),
-            self._i18n.t("api_setup_success_title"),
+            "O WPPConnect Server foi configurado com sucesso!\n\n"
+            "O WinZapp irá agora iniciar a API.",
+            "Configuração concluída",
             wx.OK | wx.ICON_INFORMATION,
             self,
         )
@@ -875,8 +745,8 @@ class ApiSetupDialog(wx.Dialog):
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
-        msg = self._i18n.t("api_setup_error_generic")
+        msg = "Ocorreu um erro durante a configuração do WPPConnect Server."
         if details:
             msg = f"{msg}\n\n{details}"
-        wx.MessageBox(msg, self._i18n.t("api_setup_error_title"), wx.OK | wx.ICON_ERROR, self)
+        wx.MessageBox(msg, "Erro de configuração", wx.OK | wx.ICON_ERROR, self)
         self.EndModal(wx.ID_CANCEL)
