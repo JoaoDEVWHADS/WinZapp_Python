@@ -4641,6 +4641,18 @@ class MainWindow(wx.Frame):
                     json.dump(self.settings, f, indent=4)
             except Exception:
                 pass
+            if hasattr(self, "i18n"):
+                msg   = self.i18n.t("settings_load_failed")
+                title = self.i18n.t("error").format(app_name=self.app_name)
+            else:
+                from core.i18n import _load_translations
+                _pt   = _load_translations("pt-BR")
+                msg   = _pt.get("settings_load_failed", "Erro ao carregar o arquivo de configuração:")
+                title = _pt.get("error", "{app_name} Erro").format(app_name=self.app_name)
+            if hasattr(self, "error_sound"):
+                self.error_sound.play()
+            if not self.background_mode:
+                wx.CallAfter(wx.MessageBox, f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_WARNING)
         self._migrate_settings()
 
     def _migrate_settings(self):

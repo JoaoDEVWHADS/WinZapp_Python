@@ -1204,6 +1204,8 @@ class Connect:
         self.cancel_btn = wx.Button(self.pairing_dial, label=self.i18n.t("cancel_pairing"))
         self.cancel_btn.Bind(wx.EVT_BUTTON, self.on_cancel_pairing)
 
+        self.pairing_dial.CentreOnParent()
+
         self.main_window.waiting_pairing_sound.play()
         logging.info("[show_pairing_dial] Entering pairing_dial modal loop.")
         result = self.pairing_dial.ShowModal()
