@@ -4490,35 +4490,56 @@ class ConversationsPanel(wx.Panel):
 
         # Walk forward, skipping separators, to find the next message
         next_idx = current_idx + 1
+        has_next_audio = False
+        target_msg = None
+        target_idx = -1
         while next_idx < len(self._sorted_messages):
-            next_msg = self._sorted_messages[next_idx]
-            if self._is_separator(next_msg):
+            candidate = self._sorted_messages[next_idx]
+            if self._is_separator(candidate):
                 next_idx += 1
                 continue
-            # Only auto-play if the next message is also an audio message
-            if next_msg.get("messageType") == "audioMessage":
-                msg_id   = next_msg.get("key", {}).get("id", "")
+            if candidate.get("messageType") == "audioMessage":
+                has_next_audio = True
+                target_msg = candidate
+                target_idx = next_idx
+            break
+
+        if has_next_audio and target_msg is not None:
+            def _play_next():
+                try:
+                    if hasattr(self.main_window, "audio_transition_next_sound"):
+                        self.main_window.audio_transition_next_sound.play()
+                except Exception as e:
+                    logging.exception(f"[UI Audio Chaining] Error playing audio_transition_next_sound: {e}")
+
+                msg_id   = target_msg.get("key", {}).get("id", "")
                 duration = (
-                    (next_msg.get("message") or {}).get("audioMessage") or {}
+                    (target_msg.get("message") or {}).get("audioMessage") or {}
                 ).get("seconds", 0) or 0
-                # Only move list focus to the next audio if the user hasn't
-                # already scrolled past it — avoids disrupting reading when
-                # sequential audio plays in the background.
                 current_focus = self.messages_list.GetFocusedItem()
-                if current_focus < 0 or current_focus <= next_idx:
-                    self.messages_list.Focus(next_idx)
-                    self.messages_list.Select(next_idx, True)
-                    self.messages_list.EnsureVisible(next_idx)
+                if current_focus < 0 or current_focus <= target_idx:
+                    self.messages_list.Focus(target_idx)
+                    self.messages_list.Select(target_idx, True)
+                    self.messages_list.EnsureVisible(target_idx)
                 clean_msg_id = msg_id
                 if "_" in msg_id:
                     parts = msg_id.split("_")
                     clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
                 self._toggle_playback(
-                    msg_id, duration, next_msg,
+                    msg_id, duration, target_msg,
                     file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
                     audio_ext=".ogg",
                 )
-            break  # stop regardless (either play next or not)
+            wx.CallLater(10, _play_next)
+        else:
+            def _play_end():
+                try:
+                    if hasattr(self.main_window, "audio_transition_end_sound"):
+                        self.main_window.audio_transition_end_sound.play()
+                except Exception as e:
+                    logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
+            wx.CallLater(5, _play_end)
+
 
     def on_audio_speed_btn(self, event):
         self._audio_speed_index = (self._audio_speed_index + 1) % len(
