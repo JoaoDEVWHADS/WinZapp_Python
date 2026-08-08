@@ -1860,6 +1860,9 @@ class ConversationsPanel(wx.Panel):
             self.message_field.SetFocus()
             return
 
+        if hasattr(self.main_window, "mark_conversation_as_read") and remote_jid:
+            self.main_window.mark_conversation_as_read(remote_jid)
+
         # ── Phase 2: instant UI update ────────────────────────────────────────
         remote_jid      = self.conversation.get("remoteJid", "")
         local_id        = str(uuid.uuid4())
@@ -7819,6 +7822,8 @@ class ConversationsPanel(wx.Panel):
             self._register_virtual_msg(virtual_msg)
 
         self._on_cancel_reply()  # clear quoted state after send
+        if hasattr(self.main_window, "mark_conversation_as_read") and remote_jid:
+            self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
         self.main_window._schedule_set_chats()
         self.message_field.SetFocus()
