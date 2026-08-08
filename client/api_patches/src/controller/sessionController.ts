@@ -816,24 +816,53 @@ export async function getMediaByMessage(req: Request, res: Response) {
         }
       }
 
-      // Final fallback to WPPConnect's downloadMedia
-      if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
+      // Final fallback to WPPConnect / WA-JS browser-side downloadMedia
+      if (client.page && !client.page.isClosed()) {
         try {
-          let timer: any;
           const targetId = cleanMsgId || messageId;
-          const downloadPromise = (client as any).downloadMedia(targetId).catch((err: any) => {
-            req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
-            return null;
-          }).finally(() => {
-            if (timer) clearTimeout(timer);
-          });
-          const timeoutPromise = new Promise<null>((resolve) => {
-            timer = setTimeout(() => {
-              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${targetId})`);
-              resolve(null);
-            }, 30000);
-          });
-          let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
+          req.logger.info(`Attempting browser-side WPP.chat.downloadMedia for ${targetId}...`);
+          
+          let base64: string | null = null;
+
+          if (typeof (client as any).downloadMedia === 'function') {
+            let timer: any;
+            const downloadPromise = (client as any).downloadMedia(targetId).catch((err: any) => {
+              req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
+              return null;
+            }).finally(() => {
+              if (timer) clearTimeout(timer);
+            });
+            const timeoutPromise = new Promise<null>((resolve) => {
+              timer = setTimeout(() => {
+                req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${targetId})`);
+                resolve(null);
+              }, 30000);
+            });
+            base64 = await Promise.race([downloadPromise, timeoutPromise]);
+          }
+
+          // Direct browser-side WA-JS evaluate if client.downloadMedia returned null or wasn't available
+          if (!base64 && client.page && !client.page.isClosed()) {
+            req.logger.info(`Executing direct WPP.chat.downloadMedia evaluate in browser context for ${targetId}...`);
+            base64 = await client.page.evaluate(async (msgId: string) => {
+              try {
+                const w = window as any;
+                if (w.WPP && w.WPP.chat && typeof w.WPP.chat.downloadMedia === 'function') {
+                  const blob = await w.WPP.chat.downloadMedia(msgId);
+                  if (blob && w.WPP.util && typeof w.WPP.util.blobToBase64 === 'function') {
+                    return await w.WPP.util.blobToBase64(blob);
+                  }
+                }
+              } catch (e) {
+                console.error('WPP.chat.downloadMedia evaluate error:', e);
+              }
+              return null;
+            }, targetId).catch((err: any) => {
+              req.logger.warn(`Direct WPP.chat.downloadMedia evaluate failed: ${err}`);
+              return null;
+            });
+          }
+
           if (base64) {
             let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
@@ -846,10 +875,10 @@ export async function getMediaByMessage(req: Request, res: Response) {
             return res.status(200).json({ base64, mimetype });
           }
         } catch (downloadErr) {
-          req.logger.error(`Error in client.downloadMedia fallback after decryption error: ${downloadErr}`);
+          req.logger.error(`Error in browser-side downloadMedia recovery: ${downloadErr}`);
         }
       }
-      throw decryptErr; // rethrow to trigger the 500 block if both failed
+      throw decryptErr; // rethrow to trigger the 500 block if all recovery attempts failed
     }
   } catch (ex) {
     req.logger.error(ex);
