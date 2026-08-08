@@ -198,3 +198,18 @@ db.sqlite3-journal
 .ipynb_checkpoints
 
 wppconnect_repos/
+
+# 10 Protected Files (Audit Isolation)
+build.py
+updater.py
+config.py
+version.py
+setup_api.py
+package.json
+api_setup.py
+README
+README.md
+CHANGELOG
+CHANGELOG.md
+changelog.md
+release.imo
