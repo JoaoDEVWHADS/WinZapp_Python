@@ -8,6 +8,8 @@
 name: Pre-release de Teste (joaopr4)
 
 on:
+  push:
+    branches: [ joaopr4 ]
   workflow_dispatch:
     inputs:
       version:
@@ -59,7 +61,7 @@ jobs:
           git config --local user.name "github-actions"
           git config --local user.email "github-actions@github.com"
           git add client/version.py
-          git commit -m "chore: bump version to $ver [skip ci]"
+          git commit -m "[skip ci] chore: bump version to $ver"
           git tag "v$ver"
           git push origin HEAD:joaopr4
           git push origin "v$ver"
