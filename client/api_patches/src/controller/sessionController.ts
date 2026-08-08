@@ -685,7 +685,7 @@ export async function getMediaByMessage(req: Request, res: Response) {
       // Direct browser-side WA-JS downloadMedia recovery (bypasses hanging Node-side downloadMedia)
       if (client.page && !client.page.isClosed()) {
         try {
-          const targetId = cleanMsgId || messageId;
+          const targetId = messageId;
           req.logger.info(`Attempting direct browser WPP.chat.downloadMedia recovery for ${targetId}...`);
           
           let base64: string | null = await client.page.evaluate(async (msgId: string) => {
