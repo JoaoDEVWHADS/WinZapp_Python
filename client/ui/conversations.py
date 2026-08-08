@@ -1437,6 +1437,13 @@ class ConversationsPanel(wx.Panel):
         )
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+        # Replying is a clear signal the conversation has been read — clears
+        # the unread badge/title/tray count and notifies WPPConnect, even in
+        # the edge case where unreadCount is still nonzero for the chat
+        # that's open right now (e.g. the window was minimized when a
+        # message arrived, so the open-conversation suppression in
+        # on_new_message() never applied).
+        self.main_window.mark_conversation_as_read(remote_jid)
 
         # Register the virtual message in chat records so the conversation
         # list preview updates immediately to show the sent message.
@@ -1994,6 +2001,7 @@ class ConversationsPanel(wx.Panel):
             pm = PendingMessage(local_id, remote_jid, audio_path=wav_path,
                                 ogg_bytes=ogg_bytes, quoted=quoted_msg)
             mw.message_queue.enqueue(pm)
+            mw.mark_conversation_as_read(remote_jid)
 
         threading.Thread(target=_write_and_enqueue, daemon=True).start()
 
@@ -7581,6 +7589,7 @@ class ConversationsPanel(wx.Panel):
                             quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+        self.main_window.mark_conversation_as_read(remote_jid)
 
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
@@ -7748,6 +7757,7 @@ class ConversationsPanel(wx.Panel):
             self._register_virtual_msg(virtual_msg)
 
         self._on_cancel_reply()  # clear quoted state after send
+        self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
         self.main_window._schedule_set_chats()
         self.message_field.SetFocus()
