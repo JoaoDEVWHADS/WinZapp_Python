@@ -5804,7 +5804,7 @@ class MainWindow(wx.Frame):
                 os.makedirs(os.path.dirname(settings_file), exist_ok=True)
                 shutil.copy2(default_file, settings_file)
         try:
-            with open(settings_file, "r") as f:
+            with open(settings_file, "r", encoding="utf-8") as f:
                 self.settings = json.load(f)
         except Exception:
             # If load still fails (e.g. corrupt settings.json), reset to defaults
@@ -6266,7 +6266,7 @@ class MainWindow(wx.Frame):
         if not token:
             # Migration: read from legacy token.tk if WA_token not yet present
             try:
-                with open(data_path("token.tk"), "r") as f:
+                with open(data_path("token.tk"), "r", encoding="utf-8") as f:
                     token = f.read().strip()
                 if token:
                     self._set_wa_token(token)
