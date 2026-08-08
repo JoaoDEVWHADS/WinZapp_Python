@@ -1444,6 +1444,13 @@ class ConversationsPanel(wx.Panel):
         )
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+        # Replying is a clear signal the conversation has been read — clears
+        # the unread badge/title/tray count and notifies WPPConnect, even in
+        # the edge case where unreadCount is still nonzero for the chat
+        # that's open right now (e.g. the window was minimized when a
+        # message arrived, so the open-conversation suppression in
+        # on_new_message() never applied).
+        self.main_window.mark_conversation_as_read(remote_jid)
 
         # Register the virtual message in chat records so the conversation
         # list preview updates immediately to show the sent message.
@@ -2003,6 +2010,7 @@ class ConversationsPanel(wx.Panel):
             pm = PendingMessage(local_id, remote_jid, audio_path=wav_path,
                                 ogg_bytes=ogg_bytes, quoted=quoted_msg)
             mw.message_queue.enqueue(pm)
+            mw.mark_conversation_as_read(remote_jid)
 
         threading.Thread(target=_write_and_enqueue, daemon=True).start()
 
@@ -3681,6 +3689,46 @@ class ConversationsPanel(wx.Panel):
             self._is_loading_more = False
 
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
+
+    # Default for how many rows Page Up/Page Down jump in messages_list/
+    # conversations_list, when Settings > User Interface hasn't set one yet.
+    # Both are plain wx.ListCtrl (native SysListView32 on Windows), whose
+    # default Page Up/Down handling only moved focus by a single row instead
+    # of paging — reported as making them functionally indistinguishable
+    # from Up/Down. 15 mirrors the default messages_page_size fetched per
+    # sync page (see client/data/settings_default.json's user_interface
+    # section) as a reasonable "one screenful" default.
+    _DEFAULT_PAGE_JUMP_SIZE = 15
+
+    def _page_jump_size(self) -> int:
+        """User-configurable Page Up/Page Down jump size (Settings > User
+        Interface). Falls back to the default for a missing/invalid value —
+        settings_dialog.py validates on save, but settings.json can still be
+        hand-edited or predate this option."""
+        raw = self.main_window.settings.get("user_interface", {}).get(
+            "page_jump_size", self._DEFAULT_PAGE_JUMP_SIZE
+        )
+        try:
+            size = int(raw)
+        except (TypeError, ValueError):
+            return self._DEFAULT_PAGE_JUMP_SIZE
+        return size if size >= 1 else self._DEFAULT_PAGE_JUMP_SIZE
+
+    @staticmethod
+    def _page_jump_target(count: int, focused_idx: int, delta: int) -> int:
+        """Clamped index for a Page Up/Down jump, or -1 when the list is empty."""
+        if count <= 0:
+            return -1
+        idx = focused_idx if focused_idx >= 0 else 0
+        return max(0, min(count - 1, idx + delta))
+
+    def _jump_list_by(self, list_ctrl: wx.ListCtrl, delta: int) -> None:
+        target = self._page_jump_target(list_ctrl.GetItemCount(), list_ctrl.GetFocusedItem(), delta)
+        if target < 0:
+            return
+        list_ctrl.Focus(target)
+        list_ctrl.Select(target, True)
+        list_ctrl.EnsureVisible(target)
 
     def _on_messages_list_key_down(self, event):
         """Make Space fire the same activation as Enter / double-click.
@@ -7654,6 +7702,7 @@ class ConversationsPanel(wx.Panel):
                             quoted=self._quoted_message)
         self.main_window.message_queue.enqueue(pm)
         self._on_cancel_reply()  # clear quoted state after send
+        self.main_window.mark_conversation_as_read(remote_jid)
 
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
@@ -7821,6 +7870,7 @@ class ConversationsPanel(wx.Panel):
             self._register_virtual_msg(virtual_msg)
 
         self._on_cancel_reply()  # clear quoted state after send
+        self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
         self.main_window._schedule_set_chats()
         self.message_field.SetFocus()
