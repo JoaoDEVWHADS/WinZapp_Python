@@ -7465,6 +7465,34 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._schedule_set_chats)
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
+        """Rename an already-known group chat when its WhatsApp subject changes.
+
+        The "gp2"/subject-change system message (subtype "subject", new name
+        in "body" — see WebSocketClient's gp2 handling) already got rendered
+        as an in-chat notification, but nothing updated chat["name"] itself:
+        the group kept showing its old name everywhere else (chat list,
+        window title, tray tooltip, dialogs) until the next full sync
+        happened to re-fetch group-info, which could be minutes/hours away
+        or never for a group with no other activity. Applying it immediately
+        here — from the same event that already told us the new name — keeps
+        the chat list in sync instead of looking like the renamed group
+        vanished.
+        """
+        if not remote_jid.endswith("@g.us"):
+            return
+        if msg.get("messageType") != "groupNotification":
+            return
+        notif = (msg.get("message") or {}).get("groupNotification") or {}
+        if notif.get("subtype") != "subject":
+            return
+        new_name = (notif.get("body") or "").strip()
+        if not new_name or chat.get("name") == new_name:
+            return
+        chat["name"] = new_name
+        self._group_name_cache = getattr(self, "_group_name_cache", {})
+        self._group_name_cache[remote_jid] = new_name
+
     def _resolve_missing_group_names(self):
         """Retry group-info lookups for groups still unnamed after sync.
 
@@ -9566,6 +9594,22 @@ class MainWindow(wx.Frame):
         self._save_media_failed_ids()
         return len(tasks)
 
+    def _refresh_open_conversation_after_sync(self, remote_jid: str, chat: dict) -> None:
+        """Repaint the open conversation after sync_chat_messages() replaces
+        its backing dict.
+        """
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or cp.conversation is None:
+            return
+        if cp.conversation.get("remoteJid") != remote_jid:
+            return
+
+        def _apply(new_chat=chat):
+            if cp.conversation is not None and cp.conversation.get("remoteJid") == remote_jid:
+                cp.conversation = new_chat
+                cp.refresh_messages_if_changed()
+        wx.CallAfter(_apply)
+
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
@@ -9827,6 +9871,7 @@ class MainWindow(wx.Frame):
 
         self.chats[remote_jid] = chat
         self._note_backfill_state(remote_jid, chat, api_ok)
+        self._refresh_open_conversation_after_sync(remote_jid, chat)
 
         if not getattr(self, "_initial_sync_running", False):
             wx.CallAfter(self._schedule_set_chats)

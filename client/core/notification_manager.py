@@ -651,11 +651,15 @@ class NotificationManager:
         except Exception:
             pass
 
-    def _dispatch(self, title: str, body: str, remote_jid: str):
+    _TOAST_REACTIONS = ["👍", "❤️"]
+
+    def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
         if not self._toaster:
             return
         try:
-            from windows_toasts import Toast, ToastInputTextBox, ToastAudio, ToastDuration
+            from windows_toasts import (
+                Toast, ToastInputTextBox, ToastButton, ToastAudio, ToastDuration,
+            )
             from core.utils import effective_unread_count
 
             self.i18n.get_language()
@@ -670,8 +674,9 @@ class NotificationManager:
             # actively misleading, not just imprecise, so the badge is
             # omitted entirely until a real sync backs the number (see
             # get_remote_chats(), which clears this flag).
+            unread_suffix = ""
             if chat is not None and not chat.get("_unread_count_unsynced"):
-                body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
+                unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
 
             # Fire the custom sound BEFORE any of the WinRT/COM work below
             # (clearing the previous toast, show_toast() itself). Both of
@@ -718,19 +723,41 @@ class NotificationManager:
             toast.tag      = self.TOAST_TAG
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
-            toast.text_fields = [title, body]
+            toast.text_fields = [title, body, unread_suffix] if unread_suffix else [title, body]
             toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
             jid_snapshot = remote_jid
+            msg_key_snapshot = msg_key
 
             if self._interactable:
-                toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
+                reply_box = ToastInputTextBox("reply_box", "", reply_hint)
+                toast.AddInput(reply_box)
+                toast.AddAction(ToastButton(
+                    content=self.i18n.t("notif_send_reply"),
+                    arguments="do_reply",
+                    relatedInput=reply_box,
+                    tooltip=self.i18n.t("notif_send_reply"),
+                ))
+
+                if msg_key_snapshot:
+                    for emoji in self._TOAST_REACTIONS:
+                        toast.AddAction(ToastButton(
+                            content=emoji,
+                            arguments=f"do_react:{emoji}",
+                            tooltip=self.i18n.t("notif_react_with").format(emoji=emoji),
+                        ))
 
                 def on_activated(event):
-                    inputs     = getattr(event, "inputs", {}) or {}
+                    args   = getattr(event, "arguments", "") or ""
+                    inputs = getattr(event, "inputs", {}) or {}
+                    if args.startswith("do_react:"):
+                        emoji = args.split(":", 1)[1]
+                        if emoji and msg_key_snapshot:
+                            wx.CallAfter(self._do_react, jid_snapshot, msg_key_snapshot, emoji)
+                        return
                     reply_text = (inputs.get("reply_box") or "").strip()
                     if reply_text:
-                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
+                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text, msg_key_snapshot)
                     else:
                         wx.CallAfter(self._do_open, jid_snapshot)
 
