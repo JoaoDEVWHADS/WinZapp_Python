@@ -3661,14 +3661,29 @@ class ConversationsPanel(wx.Panel):
 
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
-    # How many rows Page Up/Page Down jump in messages_list/conversations_list.
+    # Default for how many rows Page Up/Page Down jump in messages_list/
+    # conversations_list, when Settings > User Interface hasn't set one yet.
     # Both are plain wx.ListCtrl (native SysListView32 on Windows), whose
     # default Page Up/Down handling only moved focus by a single row instead
     # of paging — reported as making them functionally indistinguishable
     # from Up/Down. 15 mirrors the default messages_page_size fetched per
     # sync page (see client/data/settings_default.json's user_interface
     # section) as a reasonable "one screenful" default.
-    _PAGE_JUMP_SIZE = 15
+    _DEFAULT_PAGE_JUMP_SIZE = 15
+
+    def _page_jump_size(self) -> int:
+        """User-configurable Page Up/Page Down jump size (Settings > User
+        Interface). Falls back to the default for a missing/invalid value —
+        settings_dialog.py validates on save, but settings.json can still be
+        hand-edited or predate this option."""
+        raw = self.main_window.settings.get("user_interface", {}).get(
+            "page_jump_size", self._DEFAULT_PAGE_JUMP_SIZE
+        )
+        try:
+            size = int(raw)
+        except (TypeError, ValueError):
+            return self._DEFAULT_PAGE_JUMP_SIZE
+        return size if size >= 1 else self._DEFAULT_PAGE_JUMP_SIZE
 
     @staticmethod
     def _page_jump_target(count: int, focused_idx: int, delta: int) -> int:
@@ -3689,7 +3704,8 @@ class ConversationsPanel(wx.Panel):
     def _on_messages_list_key_down(self, event):
         """Make Space fire the same activation as Enter / double-click.
         Trigger loading older messages on Arrow Up / Page Up when at the top (index 0).
-        Page Up/Down jump _PAGE_JUMP_SIZE rows instead of the native single-row step."""
+        Page Up/Down jump the configured Settings > User Interface amount
+        (default _DEFAULT_PAGE_JUMP_SIZE) instead of the native single-row step."""
         key = event.GetKeyCode()
         idx = self.messages_list.GetFocusedItem()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
@@ -3703,9 +3719,9 @@ class ConversationsPanel(wx.Panel):
                 else:
                     self._load_older_messages()
             else:
-                self._jump_list_by(self.messages_list, -self._PAGE_JUMP_SIZE)
+                self._jump_list_by(self.messages_list, -self._page_jump_size())
         elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
-            self._jump_list_by(self.messages_list, self._PAGE_JUMP_SIZE)
+            self._jump_list_by(self.messages_list, self._page_jump_size())
         elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_HOME):
             if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
@@ -3720,7 +3736,8 @@ class ConversationsPanel(wx.Panel):
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
         Ctrl+P pins/unpins, Ctrl+Q archives/unarchives.
-        Page Up/Down jump _PAGE_JUMP_SIZE rows instead of the native single-row step."""
+        Page Up/Down jump the configured Settings > User Interface amount
+        (default _DEFAULT_PAGE_JUMP_SIZE) instead of the native single-row step."""
         key  = event.GetKeyCode()
         ctrl = event.ControlDown()
 
@@ -3730,9 +3747,9 @@ class ConversationsPanel(wx.Panel):
                 self.conversations_list.Select(idx)
                 self.on_conversation_selected_by_index(idx)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
-            self._jump_list_by(self.conversations_list, -self._PAGE_JUMP_SIZE)
+            self._jump_list_by(self.conversations_list, -self._page_jump_size())
         elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
-            self._jump_list_by(self.conversations_list, self._PAGE_JUMP_SIZE)
+            self._jump_list_by(self.conversations_list, self._page_jump_size())
         elif ctrl and key == ord("P"):
             idx = self.conversations_list.GetFocusedItem()
             if 0 <= idx < len(self.chats_list):

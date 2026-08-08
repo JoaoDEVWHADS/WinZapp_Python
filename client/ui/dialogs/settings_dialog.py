@@ -247,6 +247,13 @@ class SettingsDialog(wx.Dialog):
         self._messages_page_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         ui_sizer.Add(self._messages_page_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
+        ui_sizer.Add(
+            wx.StaticText(self._ui_page, label=i18n.t("ui_page_jump_size_label")),
+            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        )
+        self._page_jump_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
+        ui_sizer.Add(self._page_jump_size_field, 0, wx.EXPAND | wx.ALL, 8)
+
         # Wrap radio buttons in a StaticBox so NVDA reads the group label when
         # the user tabs into them.  A plain StaticText label is not sufficient
         # for screen readers to announce group membership.
@@ -657,6 +664,9 @@ class SettingsDialog(wx.Dialog):
 
         page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
+
+        page_jump_size = self.main_window.settings.get("user_interface", {}).get("page_jump_size", 15)
+        self._page_jump_size_field.SetValue(str(page_jump_size))
 
         focus_on_open = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_on_open == "unread_or_last":
@@ -1074,6 +1084,21 @@ class SettingsDialog(wx.Dialog):
             self._messages_page_size_field.SetFocus()
             return False
 
+        page_jump_size_str = self._page_jump_size_field.GetValue().strip()
+        try:
+            page_jump_size = int(page_jump_size_str)
+            if page_jump_size < 1:
+                raise ValueError
+        except ValueError:
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_page_jump_size"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._page_jump_size_field.SetFocus()
+            return False
+
         port_str = self._port_field.GetValue().strip()
         try:
             port = int(port_str)
@@ -1260,6 +1285,10 @@ class SettingsDialog(wx.Dialog):
         # UI: messages page size
         page_size = int(self._messages_page_size_field.GetValue().strip())
         self.main_window.settings.setdefault("user_interface", {})["messages_page_size"] = page_size
+
+        # UI: Page Up/Page Down jump size
+        page_jump_size = int(self._page_jump_size_field.GetValue().strip())
+        self.main_window.settings.setdefault("user_interface", {})["page_jump_size"] = page_jump_size
 
         # UI: focus on open
         focus_on_open = (

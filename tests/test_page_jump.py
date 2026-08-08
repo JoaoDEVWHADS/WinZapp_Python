@@ -34,3 +34,50 @@ class TestPageJumpTarget:
 
     def test_short_list_page_down_still_clamps(self):
         assert target(count=5, focused_idx=2, delta=15) == 4
+
+
+class _MainWindowStub:
+    def __init__(self, settings):
+        self.settings = settings
+
+
+class _PanelStub:
+    _page_jump_size = ConversationsPanel._page_jump_size
+    _DEFAULT_PAGE_JUMP_SIZE = ConversationsPanel._DEFAULT_PAGE_JUMP_SIZE
+
+    def __init__(self, settings):
+        self.main_window = _MainWindowStub(settings)
+
+
+class TestPageJumpSize:
+    """Settings > User Interface > "Mensagens a pular ao pressionar PageUp /
+    PageDown" — falls back to the default for anything not a positive int,
+    since settings.json can be hand-edited or predate this option."""
+
+    def test_reads_the_configured_value(self):
+        panel = _PanelStub({"user_interface": {"page_jump_size": 30}})
+        assert panel._page_jump_size() == 30
+
+    def test_missing_key_falls_back_to_the_default(self):
+        panel = _PanelStub({"user_interface": {}})
+        assert panel._page_jump_size() == ConversationsPanel._DEFAULT_PAGE_JUMP_SIZE
+
+    def test_missing_section_falls_back_to_the_default(self):
+        panel = _PanelStub({})
+        assert panel._page_jump_size() == ConversationsPanel._DEFAULT_PAGE_JUMP_SIZE
+
+    def test_string_digit_value_is_accepted(self):
+        """settings.json round-trips through JSON — an int stays an int, but
+        this stays lenient in case of manual edits."""
+        panel = _PanelStub({"user_interface": {"page_jump_size": "7"}})
+        assert panel._page_jump_size() == 7
+
+    def test_non_numeric_value_falls_back_to_the_default(self):
+        panel = _PanelStub({"user_interface": {"page_jump_size": "abc"}})
+        assert panel._page_jump_size() == ConversationsPanel._DEFAULT_PAGE_JUMP_SIZE
+
+    def test_zero_or_negative_falls_back_to_the_default(self):
+        panel = _PanelStub({"user_interface": {"page_jump_size": 0}})
+        assert panel._page_jump_size() == ConversationsPanel._DEFAULT_PAGE_JUMP_SIZE
+        panel = _PanelStub({"user_interface": {"page_jump_size": -5}})
+        assert panel._page_jump_size() == ConversationsPanel._DEFAULT_PAGE_JUMP_SIZE

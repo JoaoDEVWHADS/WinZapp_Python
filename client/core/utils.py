@@ -34,6 +34,7 @@ DEFAULT_SETTINGS = {
     },
     "user_interface": {
         "messages_page_size": 200,
+        "page_jump_size": 15,
         "focus_on_open": "message_field"
     },
     "audio_playback": {
