@@ -4528,28 +4528,30 @@ class ConversationsPanel(wx.Panel):
                 except Exception as e:
                     logging.exception(f"[UI Audio Chaining] Error playing audio_transition_next_sound: {e}")
 
-                msg_id   = target_msg.get("key", {}).get("id", "")
-                duration = (
-                    (target_msg.get("message") or {}).get("audioMessage") or {}
-                ).get("seconds", 0) or 0
-                current_focus = self.messages_list.GetFocusedItem()
-                if current_focus < 0 or current_focus <= target_idx:
-                    self.messages_list.Focus(target_idx)
-                    self.messages_list.Select(target_idx, True)
-                    self.messages_list.EnsureVisible(target_idx)
-                clean_msg_id = msg_id
-                if "_" in msg_id:
-                    parts = msg_id.split("_")
-                    clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-                self._in_auto_chain_transition = True
-                try:
-                    self._toggle_playback(
-                        msg_id, duration, target_msg,
-                        file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
-                        audio_ext=".ogg",
-                    )
-                finally:
-                    self._in_auto_chain_transition = False
+                def _start_audio():
+                    msg_id   = target_msg.get("key", {}).get("id", "")
+                    duration = (
+                        (target_msg.get("message") or {}).get("audioMessage") or {}
+                    ).get("seconds", 0) or 0
+                    current_focus = self.messages_list.GetFocusedItem()
+                    if current_focus < 0 or current_focus <= target_idx:
+                        self.messages_list.Focus(target_idx)
+                        self.messages_list.Select(target_idx, True)
+                        self.messages_list.EnsureVisible(target_idx)
+                    clean_msg_id = msg_id
+                    if "_" in msg_id:
+                        parts = msg_id.split("_")
+                        clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+                    self._in_auto_chain_transition = True
+                    try:
+                        self._toggle_playback(
+                            msg_id, duration, target_msg,
+                            file_path=data_path("voice_messages", f"{clean_msg_id}.msv"),
+                            audio_ext=".ogg",
+                        )
+                    finally:
+                        self._in_auto_chain_transition = False
+                wx.CallLater(100, _start_audio)
             wx.CallLater(100, _play_next)
         else:
             if getattr(self, "_is_in_audio_chain", False):
