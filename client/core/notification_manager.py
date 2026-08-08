@@ -655,6 +655,16 @@ class NotificationManager:
         except Exception:
             pass
 
+    # Curated quick-reaction set for the toast's "Reagir" action — mirrors
+    # the emojis WhatsApp's own official client offers from a notification
+    # (a subset of the fuller picker in ConversationsPanel._on_menu_react,
+    # which doesn't fit/isn't needed in a one-line toast dropdown).
+    # Windows toasts realistically support ~5 actions total (buttons +
+    # inputs combined) before the shell starts clipping/misbehaving — kept
+    # to 2 so "1 reply input + 1 send button + N reaction buttons" has
+    # comfortable margin.
+    _TOAST_REACTIONS = ["👍", "❤️"]
+
     def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
         if not self._toaster:
             return
@@ -673,9 +683,15 @@ class NotificationManager:
             # yet. Showing that assumed-low count ("1 unread"/"2 unread") is
             # actively misleading, not just imprecise, so the badge is
             # omitted entirely until a real sync backs the number (see
-            # get_remote_chats(), which clears this flag).
+            # get_remote_chats(), which clears this flag). It's still only a
+            # snapshot taken right before this toast is shown — a burst still
+            # arriving after that (each message bumping the real count
+            # further) can leave the toast reporting fewer unread than what
+            # Alt+3/the chat itself shows moments later; there is no single
+            # later point to re-sample from once the banner is already up.
+            unread_suffix = ""
             if chat is not None and not chat.get("_unread_count_unsynced"):
-                body = f"{body}\n{format_toast_unread_suffix(effective_unread_count(chat), self.i18n)}"
+                unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
 
             # Fire the custom sound BEFORE any of the WinRT/COM work below
             # (clearing the previous toast, show_toast() itself). Both of
@@ -722,9 +738,6 @@ class NotificationManager:
             toast.tag      = self.TOAST_TAG
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
-            unread_suffix = ""
-            if chat is not None and not chat.get("_unread_count_unsynced"):
-                unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
 
             # Fire the custom sound BEFORE any of the WinRT/COM work below
             # (clearing the previous toast, show_toast() itself). Both of
