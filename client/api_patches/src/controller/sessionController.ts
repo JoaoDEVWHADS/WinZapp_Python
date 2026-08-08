@@ -261,32 +261,29 @@ export async function closeSession(req: Request, res: Response): Promise<any> {
         .json({ status: true, message: 'Session successfully closed' });
     }
 
-    if (client.status !== 'CONNECTED' && client.status !== 'open') {
-      req.logger.info(`[${session}] Force killing session because status is ${client.status}`);
-      client.shouldClose = true;
-      try {
-        SessionUtil.forceKillSession(session, req.logger);
-      } catch (e) {}
-      (clientsArray as any)[session] = undefined;
-      return await res
-        .status(200)
-        .json({ status: true, message: 'Session force closed' });
-    }
-
+    // WinZapp fix: ALWAYS close gracefully, never force-kill.
+    //
+    // The old code force-killed the Chrome tree (taskkill /F /T /
+    // Stop-Process -Force) whenever the session wasn't fully CONNECTED,
+    // which could tear down the profile (a LevelDB store) mid-write and
+    // corrupt it — the documented root cause of sessions coming back
+    // "logged out" after exiting (see createSessionUtil.ts's comment).
+    // client.close() closes page + browser cleanly and preserves the
+    // pairing, matching upstream wppconnect-server behaviour.
     (clientsArray as any)[session] = { status: null };
 
     if (req.client && typeof req.client.close === 'function') {
       await req.client.close();
     }
-      req.io.emit('whatsapp-status', false);
-      callWebHook(req.client, req, 'closesession', {
-        message: `Session: ${session} disconnected`,
-        connected: false,
-      });
+    req.io.emit('whatsapp-status', false);
+    callWebHook(req.client, req, 'closesession', {
+      message: `Session: ${session} disconnected`,
+      connected: false,
+    });
 
-      return await res
-        .status(200)
-        .json({ status: true, message: 'Session successfully closed' });
+    return await res
+      .status(200)
+      .json({ status: true, message: 'Session successfully closed' });
   } catch (error) {
     req.logger.error(error);
     return await res
