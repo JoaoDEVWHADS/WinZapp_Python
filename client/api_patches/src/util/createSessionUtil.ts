@@ -324,13 +324,13 @@ export default class CreateSessionUtil {
 
       if (req.serverOptions.customUserDataDir) {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
-          { protocolTimeout: 120000 },
+          { protocolTimeout: 300000 },
           req.serverOptions.createOptions.puppeteerOptions || {},
           { userDataDir: req.serverOptions.customUserDataDir + session }
         );
       } else {
         req.serverOptions.createOptions.puppeteerOptions = Object.assign(
-          { protocolTimeout: 120000 },
+          { protocolTimeout: 300000 },
           req.serverOptions.createOptions.puppeteerOptions || {}
         );
       }

@@ -6199,16 +6199,27 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download starting.")
-            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-            if not self.background_mode:
-                wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
             self._media_sync_running = True
             try:
+                # Verifica se existem mídias a serem baixadas antes de anunciar
+                _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
+                                "stickerMessage", "videoMessage",
+                                "audio", "ptt", "document", "doc", "image", "sticker", "video"}
+                has_media = any(
+                    msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES
+                    for chat in self.chats.values()
+                    for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
+                )
+                if has_media:
+                    wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+                    if not self.background_mode:
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
+
                 count = self.sync_media_for_all_chats()
                 if count > 0:
                     logging.info("[start_sync] Phase 2 downloaded media for %d task(s).", count)
-                if not self.background_mode:
-                    wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
+                    if not self.background_mode:
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
                 if not self.background_mode:
@@ -6863,13 +6874,32 @@ class MainWindow(wx.Frame):
                         if jid in chats:
                             chats[jid]["archive"] = server_archived
                             chats[jid]["archived"] = server_archived
+
+                        alt_jid = ""
+                        if jid.endswith("@lid"):
+                            alt_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
+                        else:
+                            alt_jid = getattr(self, "_phone_to_lid", {}).get(jid, "")
+                        if alt_jid:
+                            alt_jid = self._normalize_jid(alt_jid)
+                            if alt_jid in chats:
+                                chats[alt_jid]["archive"] = server_archived
+                                chats[alt_jid]["archived"] = server_archived
+
                         if server_archived:
                             if jid not in self._archived_chats:
                                 self._archived_chats.add(jid)
                                 archive_changed = True
-                        elif jid in self._archived_chats:
-                            self._archived_chats.discard(jid)
-                            archive_changed = True
+                            if alt_jid and alt_jid not in self._archived_chats:
+                                self._archived_chats.add(alt_jid)
+                                archive_changed = True
+                        else:
+                            if jid in self._archived_chats:
+                                self._archived_chats.discard(jid)
+                                archive_changed = True
+                            if alt_jid and alt_jid in self._archived_chats:
+                                self._archived_chats.discard(alt_jid)
+                                archive_changed = True
 
                     # Check if the JID starts with "0@" (official WhatsApp/system account)
                     is_system = jid.startswith("0@")
@@ -7226,10 +7256,10 @@ class MainWindow(wx.Frame):
                 )
                 _merge_records(dst_records, src_records)
                 
-                # Merge unread counts
+                # Merge unread counts (take max, not sum, to avoid duplicating counts across LID and phone entries)
                 unread_dst = int(chats[alt_jid].get("unreadCount") or 0)
                 unread_src = int(lid_chat.get("unreadCount") or 0)
-                chats[alt_jid]["unreadCount"] = unread_dst + unread_src
+                chats[alt_jid]["unreadCount"] = max(unread_dst, unread_src)
             else:
                 # Only the @lid version exists — rename it to @s.whatsapp.net
                 lid_chat["remoteJid"] = alt_jid
@@ -11408,7 +11438,10 @@ class MainWindow(wx.Frame):
 
         # Persist the updated pushName map to database metadata.
         if _ppm_updated and hasattr(self, "db") and self.db is not None:
-            self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
+            try:
+                self.db.set_metadata_json("presence_pushname_map", dict(self._presence_pushname_map))
+            except Exception as db_err:
+                logging.warning("[on_presence_update] Failed to save presence_pushname_map: %s", db_err)
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
@@ -11455,6 +11488,14 @@ class MainWindow(wx.Frame):
         cp = getattr(self, "conversations_panel", None)
         if normalized == getattr(cp, "_last_open_jid", ""):
             unread_count = 0
+        else:
+            read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
+            if read_at_t is not None:
+                incoming_t = int(chat.get("t", 0) or 0)
+                if incoming_t <= read_at_t:
+                    unread_count = 0
+                else:
+                    self._locally_read_at.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
@@ -12869,14 +12910,38 @@ class MainWindow(wx.Frame):
         )
 
     def is_chat_archived(self, jid: str) -> bool:
-        chat = self.chats.get(jid, {})
+        if not jid:
+            return False
+        jid_norm = self._normalize_jid(jid)
+        chat = self.chats.get(jid_norm, {})
         raw = chat.get("archive")
         if raw is None:
             raw = chat.get("archived")
         flag = _parse_bool_flag(raw)
         if flag is not None:
             return flag
-        return jid in self._archived_chats
+        if jid_norm in self._archived_chats:
+            return True
+
+        alt_jid = ""
+        if jid_norm.endswith("@lid"):
+            alt_jid = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
+        else:
+            alt_jid = getattr(self, "_phone_to_lid", {}).get(jid_norm, "")
+
+        if alt_jid:
+            alt_jid_norm = self._normalize_jid(alt_jid)
+            alt_chat = self.chats.get(alt_jid_norm, {})
+            alt_raw = alt_chat.get("archive")
+            if alt_raw is None:
+                alt_raw = alt_chat.get("archived")
+            alt_flag = _parse_bool_flag(alt_raw)
+            if alt_flag is not None:
+                return alt_flag
+            if alt_jid_norm in self._archived_chats:
+                return True
+
+        return False
 
 
     def _set_archived_state(self, jid: str, archived: bool):
@@ -12884,21 +12949,38 @@ class MainWindow(wx.Frame):
 
         Both have to move together: the chat record is what the list builder
         and is_chat_archived() consult first (it carries the server's truth),
-        while the set is what survives a restart.
+        while the set is what survives a restart. Supports LID <-> Phone JID mapping.
         """
-        if archived:
-            self._archived_chats.add(jid)
+        if not jid:
+            return
+        jid_norm = self._normalize_jid(jid)
+        alt_jid = ""
+        if jid_norm.endswith("@lid"):
+            alt_jid = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
         else:
-            self._archived_chats.discard(jid)
-        chat = self.chats.get(jid)
-        if chat is not None:
-            chat["archive"] = archived
-            chat["archived"] = archived
+            alt_jid = getattr(self, "_phone_to_lid", {}).get(jid_norm, "")
+
+        targets = [jid_norm]
+        if alt_jid:
+            targets.append(self._normalize_jid(alt_jid))
+
+        for target in targets:
+            if archived:
+                self._archived_chats.add(target)
+            else:
+                self._archived_chats.discard(target)
+            chat = self.chats.get(target)
+            if chat is not None:
+                chat["archive"] = archived
+                chat["archived"] = archived
+
         if hasattr(self, "db") and self.db is not None:
             self.db.set_metadata_json("archived_chats", list(self._archived_chats))
             try:
-                if chat is not None:
-                    self.db.upsert_chat(jid, chat)
+                for target in targets:
+                    chat = self.chats.get(target)
+                    if chat is not None:
+                        self.db.upsert_chat(target, chat)
             except Exception as exc:
                 logging.warning("[_set_archived_state] DB update failed for %s: %s", jid, exc)
         self._schedule_set_chats()

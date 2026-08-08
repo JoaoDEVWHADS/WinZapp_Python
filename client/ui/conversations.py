@@ -2447,8 +2447,8 @@ class ConversationsPanel(wx.Panel):
                 copy_item,
             )
 
-        # Copy file (only for image, video, document messages)
-        _MEDIA_TYPES = ("imageMessage", "videoMessage", "documentMessage")
+        # Copy file (for image, video, document, and audio/voice messages)
+        _MEDIA_TYPES = ("imageMessage", "videoMessage", "documentMessage", "audioMessage")
         if msg_type in _MEDIA_TYPES:
             copy_file_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_file')}\tCtrl+C")
             self.Bind(
@@ -3889,11 +3889,8 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _on_action_save_as(self, event):
-        index = self.messages_list.GetFirstSelected()
-        if index < 0 or index >= len(self._sorted_messages):
-            return
-        msg      = self._sorted_messages[index]
+    def _resolve_media_filename(self, msg: dict) -> str:
+        """Resolve original filename and extension for any media message (document, audio, image, video)."""
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
@@ -3984,7 +3981,23 @@ class ConversationsPanel(wx.Panel):
             default_file = f"arquivo_{time_str or msg_id}{ext}"
 
         # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
-        default_file = re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
+        return re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
+
+    def _on_action_save_as(self, event):
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg      = self._sorted_messages[index]
+        msg_type = msg.get("messageType", "")
+        msg_obj  = msg.get("message") or {}
+        msg_id   = msg.get("key", {}).get("id", "")
+
+        inner = msg_obj.get(msg_type) or {}
+        media_data = msg.get("mediaData") or {}
+        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+        mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
+
+        default_file = self._resolve_media_filename(msg)
 
         # Build specific wildcard filter based on target file extension
         ext_clean = os.path.splitext(default_file)[1].lower().lstrip(".")
@@ -4000,7 +4013,7 @@ class ConversationsPanel(wx.Panel):
         else:
             wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
 
-        logging.info(f"[Save As] msg_id={msg_id}, msg_type={msg_type}, is_ptt={is_ptt}, raw_fileName='{file_name}', mimetype='{mimetype}', default_file='{default_file}', wildcard='{wildcard}'")
+        logging.info(f"[Save As] msg_id={msg_id}, msg_type={msg_type}, is_ptt={is_ptt}, mimetype='{mimetype}', default_file='{default_file}', wildcard='{wildcard}'")
 
         dlg_title = (
             self.main_window.i18n.t("save_audio_as") if msg_type == "audioMessage"
@@ -5902,28 +5915,21 @@ class ConversationsPanel(wx.Panel):
             self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
 
     def _on_menu_copy_file(self, msg: dict):
-        """Decrypt media file and place it on the clipboard as a file object."""
+        """Decrypt media file and place it on the clipboard as a file object with original filename."""
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
         if not msg_id:
             return
 
-        if msg_type == "documentMessage":
-            ext = ""
-            doc = msg_obj.get("documentMessage") or {}
-            filename = doc.get("fileName", f"documento_{msg_id}")
-            if "." in filename:
-                ext = "." + filename.split(".")[-1]
-        elif msg_type == "imageMessage":
-            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
-            ext  = "." + (mime.split("/")[-1] if "/" in mime else "jpg")
-        elif msg_type == "videoMessage":
-            mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
-            ext  = "." + (mime.split("/")[-1] if "/" in mime else "mp4")
-        else:
+        inner = msg_obj.get(msg_type) or {}
+        media_data = msg.get("mediaData") or {}
+        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+
+        if msg_type not in ("documentMessage", "imageMessage", "videoMessage", "audioMessage"):
             return
 
+        default_file = self._resolve_media_filename(msg)
         media_path = data_path("media", f"{msg_id}.wzmedia")
 
         def _run():
@@ -5939,13 +5945,14 @@ class ConversationsPanel(wx.Panel):
                 with open(media_path, "rb") as fh:
                     content = decrypt_bytes(fh.read(), self.main_window.key)
                 
-                # Write decrypted content to a temp file
-                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                tmp.write(content)
-                tmp.close()
+                # Write decrypted content to a temp file with original filename
+                tmp_dir = tempfile.mkdtemp(prefix="wz_copy_")
+                target_file = os.path.join(tmp_dir, default_file)
+                with open(target_file, "wb") as fh:
+                    fh.write(content)
                 
                 # Copy the temporary file to clipboard (must run on the main thread)
-                def _to_clipboard(path=tmp.name):
+                def _to_clipboard(path=target_file):
                     try:
                         if wx.TheClipboard.Open():
                             file_data = wx.FileDataObject()
@@ -6743,7 +6750,7 @@ class ConversationsPanel(wx.Panel):
             self._on_menu_pin(jid)
 
     def _on_accel_copy_message(self, event):
-        """Ctrl+C: copy focused message text to clipboard."""
+        """Ctrl+C: copy focused message text or media file (with original filename) to clipboard."""
         index = self.messages_list.GetFirstSelected()
         if index < 0 or index >= len(self._sorted_messages):
             return
@@ -6751,7 +6758,12 @@ class ConversationsPanel(wx.Panel):
         if self._is_separator(msg):
             return
         msg_type = msg.get("messageType", "")
-        if msg_type in ("imageMessage", "videoMessage", "documentMessage"):
+        msg_obj  = msg.get("message") or {}
+        inner    = msg_obj.get(msg_type) or {}
+        media_data = msg.get("mediaData") or {}
+        is_ptt   = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
+
+        if msg_type in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
             self._on_menu_copy_file(msg)
         else:
             self._on_menu_copy_message(msg)
