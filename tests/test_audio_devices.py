@@ -249,3 +249,51 @@ class TestTestInputDevice:
         monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: fake_pa)
         assert audio_devices_module.test_input_device(5) is False
         assert fake_pa.opened_with == audio_devices_module.RECORDING_SAMPLE_CONFIGS
+
+
+class TestApplyEffectsDevice:
+    """The effects-output device pins effect sounds to a concrete device so they
+    don't follow the voice output when it's switched. Empty name = the resolved
+    system-default index (NOT None), a named device = its own index."""
+
+    def _make(self, monkeypatch, name_to_index, default_idx=1, init_ok=True):
+        ss = _make_sound_system(monkeypatch, name_to_index)
+        monkeypatch.setattr(ss, "_ensure_device_inited", lambda idx: init_ok)
+        monkeypatch.setattr(
+            sound_system_module, "find_default_output_device_index", lambda: default_idx
+        )
+        return ss
+
+    def test_empty_name_pins_to_resolved_default_index(self, monkeypatch):
+        ss = self._make(monkeypatch, {}, default_idx=1)
+        assert ss.apply_effects_device("") is True
+        assert ss._effects_device == 1
+        assert ss._configured_effects_device == ""
+
+    def test_empty_name_falls_back_to_none_if_default_unresolvable(self, monkeypatch):
+        ss = self._make(monkeypatch, {}, default_idx=None)
+        assert ss.apply_effects_device("") is False
+        assert ss._effects_device is None
+
+    def test_known_device_is_routed(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Speakers": 3})
+        assert ss.apply_effects_device("Speakers") is True
+        assert ss._effects_device == 3
+        assert ss._configured_effects_device == "Speakers"
+
+    def test_unknown_device_falls_back(self, monkeypatch):
+        ss = self._make(monkeypatch, {})
+        assert ss.apply_effects_device("Ghost") is False
+        assert ss._effects_device is None
+
+    def test_device_that_fails_to_init_falls_back(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Broken": 4}, init_ok=False)
+        assert ss.apply_effects_device("Broken") is False
+        assert ss._effects_device is None
+
+    def test_switching_from_named_back_to_default_repins_not_clears(self, monkeypatch):
+        ss = self._make(monkeypatch, {"Speakers": 3}, default_idx=1)
+        ss.apply_effects_device("Speakers")
+        assert ss._effects_device == 3
+        assert ss.apply_effects_device("") is True
+        assert ss._effects_device == 1  # pinned to default, NOT None

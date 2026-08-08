@@ -1354,30 +1354,24 @@ class WebSocketClient:
                 seconds_val = int(float(dur)) if dur else 0
             except Exception:
                 seconds_val = 0
-            file_name = wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or ""
-            is_ptt = bool(wpp_msg.get("isPtt", False) or wpp_msg.get("ptt", False) or msg_type == "ptt")
             message_content = {
                 "audioMessage": {
                     "url": wpp_msg.get("clientUrl", ""),
-                    "directPath": wpp_msg.get("directPath", ""),
                     "seconds": seconds_val,
-                    "mimetype": wpp_msg.get("mimetype", "audio/ogg"),
-                    "ptt": is_ptt,
-                    "fileName": file_name,
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "image":
+            # NOTE: do NOT fall back to wpp_msg["body"] for the caption — for
+            # media messages WPPConnect puts the base64 JPEG thumbnail in `body`,
+            # which then showed up as raw base64 instead of the caption.
             img_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(img_caption):
                 img_caption = ""
-            file_name = wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or ""
             message_content = {
                 "imageMessage": {
                     "caption": img_caption,
-                    "fileName": file_name,
                     "url": wpp_msg.get("clientUrl", ""),
-                    "directPath": wpp_msg.get("directPath", ""),
                     "mimetype": wpp_msg.get("mimetype", "image/jpeg"),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
@@ -1393,15 +1387,12 @@ class WebSocketClient:
             vid_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(vid_caption):
                 vid_caption = ""
-            file_name = wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or ""
             message_content = {
                 "videoMessage": {
                     "caption": vid_caption,
-                    "fileName": file_name,
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
                     "url": wpp_msg.get("clientUrl", ""),
-                    "directPath": wpp_msg.get("directPath", ""),
                     "mimetype": wpp_msg.get("mimetype", "video/mp4"),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
