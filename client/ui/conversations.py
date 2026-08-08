@@ -4484,11 +4484,19 @@ class ConversationsPanel(wx.Panel):
 
         # Find the index of the just-finished message
         current_idx = -1
+        finished_msg = None
         for i, msg in enumerate(self._sorted_messages):
             if not self._is_separator(msg) and msg.get("key", {}).get("id") == finished_id:
                 current_idx = i
+                finished_msg = msg
                 break
-        if current_idx < 0:
+        if current_idx < 0 or finished_msg is None:
+            return
+
+        # Sequential playback and transition sounds ONLY apply to voice notes (PTT),
+        # not to generic attached audio/music files.
+        if not self._is_voice_message(finished_msg):
+            self._is_in_audio_chain = False
             return
 
         # Walk forward, skipping separators, to find the next message
@@ -4501,7 +4509,7 @@ class ConversationsPanel(wx.Panel):
             if self._is_separator(candidate):
                 next_idx += 1
                 continue
-            if candidate.get("messageType") == "audioMessage":
+            if candidate.get("messageType") == "audioMessage" and self._is_voice_message(candidate):
                 has_next_audio = True
                 target_msg = candidate
                 target_idx = next_idx
@@ -4549,6 +4557,15 @@ class ConversationsPanel(wx.Panel):
                         logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
                 wx.CallLater(5, _play_end)
             self._is_in_audio_chain = False
+
+    def _is_voice_message(self, msg: dict) -> bool:
+        """Return True if msg is a voice note (PTT / mensagem de voz), not a generic audio file."""
+        if not isinstance(msg, dict) or msg.get("messageType") != "audioMessage":
+            return False
+        msg_obj = msg.get("message") or {}
+        inner = (msg_obj.get("audioMessage") or {}) if isinstance(msg_obj, dict) else {}
+        media_data = msg.get("mediaData") or {}
+        return bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
 
     def on_audio_speed_btn(self, event):
