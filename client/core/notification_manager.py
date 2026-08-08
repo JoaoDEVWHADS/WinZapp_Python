@@ -651,6 +651,14 @@ class NotificationManager:
         except Exception:
             pass
 
+    # Curated quick-reaction set for the toast's "Reagir" action — mirrors
+    # the emojis WhatsApp's own official client offers from a notification
+    # (a subset of the fuller picker in ConversationsPanel._on_menu_react,
+    # which doesn't fit/isn't needed in a one-line toast dropdown).
+    # Windows toasts realistically support ~5 actions total (buttons +
+    # inputs combined) before the shell starts clipping/misbehaving — kept
+    # to 2 so "1 reply input + 1 send button + N reaction buttons" has
+    # comfortable margin.
     _TOAST_REACTIONS = ["👍", "❤️"]
 
     def _dispatch(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
@@ -673,7 +681,12 @@ class NotificationManager:
             # yet. Showing that assumed-low count ("1 unread"/"2 unread") is
             # actively misleading, not just imprecise, so the badge is
             # omitted entirely until a real sync backs the number (see
-            # get_remote_chats(), which clears this flag).
+            # get_remote_chats(), which clears this flag). It's still only a
+            # snapshot taken right before this toast is shown — a burst still
+            # arriving after that (each message bumping the real count
+            # further) can leave the toast reporting fewer unread than what
+            # Alt+3/the chat itself shows moments later; there is no single
+            # later point to re-sample from once the banner is already up.
             unread_suffix = ""
             if chat is not None and not chat.get("_unread_count_unsynced"):
                 unread_suffix = format_toast_unread_suffix(effective_unread_count(chat), self.i18n)
@@ -723,6 +736,12 @@ class NotificationManager:
             toast.tag      = self.TOAST_TAG
             toast.group    = self.TOAST_GRP
             toast.duration = ToastDuration.Short   # ~5 seconds on screen
+            # Each toast.text_fields entry becomes its own <text> element in
+            # the notification's XML — an embedded "\n" inside a single entry
+            # does NOT force a line break (Windows' toast renderer collapses
+            # it), which is why the "✉️ N não lidas" line used to run
+            # straight into the message body instead of appearing below it.
+            # A separate list entry is a real second line.
             toast.text_fields = [title, body, unread_suffix] if unread_suffix else [title, body]
             toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
@@ -730,8 +749,22 @@ class NotificationManager:
             msg_key_snapshot = msg_key
 
             if self._interactable:
+                # `caption` (-> the toast XML's `title` attribute) renders as
+                # its own visible line ABOVE the field — setting it to the
+                # same text as `placeholder` (-> `placeHolderContent`, the
+                # text shown inside the empty box, and what Windows' toast/
+                # Action Center accessibility tree exposes as the edit
+                # control's accessible Name) doubled up "Responder..." on
+                # screen once the real accessibility fix — a non-empty
+                # placeholder — was in place. Leave caption unset; the
+                # "Enviar resposta" button right next to it already gives
+                # sighted users a visible label for what the field is for.
                 reply_box = ToastInputTextBox("reply_box", "", reply_hint)
                 toast.AddInput(reply_box)
+                # Without an explicit action tied to it (relatedInput), the
+                # reply box had no real button in the toast's XML at all —
+                # nothing for Tab to land on, just whatever bare Enter-to-
+                # submit behaviour Windows happens to give a lone input.
                 toast.AddAction(ToastButton(
                     content=self.i18n.t("notif_send_reply"),
                     arguments="do_reply",
@@ -739,6 +772,20 @@ class NotificationManager:
                     tooltip=self.i18n.t("notif_send_reply"),
                 ))
 
+                # One button per emoji rather than a second input (a
+                # selection dropdown) alongside the reply text box: combining
+                # two different input controls in the same toast was the
+                # prime suspect for a live regression reported right after
+                # this shipped — notifications came back with no accessible
+                # content at all (NVDA fell back to reading the generic "New
+                # notification" wrapper) and Windows' own default sound
+                # instead of the app's, i.e. the whole custom toast getting
+                # rejected/replaced wholesale rather than one control simply
+                # rendering oddly. A row of plain ToastButtons is the
+                # standard, widely-supported "quick react" shape (same idea
+                # as the reply button above) and keeps the action count (1
+                # input + 1 button + N reaction buttons) comfortably under
+                # the ~5 actions a toast can show.
                 if msg_key_snapshot:
                     for emoji in self._TOAST_REACTIONS:
                         toast.AddAction(ToastButton(
@@ -798,6 +845,12 @@ class NotificationManager:
         if not text:
             return
         local_id = str(uuid.uuid4())
+        # quoted needs a "message"-shaped dict wrapping the key — matches
+        # what _serialize_quoted_id()/send_text_message() (main.py) expect;
+        # msg_key alone (a bare key.id/remoteJid/fromMe dict) previously went
+        # straight into PendingMessage with no "quoted" at all, so replying
+        # from a toast always sent a brand new message instead of an actual
+        # WhatsApp reply.
         quoted = {"key": msg_key} if msg_key else None
         pm = PendingMessage(local_id=local_id, jid=jid, text=text, quoted=quoted)
         self.main_window.message_queue.enqueue(pm)
