@@ -4643,8 +4643,8 @@ class ConversationsPanel(wx.Panel):
                         )
                     finally:
                         self._in_auto_chain_transition = False
-                self._chain_start_timer = wx.CallLater(500, _start_audio)
-            self._chain_play_timer = wx.CallLater(500, _play_next)
+                self._chain_start_timer = wx.CallLater(100, _start_audio)
+            self._chain_play_timer = wx.CallLater(100, _play_next)
         else:
             if getattr(self, "_is_in_audio_chain", False):
                 def _play_end():
@@ -4655,7 +4655,7 @@ class ConversationsPanel(wx.Panel):
                         except Exception as e:
                             logging.exception(f"[UI Audio Chaining] Error playing audio_transition_end_sound: {e}")
                     self._is_in_audio_chain = False
-                self._chain_end_timer = wx.CallLater(500, _play_end)
+                self._chain_end_timer = wx.CallLater(100, _play_end)
             else:
                 self._is_in_audio_chain = False
 
