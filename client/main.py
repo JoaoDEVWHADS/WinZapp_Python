@@ -7256,10 +7256,10 @@ class MainWindow(wx.Frame):
                 )
                 _merge_records(dst_records, src_records)
                 
-                # Merge unread counts
+                # Merge unread counts (take max, not sum, to avoid duplicating counts across LID and phone entries)
                 unread_dst = int(chats[alt_jid].get("unreadCount") or 0)
                 unread_src = int(lid_chat.get("unreadCount") or 0)
-                chats[alt_jid]["unreadCount"] = unread_dst + unread_src
+                chats[alt_jid]["unreadCount"] = max(unread_dst, unread_src)
             else:
                 # Only the @lid version exists — rename it to @s.whatsapp.net
                 lid_chat["remoteJid"] = alt_jid
