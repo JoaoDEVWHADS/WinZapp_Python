@@ -816,25 +816,42 @@ export async function getMediaByMessage(req: Request, res: Response) {
         }
       }
 
-      // Final fallback to WPPConnect's downloadMedia
-      if (typeof (client as any).downloadMedia === 'function' && client.page && !client.page.isClosed()) {
+      // Direct browser-side WA-JS downloadMedia recovery (bypasses hanging Node-side downloadMedia)
+      if (client.page && !client.page.isClosed()) {
         try {
-          let timer: any;
           const targetId = cleanMsgId || messageId;
-          const downloadPromise = (client as any).downloadMedia(targetId).catch((err: any) => {
-            req.logger.warn(`client.downloadMedia caught inner error: ${err}`);
+          req.logger.info(`Attempting direct browser WPP.chat.downloadMedia recovery for ${targetId}...`);
+          
+          let base64: string | null = await client.page.evaluate(async (msgId: string) => {
+            try {
+              const w = window as any;
+              if (w.WPP && w.WPP.chat) {
+                // Find message to get its chat ID
+                const msg = typeof w.WPP.chat.getMessageById === 'function' ? await w.WPP.chat.getMessageById(msgId).catch(() => null) : null;
+                const chatId = msg?.chatId?._serialized || msg?.from || (msgId.split('_')[1]);
+                if (chatId && typeof w.WPP.chat.openChatAt === 'function') {
+                  await w.WPP.chat.openChatAt(chatId).catch(() => null);
+                }
+                if (typeof w.WPP.chat.downloadMedia === 'function') {
+                  const downloadPromise = w.WPP.chat.downloadMedia(msgId);
+                  const timeoutPromise = new Promise((res) => setTimeout(() => res(null), 8000));
+                  const blob = await Promise.race([downloadPromise, timeoutPromise]);
+                  if (blob && w.WPP.util && typeof w.WPP.util.blobToBase64 === 'function') {
+                    return await w.WPP.util.blobToBase64(blob);
+                  }
+                }
+              }
+            } catch (e) {
+              console.error('WPP.chat.downloadMedia evaluate error:', e);
+            }
             return null;
-          }).finally(() => {
-            if (timer) clearTimeout(timer);
+          }, targetId).catch((err: any) => {
+            req.logger.warn(`Direct WPP.chat.downloadMedia evaluate failed: ${err}`);
+            return null;
           });
-          const timeoutPromise = new Promise<null>((resolve) => {
-            timer = setTimeout(() => {
-              req.logger.warn(`Timeout 30000ms reached for client.downloadMedia (${targetId})`);
-              resolve(null);
-            }, 30000);
-          });
-          let base64: string | null = await Promise.race([downloadPromise, timeoutPromise]);
+
           if (base64) {
+            req.logger.info(`Browser-side WPP.chat.downloadMedia recovery succeeded for ${targetId}!`);
             let mimetype = (freshMessage || message).mimetype || 'audio/ogg';
             if (base64.startsWith('data:')) {
               const matches = base64.match(/^data:(.*?);base64,(.*)$/);
@@ -844,12 +861,14 @@ export async function getMediaByMessage(req: Request, res: Response) {
               }
             }
             return res.status(200).json({ base64, mimetype });
+          } else {
+            req.logger.warn(`Browser-side WPP.chat.downloadMedia recovery returned no blob for ${targetId}.`);
           }
         } catch (downloadErr) {
-          req.logger.error(`Error in client.downloadMedia fallback after decryption error: ${downloadErr}`);
+          req.logger.error(`Error in browser-side downloadMedia recovery: ${downloadErr}`);
         }
       }
-      throw decryptErr; // rethrow to trigger the 500 block if both failed
+      throw decryptErr; // rethrow to trigger the 500 block if all recovery attempts failed
     }
   } catch (ex) {
     req.logger.error(ex);
