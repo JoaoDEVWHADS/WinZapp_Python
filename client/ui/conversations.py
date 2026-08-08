@@ -3661,16 +3661,52 @@ class ConversationsPanel(wx.Panel):
 
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
+    # How many rows Page Up/Page Down jump in messages_list/conversations_list.
+    # Both are plain wx.ListCtrl (native SysListView32 on Windows), whose
+    # default Page Up/Down handling only moved focus by a single row instead
+    # of paging — reported as making them functionally indistinguishable
+    # from Up/Down. 15 mirrors the default messages_page_size fetched per
+    # sync page (see client/data/settings_default.json's user_interface
+    # section) as a reasonable "one screenful" default.
+    _PAGE_JUMP_SIZE = 15
+
+    @staticmethod
+    def _page_jump_target(count: int, focused_idx: int, delta: int) -> int:
+        """Clamped index for a Page Up/Down jump, or -1 when the list is empty."""
+        if count <= 0:
+            return -1
+        idx = focused_idx if focused_idx >= 0 else 0
+        return max(0, min(count - 1, idx + delta))
+
+    def _jump_list_by(self, list_ctrl: wx.ListCtrl, delta: int) -> None:
+        target = self._page_jump_target(list_ctrl.GetItemCount(), list_ctrl.GetFocusedItem(), delta)
+        if target < 0:
+            return
+        list_ctrl.Focus(target)
+        list_ctrl.Select(target, True)
+        list_ctrl.EnsureVisible(target)
+
     def _on_messages_list_key_down(self, event):
         """Make Space fire the same activation as Enter / double-click.
-        Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
+        Trigger loading older messages on Arrow Up / Page Up when at the top (index 0).
+        Page Up/Down jump _PAGE_JUMP_SIZE rows instead of the native single-row step."""
         key = event.GetKeyCode()
         idx = self.messages_list.GetFocusedItem()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
         if key == wx.WXK_SPACE:
             if idx >= 0:
                 self._do_activate_message(idx)
-        elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_HOME):
+        elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
+            if idx <= 0 and not self._is_loading_more:
+                if self._messages_offset > 0:
+                    self._load_more_messages()
+                else:
+                    self._load_older_messages()
+            else:
+                self._jump_list_by(self.messages_list, -self._PAGE_JUMP_SIZE)
+        elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
+            self._jump_list_by(self.messages_list, self._PAGE_JUMP_SIZE)
+        elif key in (wx.WXK_UP, wx.WXK_NUMPAD_UP, wx.WXK_HOME):
             if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
                     self._load_more_messages()
@@ -3683,7 +3719,8 @@ class ConversationsPanel(wx.Panel):
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
-        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives."""
+        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives.
+        Page Up/Down jump _PAGE_JUMP_SIZE rows instead of the native single-row step."""
         key  = event.GetKeyCode()
         ctrl = event.ControlDown()
 
@@ -3692,6 +3729,10 @@ class ConversationsPanel(wx.Panel):
             if idx >= 0:
                 self.conversations_list.Select(idx)
                 self.on_conversation_selected_by_index(idx)
+        elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
+            self._jump_list_by(self.conversations_list, -self._PAGE_JUMP_SIZE)
+        elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
+            self._jump_list_by(self.conversations_list, self._PAGE_JUMP_SIZE)
         elif ctrl and key == ord("P"):
             idx = self.conversations_list.GetFocusedItem()
             if 0 <= idx < len(self.chats_list):
