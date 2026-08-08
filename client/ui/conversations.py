@@ -4010,7 +4010,12 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        inner = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
 
         # 1. Search local path properties if message was attached or downloaded locally
@@ -4107,7 +4112,12 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
-        inner = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
         mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
@@ -6139,7 +6149,12 @@ class ConversationsPanel(wx.Panel):
         if not msg_id:
             return
 
-        inner = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
@@ -6976,7 +6991,12 @@ class ConversationsPanel(wx.Panel):
             return
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
-        inner    = msg_obj.get(msg_type) or {}
+        # Text messages store the payload as a plain string under the
+        # messageType key (e.g. {"conversation": "..."}), not a dict — guard
+        # before calling .get() on it.
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            inner = {}
         media_data = msg.get("mediaData") or {}
         is_ptt   = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
