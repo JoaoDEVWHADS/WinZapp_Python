@@ -776,6 +776,8 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_ALT,     ord("3"),          self.ID_ALT_3),
             (wx.ACCEL_ALT,     ord("U"),          self.ID_ALT_U),
             (wx.ACCEL_ALT,     ord("u"),          self.ID_ALT_U),
+            (wx.ACCEL_CTRL,    ord("L"),          self.ID_ALT_U),
+            (wx.ACCEL_CTRL,    ord("l"),          self.ID_ALT_U),
             (AS,               ord("R"),          self.ID_ALT_SHIFT_R),
             (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
