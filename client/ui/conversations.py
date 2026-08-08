@@ -4635,8 +4635,13 @@ class ConversationsPanel(wx.Panel):
                     duration = (
                         (target_msg.get("message") or {}).get("audioMessage") or {}
                     ).get("seconds", 0) or 0
+                    # Only move list focus to the next audio when the user is
+                    # EXCLUSIVELY focused on the audio that just finished
+                    # playing (current_idx). If they've moved focus one row
+                    # above/below (or anywhere else) while listening, keep the
+                    # chain playing but never steal their focus back.
                     current_focus = self.messages_list.GetFocusedItem()
-                    if current_focus < 0 or current_focus <= target_idx:
+                    if current_focus == current_idx:
                         self.messages_list.Focus(target_idx)
                         self.messages_list.Select(target_idx, True)
                         self.messages_list.EnsureVisible(target_idx)
