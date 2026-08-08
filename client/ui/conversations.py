@@ -6958,10 +6958,6 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Select(self._unread_sep_idx, True)
         self.messages_list.EnsureVisible(self._unread_sep_idx)
         self.messages_list.SetFocus()
-        self.main_window.output(
-            self.messages_list.GetItemText(self._unread_sep_idx),
-            interrupt=True,
-        )
         # mark_conversation_as_read is triggered by _on_message_focused which
         # fires when Focus() is called above — no need to call it here again.
 
