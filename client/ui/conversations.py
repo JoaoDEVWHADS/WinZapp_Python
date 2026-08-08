@@ -5460,7 +5460,13 @@ class ConversationsPanel(wx.Panel):
             return False
         return msg.get("messageType") == "groupNotification"
 
-    def _render_message_line(self, msg, index: int | None = None, total: int | None = None) -> str:
+    def _render_message_line(
+        self,
+        msg,
+        index: int | None = None,
+        total: int | None = None,
+        include_position: bool = False,
+    ) -> str:
         """Produce the full display string for a single message row."""
         if isinstance(msg, dict) and msg.get("_type") == "empty_placeholder":
             return self.main_window.i18n.t("no_messages_in_conversation")
@@ -5521,9 +5527,10 @@ class ConversationsPanel(wx.Panel):
             pieces.append(f". {i18n.t('reactions_label')} {', '.join(r_parts)}.")
 
         # In listbox mode, native Win32 LISTBOX controls don't announce item position
-        # (e.g. "1 de 200") to screen readers. Append position info to the line text so
-        # screen readers announce item position and total count without truncation.
-        if getattr(self, "_message_list_mode", "classic") == "listbox":
+        # (e.g. "1 de 200") to screen readers. Append position info ONLY when
+        # explicitly requested for row rendering in messages_list (include_position=True
+        # or index/total passed), NEVER for conversation previews or clipboard copy.
+        if (include_position or (index is not None and total is not None)) and getattr(self, "_message_list_mode", "classic") == "listbox":
             if index is None and hasattr(self, "_sorted_messages"):
                 try:
                     index = self._sorted_messages.index(msg)
