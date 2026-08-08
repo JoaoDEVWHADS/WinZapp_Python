@@ -5,6 +5,52 @@ import base64
 import requests
 from cryptography.fernet import Fernet
 
+# Single source of truth for settings.json's shape, used both to bootstrap a
+# missing/corrupt settings.json (MainWindow.load_settings()) and to backfill
+# settings_default.json when the dialog needs it (settings_dialog.py). Keeping
+# one copy avoids the two call sites drifting apart when a new settings key
+# is added to only one of them.
+DEFAULT_SETTINGS = {
+    "connection": {
+        "wpp_server": "http://127.0.0.1",
+        "wpp_port": 6300,
+        "wpp_ws_server": "ws://127.0.0.1",
+        "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
+        "wpp_custom_api": False
+    },
+    "general": {
+        "language": "",
+        "notifications_enabled": True,
+        "updates_enabled": True,
+        "noise_reduction_enabled": False,
+        "first_run": True,
+        "autostart": False,
+        "show_tray_icon": True,
+        "terms_alert_displayed": False,
+        "quick_tip_shown": False
+    },
+    "status": {
+        "messages_set_completed": False
+    },
+    "user_interface": {
+        "messages_page_size": 200,
+        "page_jump_size": 15,
+        "focus_on_open": "message_field"
+    },
+    "audio_playback": {
+        "audio_default_speed": 1.0
+    },
+    "audio_devices": {
+        "output_device_name": "",
+        "input_device_name": ""
+    },
+    "storage": {
+        "auto_download_media": True,
+        "media_max_days": 30,
+        "media_max_mb": 100
+    }
+}
+
 def generate_and_save_key(filepath):
     key = Fernet.generate_key()
     with open(filepath, 'wb') as key_file:
@@ -251,6 +297,14 @@ def effective_unread_count(chat) -> int:
         return 0
     reported = int(chat.get("unreadCount") or 0)
     if reported <= 0:
+        return 0
+    try:
+        local_count = len(
+            chat.get("messages", {}).get("messages", {}).get("records", []) or []
+        )
+    except AttributeError:
+        local_count = 0
+    if local_count == 0:
         return 0
     return reported
 

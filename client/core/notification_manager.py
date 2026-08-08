@@ -750,9 +750,14 @@ class NotificationManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def send(self, title: str, body: str, remote_jid: str):
-        """Enqueue a toast notification (non-blocking)."""
-        self._queue.put((title, body, remote_jid))
+    def send(self, title: str, body: str, remote_jid: str, msg_key: dict = None):
+        """Enqueue a toast notification (non-blocking).
+
+        msg_key: the triggering message's `key` dict, if available — lets the
+        toast's "Reagir" action react to that specific message instead of
+        needing to look one up later.
+        """
+        self._queue.put((title, body, remote_jid, msg_key))
 
     # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
@@ -762,12 +767,20 @@ class NotificationManager:
         elif hasattr(self.main_window, "message_background_sound"):
             self.main_window.message_background_sound.play()
 
-    def _do_reply(self, jid: str, text: str):
+    def _do_reply(self, jid: str, text: str, msg_key: dict = None):
         if not text:
             return
         local_id = str(uuid.uuid4())
-        pm = PendingMessage(local_id=local_id, jid=jid, text=text)
+        quoted = {"key": msg_key} if msg_key else None
+        pm = PendingMessage(local_id=local_id, jid=jid, text=text, quoted=quoted)
         self.main_window.message_queue.enqueue(pm)
+
+    def _do_react(self, jid: str, msg_key: dict, emoji: str):
+        threading.Thread(
+            target=self.main_window.send_reaction,
+            args=(jid, msg_key, emoji),
+            daemon=True,
+        ).start()
 
     def _do_open(self, jid: str):
         self.main_window.restore_window()

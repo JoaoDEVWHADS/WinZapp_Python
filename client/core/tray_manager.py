@@ -104,7 +104,10 @@ class TrayIcon(wx.adv.TaskBarIcon):
         mw = self.main_window
         # Only return unread info if initial sync has completed
         if getattr(mw, "_sync_completed", False):
+            deleted = getattr(mw, "_deleted_chats", set())
             for jid, chat in mw.chats.items():
+                if jid in deleted or mw.is_chat_archived(jid):
+                    continue
                 unread = effective_unread_count(chat)
                 if unread > 0:
                     total += unread

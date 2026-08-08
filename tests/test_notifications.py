@@ -57,9 +57,18 @@ class _FakeI18n:
         return f"[{key}]"
 
 
+class _FakeMessageQueue:
+    def __init__(self):
+        self.enqueued = []
+
+    def enqueue(self, pm):
+        self.enqueued.append(pm)
+
+
 class _FakeMainWindow:
     def __init__(self, chats=None):
         self.chats = chats if chats is not None else {}
+        self.message_queue = _FakeMessageQueue()
 
 
 def _chat(unread=0, records=1):
@@ -76,10 +85,12 @@ class _Stub:
     TOAST_TAG = NotificationManager.TOAST_TAG
     TOAST_GRP = NotificationManager.TOAST_GRP
     _TOAST_LIKELY_GONE_SECONDS = NotificationManager._TOAST_LIKELY_GONE_SECONDS
+    _TOAST_REACTIONS = NotificationManager._TOAST_REACTIONS
 
     _coalesce_pending     = NotificationManager._coalesce_pending
     _clear_active_toasts  = NotificationManager._clear_active_toasts
     _dispatch             = NotificationManager._dispatch
+    _do_reply             = NotificationManager._do_reply
 
     def _play_sound(self, remote_jid=""):
         pass
@@ -250,11 +261,22 @@ class TestDispatchLatency:
 
 
 class TestUnreadSuffix:
-    """The unread line is appended at display time, from the live chat map."""
+    """The unread line is appended at display time, from the live chat map.
+
+    It must land as its OWN text_fields entry (a real second line in the
+    toast), not concatenated with "\\n" onto the body — Windows' toast
+    renderer does not honour an embedded newline inside a single <text>
+    element, so the "\\n"-joined version used to visually run the "✉️ N não
+    lidas" line straight into the message body instead of showing it below.
+    """
 
     def _body_of(self, toaster):
         assert len(toaster.shown_toasts) == 1
         return toaster.shown_toasts[0].text_fields[1]
+
+    def _suffix_of(self, toaster):
+        fields = toaster.shown_toasts[0].text_fields
+        return fields[2] if len(fields) > 2 else ""
 
     def test_suffix_is_appended_from_the_live_chat(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -263,9 +285,8 @@ class TestUnreadSuffix:
 
         mgr._dispatch("title", "body", "j@g.us")
 
-        body = self._body_of(toaster)
-        assert body.startswith("body\n")
-        assert "7" in body
+        assert self._body_of(toaster) == "body"
+        assert "7" in self._suffix_of(toaster)
 
     def test_singular_and_plural_take_different_strings(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -274,7 +295,7 @@ class TestUnreadSuffix:
 
         mgr._dispatch("title", "body", "j@g.us")
 
-        assert "unread_sep_singular" in self._body_of(toaster)
+        assert "unread_sep_singular" in self._suffix_of(toaster)
 
     def test_a_chat_we_do_not_know_yet_still_notifies(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -284,6 +305,7 @@ class TestUnreadSuffix:
         mgr._dispatch("title", "body", "j@g.us")
 
         assert self._body_of(toaster) == "body"
+        assert self._suffix_of(toaster) == ""
 
     def test_a_count_over_an_empty_chat_is_suppressed(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -292,7 +314,7 @@ class TestUnreadSuffix:
 
         mgr._dispatch("title", "body", "j@g.us")
 
-        assert "9" not in self._body_of(toaster)
+        assert "9" not in self._suffix_of(toaster)
 
     def test_a_freshly_discovered_chats_low_count_is_suppressed(self, monkeypatch):
         """on_new_message() creates a brand-new chat entry with unreadCount=0
@@ -311,6 +333,7 @@ class TestUnreadSuffix:
         mgr._dispatch("title", "body", "j@g.us")
 
         assert self._body_of(toaster) == "body"
+        assert self._suffix_of(toaster) == ""
 
     def test_the_count_reappears_once_a_real_sync_clears_the_flag(self, monkeypatch):
         monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
@@ -320,4 +343,150 @@ class TestUnreadSuffix:
 
         mgr._dispatch("title", "body", "j@g.us")
 
-        assert "230" in self._body_of(toaster)
+        assert "230" in self._suffix_of(toaster)
+
+
+class TestInteractableAccessibility:
+    """The reply box had no accessible label (empty placeholder, the field
+    NVDA actually reads) and no real "Enviar" button (no explicit
+    ToastButton at all, so nothing for Tab to land on). Also covers the new
+    "Reagir" quick-action, added beside it when a msg_key is available."""
+
+    def test_reply_box_placeholder_is_set_and_caption_is_not(self, monkeypatch):
+        """placeholder is what Windows exposes as the field's accessible
+        Name — that's the actual NVDA fix. caption renders as a separate
+        visible line above the field; setting it to the same text doubled
+        up "Responder..." on screen once placeholder was no longer empty."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        toast = toaster.shown_toasts[0]
+        reply_inputs = [i for i in toast.inputs if i.input_id == "reply_box"]
+        assert len(reply_inputs) == 1
+        assert reply_inputs[0].placeholder
+        assert not reply_inputs[0].caption
+
+    def test_reply_box_has_a_related_send_button(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us")
+
+        toast = toaster.shown_toasts[0]
+        send_buttons = [a for a in toast.actions if a.arguments == "do_reply"]
+        assert len(send_buttons) == 1
+        reply_box = next(i for i in toast.inputs if i.input_id == "reply_box")
+        assert send_buttons[0].relatedInput is reply_box
+
+    def test_no_react_buttons_without_a_message_key(self, monkeypatch):
+        """_maybe_notify_reaction() (reacting to your own message) has no
+        message to quick-react to — msg_key stays None there."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us", None)
+
+        toast = toaster.shown_toasts[0]
+        assert not any(a.arguments.startswith("do_react:") for a in toast.actions)
+
+    def test_react_buttons_present_with_a_message_key(self, monkeypatch):
+        """One plain ToastButton per emoji — not a second input control
+        (a selection dropdown) alongside the reply text box. Combining two
+        different input types in one toast was the prime suspect for a live
+        regression (notifications losing all accessible content and playing
+        Windows' default sound instead of the app's), so reactions are kept
+        to independent buttons, same shape as the reply button."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123", "fromMe": False})
+
+        toast = toaster.shown_toasts[0]
+        assert not any(i.input_id == "react_box" for i in toast.inputs)
+        react_buttons = [a for a in toast.actions if a.arguments.startswith("do_react:")]
+        assert len(react_buttons) == len(NotificationManager._TOAST_REACTIONS)
+        assert {a.arguments.split(":", 1)[1] for a in react_buttons} == set(NotificationManager._TOAST_REACTIONS)
+
+    def test_total_action_count_stays_within_the_toast_budget(self, monkeypatch):
+        """Windows toasts realistically render at most ~5 actions (buttons +
+        inputs combined) reliably — 1 reply input + 1 send button + the
+        reaction buttons must stay comfortably under that."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: None)
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123"})
+
+        toast = toaster.shown_toasts[0]
+        assert len(toast.inputs) + len(toast.actions) <= 5
+
+    def test_activating_with_do_react_arguments_sends_the_chosen_emoji(self, monkeypatch):
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+        reacted = []
+        mgr._do_react = lambda jid, msg_key, emoji: reacted.append((jid, msg_key, emoji))
+
+        mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123"})
+
+        toast = toaster.shown_toasts[0]
+
+        class _Event:
+            arguments = "do_react:👍"
+            inputs = {}
+
+        toast.on_activated(_Event())
+        assert reacted == [("j@g.us", {"id": "ABC123"}, "👍")]
+
+    def test_activating_with_reply_text_quotes_the_triggering_message(self, monkeypatch):
+        """A reply from the toast used to always send as a brand new
+        message — msg_key never made it into the enqueued PendingMessage's
+        "quoted" field, so WhatsApp had nothing to attach the reply to."""
+        monkeypatch.setattr(wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+        toaster = _FakeToaster()
+        mgr = _Stub(toaster, interactable=True)
+
+        mgr._dispatch("title", "body", "j@g.us", {"id": "ABC123", "fromMe": False})
+
+        toast = toaster.shown_toasts[0]
+
+        class _Event:
+            arguments = "do_reply"
+            inputs = {"reply_box": "valeu!"}
+
+        toast.on_activated(_Event())
+
+        [pm] = mgr.main_window.message_queue.enqueued
+        assert pm.text == "valeu!"
+        assert pm.quoted == {"key": {"id": "ABC123", "fromMe": False}}
+
+
+class TestDoReply:
+    def test_quotes_the_message_key_when_given(self):
+        mgr = _Stub()
+        mgr._do_reply("j@g.us", "oi", {"id": "M1", "fromMe": False})
+
+        [pm] = mgr.main_window.message_queue.enqueued
+        assert pm.jid == "j@g.us"
+        assert pm.text == "oi"
+        assert pm.quoted == {"key": {"id": "M1", "fromMe": False}}
+
+    def test_sends_plain_when_no_message_key(self):
+        """_maybe_notify_reaction() notifications carry no msg_key — a
+        reply from one of those has nothing to quote."""
+        mgr = _Stub()
+        mgr._do_reply("j@g.us", "oi")
+
+        [pm] = mgr.main_window.message_queue.enqueued
+        assert pm.quoted is None
+
+    def test_empty_text_is_a_no_op(self):
+        mgr = _Stub()
+        mgr._do_reply("j@g.us", "", {"id": "M1"})
+        assert mgr.main_window.message_queue.enqueued == []

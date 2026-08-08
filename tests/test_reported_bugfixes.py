@@ -53,6 +53,7 @@ class _MainWindowStub:
 
     is_chat_archived           = MainWindow.is_chat_archived
     get_archived_unread_count  = MainWindow.get_archived_unread_count
+    _normalize_jid             = staticmethod(MainWindow._normalize_jid)
     _resolve_contact_name      = MainWindow._resolve_contact_name
     _last_msg_preview          = MainWindow._last_msg_preview
     _track_last_reaction       = MainWindow._track_last_reaction

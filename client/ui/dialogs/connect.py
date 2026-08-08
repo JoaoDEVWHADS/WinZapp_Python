@@ -450,6 +450,8 @@ class Connect:
         main_sizer.Add(self.quit_btn, 0, wx.ALL | wx.CENTER, 5)
         self.connection_dial.SetSizer(main_sizer)
 
+        self.connection_dial.CentreOnScreen()
+
         logging.info("[show_connection_dial] Entering connection_dial modal loop.")
         if hasattr(self.main_window, "play_startup_sound"):
             self.main_window.play_startup_sound()
@@ -1197,6 +1199,8 @@ class Connect:
         self.pairing_code_field = wx.TextCtrl(self.pairing_dial, style=wx.TE_CENTER | wx.TE_READONLY | wx.TE_DONTWRAP, value=pairing_code)
         self.cancel_btn = wx.Button(self.pairing_dial, label=self.i18n.t("cancel_pairing"))
         self.cancel_btn.Bind(wx.EVT_BUTTON, self.on_cancel_pairing)
+
+        self.pairing_dial.CentreOnParent()
 
         self.main_window.waiting_pairing_sound.play()
         logging.info("[show_pairing_dial] Entering pairing_dial modal loop.")
