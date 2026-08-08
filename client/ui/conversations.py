@@ -2763,7 +2763,7 @@ class ConversationsPanel(wx.Panel):
             _ident = self._mention_identity
             participant_jids = {_ident(jid) for _, jid in participants}
             participant_jids.discard("")
-            if len(participant_jids) > 2:
+            if len(participant_jids) >= 2:
                 mentioned_norm = {_ident(jid) for jid in mentioned if jid}
                 mentioned_norm.discard("")
                 # Primary check: JID intersection (works for received messages).
@@ -2773,7 +2773,12 @@ class ConversationsPanel(wx.Panel):
                 # don't intersect the @lid-keyed participant cache).
                 intersect_size = len(mentioned_norm & participant_jids)
                 threshold = len(participant_jids) - 1
-                count_match = len(mentioned_norm) >= threshold
+                # count_match requires >= 2 mentions AND near-full coverage to
+                # avoid suppressing individual mentions in small groups.
+                count_match = (
+                    len(mentioned_norm) >= 2
+                    and len(mentioned_norm) >= threshold
+                )
                 if intersect_size >= threshold or count_match:
                     return []
 
@@ -3022,9 +3027,12 @@ class ConversationsPanel(wx.Panel):
             # every group participant JID to the pending mentions list.
             all_kw = i18n.t("mention_all_keyword")   # "todos" or "all"
             replacement = f"@{all_kw} "
-            for _, p_jid in self._group_participants_cache:
+            for p_name, p_jid in self._group_participants_cache:
                 if p_jid not in self._pending_mentions:
                     self._pending_mentions.append(p_jid)
+                # Always store the display name so pill buttons show names, not LIDs.
+                if p_jid not in self._pending_mention_display_names:
+                    self._pending_mention_display_names[p_jid] = p_name or p_jid.rsplit("@", 1)[0]
         else:
             replacement = f"@{display_name} "
             if jid not in self._pending_mentions:
