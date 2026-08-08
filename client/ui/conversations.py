@@ -4040,56 +4040,10 @@ class ConversationsPanel(wx.Panel):
                 or msg.get("caption")
                 or ""
             )
-
-        # 3. If parsing from URL, ignore WhatsApp CDN hashes (.enc, .chk, encrypted blobs)
-        if not file_name:
-            target_url = inner.get("clientUrl") or inner.get("url") or msg.get("clientUrl") or msg.get("url") or ""
-            if target_url and "/" in target_url:
-                url_base = target_url.split("?")[0].split("/")[-1]
-                if (
-                    url_base
-                    and "." in url_base
-                    and not url_base.startswith(".")
-                    and not url_base.lower().endswith((".enc", ".chk"))
-                    and not re.match(r"^\d+_\d+_\d+_n", url_base)
-                ):
-                    file_name = url_base
-
-        is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
-
-        mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
-        clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
-        guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
-        if not guessed_ext and "/" in clean_mime:
-            guessed_ext = f".{clean_mime.split('/')[-1]}"
-
-        # Standardise common extension guesses
-        if guessed_ext == ".jpe": guessed_ext = ".jpg"
-        if guessed_ext == ".oga": guessed_ext = ".ogg"
-
-        # Friendly timestamp suffix for fallbacks (e.g. 2026-08-07_03h55)
-        msg_ts = int(msg.get("messageTimestamp", 0) or time.time())
-        if msg_ts > 1_000_000_000_000:
-            msg_ts //= 1000
-        time_str = datetime.fromtimestamp(msg_ts).strftime("%Y%m%d_%H%M%S") if msg_ts > 0 else ""
-
-        if msg_type == "audioMessage" and is_ptt:
-            # Recorded voice messages: default to .ogg
-            default_file = f"mensagem_de_voz_{time_str or msg_id}.ogg"
-        elif file_name:
-            # Preserve original filename and extension
-            if "." in file_name and not file_name.endswith("."):
-                default_file = file_name
-            elif guessed_ext:
-                default_file = f"{file_name}{guessed_ext}"
-            else:
-                default_file = file_name
-        elif msg_type == "documentMessage":
-            ext = guessed_ext or ".bin"
-            default_file = f"documento_{time_str or msg_id}{ext}"
         elif msg_type == "imageMessage":
-            ext = guessed_ext or ".jpg"
-            default_file = f"imagem_{time_str or msg_id}{ext}"
+            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
+            ext  = mime.split("/")[-1] if "/" in mime else "jpg"
+            default_file = f"foto_{msg_id}.{ext}"
         elif msg_type == "videoMessage":
             ext = guessed_ext or ".mp4"
             default_file = f"video_{time_str or msg_id}{ext}"
@@ -4130,11 +4084,9 @@ class ConversationsPanel(wx.Panel):
         if ext_clean:
             wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
         elif msg_type == "audioMessage":
-            wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
-        elif msg_type == "imageMessage":
-            wildcard = "Imagens (*.jpg;*.png;*.webp;*.gif)|*.jpg;*.png;*.webp;*.gif|*.*|*.*"
-        elif msg_type == "videoMessage":
-            wildcard = "Vídeos (*.mp4;*.mkv;*.avi;*.mov)|*.mp4;*.mkv;*.avi;*.mov|*.*|*.*"
+            mime = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
+            ext  = mime.split("/")[-1].split(";")[0].strip() if "/" in mime else "ogg"
+            default_file = f"audio_{msg_id}.{ext or 'ogg'}"
         else:
             wildcard = "Documentos (*.pdf;*.doc;*.docx;*.txt;*.zip)|*.pdf;*.doc;*.docx;*.txt;*.zip|*.*|*.*"
 
@@ -4148,7 +4100,6 @@ class ConversationsPanel(wx.Panel):
             self,
             dlg_title,
             defaultFile=default_file,
-            wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         ) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
@@ -4773,59 +4724,28 @@ class ConversationsPanel(wx.Panel):
             return ""
 
     def _probe_audio_duration(self, path: str):
-        """Best-effort audio length in whole seconds for any audio format, or None if unknown.
+        """Best-effort audio length in whole seconds, or None if unknown.
 
-        Supports .mp3, .ogg, .wav, .m4a, .flac, .opus, .aac etc. Uses sound_lib / BASS
-        when available, or stdlib wave and header fallback parsers.
+        Only .wav is decoded (stdlib `wave`, no extra dependency) — an audio
+        file sent via the attachment picker previously always went out with
+        no "seconds" at all in its message record (unlike a recorded voice
+        message, which measures it from the captured PCM frames), so the
+        chat history permanently showed "áudio, duração: " with nothing
+        after the colon, even long after the message was delivered and read.
+        Other formats (mp3/ogg/m4a/aac/flac) still go out without a duration
+        rather than a wrong one — WinZapp has no audio-decoding dependency
+        to probe them with.
         """
-        if not path or not os.path.isfile(path):
+        if not path.lower().endswith(".wav"):
             return None
-
-        # 1. Try BASS / sound_lib stream length (supports all audio formats: mp3, ogg, wav, m4a, flac, opus, aac)
         try:
-            from sound_lib import stream
-            s = stream.FileStream(file=path)
-            length_bytes = s.get_length()
-            length_secs = s.bytes_to_seconds(length_bytes)
-            s.free()
-            if length_secs and 0 < length_secs < 86400:
-                return int(length_secs)
+            with wave.open(path, "rb") as wf:
+                frames = wf.getnframes()
+                rate   = wf.getframerate()
+                if rate > 0:
+                    return int(frames / rate)
         except Exception:
             pass
-
-        # 2. Try stdlib wave module for .wav files
-        if path.lower().endswith(".wav"):
-            try:
-                import wave
-                with wave.open(path, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate   = wf.getframerate()
-                    if rate > 0:
-                        sec = int(frames / rate)
-                        if 0 < sec < 86400:
-                            return sec
-            except Exception:
-                pass
-
-        # 3. Fallback lightweight header parser for MP3 / OGG
-        try:
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".mp3":
-                size = os.path.getsize(path)
-                if size > 0:
-                    # Estimate based on standard 128kbps (16000 bytes/sec)
-                    sec = max(1, int(size / 16000))
-                    if 0 < sec < 86400:
-                        return sec
-            elif ext in (".ogg", ".opus"):
-                size = os.path.getsize(path)
-                if size > 0:
-                    sec = max(1, int(size / 6000))
-                    if 0 < sec < 86400:
-                        return sec
-        except Exception:
-            pass
-
         return None
 
     def _format_duration(self, seconds):
@@ -6547,35 +6467,6 @@ class ConversationsPanel(wx.Panel):
         msg_id = msg.get("key", {}).get("id", "")
         i18n   = self.main_window.i18n
 
-        msg_key = msg.get("key", {})
-        from_me = msg_key.get("fromMe", False)
-        can_delete_for_all = from_me
-
-        if not can_delete_for_all and self.conversation:
-            conv_jid = self.conversation.get("remoteJid", "")
-            if conv_jid.endswith("@g.us"):
-                group_meta = self.conversation.get("groupMetadata", {})
-                participants = group_meta.get("participants") or self.conversation.get("participants") or []
-
-                def _phone_part(j: str) -> str:
-                    return j.rsplit("@", 1)[0].split(":")[0] if isinstance(j, str) else ""
-
-                my_phone = _phone_part(getattr(self.main_window, "my_jid", ""))
-                my_lid   = _phone_part(getattr(self.main_window, "my_lid", ""))
-
-                for p in participants:
-                    if isinstance(p, dict):
-                        p_id = p.get("id", "")
-                        if isinstance(p_id, dict):
-                            p_id = p_id.get("_serialized", "")
-                        p_digits = _phone_part(p_id)
-                        if p_digits:
-                            is_me = (my_phone and self.main_window._phone_digits_equivalent(p_digits, my_phone)) or (my_lid and p_digits == my_lid)
-                            if is_me:
-                                if p.get("admin") or p.get("isAdmin"):
-                                    can_delete_for_all = True
-                                break
-
         # ── Ask the user: delete for me only, or for everyone ─────────────────
         dlg = wx.Dialog(
             self,
@@ -6585,14 +6476,11 @@ class ConversationsPanel(wx.Panel):
         panel  = wx.Panel(dlg)
         sizer  = wx.BoxSizer(wx.VERTICAL)
 
-        rb_me  = wx.RadioButton(panel, label=i18n.t("delete_for_me"), style=wx.RB_GROUP)
+        rb_me  = wx.RadioButton(panel, label=i18n.t("delete_for_me"),    style=wx.RB_GROUP)
+        rb_all = wx.RadioButton(panel, label=i18n.t("delete_for_everyone"))
         rb_me.SetValue(True)
-        sizer.Add(rb_me, 0, wx.ALL, 8)
-
-        rb_all = None
-        if can_delete_for_all:
-            rb_all = wx.RadioButton(panel, label=i18n.t("delete_for_everyone"))
-            sizer.Add(rb_all, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sizer.Add(rb_me,  0, wx.ALL, 8)
+        sizer.Add(rb_all, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         btn_sizer = wx.StdDialogButtonSizer()
         ok_btn     = wx.Button(panel, wx.ID_OK,     label=i18n.t("delete_message"))
@@ -6609,8 +6497,8 @@ class ConversationsPanel(wx.Panel):
         dlg.Fit()
         dlg.CentreOnParent()
 
-        result       = dlg.ShowModal()
-        for_everyone = rb_all.GetValue() if rb_all else False
+        result     = dlg.ShowModal()
+        for_everyone = rb_all.GetValue()
         dlg.Destroy()
 
         if result != wx.ID_OK:

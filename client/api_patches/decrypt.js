@@ -72,21 +72,11 @@ const timeout = (ms) => new Promise((res) => setTimeout(res, ms));
 exports.timeout = timeout;
 exports.mediaTypes = {
     IMAGE: 'Image',
-    IMAGEMESSAGE: 'Image',
     VIDEO: 'Video',
-    VIDEOMESSAGE: 'Video',
     AUDIO: 'Audio',
-    AUDIOMESSAGE: 'Audio',
     PTT: 'Audio',
     DOCUMENT: 'Document',
-    DOCUMENTMESSAGE: 'Document',
     STICKER: 'Image',
-    STICKERMESSAGE: 'Image',
-};
-const getNormalizedMediaType = (mediaType) => {
-    if (!mediaType) return 'Audio';
-    const upper = String(mediaType).toUpperCase().replace(/MESSAGE$/, '');
-    return exports.mediaTypes[upper] || exports.mediaTypes[String(mediaType).toUpperCase()] || 'Audio';
 };
 const processUA = (userAgent) => {
     let ua = userAgent ||
@@ -98,8 +88,7 @@ const processUA = (userAgent) => {
 const magix = (fileData, mediaKeyBase64, mediaType, expectedSize) => {
     const encodedBytes = new Uint8Array(fileData);
     const mediaKeyBytes = base64ToBytes(mediaKeyBase64);
-    const normalizedType = getNormalizedMediaType(mediaType);
-    const info = `WhatsApp ${normalizedType} Keys`;
+    const info = `WhatsApp ${exports.mediaTypes[mediaType.toUpperCase()]} Keys`;
     const hash = 'sha256';
     const salt = new Uint8Array(32);
     const expandedSize = 112;

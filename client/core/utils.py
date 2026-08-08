@@ -340,7 +340,6 @@ def effective_unread_count(chat) -> int:
     return reported
 
 
-
 _CC_SORTED: list[str] | None = None
 
 def _known_country_codes() -> list[str]:

@@ -35,6 +35,7 @@ import socketio
 import atexit
 import ctypes
 import ctypes.wintypes
+import uuid
 from accessible_output2 import outputs
 from core.sound_system import (
     SoundSystem, Sound, load_sound, SOUND_EVENTS,
@@ -59,6 +60,7 @@ from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
 from status_panel import StatusPanel
 from version import __version__
+from window_title import format_window_title
 import json
 from traceback import format_exc, format_exception
 import pyperclip
@@ -477,43 +479,38 @@ def is_countable_message(msg: dict) -> bool:
 
 
 class MainWindow(wx.Frame):
-    def __init__(self):
+    def __init__(self, account_id=None, account_name=None, startup_source="user",
+                 resume_pending=False, registry=None, global_dir=None):
         import time as _time
         self._t_app_start = _time.perf_counter()
-        is_post_update = "--post-update" in sys.argv
-        logging.info("[STARTUP] ==================================================")
-        logging.info("[STARTUP] WinZapp Application Opened Successfully!")
-        if is_post_update:
-            logging.info("[POST_UPDATE_SUCCESS] *** SUCCESS: APPLICATION SUCCESSFULLY RESTARTED AFTER AUTO-UPDATE! ***")
         logging.info("[STARTUP_TIMING] T+0.000s — MainWindow __init__ started")
-        
-        # Check for update marker file from previous update attempt
-        try:
-            from updater import _outer_exe_dir
-            marker_file = os.path.join(_outer_exe_dir(), "update_failed.marker")
-            if os.path.exists(marker_file):
-                with open(marker_file, "r", encoding="utf-8", errors="ignore") as _mf:
-                    marker_content = _mf.read().strip()
-                logging.error("[UPDATER_STATUS] WARNING: Found update_failed.marker from previous update: %s", marker_content)
-                if is_post_update:
-                    # Clean up old marker on successful post-update start
-                    try:
-                        os.remove(marker_file)
-                        logging.info("[UPDATER_STATUS] Cleaned up old update_failed.marker after successful launch.")
-                    except OSError:
-                        pass
-            else:
-                logging.info("[UPDATER_STATUS] Application started cleanly without update_failed.marker.")
-        except Exception as _me:
-            logging.warning("[UPDATER_STATUS] Error checking update marker: %s", _me)
-        logging.info("[STARTUP] ==================================================")
         super().__init__(None)
+        # Multi-account context (plan Zad 2.2). account_id is None only in
+        # legacy/single-account fallback; new startup always passes it.
+        self.account_id = account_id
+        self.account_name = account_name or "WinZapp"
+        self.startup_source = startup_source
+        self.resume_pending = resume_pending
+        self.registry = registry
+        self.global_dir = global_dir
         # Locks and saving state (initialized early to prevent AttributeErrors on early saves/migrations)
         self._save_lock = threading.Lock()
         self._save_timer = None
         self._save_timer_lock = threading.Lock()
         # Guards self.sync_thread creation — see _try_start_sync_thread().
         self._sync_start_lock = threading.Lock()
+        # Serializes wake-from-suspend recovery so the two independent triggers
+        # (EVT_POWER_RESUME thread and the health-check clock-gap detector)
+        # never run _recover_from_suspend concurrently — overlapping runs made
+        # the second kill-orphan sweep murder the fresh Chrome the first run's
+        # start-session had just spawned, hanging the session in INITIALIZING or
+        # bouncing it to QRCODE. See _recover_from_suspend.
+        self._resume_recovery_lock = threading.Lock()
+        self._resume_recovery_active = False
+        # True only during the ACTIVE close/kill/start restart sequence (not the
+        # whole passive observation window), so the health loop's auto-start
+        # yields to it without being suppressed for the full observation (GPT r5 #3).
+        self._recovery_restart_active = False
         self._unresolvable_lids = set()
         self._unresolvable_names = set()
         self._resolving_lids = set()
@@ -524,7 +521,9 @@ class MainWindow(wx.Frame):
         self._notification_sound_cache = {}
 
         self.app_name = "WinZapp"
-        self.SetTitle(self.app_name)
+        # Per-account window title so each account is distinguishable to the
+        # screen reader and to IPC/activation (plan Zad 2.2 / 4.2).
+        self.SetTitle(self._format_title())
 
         # Detect no-UI background mode (started via --background flag by Windows
         # autostart).  When True: no dialogs, no sounds, no visible window.
@@ -557,6 +556,9 @@ class MainWindow(wx.Frame):
         # _apply_configured_audio_devices() below since i18n isn't ready yet.
         self.sound_system.apply_output_device(
             self.settings.get("audio_devices", {}).get("output_device_name", "")
+        )
+        self.sound_system.apply_effects_device(
+            self.settings.get("audio_devices", {}).get("effects_output_device_name", "")
         )
 
         self.refresh_sound_packs()
@@ -614,12 +616,15 @@ class MainWindow(wx.Frame):
 
         conn = self.settings.get("connection", {})
         self.wpp_server    = conn.get("wpp_server",    "http://127.0.0.1")
-        self.wpp_port      = conn.get("wpp_port",      6300)
-        if self.wpp_port == 3417:
-            self.wpp_port = 6300
         self.wpp_ws_server = conn.get("wpp_ws_server", "ws://127.0.0.1")
         self.wpp_api_key   = conn.get("wpp_api_key",   "wz-local-api-key")
         self.wpp_custom_api = conn.get("wpp_custom_api", False)
+        # Per-account Node port (revised multi-account architecture): each
+        # account runs its OWN WPPConnect Node on its OWN port so sessions never
+        # share a server and can't race/kill each other. The port is resolved
+        # once here, persisted, and stable across launches. A user-configured
+        # custom API keeps whatever port they set (we don't manage their server).
+        self.wpp_port = self._resolve_wpp_port(conn)
         logging.info("MainWindow: WPPConnect config - server=%s, port=%s, custom_api=%s", self.wpp_server, self.wpp_port, self.wpp_custom_api)
 
         #Set basic variables
@@ -795,6 +800,77 @@ class MainWindow(wx.Frame):
         # blip.
         self._pairing_in_progress = False
 
+        #Check for what window should be shown (skipped in background mode)
+        if not self.background_mode:
+            logging.info("MainWindow: Checking WhatsApp connection status...")
+            if not self.connect.check_connection_status():
+                # This account is unpaired (session lost, or pairing never
+                # finished). If OTHER paired accounts exist, do NOT trap the
+                # user in this dead account's pairing dialog with no way to
+                # reach a working account or the menu (reported live: after an
+                # overnight session loss, launch showed only the connect dialog
+                # of the logged-out account — no way to switch to the healthy
+                # one). Offer connect-this / switch-to-other / quit first.
+                if self._offer_switch_when_unpaired():
+                    return  # switching away; this process is shutting down
+                logging.info("MainWindow: WhatsApp connection not paired. Showing connection dialog...")
+                self.connect.show_connection_dial()
+                if not self.connect.check_connection_status():
+                    logging.info("Connection dialog closed without pairing. Exiting application.")
+                    sys.exit()
+                # Do NOT disconnect self.ws here — see the "Initialize
+                # websocket" block below for why this used to cause the
+                # pairing session to crash.
+                self._just_paired = True
+                # Multi-account: pairing succeeded → promote this account from
+                # pending to paired in the registry, so it appears in the
+                # switcher/autostart (plan Zad 3.2/GPT r7 #1). last_foreground is
+                # set later, only after the window is ready and for source=user.
+                if getattr(self, "account_id", None) and getattr(self, "registry", None):
+                    try:
+                        self.registry.set_state(self.account_id, "paired")
+                        self.resume_pending = False
+                    except Exception:
+                        logging.exception("[accounts] pending→paired transition failed")
+
+        logging.info("MainWindow: Retrieving token...")
+        self.retrieve_token()
+        if not self.token:
+            logging.error("No token retrieved. Exiting application.")
+            sys.exit()
+        #Initialize websocket
+        logging.info("MainWindow: Initializing WebSocketClient...")
+        # A pairing that just succeeded (_just_paired) already leaves self.ws
+        # connected and authenticated — Connect._bg_pairing_flow() created it
+        # and used it to receive the phoneCode/session-logged events that
+        # just completed pairing. Disconnecting it here (unconditionally,
+        # until this fix) and reconnecting from scratch a moment later raced
+        # WPPConnect's own session lifecycle: reported live, disconnecting
+        # the socket mere milliseconds after WPPConnect logged the session as
+        # "Started" reliably closed the WhatsApp Web page/browser
+        # server-side (wppconnect.log showed the socket's "saiu" entry
+        # immediately followed by "Page Closed" / "browserClose") — leaving
+        # WinZapp connected to a server with a dead WhatsApp session inside
+        # it, forever, with no window ever shown, no sync, and no further
+        # event arriving to explain why. Reuse the live connection instead.
+        reuse_existing_ws = (
+            self._just_paired
+            and getattr(self, "ws", None) is not None
+            and getattr(self.ws.sio, "connected", False)
+        )
+        if reuse_existing_ws:
+            logging.info("MainWindow: Reusing the live WebSocketClient established during pairing.")
+        else:
+            if hasattr(self, 'ws') and self.ws:
+                try:
+                    self.ws.sio.disconnect()
+                except Exception:
+                    pass
+                self.ws = None
+            self.ws = WebSocketClient(self, self.connect, self.token)
+
+        logging.info("MainWindow: Preparing sync...")
+        self.prepare_sync()
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
@@ -805,6 +881,56 @@ class MainWindow(wx.Frame):
         )
         # Cache of resolved background-notification Sound objects
         self._notification_sound_cache: dict = {}
+        # Run WPP status checks and WebSocket connection in a background thread to prevent UI freezing
+        def _connect_bg():
+            # Ensure session is active on WPPConnect Server before connecting WebSocket
+            self.check_wa_connection_http()
+            if reuse_existing_ws:
+                # self.ws is already the live connection from pairing —
+                # connect_websocket() itself unconditionally disconnects
+                # before reconnecting, which is exactly the premature
+                # disconnect this whole path exists to avoid (see the
+                # "Initialize websocket" comment above). Nothing else to do.
+                logging.info("MainWindow: Skipping WebSocket reconnect — already connected from pairing.")
+                return
+            try:
+                logging.info("MainWindow: Connecting WebSocket...")
+                self.connect_websocket()
+            except Exception as e:
+                logging.exception("MainWindow: Exception during websocket connection")
+                self.error_sound.play()
+                error_str = str(e)
+                # If the instance does not exist on the server (e.g. database recreated/wiped),
+                # it returns "Invalid namespace". We should fallback to the connection dialog silently.
+                if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                    logging.info("WebSocket namespace is invalid (instance does not exist). Triggering logout.")
+                    def _gui_logout():
+                        wx.MessageBox(
+                            self.i18n.t("device_logged_out"),
+                            self.i18n.t("error").format(self.app_name),
+                            wx.OK | wx.ICON_ERROR,
+                        )
+                        self._on_disconnect()
+                    wx.CallAfter(_gui_logout)
+                else:
+                    def _gui_failed():
+                        wx.MessageBox(
+                            self.i18n.t("websocket_failed_reconnect"),
+                            self.i18n.t("connection_error"),
+                            wx.OK | wx.ICON_WARNING,
+                        )
+                        self.connect.show_connection_dial()
+                    wx.CallAfter(_gui_failed)
+                self._just_paired = True
+                # Multi-account: re-pairing after a logout also promotes the
+                # account back to paired if it had fallen to pending (Zad 3.2).
+                if getattr(self, "account_id", None) and getattr(self, "registry", None):
+                    try:
+                        acc = self.registry.get(self.account_id)
+                        if acc and acc.get("state") == "pending":
+                            self.registry.set_state(self.account_id, "paired")
+                    except Exception:
+                        logging.exception("[accounts] re-pair pending→paired failed")
 
         logging.info("MainWindow: Initializing User Interface immediately...")
 
@@ -1039,6 +1165,25 @@ class MainWindow(wx.Frame):
         # sync thread that was waiting for the UI to be ready.
         self._ui_ready_event.set()
 
+        # ── Multi-account: window is ready → start IPC + flush queued requests,
+        # and record this as the foreground account for a conscious user start
+        # (plan Zad 2.0/4.1; GPT r5 #2: autostart-boot does NOT move it).
+        self._window_ready = True
+        self._ipc_released = False
+        self._start_ipc_listener()
+        try:
+            if getattr(self, "_ipc_listener", None) is not None:
+                self._ipc_listener.flush_queue()
+        except Exception:
+            pass
+        if (getattr(self, "account_id", None) and getattr(self, "registry", None)
+                and getattr(self, "startup_source", "user") == "user"
+                and not self.background_mode):
+            try:
+                self.registry.set_last_foreground(self.account_id)
+            except Exception:
+                logging.exception("[accounts] set_last_foreground failed (non-fatal)")
+
         # ── Quick tip after first pairing ─────────────────────────────────────
         if not self.background_mode and self._just_paired:
             wx.CallAfter(self._check_quick_tip)
@@ -1061,6 +1206,15 @@ class MainWindow(wx.Frame):
         app.MainLoop()
 
     # ── Menu bar ─────────────────────────────────────────────────────────────
+
+    def _format_title(self, unread=0):
+        """Window title including the account name (plan Zad 2.2/4.2).
+
+        Single/legacy account -> plain 'WinZapp'; multi-account -> 'WinZapp — <name>'.
+        Kept as a pure helper so it's unit-testable and reused by tray/refresh.
+        """
+        return format_window_title("WinZapp", self.account_name, unread,
+                                   is_multi=bool(self.account_id))
 
     def _build_menubar(self):
         """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
@@ -1119,6 +1273,54 @@ class MainWindow(wx.Frame):
         self._sync_offline_menu_item.Check(bool(self.offline_mode))
         menubar.Append(sync_menu, self.i18n.t("menu_sync"))
 
+        # ── Konta (multi-account) ─────────────────────────────────────────────
+        # Only shown when this process runs under the account system (account_id
+        # set). Populated dynamically from the registry (plan Zad 4.2).
+        self._accounts_menu_id_map = {}
+        if getattr(self, "account_id", None) and getattr(self, "registry", None):
+            accounts_menu = wx.Menu()
+            try:
+                import account_ui
+                # Keep the WindowIDRef objects ALIVE: wx.NewIdRef() reserves an id
+                # only for as long as the ref object exists. Casting to int() and
+                # dropping the ref frees the reservation, so AppendRadioItem then
+                # trips "id should first be reserved" (wxAssertionError) and the
+                # whole Accounts menu silently fails to build. Store the refs.
+                self._accounts_menu_id_refs = []
+
+                def _new_account_menu_id():
+                    ref = wx.NewIdRef()
+                    self._accounts_menu_id_refs.append(ref)
+                    return ref
+
+                self._accounts_menu_id_map = account_ui.build_accounts_menu(
+                    accounts_menu, self.registry.list(), self.account_id,
+                    self.i18n, _new_account_menu_id)
+                for wid, action in self._accounts_menu_id_map.items():
+                    self.Bind(wx.EVT_MENU,
+                              lambda e, a=action: self._on_accounts_menu(a), id=int(wid))
+                menubar.Append(accounts_menu, self.i18n.t("acc_menu_title"))
+                # Ctrl+Shift+1..9 → switch to the n-th paired account. Menu-label
+                # accelerators alone don't fire reliably here: focused child
+                # panels (conversation list, message field, …) install their own
+                # wx.AcceleratorTable, which swallows the keystroke before the
+                # menu bar sees it. A frame-level EVT_CHAR_HOOK catches the combo
+                # regardless of which control has focus (bound once).
+                self._account_hotkey_slots = {
+                    slot: acc["id"] for slot, acc in
+                    account_ui.accelerator_slots(account_ui.switchable_accounts(self.registry.list()))
+                }
+                # Remember what the menu was built from, so focus-gain can tell
+                # whether a live registry change made it stale (see
+                # _refresh_accounts_menu_if_stale).
+                self._accounts_menu_signature = account_ui.accounts_menu_signature(
+                    self.registry.list())
+                if not getattr(self, "_account_hotkey_hook_bound", False):
+                    self.Bind(wx.EVT_CHAR_HOOK, self._on_account_hotkey_char)
+                    self._account_hotkey_hook_bound = True
+            except Exception:
+                logging.exception("[menu] building Accounts menu failed (non-fatal)")
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -1137,7 +1339,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,     id=self._ID_SETTINGS)
         self.Bind(wx.EVT_MENU, self._on_menu_disconnect, id=self._ID_DISCONNECT)
-        self.Bind(wx.EVT_MENU, lambda e: self.real_exit(), id=self._ID_EXIT)
+        self.Bind(wx.EVT_MENU, lambda e: self.quit_all_accounts(), id=self._ID_EXIT)
         self.Bind(wx.EVT_MENU, self._on_menu_resync_all, id=self._ID_RESYNC_ALL)
         self.Bind(wx.EVT_MENU, self._on_menu_sync_media, id=self._ID_SYNC_MEDIA)
         self.Bind(wx.EVT_MENU, self._on_menu_toggle_offline, id=self._ID_OFFLINE_MENU)
@@ -1146,6 +1348,246 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_zip, id=self._ID_FORCE_REINSTALL_ZIP)
         self.Bind(wx.EVT_MENU, self._on_force_reinstall_wpp, id=self._ID_FORCE_REINSTALL_WPP)
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
+
+    def _on_account_hotkey_char(self, event):
+        """Frame-level Ctrl+Shift+1..9 → switch to the n-th paired account.
+
+        Bound via EVT_CHAR_HOOK so it fires no matter which child control holds
+        focus (child panels' own AcceleratorTables would otherwise swallow the
+        menu-bar accelerator). Anything that isn't our exact combo is passed
+        through untouched with event.Skip().
+        """
+        try:
+            if (event.GetModifiers() == (wx.MOD_CONTROL | wx.MOD_SHIFT)):
+                code = event.GetKeyCode()
+                if ord("1") <= code <= ord("9"):
+                    slot = code - ord("0")
+                    target = getattr(self, "_account_hotkey_slots", {}).get(slot)
+                    if target and target != getattr(self, "account_id", None):
+                        self._switch_to_account(target)
+                    return  # consume the combo (even a no-op self-switch)
+        except Exception:
+            logging.exception("[accounts] hotkey char handler failed")
+        event.Skip()
+
+    def _on_accounts_menu(self, action: dict):
+        """Handle a click in the Accounts menu (plan Zad 4.2-4.5)."""
+        try:
+            import account_ui
+            if action.get("switch"):
+                self._switch_to_account(action["switch"])
+            elif action.get("open_switch"):
+                dlg = account_ui.SwitchAccountDialog(
+                    self, self.registry.list(), self.account_id, self.i18n)
+                chosen = dlg.show()
+                if chosen and chosen != self.account_id:
+                    self._switch_to_account(chosen)
+            elif action.get("open_manager"):
+                account_ui.AccountManagerDialog(
+                    self, self.registry, self.account_id, self.i18n,
+                    self.global_dir, on_pair=self._switch_to_account).show()
+                self._rebuild_accounts_menu()
+        except Exception:
+            logging.exception("[accounts] menu action failed")
+
+    def _switch_to_account(self, account_id: str):
+        """Activation-first switch (plan Zad 4.1): bring the target account's
+        running process to the foreground via IPC, or spawn it. This window
+        stays open (accounts run in the background, choice 1b)."""
+        try:
+            from account_launcher import switch_to_account
+            activated = switch_to_account(self.global_dir, account_id)
+            logging.info("[accounts] switch to %s -> %s", account_id,
+                         "activated existing process" if activated else "spawned new process")
+            # Option 2 UX: single visible window. Once the target account's
+            # window is coming forward (activated now, or spawning and will show
+            # itself when ready), hide THIS window to the tray. The process
+            # stays alive in the background so this account keeps receiving its
+            # messages/notifications; the user just sees one window at a time.
+            self.hide_to_tray()
+        except Exception:
+            logging.exception("[accounts] switch to %s failed", account_id)
+
+    def _rebuild_accounts_menu(self):
+        """Rebuild the whole menu bar so the Accounts list reflects registry
+        changes (add/rename/archive/delete)."""
+        try:
+            self._build_menubar()
+        except Exception:
+            logging.exception("[accounts] menu rebuild failed")
+
+    def _refresh_accounts_menu_if_stale(self):
+        """Rebuild the menu bar iff the live registry no longer matches what the
+        Accounts menu was built from (another process paired/renamed/archived an
+        account, or one was still coming up when this menu was first built).
+
+        Fixes the reported bug: an account vanished from the menu and only came
+        back after opening 'Switch account'. Cheap: compares a signature and
+        no-ops when nothing menu-visible changed, so focus-gain doesn't cause
+        menu flicker or screen-reader churn."""
+        registry = getattr(self, "registry", None)
+        if not (getattr(self, "account_id", None) and registry):
+            return
+        try:
+            import account_ui
+            current = account_ui.accounts_menu_signature(registry.list())
+            if current != getattr(self, "_accounts_menu_signature", None):
+                logging.info("[accounts] menu stale on focus — rebuilding "
+                             "(was=%s now=%s)",
+                             getattr(self, "_accounts_menu_signature", None), current)
+                self._build_menubar()  # rebuilds menu + hotkey slots + signature
+        except Exception:
+            logging.exception("[accounts] stale-menu refresh failed (non-fatal)")
+
+    def _offer_switch_when_unpaired(self) -> bool:
+        """Startup helper: the current account is unpaired. If other paired
+        accounts exist, offer connect-this / switch-to-other / quit instead of
+        dropping straight into this account's pairing dialog (which left the
+        user with no way to reach a working account or the menu).
+
+        Returns True if this process should stop __init__ and shut down (the
+        user chose to switch to another account, or to quit); False to fall
+        through to the normal pairing dialog (no other account to switch to, or
+        the user chose to connect this one). Best-effort: any failure returns
+        False so startup degrades to the existing pairing flow.
+        """
+        registry = getattr(self, "registry", None)
+        acc_id = getattr(self, "account_id", None)
+        if not (registry and acc_id):
+            return False
+        try:
+            import account_ui
+            accounts = registry.list()
+            if not account_ui.unpaired_start_options(accounts, acc_id):
+                return False  # no other paired account — normal pairing flow
+            acc = registry.get(acc_id) or {}
+            name = acc.get("name", acc_id)
+            dlg = account_ui.UnpairedStartDialog(
+                None, accounts, acc_id, name, self.i18n)
+            result = dlg.show()
+            if result == account_ui.UnpairedStartDialog.RESULT_SWITCH and dlg.chosen_account_id:
+                logging.info("[accounts] unpaired start: switching to %s", dlg.chosen_account_id)
+                from account_launcher import switch_to_account
+                switch_to_account(self.global_dir, dlg.chosen_account_id)
+                wx.CallAfter(self.real_exit)
+                return True
+            if result == account_ui.UnpairedStartDialog.RESULT_QUIT:
+                logging.info("[accounts] unpaired start: user chose to quit")
+                wx.CallAfter(self.real_exit)
+                return True
+            # RESULT_PAIR — fall through to the normal pairing dialog.
+            return False
+        except Exception:
+            logging.exception("[accounts] unpaired-start switch offer failed (non-fatal)")
+            return False
+
+    def _start_ipc_listener(self):
+        """Start the account-scoped IPC listener so other WinZapp processes can
+        ask THIS one to foreground / quit (plan Zad 2.0/4.1). Callbacks marshal
+        onto the wx thread via wx.CallAfter. Safe no-op without an account."""
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if not (gd and acc_id):
+            logging.info("[ipc] listener NOT started (no account/global_dir) — "
+                         "gd=%s acc=%s", bool(gd), bool(acc_id))
+            return
+        try:
+            import ipc
+            self._ipc_listener = ipc.IpcListener(
+                gd, acc_id,
+                on_activate=lambda source: wx.CallAfter(self._ipc_activate, source),
+                on_quit=lambda: wx.CallAfter(self._ipc_quit),
+                released_predicate=lambda: getattr(self, "_ipc_released", False),
+                window_ready_predicate=lambda: getattr(self, "_window_ready", False),
+            )
+            self._ipc_listener.start()
+            ready = self._ipc_listener.wait_ready(timeout=3.0)
+            logging.info("[ipc] listener started for account %s (ready=%s)", acc_id, ready)
+        except Exception:
+            logging.exception("[ipc] listener start failed (non-fatal)")
+
+    def _ipc_activate(self, source: str):
+        """Bring this window to the foreground on an IPC activate request.
+
+        Delegates to restore_window(), which handles the SW_HIDE state-drift
+        (this window was likely hidden via hide_to_tray on a previous switch,
+        so a bare wx Show()/Raise() can silently no-op) AND lands keyboard focus
+        on the conversation list — without that, repeated switches left the
+        window focused but no control focused, so arrow keys did nothing.
+        """
+        try:
+            self.restore_window()
+            # A conscious user switch updates last_foreground; an autostart-boot
+            # activation does not (plan / GPT r5 #2).
+            if source == "user" and getattr(self, "registry", None):
+                try:
+                    self.registry.set_last_foreground(self.account_id)
+                except Exception:
+                    pass
+        except Exception:
+            logging.exception("[ipc] activate failed")
+
+    def _ipc_quit(self):
+        """Handle an IPC quit request from the account that owns the 'Exit'.
+
+        Ordering is critical. real_exit() ends in os._exit(0), which never
+        returns — so setting the released flag AFTER it (the old code's finally)
+        was unreachable, the IPC handler never saw `released`, and the
+        initiating account's request_quit() waited its full 10s timeout then
+        exited anyway WITHOUT confirming this account had flushed. Combined with
+        the old fixed sleep(2), that race hard-killed a still-flushing session
+        into a re-pair on next launch.
+
+        Fix: run the full graceful teardown (close-session + wait-for-flush +
+        stop Node) FIRST, then flag released so the IPC handler can reply
+        `released:True`, give it a beat to send that reply over the pipe, and
+        only THEN take the process down for good.
+        """
+        try:
+            self._perform_shutdown()
+        finally:
+            # Reachable now (teardown does not call os._exit). Let the IPC
+            # listener observe this and reply released:True to the initiator.
+            self._ipc_released = True
+        # Give the listener thread a moment to send the released reply before we
+        # vanish (its poll loop checks the predicate every 50ms).
+        time.sleep(0.3)
+        self._terminate_process()
+
+    def quit_all_accounts(self):
+        """Quit the WHOLE app: gracefully stop every OTHER account's background
+        process, then exit this one. Bound to the 'Exit' menu item and the tray
+        'Exit' — the user expects 'quit' to close WinZapp entirely, not leave
+        other accounts running invisibly in the tray (reported live: closing one
+        window left another account alive, and the teardown order then hard-
+        killed its session into a re-pair).
+
+        Each other process handles its own IPC quit by closing its WhatsApp
+        session gracefully first (see real_exit → _stop_wpp_server STEP 1), so
+        no session is ever hard-killed by the shared-Node taskkill. We ask them
+        sequentially and wait for each to confirm RELEASED before we exit, so
+        the last-one-out Node teardown happens only after every session is
+        cleanly closed. Best-effort: an unresponsive peer never blocks our exit.
+        """
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if gd and acc_id:
+            try:
+                import ipc
+                import node_coord
+                import update_coord
+                others = [l.get("account_id") for l in node_coord.live_node_leases(
+                    gd, is_alive=update_coord.lease_alive) if not l.get("_corrupt")]
+                others = [a for a in others if a and a != acc_id]
+                for other in others:
+                    try:
+                        logging.info("[quit-all] asking account %s to quit", other)
+                        ipc.request_quit(gd, other, timeout=10.0)
+                    except Exception:
+                        logging.exception("[quit-all] request_quit failed for %s", other)
+            except Exception:
+                logging.exception("[quit-all] enumerating peers failed (non-fatal)")
+        self.real_exit()
 
     def _refresh_menubar(self):
         """Retranslate the menu bar labels after a language change."""
@@ -1176,22 +1618,37 @@ class MainWindow(wx.Frame):
         mb.GetMenu(1).FindItemById(self._ID_OFFLINE_MENU).SetItemLabel(
             f"{self.i18n.t('tray_offline_mode')}\tCtrl+Alt+Shift+O"
         )
-        mb.SetMenuLabel(2, self.i18n.t("menu_help"))
-        mb.GetMenu(2).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
-            f"{self.i18n.t('menu_shortcuts')}\tF1"
-        )
-        mb.GetMenu(2).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
-            self.i18n.t("menu_force_update")
-        )
-        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
-            self.i18n.t("menu_force_reinstall_zip")
-        )
-        mb.GetMenu(2).FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
-            self.i18n.t("menu_force_reinstall_wpp")
-        )
-        mb.GetMenu(2).FindItemById(self._ID_ABOUT).SetItemLabel(
-            self.i18n.t("menu_about")
-        )
+        # The Help menu is NOT at a fixed index: with multi-account a "Konta"
+        # menu sits between Sync and Help (File=0, Sync=1, Konta=2, Help=3),
+        # without it Help is at index 2. Locate it by the item it owns rather
+        # than hard-coding index 2 — otherwise a language change would relabel
+        # the "Konta" menu as "Help" and retranslate the wrong menu.
+        help_idx = mb.FindMenu(self.i18n.t("menu_help"))
+        if help_idx == wx.NOT_FOUND:
+            help_menu = None
+            for i in range(mb.GetMenuCount()):
+                if mb.GetMenu(i).FindItemById(self._ID_ABOUT) is not None:
+                    help_idx, help_menu = i, mb.GetMenu(i)
+                    break
+        else:
+            help_menu = mb.GetMenu(help_idx)
+        if help_menu is not None:
+            mb.SetMenuLabel(help_idx, self.i18n.t("menu_help"))
+            help_menu.FindItemById(self._ID_SHORTCUTS).SetItemLabel(
+                f"{self.i18n.t('menu_shortcuts')}\tF1"
+            )
+            help_menu.FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
+                self.i18n.t("menu_force_update")
+            )
+            help_menu.FindItemById(self._ID_FORCE_REINSTALL_ZIP).SetItemLabel(
+                self.i18n.t("menu_force_reinstall_zip")
+            )
+            help_menu.FindItemById(self._ID_FORCE_REINSTALL_WPP).SetItemLabel(
+                self.i18n.t("menu_force_reinstall_wpp")
+            )
+            help_menu.FindItemById(self._ID_ABOUT).SetItemLabel(
+                self.i18n.t("menu_about")
+            )
 
     def _on_about(self, event=None):
         """Show application authorship, version and license information."""
@@ -1248,8 +1705,16 @@ class MainWindow(wx.Frame):
         ) == wx.YES:
             self._on_disconnect()
 
-    def _on_disconnect(self, event=None):
-        """Disconnect from WhatsApp: wipe credentials, stop WebSocket and show pairing dialog."""
+    def _on_disconnect(self, event=None, wipe=True):
+        """Disconnect from WhatsApp: drop credentials, stop WebSocket and show
+        the pairing dialog.
+
+        ``wipe`` (default True) also clears the local database/media — the right
+        thing on a *confirmed* logout. Pass wipe=False for a session that simply
+        could not be resumed (long QRCODE at startup with no prior connect this
+        run): the user needs the pairing dialog, but their history must survive,
+        because a failed resume is NOT proof the device was unlinked (a real log
+        showed the server logging back in the same second the client wiped)."""
         old_token = self._get_wa_token()
         pi = self.settings.setdefault("privateinfo", {})
         self._set_wa_token("")
@@ -1258,7 +1723,11 @@ class MainWindow(wx.Frame):
         self.messages_set_completed = False
         self.token = ""
         self.save_settings()
-        self.clear_local_data()
+        if wipe:
+            self.clear_local_data()
+        else:
+            logging.warning("[_on_disconnect] resume failed — showing pairing "
+                            "dialog WITHOUT wiping local data (history preserved).")
         # Reset the connection state as if this were a fresh app launch, not
         # just a fresh WebSocket. Without this, _wa_connect_announced stayed
         # True from the connection that just ended, which permanently
@@ -1337,14 +1806,16 @@ class MainWindow(wx.Frame):
 
     def _update_title(self):
         """
-        Rebuild the frame title from the app name, the number of conversations
-        with unread messages and the current status, e.g.:
+        Rebuild the frame title from the app name, the account name (multi-
+        account), the number of conversations with unread messages and the
+        current status, e.g.:
           "WinZapp"
-          "WinZapp (2)"
-          "WinZapp (2) | modo offline"
-          "WinZapp (3) | baixando mídias"
+          "WinZapp — Midzi"
+          "WinZapp — Midzi (2)"
+          "WinZapp — Midzi (2) | modo offline"
+          "WinZapp — Midzi (3) | baixando mídias"
         """
-        title   = self.i18n.t("app_name")
+        unread_chats = 0
         if not getattr(self, "_initial_sync_running", False):
             deleted = self._deleted_chats
             # Archived conversations are intentionally excluded here — they
@@ -1359,8 +1830,12 @@ class MainWindow(wx.Frame):
                 and not self.is_chat_archived(jid)
                 and effective_unread_count(chat) > 0
             )
-            if unread_chats:
-                title += f" ({unread_chats})"
+        # Base title carries the account name (multi-account) + unread count,
+        # so the user/screen reader can always tell which account this window
+        # is — _format_title is the single source of that logic (previously
+        # this method rebuilt the title from scratch and dropped the account
+        # name on every refresh).
+        title = self._format_title(unread_chats)
         if hasattr(self, "navigation_panel"):
             self.navigation_panel.refresh_archived_label()
         if self.offline_mode:
@@ -1442,6 +1917,19 @@ class MainWindow(wx.Frame):
         logging.info("[power] System is suspending.")
         event.Skip()
 
+    def _reset_connection_state_for_resume(self):
+        """Reset the connection/logout latches so a wake-from-suspend is
+        treated like a fresh session start, NOT like a mid-session drop.
+
+        Thin wx-side wrapper over connection_state.reset_state_for_resume,
+        which holds the pure (unit-testable) logic and the full rationale:
+        across a suspend the ``_wa_connect_announced`` latch stayed True, so a
+        transient post-wake QRCODE was misread as a logout and wiped the token
+        of accounts that did not re-attach instantly.
+        """
+        import connection_state as cs
+        cs.reset_state_for_resume(self, time.time())
+
     def _on_power_resume(self, event):
         """Force a reconnection check right after the system wakes up.
 
@@ -1449,25 +1937,484 @@ class MainWindow(wx.Frame):
         eventually notice the socket/session died across the suspend —
         which observed live routinely never actually recovered, leaving
         the app permanently in offline mode until manually restarted from
-        the tray. Resetting the failure-strike counters and re-probing
-        immediately (rather than waiting up to 30s, plus however many
-        strikes are now required) gives both the HTTP health check and the
-        WebSocket a clean slate to reconnect against right away.
+        the tray. Resetting the connection state (see
+        _reset_connection_state_for_resume) and re-probing immediately
+        (rather than waiting up to 30s, plus however many strikes are now
+        required) gives both the HTTP health check and the WebSocket a
+        clean slate to reconnect against right away — crucially without a
+        transient post-wake QRCODE being mistaken for a logout.
         """
         logging.info("[power] System resumed from suspend — forcing reconnection check.")
-        self._wa_http_fail_strikes = 0
-        self._offline_probe_strikes = 0
+        self._reset_connection_state_for_resume()
         threading.Thread(target=self._recover_from_suspend, daemon=True).start()
         event.Skip()
 
     def _recover_from_suspend(self):
+        # Single-flight: EVT_POWER_RESUME (a dedicated thread) and the
+        # health-check clock-gap detector can both fire for the SAME wake, a few
+        # seconds apart. Two overlapping recoveries interleave their
+        # close/kill-orphan/start-session steps, and the later run's kill-orphan
+        # sweep (chrome_cmdline_owns_session matches by session name only) kills
+        # the fresh Chrome the earlier run's start-session just launched — the
+        # session then hangs in INITIALIZING or bounces to QRCODE/unpaired.
+        # Observed live after an 8h hibernation: same PIDs killed twice,
+        # "start-session sent" logged twice, 1 of 3 accounts recovered cleanly.
+        # If a recovery is already in progress, this trigger is redundant — drop
+        # it rather than pile a second pass on top. try_begin_resume_recovery
+        # holds the pure single-flight logic (connection_state, unit-tested).
+        import connection_state as cs
+        if not cs.try_begin_resume_recovery(self, self._resume_recovery_lock):
+            logging.info("[power] recovery already in progress — "
+                         "skipping duplicate wake trigger.")
+            return
         try:
             if self.ws is not None and not getattr(self.ws.sio, "connected", False):
                 self._reconnect_websocket_now()
             self.check_wa_connection_http()
             self.trigger_sync_if_needed()
+            # After a wake, WhatsApp Web inside the (suspended) Chrome loses its
+            # stream and does NOT rebuild it on its own, yet WPPConnect keeps a
+            # stale "CONNECTED" status string — so check_wa_connection_http()
+            # above lands in the CONNECTED branch, sees isConnected()==false,
+            # flips the UI to offline and returns WITHOUT ever calling
+            # start-session (that path is gated to CLOSED/DESTROYED only). The
+            # session is a zombie: alive object, dead stream. Nothing recovers it
+            # but a full app restart — which is exactly the symptom the user hit.
+            # Actively restart the WhatsApp session once here to force Chrome to
+            # reload web.whatsapp.com and rebuild the stream.
+            self._restart_session_if_zombie_after_resume()
         except Exception:
             logging.exception("[power] _recover_from_suspend failed")
+        finally:
+            cs.end_resume_recovery(self, self._resume_recovery_lock)
+
+    # Post-resume recovery timing. After the WAPI-race fix a plain INITIALIZING
+    # right after wake is usually the session coming up on its own (onStateChange
+    # promotes it to CONNECTED without our help), so we no longer force-restart on
+    # a raw probe count. Instead we OBSERVE for up to _RESUME_OBSERVE_SECONDS,
+    # polling every _RESUME_PROBE_INTERVAL, and only force a restart if the
+    # session stays INITIALIZING with NO progress for _RESUME_INITIALIZING_GRACE
+    # (GPT r2: time-without-progress, not attempt count). The zombie-CONNECTED
+    # path still needs its own independent confirmation (dead stream, network up).
+    _RESUME_PROBE_INTERVAL = 3.0
+    _RESUME_OBSERVE_SECONDS = 150.0       # observation window (NOT a total recovery budget)
+    _RESUME_INITIALIZING_GRACE = 90.0     # no-progress INITIALIZING before restart
+    _RESUME_ZOMBIE_CONFIRM_SECONDS = 12.0  # CONNECTED-but-dead-stream must persist this long
+    # MVP gate (GPT r5 #1): auto-restarting a stuck INITIALIZING session calls
+    # close-session, which in WPPConnect force-kills (pkill -9, NO auth flush) any
+    # non-CONNECTED session — risking a re-pair. Until the Node close path is made
+    # graceful-first, we OBSERVE/log a stuck INITIALIZING but do NOT restart it.
+    # The zombie-CONNECTED recovery stays ON: it only ever closes a genuinely
+    # CONNECTED session, which takes WPPConnect's graceful client.close() (flush)
+    # path, not the force-kill branch. Flip back to True once Node is graceful.
+    _RESUME_RESTART_STUCK_INITIALIZING = False
+
+    def _restart_session_if_zombie_after_resume(self):
+        """Detect and repair a post-wake session that cannot recover on its own.
+
+        Runs on a daemon thread (see _on_power_resume), never the wx GUI thread,
+        so the polling sleeps here do not block the UI.
+
+        Conservative by design (GPT r2/r3): the WAPI-race fix made status reliable
+        enough that most post-wake INITIALIZING sessions now finish connecting by
+        themselves via onStateChange. So we do NOT restart on a raw probe count.
+        We observe for _RESUME_OBSERVE_SECONDS and act only on genuinely stuck
+        cases, gated on the network actually being up:
+
+        1. 'Stuck INITIALIZING' — MVP: OBSERVED and logged, but NOT auto-restarted
+           (_RESUME_RESTART_STUCK_INITIALIZING=False). Restarting it would call
+           WPPConnect's close-session, which force-kills a non-CONNECTED session
+           without flushing auth and can re-pair the account. Re-enable once the
+           Node close path is graceful-first (GPT r5 #1).
+        2. 'Zombie CONNECTED' — status CONNECTED but the stream is dead
+           (isConnected()==false) with the network up, PERSISTING for
+           _RESUME_ZOMBIE_CONFIRM_SECONDS. This IS restarted: closing a genuinely
+           CONNECTED session takes WPPConnect's graceful client.close() (flush)
+           path, so it does not risk the force-kill re-pair.
+
+        A genuinely healthy CONNECTED or a user-action state (QRCODE/UNPAIRED)
+        ends observation immediately — we never loop restarts on a pairing screen
+        nor bounce a working session.
+        """
+        if getattr(self, "_wa_connected", False):
+            return  # recovered normally — nothing to do
+        import connection_state as cs
+        self._logged_stuck_initializing = False  # per-observation, so each wake logs once
+        deadline = time.monotonic() + self._RESUME_OBSERVE_SECONDS
+        prev_status = None
+        initializing_since = None  # monotonic time the current INITIALIZING run began
+        zombie_since = None        # monotonic time CONNECTED-but-dead-stream began
+        while time.monotonic() < deadline:
+            if getattr(self, "_wa_connected", False):
+                return  # came up on its own — no restart needed
+            status = self._raw_session_status()
+            network_up = self._probe_whatsapp_host()  # probe once per iteration
+            now = time.monotonic()
+
+            # User-action state (QR/pairing) is handled by the pairing UI — stop,
+            # never restart-loop. Checked FIRST (GPT r3 #1).
+            if cs.recovery_needs_user_action(status):
+                return
+
+            if not network_up:
+                # No internet: not a zombie, just an outage. The normal health
+                # loop will reconnect once the network is back.
+                logging.info("[power] post-resume offline but network is down — "
+                             "leaving session alone to recover naturally.")
+                return
+
+            # CONNECTED path: distinguish a HEALTHY session (done) from a ZOMBIE
+            # (CONNECTED object, dead stream). Only a zombie that PERSISTS for the
+            # confirm window is restarted — not a single post-wake blip (GPT r3 #2).
+            if cs.recovery_connected(status):
+                if not cs.is_zombie_session_after_resume(
+                    getattr(self, "_wa_connected", False), status, network_up,
+                ):
+                    return  # healthy CONNECTED — leave it alone
+                if zombie_since is None:
+                    zombie_since = now
+                elif (now - zombie_since) >= self._RESUME_ZOMBIE_CONFIRM_SECONDS:
+                    # Final re-check right before the destructive restart. Order
+                    # matters (GPT r5 #4): do the slow network probe FIRST, then
+                    # read a fresh status, then the _wa_connected flag last — so a
+                    # stream that revived DURING the probe is not clobbered.
+                    fresh_net = self._probe_whatsapp_host()
+                    final_status = self._raw_session_status()
+                    if getattr(self, "_wa_connected", False):
+                        return
+                    if not (fresh_net and cs.recovery_connected(final_status)
+                            and cs.is_zombie_session_after_resume(
+                                getattr(self, "_wa_connected", False), final_status,
+                                fresh_net)):
+                        # No longer a confirmed zombie — reset and keep observing.
+                        zombie_since = None
+                        prev_status = status
+                        time.sleep(self._RESUME_PROBE_INTERVAL)
+                        self.check_wa_connection_http()
+                        continue
+                    logging.warning("[power] Confirmed zombie session after resume "
+                                    "(CONNECTED but stream dead >%.0fs, network up) — "
+                                    "forcing restart to rebuild the stream.",
+                                    self._RESUME_ZOMBIE_CONFIRM_SECONDS)
+                    self._force_whatsapp_session_restart()
+                    return
+                initializing_since = None  # not initializing while (zombie) connected
+            elif status == "INITIALIZING":
+                zombie_since = None
+                # Start the no-progress clock once; a readable non-INITIALIZING
+                # status resets it below. Using "is None" (not prev_status) means
+                # a transient unreadable '' between two INITIALIZING reads does
+                # NOT restart the clock (GPT r4 #1).
+                if initializing_since is None:
+                    initializing_since = now
+                if cs.initializing_restart_due(initializing_since, now,
+                                               self._RESUME_INITIALIZING_GRACE):
+                    if not self._RESUME_RESTART_STUCK_INITIALIZING:
+                        # MVP: auto-restart of stuck INITIALIZING is gated OFF
+                        # (would hit WPPConnect's force-kill-without-flush path
+                        # and risk a re-pair). Log once and keep observing; the
+                        # normal health loop / a manual restart handles it until
+                        # the Node close path is graceful-first (GPT r5 #1).
+                        if not getattr(self, "_logged_stuck_initializing", False):
+                            self._logged_stuck_initializing = True
+                            logging.warning("[power] Session stuck in INITIALIZING with no "
+                                            "progress for %.0fs after resume — auto-restart "
+                                            "is disabled (would risk re-pair via force-kill); "
+                                            "leaving to health loop.",
+                                            self._RESUME_INITIALIZING_GRACE)
+                            self._shutdown_audit("WAKE stuck INITIALIZING — auto-restart gated OFF (MVP)")
+                        # Do not spin the clock: keep observing without restart.
+                        if status:
+                            prev_status = status
+                        time.sleep(self._RESUME_PROBE_INTERVAL)
+                        self.check_wa_connection_http()
+                        continue
+                    # Re-check immediately before the destructive restart: only
+                    # restart if it's STILL exactly INITIALIZING (GPT r4 #2).
+                    if getattr(self, "_wa_connected", False):
+                        return
+                    if self._raw_session_status() != "INITIALIZING":
+                        # Progress (or a user-action/closed state) appeared — let
+                        # the loop re-evaluate on the next iteration instead.
+                        prev_status = status
+                        time.sleep(self._RESUME_PROBE_INTERVAL)
+                        self.check_wa_connection_http()
+                        continue
+                    logging.warning("[power] Session stuck in INITIALIZING with no "
+                                    "progress for %.0fs after resume (network up) — "
+                                    "one force restart to clear a hung/detached browser.",
+                                    self._RESUME_INITIALIZING_GRACE)
+                    self._force_whatsapp_session_restart()
+                    return
+            else:
+                # Any other readable, non-terminal status = progress; reset clocks.
+                # An unreadable '' falls here too but must NOT count as progress,
+                # so only reset when the status is genuinely readable (GPT r3 #8).
+                zombie_since = None
+                if cs.is_progress_status(status):
+                    initializing_since = None
+
+            # Do not let an unreadable '' overwrite the last real status we saw —
+            # otherwise INITIALIZING -> '' -> INITIALIZING would look like a fresh
+            # run (GPT r4 #1). Only remember readable statuses.
+            if status:
+                prev_status = status
+            time.sleep(self._RESUME_PROBE_INTERVAL)
+            self.check_wa_connection_http()
+        logging.info("[power] post-resume observation window elapsed without a "
+                     "definitive stuck/zombie signal — leaving session to the "
+                     "normal health loop.")
+
+    def _raw_session_status(self) -> str:
+        """Return WPPConnect's current status-session string ('' on failure)."""
+        try:
+            resp = requests.get(
+                f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                return resp.json().get("status", "") or ""
+        except Exception as e:
+            logging.info("[_raw_session_status] probe failed: %s", e)
+        return ""
+
+    def _kill_orphaned_chrome_for_session(self):
+        """Kill a suspended chrome.exe still holding this account's userDataDir
+        lock, then drop its stale lockfile, so WPPConnect can relaunch.
+
+        After hibernation the WhatsApp Web chrome.exe is suspended, not killed:
+        it keeps the lock on ./userDataDir/<session>, so the post-wake
+        start-session fails with "The browser is already running" and the
+        session is stuck in INITIALIZING forever (only a full app restart, which
+        kills the orphan, cleared it — exactly the reported symptom). Matching is
+        narrow (connection_state.chrome_cmdline_owns_session): only a chrome
+        whose --user-data-dir carries THIS session name is touched — never the
+        user's own Chrome, never another account's browser.
+        """
+        import sys
+        if sys.platform != "win32":
+            return
+        import connection_state as cs
+        session_name = (getattr(self, "token", "") or "").split(":")[0]
+        if not session_name:
+            return
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        killed = False
+        try:
+            # WMIC-free: PowerShell CIM gives us PID + full command line.
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+                 "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+                creationflags=no_window, text=True, stderr=subprocess.DEVNULL, timeout=15,
+            )
+        except Exception as e:
+            logging.info("[wake-recover] could not list chrome processes: %s", e)
+            out = ""
+        for line in out.splitlines():
+            pid, _, cmdline = line.partition("\t")
+            if not cs.chrome_cmdline_owns_session(cmdline, session_name):
+                continue
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", pid.strip()],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=no_window)
+                logging.warning("[wake-recover] killed orphaned Chrome pid=%s holding "
+                                "userDataDir lock for session %s", pid.strip(), session_name)
+                killed = True
+            except Exception as e:
+                logging.info("[wake-recover] taskkill pid=%s failed: %s", pid.strip(), e)
+        # Drop the stale lockfile so a relaunch is not refused even if the
+        # process was already gone but left the file behind.
+        try:
+            from app_paths import data_path
+            udd = os.path.join(os.path.dirname(data_path("settings.json")),
+                               "..", "..", "api", "userDataDir", session_name)
+            for name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"):
+                p = os.path.join(udd, name)
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        logging.info("[wake-recover] removed stale %s", name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return killed
+
+    # Wake-recovery restart policy. A hibernation-suspended Chrome, once resumed,
+    # can hand puppeteer a dead page context ("Attempted to use detached Frame"
+    # in the node log) — start-session then throws inside waitForLogin and the
+    # session hangs. One clean close (wait for CLOSED) before re-starting gives a
+    # fresh frame. GPT r2: prefer ONE restart + re-diagnose + cooldown over a
+    # tight 3x loop, because a rapid close/start loop can itself generate locks
+    # and detached frames. We allow a small number of attempts but SPACE them
+    # with a cooldown and stop the moment the session connects or needs the user.
+    # GPT r5 #2: for the MVP a SINGLE restart attempt. A second attempt would
+    # fire only ~50s after the first (settle+cooldown), cutting the agreed 90s
+    # no-progress grace short and possibly bouncing a session that was still
+    # coming up. A further restart instead comes from a fresh 90s no-progress
+    # window (or a hard Puppeteer error) on the next observation pass.
+    _RECOVERY_MAX_ATTEMPTS = 1
+    _RECOVERY_CLOSE_WAIT = 12.0      # wait for the browser to reach CLOSED
+    _RECOVERY_SETTLE_TIMEOUT = 40.0  # wait for the restart to connect
+    _RECOVERY_COOLDOWN = 10.0        # pause between attempts to let things settle
+    _RECOVERY_POLL = 2.0
+
+    def _wait_for_status(self, predicate, timeout: float,
+                         stop_when_connected: bool = True) -> str:
+        """Poll status-session until predicate(status) is True or timeout.
+        Returns the last status string seen ('' on repeated failure).
+
+        stop_when_connected: short-circuit as soon as _wa_connected flips True.
+        Correct when WAITING FOR A CONNECTION, but WRONG when waiting for CLOSED
+        (a still-connected flag would abort the close-wait and let kill/start run
+        before the browser actually shut down — GPT r3 #5). Callers waiting for
+        CLOSED must pass False.
+        """
+        deadline = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < deadline:
+            last = self._raw_session_status()
+            if predicate(last):
+                return last
+            if stop_when_connected and getattr(self, "_wa_connected", False):
+                return last
+            time.sleep(self._RECOVERY_POLL)
+        return last
+
+    def _force_whatsapp_session_restart(self):
+        """Close then re-start the WhatsApp session so Chrome reloads
+        web.whatsapp.com and rebuilds a dead stream. Safe on a live session:
+        close-session persists state, and the token/paired flags are untouched
+        (this is a stream refresh, NOT a logout).
+
+        GPT r2: one restart, re-diagnose, cooldown, at most a couple of attempts.
+        Success = a genuinely CONNECTED session; a user-action state (QRCODE/
+        UNPAIRED) also STOPS the loop (the pairing UI takes over — never keep
+        restarting a session that's waiting on the human).
+        """
+        token = getattr(self, "token", "")
+        if not token:
+            return
+        import connection_state as cs
+        # Mark the ACTIVE restart sequence so the health loop won't fire a
+        # competing start-session while we own the close/kill/start cycle
+        # (GPT r5 #3). Scoped tightly to this method — NOT the whole observation.
+        self._recovery_restart_active = True
+        try:
+            self._run_recovery_attempts(token, cs)
+        finally:
+            self._recovery_restart_active = False
+
+    def _run_recovery_attempts(self, token, cs):
+        for attempt in range(1, self._RECOVERY_MAX_ATTEMPTS + 1):
+            # Before each attempt re-check: the session may have connected or
+            # dropped to a user-action state during the previous settle+cooldown
+            # (GPT r4 #3). Never restart something that's already good/waiting.
+            if attempt > 1:
+                if getattr(self, "_wa_connected", False):
+                    return
+                pre = self._raw_session_status()
+                if cs.recovery_connected(pre):
+                    logging.info("[power] recovery: session CONNECTED before attempt %d "
+                                 "— no further restart.", attempt)
+                    return
+                if cs.recovery_needs_user_action(pre):
+                    logging.info("[power] recovery: session needs user action (%s) before "
+                                 "attempt %d — stopping.", pre, attempt)
+                    return
+            self._restart_session_once(token, attempt)
+            settled = self._wait_for_status(cs.recovery_should_stop,
+                                            self._RECOVERY_SETTLE_TIMEOUT)
+            if getattr(self, "_wa_connected", False) or cs.recovery_connected(settled):
+                logging.info("[power] recovery attempt %d CONNECTED (status=%s)",
+                             attempt, settled or "?")
+                self._shutdown_audit(f"WAKE recovery attempt {attempt} CONNECTED status={settled or '?'}")
+                return
+            if cs.recovery_needs_user_action(settled):
+                logging.info("[power] recovery attempt %d -> user action needed "
+                             "(status=%s) — stopping, pairing UI takes over.",
+                             attempt, settled or "?")
+                self._shutdown_audit(f"WAKE recovery attempt {attempt} USER-ACTION status={settled or '?'}")
+                return
+            logging.warning("[power] recovery attempt %d did not connect "
+                            "(status=%s) — %s", attempt, settled or "?",
+                            "cooldown then retry" if attempt < self._RECOVERY_MAX_ATTEMPTS
+                            else "giving up to normal health loop")
+            self._shutdown_audit(f"WAKE recovery attempt {attempt} NOT CONNECTED status={settled or '?'}")
+            if attempt < self._RECOVERY_MAX_ATTEMPTS:
+                time.sleep(self._RECOVERY_COOLDOWN)
+        logging.warning("[power] recovery exhausted %d attempts — leaving session "
+                        "to the normal health loop.", self._RECOVERY_MAX_ATTEMPTS)
+        self._shutdown_audit(f"WAKE recovery EXHAUSTED {self._RECOVERY_MAX_ATTEMPTS} attempts")
+
+    def _restart_session_once(self, token: str, attempt: int = 1):
+        """One close -> wait-for-CLOSED -> kill-orphan -> start-session cycle.
+        Waiting for CLOSED (not a blind sleep) is what makes the re-start get a
+        fresh browser frame instead of reusing a hibernation-detached one.
+
+        NOTE: close-session in WPPConnect force-kills (no auth flush) any session
+        whose status is not CONNECTED/open, so a restart from a non-CONNECTED
+        state can still lose auth until the WPPConnect close path is made
+        graceful-first. The conservative trigger upstream keeps us off this path
+        in the common case; a full fix belongs in the Node close handler.
+        """
+        headers = {"Authorization": f"Bearer {token}"}
+        close_ok = False
+        try:
+            resp = requests.post(
+                f"{self.wpp_server}:{self.wpp_port}/api/{token}/close-session",
+                headers=headers, timeout=10,
+            )
+            close_ok = resp.status_code in (200, 201)
+            if close_ok:
+                logging.info("[power] zombie recovery: close-session sent (attempt %d)", attempt)
+            else:
+                logging.warning("[power] zombie recovery: close-session HTTP %s (attempt %d)",
+                                resp.status_code, attempt)
+        except Exception as e:
+            logging.warning("[power] zombie recovery: close-session failed: %s", e)
+        # Wait for the browser to actually tear down (CLOSED) before re-starting,
+        # so puppeteer gets a fresh page frame — reusing a half-closed,
+        # hibernation-resumed browser is what throws "detached Frame" and hangs
+        # in INITIALIZING. Do NOT short-circuit on _wa_connected here: we are
+        # waiting for the browser to go DOWN, so a stale connected flag must not
+        # abort the wait (GPT r3 #5). Fall back to a short sleep if the
+        # close-session request itself failed and CLOSED never confirms.
+        import connection_state as cs
+        closed = self._wait_for_status(cs.session_closed_after_flush,
+                                       self._RECOVERY_CLOSE_WAIT,
+                                       stop_when_connected=False)
+        confirmed_closed = cs.session_closed_after_flush(closed)
+        # Only proceed to the destructive kill/start if the browser is genuinely
+        # down: either close-session was accepted OR the status actually reached
+        # CLOSED despite an endpoint error. Bailing here avoids killing/starting
+        # on top of a still-live browser after a failed close (GPT r4 #4).
+        if not close_ok and not confirmed_closed:
+            logging.warning("[power] recovery: close-session not accepted (HTTP/err) "
+                            "and status not CLOSED (status=%s) — skipping kill/start "
+                            "this attempt.", closed or "?")
+            return False
+        if not confirmed_closed:
+            logging.info("[power] recovery: browser did not confirm CLOSED "
+                         "(status=%s) — proceeding after close was accepted", closed or "?")
+            time.sleep(2)
+        # A hibernation-suspended chrome.exe may still hold the userDataDir lock,
+        # which makes the start-session below fail with "browser is already
+        # running" and hangs the session in INITIALIZING forever. Kill that
+        # orphan (this account's only) and clear its lockfile first.
+        self._kill_orphaned_chrome_for_session()
+        try:
+            requests.post(
+                f"{self.wpp_server}:{self.wpp_port}/api/{token}/start-session",
+                json={"waitQrCode": False}, headers=headers, timeout=15,
+            )
+            logging.info("[power] zombie recovery: start-session sent — "
+                         "WhatsApp Web reloading (attempt %d)", attempt)
+        except Exception as e:
+            logging.warning("[power] zombie recovery: start-session failed: %s", e)
 
     # How long, and how many consecutive not-yet-connected results, the very
     # first connection attempt of a session gets before the UI is allowed to
@@ -1924,6 +2871,15 @@ class MainWindow(wx.Frame):
         """Actually send the presence update after `_on_window_activate`'s debounce settles."""
         if active:
             self._last_activation_time = time.time()
+            # The Accounts menu is built once at startup from a registry
+            # snapshot and shows only 'paired' accounts. If another account's
+            # process paired / changed state after this menu was built (or its
+            # process was still coming up), this window's menu goes stale and an
+            # account "disappears" from it until 'Switch account' is opened.
+            # Rebuilding on focus-gain keeps the menu (and the Ctrl+Shift+1..9
+            # hotkey slot map, rebuilt inside _build_menubar) in sync with the
+            # live registry — this is the moment the user returns to the window.
+            self._refresh_accounts_menu_if_stale()
             threading.Thread(
                 target=self._send_presence, args=("available",), daemon=True
             ).start()
@@ -1994,6 +2950,28 @@ class MainWindow(wx.Frame):
         else:
             self.real_exit()
 
+    def hide_to_tray(self):
+        """Hide this window to the tray WITHOUT quitting (the process keeps
+        running so it still receives this account's messages/notifications).
+
+        Used by the account switch (Option 2 UX): switching to another account
+        brings that account's window forward and hides this one, so the user
+        sees a single active window while every account stays live in the
+        background. Mirrors _on_close's SW_HIDE path (bypasses wx state-drift).
+        """
+        if getattr(self, "tray_icon", None) is None:
+            return
+        try:
+            import ctypes
+            ctypes.windll.user32.ShowWindow(self.GetHandle(), 0)  # SW_HIDE
+        except Exception:
+            self.Hide()
+        self._window_hidden = True
+        try:
+            self.tray_icon.update_tooltip()
+        except Exception:
+            pass
+
     def restore_window(self):
         """Bring the WinZapp window to the foreground.
 
@@ -2047,24 +3025,47 @@ class MainWindow(wx.Frame):
             self.Show(True)
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.add_chats_to_ui)
+        # Put keyboard focus on a real navigable control. After a
+        # hide/restore (and especially repeated account switches) the frame can
+        # come forward with focus sitting on the bare window, so arrow-key
+        # navigation has nothing to act on until the user Tabs into a control.
+        # Land focus on the conversation list so the keyboard works immediately.
+        wx.CallAfter(self._focus_primary_control)
+
+    def _focus_primary_control(self):
+        """Move keyboard focus to the main navigable list (conversation list),
+        so arrow keys work right after a window restore / account switch."""
+        try:
+            panel = getattr(self, "conversations_panel", None)
+            lst = getattr(panel, "conversations_list", None) if panel else None
+            if lst is not None and lst.IsShown():
+                lst.SetFocus()
+        except Exception:
+            logging.exception("[focus] restoring primary control focus failed")
 
     def real_exit(self):
-        """Completely close WinZapp, removing the tray icon and stopping all threads.
+        """Completely close WinZapp: graceful teardown, then terminate.
 
-        _stop_wpp_server() waits for WPPConnect to close Chrome gracefully
-        (see its own docstring for why that wait matters) and used to run
-        right here, synchronously, on the wx main thread — which means the
-        message loop stopped pumping for however long that took. Windows
-        marks any window whose message loop goes quiet for a few seconds as
-        "Not Responding", so quitting looked exactly like a hang, every time,
-        for as long as the graceful-stop budget.
-        """
+        Split into _perform_shutdown() (reversible teardown — close session,
+        flush, stop Node, close DB) and _terminate_process() (the terminal
+        os._exit). The IPC quit handler needs the teardown WITHOUT the immediate
+        os._exit so it can flag `released` and reply to the initiating account
+        before the process vanishes (see _ipc_quit)."""
+        self._perform_shutdown()
+        self._terminate_process()
+
+    def _perform_shutdown(self):
+        """Reversible shutdown: stop timers/threads, gracefully close the WPP
+        session (waiting for its flush), stop the Node, close the DB. Does NOT
+        exit the process, so it is safe to call from the IPC quit handler."""
         # Set FIRST, before anything else: _stop_wpp_server() below closes
         # the WPPConnect session itself, which — while our WebSocket is
         # still connected — arrives as an ordinary "connection closed" event
         # indistinguishable from a real disconnect. _set_wa_connected()
         # checks this flag and skips entirely, so quitting never announces
         # "modo offline ativado" in the moment before the process exits.
+        if getattr(self, "_shutting_down", False):
+            return  # teardown already ran (e.g. real_exit after an IPC quit)
         self._shutting_down = True
         # Stop the presence keep-alive timer before tearing down
         if hasattr(self, "_presence_timer") and self._presence_timer.IsRunning():
@@ -2087,26 +3088,26 @@ class MainWindow(wx.Frame):
             self._update_checker.stop()
         if getattr(self, "_wpp_update_checker", None) is not None:
             self._wpp_update_checker.stop()
+        self._stop_wpp_server()
+        if hasattr(self, "db") and self.db is not None:
+            try:
+                self.db.close()
+            except Exception:
+                pass
 
-        # Hide immediately so quitting still feels instant to the user — the
-        # actual shutdown work below (which can legitimately take a few
-        # seconds) now happens off the main thread instead, so there is no
-        # window left for Windows to watch go quiet.
+    def _terminate_process(self):
+        """Terminal exit — never returns.
+
+        Hide immediately so quitting still feels instant to the user, then do
+        the final wx ExitMainLoop + os._exit off the main thread so a slow
+        teardown can't leave a window Windows would mark "Not Responding".
+        """
         try:
             self.Hide()
         except Exception:
             pass
 
         def _finish_exit():
-            # Neither of these touches any wx object — DatabaseBridge.close()
-            # is plain threading/asyncio, and _stop_wpp_server() is HTTP +
-            # subprocess — so both are safe to run off the main thread.
-            self._stop_wpp_server()
-            if hasattr(self, "db") and self.db is not None:
-                try:
-                    self.db.close()
-                except Exception:
-                    pass
             try:
                 wx.GetApp().ExitMainLoop()
             except Exception:
@@ -3707,6 +4708,72 @@ class MainWindow(wx.Frame):
 
     # ── WPPConnect lifecycle ─────────────────────────────────────────────────
 
+    def _peer_node_ports(self) -> list[int]:
+        """Node ports OTHER accounts have persisted, so this account allocates a
+        distinct one. Best-effort: reads each peer account's settings.json
+        connection.wpp_port via the registry; any unreadable peer is skipped."""
+        ports: list[int] = []
+        registry = getattr(self, "registry", None)
+        acc_id = getattr(self, "account_id", None)
+        if registry is None:
+            return ports
+        try:
+            import json as _json
+            import node_ports
+            for acc in registry.list():
+                aid = acc.get("id")
+                if not aid or aid == acc_id:
+                    continue
+                try:
+                    sp = os.path.join(registry.data_dir_for(aid), "settings.json")
+                    with open(sp, "r", encoding="utf-8") as f:
+                        p = _json.load(f).get("connection", {}).get("wpp_port")
+                    p = node_ports.sanitize_saved_port(p)
+                    if p is not None:
+                        ports.append(p)
+                except Exception:
+                    continue
+        except Exception:
+            logging.exception("[node-port] peer port enumeration failed (non-fatal)")
+        return ports
+
+    def _resolve_wpp_port(self, conn: dict) -> int:
+        """Resolve THIS account's stable WPPConnect Node port.
+
+        Custom API: honour the user's configured port untouched. Otherwise keep
+        a valid saved port (stable Node/userDataDir across launches), or allocate
+        the lowest free port not used by a peer on first run — then persist it so
+        it never drifts. This is what gives each account its own isolated Node.
+        """
+        import node_ports
+        if conn.get("wpp_custom_api"):
+            saved = conn.get("wpp_port")
+            return saved if isinstance(saved, int) and not isinstance(saved, bool) else node_ports.BASE_PORT
+        # Single-account / legacy fallback (no registry context): behave as before.
+        if getattr(self, "registry", None) is None or getattr(self, "account_id", None) is None:
+            return node_ports.sanitize_saved_port(conn.get("wpp_port")) or node_ports.BASE_PORT
+
+        def _is_free(port: int) -> bool:
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                    s.settimeout(0.3)
+                    return s.connect_ex(("127.0.0.1", port)) != 0
+            except OSError:
+                return True
+
+        port = node_ports.resolve_account_port(
+            self.account_id, conn.get("wpp_port"), self._peer_node_ports(), is_free=_is_free)
+        # Persist so the choice is stable next launch.
+        if conn.get("wpp_port") != port:
+            self.settings.setdefault("connection", {})["wpp_port"] = port
+            try:
+                self.save_settings()
+            except Exception:
+                logging.exception("[node-port] persisting resolved port failed (non-fatal)")
+        logging.info("[node-port] account %s → WPPConnect port %s",
+                     getattr(self, "account_id", None), port)
+        return port
+
     def _is_wpp_running(self):
         """Return True if the WPPConnect is already listening on the configured server/port."""
         import urllib.parse
@@ -3762,6 +4829,20 @@ class MainWindow(wx.Frame):
             os.environ["PORT"] = str(self.wpp_port)
             os.environ["PUPPETEER_CACHE_DIR"] = resource_path("api", ".cache")
 
+            # Multi-account: expose OUR identity to the Node instance so any
+            # WinZapp process can verify (via GET /winzapp/identity) that the
+            # server on the port is the one we started, and recover its pid
+            # (plan Zad 3.0/3.1b). Best-effort — never blocks a legacy start.
+            try:
+                import node_coord
+                gd = getattr(self, "global_dir", None)
+                if gd:
+                    self._node_instance_id = getattr(self, "_node_instance_id", None) or uuid.uuid4().hex
+                    os.environ["WINZAPP_INSTALLATION_ID"] = node_coord.installation_id(gd)
+                    os.environ["WINZAPP_INSTANCE_ID"] = self._node_instance_id
+            except Exception:
+                logging.exception("[startup] node identity env injection failed (non-fatal)")
+
             # Ensure dist/config.js has useChrome:false so WPPConnect always uses
             # Puppeteer's own bundled Chrome/Chromium instead of searching for a
             # system Chrome installation. Patched here at runtime so existing users
@@ -3809,8 +4890,38 @@ class MainWindow(wx.Frame):
             log_fh.close()
             self._wpp_log_fh = None
             atexit.register(self._stop_wpp_server)
+
+            # Register our per-account node-lease so shutdown coordination knows
+            # this account is a live client of the shared Node (plan Zad 3.1b).
+            self._register_node_lease()
         except Exception:
             pass
+
+    def _register_node_lease(self):
+        """Register this account's node-lease on the shared WPPConnect Node.
+
+        A node-lease is the marker "this account still needs the shared Node";
+        _stop_wpp_server() only kills the Node when no OTHER account holds a live
+        lease. This MUST run on BOTH startup paths — the one that spawns the Node
+        AND the one that adopts an already-running Node (ensure_wpp_running()
+        early-returns when the port is already open). Registering only on spawn
+        left every adopting account leaseless, so when the account that spawned
+        the Node exited, the shutdown guard saw no other live lease and tree-killed
+        the shared server out from under the still-running account — which then
+        polled QRCODE and wiped its own database. Idempotent (atomic overwrite).
+        """
+        try:
+            import node_coord
+            import update_coord
+            gd = getattr(self, "global_dir", None)
+            acc_id = getattr(self, "account_id", None)
+            if gd and acc_id:
+                _pid = os.getpid()
+                _ct = update_coord._default_proc_create_time(_pid) or 0.0
+                node_coord.add_node_lease(gd, acc_id, pid=_pid, create_time=_ct)
+                logging.info("[node-lease] registered lease for account %s (pid=%s)", acc_id, _pid)
+        except Exception:
+            logging.exception("[node-lease] registration failed (non-fatal)")
 
     # Emitted by WPPConnect (controllers/browser.js) when the WhatsApp Web build it
     # pins is not present in the installed @wppconnect/wa-version package. It is a
@@ -3852,6 +4963,64 @@ class MainWindow(wx.Frame):
                 wx.CallAfter(self.output, self.i18n.t("wpp_version_unpinned_warning"))
                 return
         logging.info("[startup] WhatsApp Web version pin OK (no fallback reported by WPPConnect).")
+
+    # How long to wait for a close-session to actually flush WhatsApp Web's auth
+    # state to disk before we hard-kill the Node. Generous because a large
+    # profile's leveldb flush can take well over the old fixed 2s — and cutting
+    # it short is exactly what corrupted the profile into a re-pair.
+    _SHUTDOWN_FLUSH_TIMEOUT = 15.0
+    _SHUTDOWN_FLUSH_POLL = 0.3
+
+    def _shutdown_audit(self, msg: str):
+        """Append one line to a PERSISTENT shutdown-audit log that (unlike
+        log.log, opened mode='w') survives across launches, so the teardown of
+        one run can still be read after the next launch has started. This is the
+        only way to prove what actually happened during a close that leads to a
+        'Session Unpaired' on the following start."""
+        try:
+            from app_paths import log_path
+            line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [pid={os.getpid()}] {msg}\n"
+            with open(log_path("shutdown_audit.log"), "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+
+    def _wait_for_session_flushed(self, token: str) -> bool:
+        """Poll status-session until the session reports CLOSED (browser down,
+        auth flushed) or the timeout elapses. Returns True if it confirmed
+        CLOSED, False on timeout. See connection_state.session_closed_after_flush
+        for why a blind sleep was not enough."""
+        import connection_state as cs
+        deadline = time.monotonic() + self._SHUTDOWN_FLUSH_TIMEOUT
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{token}/status-session"
+        started = time.monotonic()
+        polls = 0
+        while time.monotonic() < deadline:
+            polls += 1
+            try:
+                resp = requests.get(url, headers=headers, timeout=5)
+                if resp.status_code in (200, 201):
+                    status = resp.json().get("status", "") or ""
+                    self._shutdown_audit(
+                        f"flush poll #{polls} status={status!r} "
+                        f"elapsed={time.monotonic()-started:.1f}s")
+                    if cs.session_closed_after_flush(status):
+                        return True
+                else:
+                    self._shutdown_audit(
+                        f"flush poll #{polls} HTTP {resp.status_code}")
+            except Exception as e:
+                # A connection error here usually means the Node already tore the
+                # session/HTTP server down — treat as flushed rather than block.
+                self._shutdown_audit(
+                    f"flush poll #{polls} conn-error ({e!r}) — treating as closed")
+                return True
+            time.sleep(self._SHUTDOWN_FLUSH_POLL)
+        self._shutdown_audit(
+            f"flush TIMEOUT after {polls} polls / {self._SHUTDOWN_FLUSH_TIMEOUT}s "
+            "— never saw CLOSED")
+        return False
 
     def _on_query_end_session(self, event):
         """Windows is asking whether it may shut down. Always say yes, but ask
@@ -3897,66 +5066,56 @@ class MainWindow(wx.Frame):
     # anything, keeps listing the session as active. That is precisely the
     # reported symptom.
     #
-    # A first fix gave the HTTP request 25s, plus a SEPARATE poll loop after
-    # it waiting up to another 25s for the Node process to exit or its port
-    # to be released — 50s worst case, and since _stop_wpp_server() ran on
-    # the wx main thread at the time, that made every "Sair" look and feel
-    # exactly like a hang (Windows marks a quiet message loop "Not
-    # Responding" after a few seconds). _stop_wpp_server() now always runs
-    # off the main thread (see real_exit()), fixing the "Not Responding"
-    # symptom on its own — but that poll loop turned out to be worse than
-    # just slow: WPPConnect Server is a persistent multi-session host that
-    # never exits or releases its port just because one session's browser
-    # closed, so the condition it polled for could never come true. That
-    # guaranteed every single exit burned the whole budget and then force-
-    # killed the tree regardless of whether Chrome had already closed
-    # cleanly in under a second — which was likely the actual, dominant
-    # cause of the reported profile corruption, not a slow/hung Chrome. The
-    # poll loop is gone; a 200 response from /close-session (which the
-    # server only sends after `await`ing client.close()) is trusted directly
-    # as proof Chrome is down, and the budget below is the request's own
-    # timeout.
+    # A 200 response from /close-session (which the server only sends after
+    # `await`ing client.close()) is trusted directly as proof Chrome is down,
+    # and the budget below is the request's own timeout.
     _WPP_GRACEFUL_STOP_SECONDS = 10
 
     def _stop_wpp_server(self):
         """Terminate the WPPConnect Server process and all its children.
 
-        This does two genuinely different things, and conflating them (as
-        this used to) is what made `taskkill /F /T` — the thing that tears
-        down Chrome's LevelDB-backed profile mid-write if it's still running
-        — fire on essentially every single exit, even when Chrome itself had
-        already closed cleanly and quickly:
+        Ordering matters (multi-account): FIRST gracefully close THIS account's
+        own WhatsApp session (browser.close() → WhatsApp Web flushes its session
+        state to userDataDir), THEN decide the shared Node's fate. Previously the
+        node-lease guard returned BEFORE close-session, so a process that left
+        the shared Node up for other accounts never closed its own session
+        gracefully — and when the LAST account later killed the Node with
+        `taskkill /F /T`, every still-open Chrome (including sessions that were
+        CONNECTED) was hard-killed mid-flight. WhatsApp Web treats that abrupt
+        kill as a broken link, so the account came back to a pairing screen on
+        next launch (reported live: closed both windows seconds apart, one
+        account then demanded re-pairing).
 
-        1. Ask WPPConnect to close THIS session's Chrome/Puppeteer instance
-           via /close-session. Its handler `await`s `client.close()`
-           (page.close() + browser.close()) before responding — a 200 here
-           genuinely means Chrome is already down; that's the part that
-           protects the profile (see _WPP_GRACEFUL_STOP_SECONDS' comment).
-        2. Terminate the Node.js server process itself. WPPConnect Server is
-           a persistent multi-session host — it never exits or releases its
-           port just because one session's browser closed, by design (other
-           sessions may still be using it). The old code waited for exactly
-           that (proc.poll()/port release) as its "did it close gracefully"
-           signal, which can never come true from step 1 alone — so it
-           always burned the whole grace budget and always fell through to
-           force-killing the tree, Chrome included, regardless of whether
-           Chrome had already closed on its own in under a second. Chrome is
-           no longer running under this process by the time we get here (if
-           step 1 succeeded), so terminating the bare Node process is
-           comparatively low-risk — it holds no fragile profile of its own.
+        Each account now runs its own Node on its own port, so we only ever kill
+        the Node on THIS account's port.
 
-        Must not be called on the wx main thread: step 1 can legitimately
-        block for the whole grace budget.
+        Must not be called on the wx main thread: step 1 can legitimately block
+        for the whole grace budget.
         """
-        proc = getattr(self, "wpp_process", None)
+        # STEP 1: gracefully close our own session so its state is persisted,
+        # regardless of whether we go on to stop the Node or leave it up. This
+        # must happen for EVERY closing process, not just the last one.
         token = getattr(self, "token", "")
+        proc = getattr(self, "wpp_process", None)
         browser_closed_cleanly = False
+        session_name = (token or "").split(":")[0]
+        # Log the REAL session status BEFORE close-session. This is the missing
+        # piece: WPPConnect's closeSession force-kills (no auth flush) any session
+        # whose status is not exactly CONNECTED/open, which corrupts the profile
+        # into 'Session Unpaired' on next launch. If a failing account shows a
+        # non-CONNECTED status here, that force-kill path is the culprit.
+        pre_status = self._raw_session_status() if token else "(no token)"
+        self._shutdown_audit(f"_stop_wpp_server START account={getattr(self,'account_id','?')} "
+                             f"session={session_name!r} port={getattr(self,'wpp_port','?')} "
+                             f"pre_close_status={pre_status!r}")
         if token:
             try:
                 url = (
                     f"{self.wpp_server}:{self.wpp_port}"
                     f"/api/{token}/close-session"
                 )
+                logging.info("[shutdown] close-session sent — waiting for flush")
+                self._shutdown_audit("close-session POSTed — waiting for flush")
                 resp = requests.post(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -3971,12 +5130,43 @@ class MainWindow(wx.Frame):
                         "Chrome may not have closed cleanly.",
                         resp.status_code,
                     )
+                # Wait for WhatsApp Web to actually shut its browser down and
+                # flush auth state to userDataDir BEFORE we taskkill the Node.
+                # A fixed sleep(2) was too short for a large profile: the kill
+                # landed mid-flush, corrupting leveldb -> "Session Unpaired" on
+                # next launch (a big account came back to a pairing screen after
+                # a normal quit). Poll the real CLOSED signal instead.
+                if self._wait_for_session_flushed(token):
+                    browser_closed_cleanly = True
+                    logging.info("[shutdown] session flushed cleanly (CLOSED)")
+                    self._shutdown_audit("FLUSH OK — session reached CLOSED")
+                else:
+                    logging.warning("[shutdown] session did not confirm CLOSED "
+                                    "before timeout — proceeding to stop Node")
+                    self._shutdown_audit("FLUSH FAIL — timed out, killing Node anyway "
+                                         "(risk of Session Unpaired next launch)")
             except Exception as e:
                 logging.warning(
                     "[_stop_wpp_server] close-session request failed or timed out (%s) — "
                     "Chrome may still be running.",
                     e,
                 )
+                self._shutdown_audit(f"close-session EXCEPTION ({e!r})")
+
+        # STEP 2: stop OUR OWN Node. Each account now runs its own Node on its
+        # own port (revised architecture), so there is no shared server to spare
+        # and no cross-account lease to check — we only ever kill the Node on
+        # THIS account's port. Release our lease (kept purely for diagnostics /
+        # orphan attribution) and tear our Node down.
+        gd = getattr(self, "global_dir", None)
+        acc_id = getattr(self, "account_id", None)
+        if gd and acc_id:
+            try:
+                import node_coord
+                node_coord.release_node_lease(gd, acc_id)
+                logging.info("[node-lease] released lease for account %s", acc_id)
+            except Exception:
+                logging.exception("[shutdown] lease release failed (non-fatal)")
 
         pid = None
         if proc and proc.poll() is None:
@@ -3988,31 +5178,33 @@ class MainWindow(wx.Frame):
             # port it's listening on so it doesn't leak across restarts.
             pid = self._find_pid_listening_on_port(self.wpp_port)
 
-        if not pid:
-            return
-
-        if not browser_closed_cleanly:
-            logging.warning(
-                "[_stop_wpp_server] Force-killing WPPConnect (and any Chrome still "
-                "running under it) — the graceful close-session above didn't confirm "
-                "success, so its profile may not have finished flushing."
-            )
-        try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        if pid:
+            if not browser_closed_cleanly:
+                logging.warning(
+                    "[_stop_wpp_server] Force-killing WPPConnect (and any Chrome still "
+                    "running under it) — the graceful close-session above didn't confirm "
+                    "success, so its profile may not have finished flushing."
                 )
-            elif proc is not None:
-                proc.terminate()
-        except Exception:
-            if proc is not None:
-                try:
+            self._shutdown_audit(f"taskkill /F /T node pid={pid} (flush done above)")
+            try:
+                import sys
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                    )
+                elif proc is not None:
                     proc.terminate()
-                except Exception:
-                    pass
+            except Exception:
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+        else:
+            self._shutdown_audit("no node pid to kill (proc gone / port free)")
 
     def _find_pid_listening_on_port(self, port):
         """Return the PID of the node.exe process listening on *port* (Windows only).
@@ -4073,6 +5265,14 @@ class MainWindow(wx.Frame):
         budget below.
         """
         if self._is_wpp_running():
+            # ADOPT path: the shared Node is already listening (spawned by another
+            # account, or left running from a previous session). We won't spawn it,
+            # but we MUST still register our node-lease — otherwise the shutdown
+            # guard in _stop_wpp_server() can't see that this account needs the
+            # Node and will tree-kill it when the spawning account exits, wiping
+            # our live WhatsApp session (root cause of the multi-account session
+            # loss). Registering only on the spawn path was the bug.
+            self._register_node_lease()
             return  # Already up (e.g. left running from a previous session)
 
         import sys
@@ -4349,6 +5549,7 @@ class MainWindow(wx.Frame):
             self.wpp_custom_api = False
             self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
             self.save_settings()
+            self._persist_global_settings()
         elif result == wx.NO:
             # User wants to specify a custom/remote API
             self.settings.setdefault("connection", {})["wpp_custom_api"] = True
@@ -4366,6 +5567,7 @@ class MainWindow(wx.Frame):
                 # Successfully configured! Mark as asked.
                 self.settings.setdefault("general", {})["api_type_first_run_asked"] = True
                 self.save_settings()
+                self._persist_global_settings()
             else:
                 # User cancelled or closed settings dialog. Roll back and exit.
                 self.settings.setdefault("connection", {})["wpp_custom_api"] = False
@@ -4387,6 +5589,7 @@ class MainWindow(wx.Frame):
         # Mark as done before showing the dialog
         self.settings.setdefault("general", {})["first_run"] = False
         self.save_settings()
+        self._persist_global_settings()
 
         result = wx.MessageBox(
             self.i18n.t("autostart_ask_message"),
@@ -4398,6 +5601,7 @@ class MainWindow(wx.Frame):
         else:
             self.settings.setdefault("general", {})["autostart"] = False
             self.save_settings()
+            self._persist_global_settings()
 
     def _check_hotkey_first_run(self):
         """
@@ -4415,10 +5619,12 @@ class MainWindow(wx.Frame):
         if gen.get("global_hotkey"):
             self.settings.setdefault("general", {})["hotkey_first_run_asked"] = True
             self.save_settings()
+            self._persist_global_settings()
             return
 
         self.settings.setdefault("general", {})["hotkey_first_run_asked"] = True
         self.save_settings()
+        self._persist_global_settings()
 
         from ui.dialogs.settings_dialog import _HotkeyCapture
 
@@ -4593,21 +5799,12 @@ class MainWindow(wx.Frame):
 
         # Bootstrap settings.json if missing
         if not os.path.isfile(settings_file):
-            os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+            default_file = resource_path("data", "settings_default.json")
             if os.path.isfile(default_file):
-                try:
-                    shutil.copy2(default_file, settings_file)
-                except Exception:
-                    pass
-            if not os.path.isfile(settings_file):
-                try:
-                    with open(settings_file, "w", encoding="utf-8") as f:
-                        json.dump(fallback_dict, f, indent=4)
-                except Exception:
-                    pass
-
+                os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+                shutil.copy2(default_file, settings_file)
         try:
-            with open(settings_file, "r", encoding="utf-8") as f:
+            with open(settings_file, "r") as f:
                 self.settings = json.load(f)
         except Exception:
             # If load still fails (e.g. corrupt settings.json), reset to defaults
@@ -4635,6 +5832,56 @@ class MainWindow(wx.Frame):
             if not self.background_mode:
                 wx.CallAfter(wx.MessageBox, f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_WARNING)
         self._migrate_settings()
+        self._apply_global_settings()
+
+    def _apply_global_settings(self):
+        """Overlay install-wide settings from global/app.json onto self.settings
+        (plan Zad 2.3b). Keeps the hundreds of existing self.settings[...] reads
+        working unchanged while language/updates/tray/connection are SHARED
+        across accounts. Best-effort: no global_dir (legacy) -> leave as-is."""
+        gd = getattr(self, "global_dir", None)
+        if not gd:
+            return
+        try:
+            from app_settings import AppSettings, _GENERAL_GLOBAL, _CONNECTION_GLOBAL
+            app = AppSettings(gd)
+            self._app_settings = app
+            general = self.settings.setdefault("general", {})
+            # One-time backfill (GPT-safe): the install-wide "asked once" flags
+            # were per-account before this version. If global app.json doesn't
+            # carry a key yet but THIS account already has a value, seed global
+            # from it — so an account that already finished first-run setup does
+            # not get re-asked once the flag moves to the shared file.
+            raw_global = app._read()
+            for k in _GENERAL_GLOBAL:
+                if k not in raw_global and k in general:
+                    app.set(k, general[k])
+            for k in _GENERAL_GLOBAL:
+                general[k] = app.get(k)
+            connection = self.settings.setdefault("connection", {})
+            for k in _CONNECTION_GLOBAL:
+                connection[k] = app.get(k)
+        except Exception:
+            logging.exception("[settings] applying global app.json failed (non-fatal)")
+
+    def _persist_global_settings(self):
+        """Mirror the global keys of self.settings back into global/app.json so a
+        change made by this account is seen by the others (plan Zad 2.3b)."""
+        app = getattr(self, "_app_settings", None)
+        if app is None:
+            return
+        try:
+            from app_settings import _GENERAL_GLOBAL, _CONNECTION_GLOBAL
+            general = self.settings.get("general", {})
+            for k in _GENERAL_GLOBAL:
+                if k in general:
+                    app.set(k, general[k])
+            connection = self.settings.get("connection", {})
+            for k in _CONNECTION_GLOBAL:
+                if k in connection:
+                    app.set(k, connection[k])
+        except Exception:
+            logging.exception("[settings] persisting global app.json failed (non-fatal)")
 
     def _migrate_settings(self):
         """Migrate settings from old section names to current ones."""
@@ -4700,6 +5947,9 @@ class MainWindow(wx.Frame):
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=4)
             os.replace(tmp, target)
+            # Mirror install-wide keys to global/app.json so other accounts see
+            # the change (plan Zad 2.3b). Best-effort; never blocks the save.
+            self._persist_global_settings()
         except Exception:
             self.error_sound.play()
             # save_settings() is called from many places, including several
@@ -4787,6 +6037,9 @@ class MainWindow(wx.Frame):
 
         output_name = audio_devices.get("output_device_name", "")
         self.sound_system.apply_output_device(output_name, warn_on_failure=True)
+
+        effects_name = audio_devices.get("effects_output_device_name", "")
+        self.sound_system.apply_effects_device(effects_name, warn_on_failure=True)
 
         input_name = audio_devices.get("input_device_name", "")
         self.effective_input_device_name = ""
@@ -4936,6 +6189,77 @@ class MainWindow(wx.Frame):
             logging.warning("[_set_wa_token] Token protection failed, falling back to plaintext: %s", e)
             pi["WA_token"] = token
             self.save_settings()
+        # Track the committed session in this account's SessionStore: the new
+        # token becomes our ACTIVE session; any previously-active session of
+        # OURS that differs is superseded → abandoned (safe for us to close
+        # later). This never touches other accounts' sessions (plan Zad 3.2).
+        try:
+            store = self._get_session_store()
+            if store is not None:
+                new_name = token.replace("/", "_").replace("+", "-").split(":")[0]
+                # Under sessions_lock: register/abandon must be atomic w.r.t. the
+                # shared-userDataDir cleanup so it can never delete a dir we're
+                # activating (GPT r2/r3). NEVER write outside the lock — a
+                # side-write reopens the TOCTOU and can corrupt sessions.json.
+                # On lock timeout we skip the store update (the session still
+                # works; the store is reconciled on a later register/startup).
+                from coord_locks import sessions_lock, LockTimeout
+                gd = getattr(self, "global_dir", None)
+                def _commit():
+                    for s in store.list():
+                        if s.get("status") == "active" and s.get("name") != new_name:
+                            store.set_status(s["name"], "abandoned")
+                    store.register(new_name, token=token.replace("/", "_").replace("+", "-"),
+                                   status="active")
+                if gd:
+                    try:
+                        with sessions_lock(gd):
+                            _commit()
+                    except LockTimeout:
+                        logging.warning("[sessions] sessions_lock busy — deferring active-"
+                                        "session store update (will reconcile later); NOT "
+                                        "writing without the lock")
+                else:
+                    _commit()
+        except Exception:
+            logging.exception("[sessions] registering active session failed (non-fatal)")
+
+    def _session_crypto(self):
+        """Adapter exposing .encrypt/.decrypt over token_vault + this account's
+        secret.key, for SessionStore (per-account WPPConnect session isolation)."""
+        key = self._token_key()
+
+        class _C:
+            def encrypt(self, s: str) -> str:
+                return token_vault.protect_token(s, key)
+
+            def decrypt(self, s: str) -> str:
+                v = token_vault.unprotect_token(s, key)
+                if not v:
+                    raise ValueError("decrypt failed")
+                return v
+
+        return _C()
+
+    def _get_session_store(self):
+        """Return this account's SessionStore (per-account sessions.json),
+        creating it lazily. None in legacy single-account mode (no account dir).
+
+        This is the backbone of session isolation (plan Zad 3.2): each account
+        only ever closes WPPConnect sessions it can PROVE are its own AND
+        abandoned — never another account's live session, never the current one.
+        """
+        store = getattr(self, "_session_store", None)
+        if store is not None:
+            return store
+        try:
+            import session_store
+            acc_dir = os.path.dirname(data_path("settings.json"))
+            self._session_store = session_store.SessionStore(acc_dir, self._session_crypto())
+            return self._session_store
+        except Exception:
+            logging.exception("[sessions] SessionStore init failed (non-fatal)")
+            return None
 
     def retrieve_token(self):
         token = self._get_wa_token()
@@ -4970,6 +6294,156 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
         self.token = token.replace("/", "_").replace("+", "-")
+        # Seed this account's SessionStore with the current (migrated/existing)
+        # session so isolation logic knows it's ACTIVE and ours (plan Zad 3.2).
+        try:
+            store = self._get_session_store()
+            if store is not None and self.token:
+                store.ensure_from_legacy_token(self.token.split(":")[0], self.token)
+        except Exception:
+            logging.exception("[sessions] seeding session store failed (non-fatal)")
+        # Persistent audit: which session are we starting with, and what does the
+        # store think of it + every sibling. If a working session silently turned
+        # 'abandoned' and a fresh (unpaired) one took over between quit and this
+        # launch, THIS line proves it across the log truncation.
+        try:
+            store = self._get_session_store()
+            listing = []
+            if store is not None:
+                for s in store.list():
+                    listing.append(f"{s.get('name','?')[:12]}={s.get('status','?')}")
+            self._shutdown_audit(
+                f"STARTUP account={getattr(self,'account_id','?')} "
+                f"active_session={self.token.split(':')[0]!r} "
+                f"paired={self.settings.get('privateinfo',{}).get('paired')} "
+                f"store=[{', '.join(listing)}]")
+        except Exception:
+            pass
+
+        # Reclaim disk from superseded sessions: each re-pair marks the old
+        # WPPConnect session 'abandoned' but nothing ever deleted its userDataDir
+        # (60-100 MB of Chrome profile each), so they piled up unbounded. Clean
+        # them now, at startup, when they are provably not in use.
+        self._cleanup_abandoned_sessions()
+
+    def _cleanup_abandoned_sessions(self):
+        """Delete this account's superseded ('abandoned') WPPConnect sessions:
+        logout in Node (best-effort), remove the userDataDir, drop the store row.
+
+        Runs on a worker thread (never the wx UI thread): deleting ~1 GB plus a
+        run of HTTP timeouts must never freeze the UI — especially harmful for a
+        screen-reader user (GPT r1 #a).
+        """
+        threading.Thread(target=self._cleanup_abandoned_sessions_worker,
+                         name="session-cleanup", daemon=True).start()
+
+    def _protected_session_names(self) -> set:
+        """Every session name that is active/pairing in ANY account's
+        sessions.json. userDataDir is SHARED across accounts (it lives next to
+        the exe, not per-account), so before deleting a dir we must be sure no
+        other account is using that name — not just our own store (GPT r1 #4/#5).
+
+        FAIL-CLOSED: if ANY sessions.json cannot be read/parsed, raise — the
+        caller aborts the whole cleanup rather than delete on an incomplete
+        protected set (GPT r2). Call under sessions_lock so the set can't change
+        under us between here and the rmtree.
+        """
+        protected = set()
+        acc_root = accounts_root()
+        for acc_id in os.listdir(acc_root):
+            sj = os.path.join(acc_root, acc_id, "sessions.json")
+            if not os.path.isfile(sj):
+                continue
+            # No try/except: a corrupt/unreadable sessions.json must abort the
+            # cleanup (fail-closed), not silently yield a partial protected set.
+            with open(sj, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for s in data.get("sessions", []):
+                if s.get("status") in ("active", "pairing") and s.get("name"):
+                    protected.add(s["name"])
+        return protected
+
+    def _cleanup_abandoned_sessions_worker(self):
+        import connection_state as cs
+        from coord_locks import sessions_lock, LockTimeout
+        try:
+            import session_store
+            store = self._get_session_store()
+            if store is None:
+                return
+            current = (getattr(self, "token", "") or "").split(":")[0]
+            if not current:
+                return  # no confirmed current session — delete nothing (GPT r1 #a)
+            gd = getattr(self, "global_dir", None)
+            if not gd:
+                return
+            udd_root = os.path.abspath(os.path.join(
+                os.path.dirname(data_path("settings.json")),
+                "..", "..", "api", "userDataDir"))
+            node_down = False  # circuit breaker: stop retrying logout once refused
+            # Whole scan -> validate -> rmtree runs under the shared sessions_lock
+            # so no other account can register/activate a name mid-cleanup, and
+            # the protected set is rebuilt HERE (fresh, under the lock) — closing
+            # the TOCTOU window on the shared userDataDir (GPT r2).
+            try:
+                with sessions_lock(gd):
+                    try:
+                        protected = self._protected_session_names()  # fail-closed
+                    except Exception:
+                        logging.exception("[sessions] a sessions.json is unreadable — "
+                                          "aborting cleanup (fail-closed)")
+                        return
+                    protected.add(current)
+                    stale = session_store.sessions_to_close(store.list(), current)
+                    for s in stale:
+                        name = s.get("name") or ""
+                        if not name or name in protected:
+                            continue  # never a current/active/pairing name of any account
+                        target = cs.safe_session_dir_to_delete(udd_root, name)
+                        if not target:
+                            logging.warning("[sessions] refusing unsafe session name for cleanup")
+                            continue
+                        try:
+                            node_down = not self._logout_abandoned_session(name, skip=node_down)
+                            # Delete then CONFIRM gone before dropping the store row.
+                            # No ignore_errors: a failed delete (e.g. a lock) leaves
+                            # the 'abandoned' record so we retry next start (GPT r1 #2/#c).
+                            if os.path.isdir(target):
+                                shutil.rmtree(target)
+                            if os.path.exists(target):
+                                logging.warning("[sessions] userDataDir still present after "
+                                                "delete — keeping record for retry")
+                                continue
+                            store.remove(name)
+                            logging.info("[sessions] cleaned abandoned session %s", name[:12])
+                        except Exception:
+                            logging.exception("[sessions] cleanup of abandoned %s failed "
+                                              "(kept for retry)", name[:12])
+            except LockTimeout:
+                logging.info("[sessions] sessions_lock busy — skipping cleanup this start")
+        except Exception:
+            logging.exception("[sessions] _cleanup_abandoned_sessions failed (non-fatal)")
+
+    def _logout_abandoned_session(self, name: str, skip: bool = False) -> bool:
+        """Best-effort logout by SESSION NAME (never the token — a token in the
+        URL can be mis-parsed and leak to logs; the token goes in Bearer only,
+        GPT r1 #1). Returns True if Node is reachable (so the caller's circuit
+        breaker keeps trying), False on connection-refused (Node down — skip the
+        rest). ``skip`` short-circuits once Node is known down."""
+        if skip or not name:
+            return not skip
+        try:
+            token = self._get_wa_token() or name
+            requests.post(
+                f"{self.wpp_server}:{self.wpp_port}/api/{name}/logout-session",
+                headers={"Authorization": f"Bearer {token}"}, timeout=5,
+            )
+            return True
+        except requests.exceptions.ConnectionError:
+            logging.info("[sessions] Node not reachable — skipping further logouts")
+            return False
+        except Exception:
+            return True  # unknown/other error: Node likely up, keep trying others
 
     def prepare_sync(self):
         # Diagnostic breadcrumbs: prepare_sync() runs synchronously on the
@@ -5113,12 +6587,31 @@ class MainWindow(wx.Frame):
         self.start_connection_health_checker()
         logging.info("[prepare_sync] done")
 
+    # How long a single health-check sleep may overrun before we treat the gap
+    # as "the machine was suspended and just resumed". The loop sleeps 30s, so
+    # anything past ~90s of real elapsed time can only mean the thread was
+    # frozen across a system sleep/hibernate — clocks don't otherwise skip
+    # minutes. See _HEALTH_CHECK_INTERVAL below.
+    _HEALTH_CHECK_INTERVAL = 30
+    _WAKE_DETECT_GAP = 90
+
     def start_connection_health_checker(self):
-        """Periodically verify session health and auto-restart Puppeteer if closed."""
+        """Periodically verify session health and auto-restart Puppeteer if closed.
+
+        Doubles as the reliable wake detector. wx's EVT_POWER_RESUME is bound in
+        __init__, but on Windows it is NOT delivered to a frame that lives in the
+        system tray (hidden top-level window) — observed live as zero "[power]"
+        log lines across real hibernations, so the post-wake zombie-session
+        repair never ran and the app stayed offline until manually restarted.
+        This loop measures how long each sleep *actually* took: a 30s sleep that
+        really took minutes means the process was frozen across a suspend, so we
+        fire the exact same recovery path EVT_POWER_RESUME was supposed to.
+        """
         def _loop():
             # Wait a bit after startup before starting checks
-            time.sleep(30)
+            time.sleep(self._HEALTH_CHECK_INTERVAL)
             while True:
+                slept_at = time.time()
                 try:
                     # Only a *user-requested* offline pauses the checker.  When
                     # offline mode was entered automatically (connection lost)
@@ -5135,7 +6628,25 @@ class MainWindow(wx.Frame):
                         self.trigger_sync_if_needed()
                 except Exception as e:
                     logging.warning(f"[health_checker] Error checking connection in background: {e}")
-                time.sleep(30)
+                time.sleep(self._HEALTH_CHECK_INTERVAL)
+                # Clock-gap wake detection: if the sleep above overran massively,
+                # the machine was suspended and just came back. Trigger recovery
+                # here because EVT_POWER_RESUME is unreliable for a tray app.
+                import connection_state as cs
+                elapsed = time.time() - slept_at
+                if cs.is_wake_from_suspend(elapsed, self._HEALTH_CHECK_INTERVAL,
+                                           self._WAKE_DETECT_GAP) \
+                        and not getattr(self, "_user_offline", False):
+                    logging.info(
+                        "[wake-detect] Health-check sleep overran (%.0fs elapsed vs %ss expected) "
+                        "— treating as resume from suspend, forcing recovery.",
+                        elapsed, self._HEALTH_CHECK_INTERVAL,
+                    )
+                    try:
+                        self._reset_connection_state_for_resume()
+                        self._recover_from_suspend()
+                    except Exception:
+                        logging.exception("[wake-detect] recovery after detected wake failed")
 
         threading.Thread(target=_loop, daemon=True).start()
 
@@ -5162,6 +6673,13 @@ class MainWindow(wx.Frame):
     # Consecutive notLogged/QRCODE readings required before believing the device
     # was really unlinked.  The health checker polls every ~30 s.
     _LOGOUT_CONFIRM_STRIKES = 4
+
+    # How many consecutive unlinked readings to tolerate while a paired session
+    # is still trying to resume (never connected yet this run) before offering
+    # the pairing dialog WITHOUT wiping data. The health checker polls ~30 s, so
+    # 20 ≈ 10 minutes — long enough for a slow WhatsApp Web resume, short enough
+    # that a genuinely dead session eventually surfaces a QR the user can scan.
+    _RESUME_FAIL_STRIKES = 20
 
     # The unlinked state must ALSO have been continuously true for at least this
     # long. Strike count alone is not a time guarantee — two callers can observe
@@ -5486,21 +7004,25 @@ class MainWindow(wx.Frame):
 
     def check_wa_connection_http(self):
         """Query the WPPConnect API via HTTP to check if the instance is already connected to WhatsApp."""
-        if self._is_pairing_dialog_active():
+        if self._is_pairing_dialog_active() or getattr(self, "_pairing_in_progress", False):
             # Nothing below is meaningful yet: WPPConnect reporting
-            # CLOSED/QRCODE/notLogged while the user is actively looking at
-            # the pairing dialog is completely normal — that IS what
-            # "not paired yet" looks like, not an outage. Every branch
-            # below unconditionally called _set_wa_connected(False, ...)
-            # (only the *auto-start-session* side effect was gated on the
-            # dialog being open), so this ran every 30s during pairing and
-            # announced "sem conexão com o WhatsApp. Modo offline ativado
-            # automaticamente" — sound and speech — while the user hadn't
-            # even finished scanning the QR code, let alone ever connected.
-            # This whole HTTP poll exists to detect/recover from outages
-            # *after* pairing; pairing's own completion is already driven by
-            # WebSocket events (on_connection_update/session-logged), so
-            # skipping it entirely here loses nothing.
+            # CLOSED/QRCODE/notLogged while the user is actively pairing is
+            # completely normal — that IS what "not paired yet" / "waiting for
+            # the QR or phone code to be entered" looks like, not an outage.
+            #
+            # The guard checks BOTH the on-screen dialog AND _pairing_in_progress
+            # (set by connect.py for the whole pairing flow). Relying on the
+            # dialog alone missed the case that actually bit a live multi-account
+            # user: a freshly-switched-to pending account pairing where the
+            # health poll saw QRCODE (the expected "scan me" state) and fired
+            # _on_disconnect() → clear_local_data() mid-pairing, ~1s after the QR
+            # appeared, so pairing could never complete. _pairing_in_progress is
+            # the authoritative "do not touch the session" signal.
+            #
+            # This whole HTTP poll exists to detect/recover from outages *after*
+            # pairing; pairing's own completion is driven by WebSocket events
+            # (on_connection_update/session-logged), so skipping it here loses
+            # nothing.
             return
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/status-session"
         headers = {
@@ -5546,6 +7068,8 @@ class MainWindow(wx.Frame):
                 # see _LOGOUT_CONFIRM_STRIKES.
                 if status not in ("notLogged", "QRCODE"):
                     self._logout_strikes = 0
+                    self._resume_fail_strikes = 0
+                    self._last_strike_ts = 0.0
                     self._logout_first_seen = None
 
                 # Robust check: Only call start-session if the instance is explicitly CLOSED, DESTROYED, or completely inactive.
@@ -5616,6 +7140,15 @@ class MainWindow(wx.Frame):
                     # while the dialog is active — kept as a defensive fallback.)
                     if self._is_pairing_dialog_active():
                         logging.info("[check_wa_connection_http] Skipping auto-start — pairing dialog is active.")
+                    elif getattr(self, "_recovery_restart_active", False):
+                        # An ACTIVE close/kill/start restart sequence owns the
+                        # browser right now; the CLOSED we see is likely ITS own
+                        # close-session in flight. Firing start-session here would
+                        # race it and could spawn a duplicate Chrome / detached
+                        # frame (GPT r5 #3 — scoped to the active restart only, NOT
+                        # the whole passive observation window).
+                        logging.info("[check_wa_connection_http] Skipping auto-start — "
+                                     "recovery restart sequence in progress owns it.")
                     else:
                         try:
                             start_url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/start-session"
@@ -5654,18 +7187,12 @@ class MainWindow(wx.Frame):
                             self._on_disconnect()
 
                         if self.settings.get("privateinfo", {}).get("paired"):
-                            # Destructive path: _on_disconnect() wipes the whole
-                            # local database, so an unlinked reading has to be
-                            # confirmed first — see _logout_confirmed().
-                            #
                             # An automatic _restart_wpp_session() (dead-browser
                             # recovery) legitimately re-shows a fresh QR itself
                             # whenever the stored token turns out to already be
                             # bad — that is NOT a phone-side unlink, and must
-                            # never be confirmed as one. See
-                            # _auto_restart_grace_active()/_restart_wpp_session()'s
-                            # docstring for the incident this guards against
-                            # (a real one: it wiped a user's local database).
+                            # never be confirmed as one (a real incident: it
+                            # wiped a user's local database).
                             if self._auto_restart_grace_active():
                                 logging.info(
                                     "[check_wa_connection_http] %s seen while an "
@@ -5673,11 +7200,68 @@ class MainWindow(wx.Frame):
                                     "not confirming a logout yet.", status,
                                 )
                                 self._logout_strikes = 0
+                                self._resume_fail_strikes = 0
+                                self._last_strike_ts = 0.0
                                 self._logout_first_seen = None
                                 return
-                            if not self._logout_confirmed(status):
+                            # Destructive decisions go through the pure classifier
+                            # (connection_state.classify_unlinked) so the "logout
+                            # vs still-resuming vs resume-failed" rule is one
+                            # tested place. The key invariant: never wipe a
+                            # session that has not been connected THIS run — it's
+                            # resuming from its saved profile, and a transient
+                            # QRCODE during resume is NOT a logout (the bug that
+                            # kept wiping accounts; a real log showed the server
+                            # reaching 'inChat' the same second the client wiped).
+                            import connection_state as cs
+                            ever = bool(getattr(self, "_wa_connect_announced", False))
+                            # Count at most one strike per STRIKE_MIN_INTERVAL so
+                            # the thresholds mean real elapsed time, not raw
+                            # reading count: tight poll loops (e.g. _run_sync's
+                            # 0.2s cadence) used to race through 20 unlinked
+                            # readings in ~6s and wipe a session WhatsApp had just
+                            # logged back in. A reading inside the interval is
+                            # still "resuming, data preserved" — never escalates.
+                            now = time.time()
+                            if not cs.should_count_strike(now, getattr(self, "_last_strike_ts", 0.0)):
+                                logging.info(
+                                    "[check_wa_connection_http] Unlinked '%s' "
+                                    "(ever_connected=%s) — within strike interval, "
+                                    "not counting; data preserved.", status, ever)
                                 return
-                            wx.CallAfter(_logout_with_warning)
+                            self._last_strike_ts = now
+                            if ever:
+                                self._logout_strikes = getattr(self, "_logout_strikes", 0) + 1
+                            else:
+                                self._resume_fail_strikes = getattr(self, "_resume_fail_strikes", 0) + 1
+                            decision = cs.classify_unlinked(
+                                status,
+                                ever_connected=ever,
+                                logout_strikes=getattr(self, "_logout_strikes", 0),
+                                resume_strikes=getattr(self, "_resume_fail_strikes", 0),
+                                logout_confirm_strikes=self._LOGOUT_CONFIRM_STRIKES,
+                                resume_fail_strikes=self._RESUME_FAIL_STRIKES,
+                            )
+                            if decision == cs.LOGOUT and not getattr(self, "_logout_handled", False):
+                                self._logout_handled = True
+                                logging.warning(
+                                    "[check_wa_connection_http] Confirmed logout (%s, "
+                                    "%d strikes) — disconnecting and wiping.",
+                                    status, self._logout_strikes)
+                                wx.CallAfter(_logout_with_warning)
+                            elif decision == cs.RESUME_FAILED and not getattr(self, "_logout_handled", False):
+                                self._logout_handled = True
+                                logging.warning(
+                                    "[check_wa_connection_http] Session did not resume "
+                                    "after %d readings — pairing dialog WITHOUT wiping.",
+                                    self._resume_fail_strikes)
+                                wx.CallAfter(lambda: self._on_disconnect(wipe=False))
+                            else:
+                                logging.info(
+                                    "[check_wa_connection_http] Unlinked '%s' → %s "
+                                    "(ever_connected=%s) — data preserved.",
+                                    status, decision, ever)
+                            return
                         else:
                             # Not paired: there is nothing to lose (the database
                             # is empty by definition) and _on_disconnect() is
@@ -5982,7 +7566,7 @@ class MainWindow(wx.Frame):
             #      locally, which on a reconnection means it is fully warmed up, or
             #  (c) we've exhausted retries.
             settled = server_count > 0 and server_count == prev_server_count
-            covers_cache = has_local_chats and local_chat_count > 0 and server_count >= local_chat_count
+            covers_cache = has_local_chats and server_count >= local_chat_count
             if settled or covers_cache:
                 chat_list_settled = True
                 break
@@ -6233,11 +7817,6 @@ class MainWindow(wx.Frame):
                         wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
-                if not self.background_mode:
-                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
-            finally:
-                self._media_sync_running = False
-                wx.CallAfter(self._set_status, "")
             logging.info("[start_sync] Phase 2 media auto-download finished.")
         else:
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
@@ -6760,12 +8339,6 @@ class MainWindow(wx.Frame):
                                 if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
-                        # If chat exists in self.chats (passed in), preserve any higher unreadCount
-                        if hasattr(self, "chats") and jid in self.chats:
-                            local_unread = int(self.chats[jid].get("unreadCount") or 0)
-                            server_unread = int(chat.get("unreadCount") or 0)
-                            if local_unread > server_unread:
-                                chat["unreadCount"] = local_unread
                         chats[jid] = chat
                     else:
                         for k, v in chat.items():
@@ -8897,16 +10470,15 @@ class MainWindow(wx.Frame):
         return None
 
     def preselect_conversations(self):
-        # Checks if window is still open
+        #Checks if window is still open
         if self.IsShown():
             lst = self.conversations_panel.conversations_list
             if lst.GetItemCount() > 0:
-                # Only preselect focus if there is no current selection/focus
+                # Only preselect if there is no current selection/focus
                 if lst.GetFocusedItem() == -1:
                     lst.Focus(0)
                     lst.Select(0)
                     lst.EnsureVisible(0)
-
 
     def sync_remote_chats(self):
         chats = list(self.chats.values())
@@ -9562,18 +11134,17 @@ class MainWindow(wx.Frame):
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
             return False
 
-    def sync_media_for_all_chats(self) -> int:
+    def sync_media_for_all_chats(self):
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
-                        "stickerMessage", "videoMessage",
-                        "audio", "ptt", "document", "doc", "image", "sticker", "video"}
+                        "stickerMessage", "videoMessage"}
         tasks = [
             msg
             for chat in self.chats.values()
             for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
-            if (msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES)
+            if msg.get("messageType") in _MEDIA_TYPES
         ]
         if not tasks:
-            return 0
+            return
 
         timeout = self._MEDIA_SYNC_TIMEOUT
         with ThreadPoolExecutor(max_workers=self._MEDIA_SYNC_WORKERS) as pool:
@@ -9586,7 +11157,6 @@ class MainWindow(wx.Frame):
 
         # Persist the set of expired IDs accumulated during this sync run.
         self._save_media_failed_ids()
-        return len(tasks)
 
     def _refresh_open_conversation_after_sync(self, remote_jid: str, chat: dict) -> None:
         """Repaint the open conversation after sync_chat_messages() replaces
@@ -10201,19 +11771,6 @@ class MainWindow(wx.Frame):
         if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
             return
         message_type = msg.get("messageType", "")
-        if not message_type and msg.get("type"):
-            t = str(msg.get("type"))
-            if t in ("audio", "ptt"):
-                message_type = "audioMessage"
-            elif t == "image":
-                message_type = "imageMessage"
-            elif t == "video":
-                message_type = "videoMessage"
-            elif t in ("document", "doc"):
-                message_type = "documentMessage"
-            elif t == "sticker":
-                message_type = "stickerMessage"
-
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
         if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
             return
@@ -11668,15 +13225,6 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        remote_jid = _key.get("remoteJid", "") or media.get("from", "")
-        # If remote_jid is phone@c.us and we have an LID mapping for it, prefer LID JID
-        if remote_jid and not remote_jid.endswith("@lid"):
-            norm_phone = self._normalize_jid(remote_jid)
-            alt_lid = getattr(self, "_phone_to_lid", {}).get(norm_phone, "")
-            if alt_lid:
-                _key = dict(_key)
-                _key["remoteJid"] = alt_lid
-
         msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
@@ -11705,39 +13253,21 @@ class MainWindow(wx.Frame):
             elif t in ("document", "doc"):
                 msg_type = "documentMessage"
 
-        # Check nested structures as well as top-level keys
-        candidate_objs = []
-        if isinstance(msg_inner_obj, dict):
-            candidate_objs.append(msg_inner_obj)
-            if msg_type and isinstance(msg_inner_obj.get(msg_type), dict):
-                candidate_objs.append(msg_inner_obj.get(msg_type))
-            for k in ("audioMessage", "imageMessage", "videoMessage", "documentMessage", "stickerMessage"):
-                if isinstance(msg_inner_obj.get(k), dict):
-                    candidate_objs.append(msg_inner_obj.get(k))
-        candidate_objs.append(media)
-
-        for obj in candidate_objs:
-            if not body_data.get("mediaKey") and obj.get("mediaKey"):
-                mk = obj.get("mediaKey")
-                if isinstance(mk, bytes):
-                    body_data["mediaKey"] = base64.b64encode(mk).decode("utf-8")
-                elif isinstance(mk, dict) and "data" in mk:
-                    body_data["mediaKey"] = base64.b64encode(bytes(mk["data"])).decode("utf-8")
-                else:
-                    body_data["mediaKey"] = str(mk)
-            if not body_data.get("clientUrl") and (obj.get("url") or obj.get("clientUrl")):
-                body_data["clientUrl"] = obj.get("url") or obj.get("clientUrl")
-            if not body_data.get("directPath") and obj.get("directPath"):
-                body_data["directPath"] = obj.get("directPath")
-            if not body_data.get("mimetype") and obj.get("mimetype"):
-                body_data["mimetype"] = obj.get("mimetype")
-
-        if msg_type:
-            body_data["type"] = msg_type.replace("Message", "")
+        if msg_type and isinstance(msg_inner_obj, dict):
+            inner = msg_inner_obj.get(msg_type)
+            if isinstance(inner, dict):
+                if "mediaKey" in inner and inner["mediaKey"]:
+                    body_data["mediaKey"] = inner["mediaKey"]
+                if "url" in inner and inner["url"]:
+                    body_data["clientUrl"] = inner["url"]
+                if "directPath" in inner and inner["directPath"]:
+                    body_data["directPath"] = inner["directPath"]
+                if "mimetype" in inner and inner["mimetype"]:
+                    body_data["mimetype"] = inner["mimetype"]
+                body_data["type"] = msg_type.replace("Message", "")
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
-        has_direct_path = bool(body_data.get("directPath"))
         media_type = body_data.get("type", "")
         logging.info(
             "[get_base64_from_media] Requesting media for msg_id=%s, url=%s, has_mediaKey=%s, has_clientUrl=%s, type=%s",
@@ -14754,28 +16284,101 @@ def setup_logging():
 
 if __name__ == "__main__":
     try:
-        from autostart import acquire_single_instance_mutex, activate_existing_window
+        import app_paths
+        from account_bootstrap import resolve_startup, parse_startup_source
+        from account_migration import migrate_if_needed
+        from accounts import AccountRegistry
+        import update_coord
 
         background = "--background" in sys.argv
-        first_instance = acquire_single_instance_mutex()
+        startup_source = parse_startup_source(sys.argv)
+        gd = app_paths.global_dir()
 
+        # 1) Updater coordination FIRST (before migration): if an install is in
+        #    progress, don't start into a file-swap; otherwise claim a runtime
+        #    lease so the updater won't swap files under us (plan Zad 2.2/2.-1).
+        os.makedirs(gd, exist_ok=True)
+        if update_coord.is_update_in_progress(gd):
+            sys.exit(0)
+        _runtime_lease = update_coord.try_create_runtime_lease(gd)
+        if _runtime_lease is None:
+            sys.exit(0)  # an update slipped in between the check and the claim
+        atexit.register(update_coord.release_runtime_lease, gd, _runtime_lease)
+
+        # 2) One-time legacy flat-data migration, then resolve which account.
+        migrate_if_needed(gd)
+        _registry = AccountRegistry(gd)
+        _startup = resolve_startup(sys.argv, _registry)
+
+        _mode = _startup["mode"]
+        if _mode == "error":
+            ctypes.windll.user32.MessageBoxW(
+                0, f"WinZapp: {_startup.get('reason', 'nieprawidłowe konto')}",
+                "WinZapp", 0x10)
+            sys.exit(2)
+        elif _mode == "manager":
+            # Global manager mode: no account/data_path, no Node (plan sekcja F).
+            # TODO(Zad 4.5/4.6): show the account manager. For now, inform+exit.
+            ctypes.windll.user32.MessageBoxW(
+                0, "WinZapp: brak kont do uruchomienia (menedżer kont w budowie).",
+                "WinZapp", 0x40)
+            sys.exit(0)
+        elif _mode == "first_run":
+            _acc = _registry.add("default", state="pending")
+            _account_id = _acc["id"]
+            _resume_pending = True
+        elif _mode == "autostart_boot":
+            # Boot launcher: open foreground here, spawn the rest in background.
+            from account_launcher import build_launch_command
+            _account_id = _startup["foreground"]
+            for _bg_id in _startup.get("background", []):
+                try:
+                    subprocess.Popen(build_launch_command(
+                        sys.argv[0], sys.executable, _bg_id,
+                        getattr(sys, "frozen", False),
+                        startup_source="autostart", background=True))
+                except Exception:
+                    logging.exception("[autostart-boot] failed to spawn %s", _bg_id)
+            startup_source = "autostart"
+            _resume_pending = (_registry.get(_account_id) or {}).get("state") == "pending"
+        else:  # "account"
+            _account_id = _startup["account_id"]
+            _resume_pending = _startup.get("resume_pending", False)
+
+        # 3) Bind this process to its account BEFORE mutex/AppUserModelID/window.
+        app_paths.set_active_account(_account_id)
+        _account = _registry.get(_account_id) or {}
+        _account_name = _account.get("name", "WinZapp")
+
+        # Per-account AUMID so Windows groups toasts per account (GPT r4 #8).
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                f"WinZapp.{_account_id}")
+        except Exception:
+            pass
+
+        from autostart import acquire_single_instance_mutex
+        first_instance = acquire_single_instance_mutex()  # keyed on per-account data_path()
         if not first_instance:
-            # Deliberately BEFORE setup_logging(): the log file is truncated
-            # on open so it only ever holds the current run, which means a
-            # second launch must not touch it — the instance that owns it is
-            # still running and writing to it.
+            # Another process already runs THIS account: ask it to come to the
+            # foreground via account-scoped IPC (not a title match), then exit.
             if not background:
-                # A normal launch while WinZapp is already running in the background:
-                # bring the existing window to the foreground and exit.
-                activate_existing_window()
-            # If --background and already running: nothing to do — exit silently.
+                try:
+                    import ipc
+                    ipc.request_activate(gd, _account_id, source=startup_source)
+                except Exception:
+                    pass
             sys.exit(0)
 
         setup_logging()
-        logging.info("Instance lock acquired.")
+        logging.info("Instance lock acquired for account %s (%s).", _account_id, _account_name)
         logging.info("Creating wx.App...")
         app = wx.App()
-        frame = MainWindow()
+        frame = MainWindow(account_id=_account_id, account_name=_account_name,
+                           startup_source=startup_source, resume_pending=_resume_pending,
+                           registry=_registry, global_dir=gd)
+    except SystemExit:
+        raise
     except Exception:
         tb = format_exc()
         try:
