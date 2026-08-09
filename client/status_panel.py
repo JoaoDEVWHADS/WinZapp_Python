@@ -5,7 +5,6 @@ import tempfile
 import threading
 import wx
 import requests
-import sound_lib.stream as sl_stream
 from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext
 from core.utils import format_number
 
@@ -157,16 +156,15 @@ class StatusPanel(wx.Panel):
         self._selected_contact_idx = -1
         # Index of current status within the selected contact's statuses
         self._current_status_idx = 0
+        # The actual status dict/contact entry/copy-text currently shown in
+        # the viewer — set by _show_current_status(), read by the action
+        # buttons (copy text, save media, open video, reply).
+        self._current_status       = None
+        self._current_status_entry = None
+        self._current_status_text  = ""
 
         # Liked status tracking: status_id → bool
         self._liked_statuses: dict = {}
-
-        # Audio/video player state
-        self._audio_stream    = None
-        self._is_playing      = False
-        self._audio_temp_file = None
-        self._audio_timer     = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_audio_timer, self._audio_timer)
 
         self.init_UI()
         self._create_accelerators()
@@ -214,15 +212,43 @@ class StatusPanel(wx.Panel):
 
         viewer_sizer.Add(nav_sizer, 0, wx.LEFT | wx.BOTTOM, 5)
 
-        self._play_pause_btn = wx.Button(self._viewer_panel, label=i18n.t("status_play_pause"))
-        self._play_pause_btn.Bind(wx.EVT_BUTTON, self._on_play_pause)
-        viewer_sizer.Add(self._play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-        self._play_pause_btn.Hide()
+        # Video statuses have no in-app player (BASS is audio-only and can't
+        # decode WhatsApp's H.264/AAC .mp4 anyway — the previous "play/pause"
+        # button silently failed on every video). Opening it in the system's
+        # default video player actually works and needs no extra bundled
+        # codec/plugin.
+        self._open_video_btn = wx.Button(self._viewer_panel, label=i18n.t("status_open_video"))
+        self._open_video_btn.Bind(wx.EVT_BUTTON, self._on_open_video)
+        viewer_sizer.Add(self._open_video_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._open_video_btn.Hide()
 
         self._like_btn = wx.Button(self._viewer_panel, label=i18n.t("status_like"))
         self._like_btn.Bind(wx.EVT_BUTTON, self._on_like_status)
         viewer_sizer.Add(self._like_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._like_btn.Hide()
+
+        self._copy_text_btn = wx.Button(self._viewer_panel, label=i18n.t("status_copy_text"))
+        self._copy_text_btn.Bind(wx.EVT_BUTTON, self._on_copy_status_text)
+        viewer_sizer.Add(self._copy_text_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._copy_text_btn.Hide()
+
+        self._save_media_btn = wx.Button(self._viewer_panel, label=i18n.t("status_save_media"))
+        self._save_media_btn.Bind(wx.EVT_BUTTON, self._on_save_status_media)
+        viewer_sizer.Add(self._save_media_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._save_media_btn.Hide()
+
+        # ── Reply to the currently viewed status ────────────────────────────
+        self._reply_label = wx.StaticText(self._viewer_panel, label=i18n.t("status_reply_label"))
+        viewer_sizer.Add(self._reply_label, 0, wx.LEFT | wx.TOP, 5)
+        self._reply_field = wx.TextCtrl(self._viewer_panel, style=wx.TE_PROCESS_ENTER)
+        self._reply_field.Bind(wx.EVT_TEXT_ENTER, self._on_send_status_reply)
+        viewer_sizer.Add(self._reply_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
+        self._reply_send_btn = wx.Button(self._viewer_panel, label=i18n.t("status_reply_send"))
+        self._reply_send_btn.Bind(wx.EVT_BUTTON, self._on_send_status_reply)
+        viewer_sizer.Add(self._reply_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._reply_label.Hide()
+        self._reply_field.Hide()
+        self._reply_send_btn.Hide()
 
         self._viewer_panel.SetSizer(viewer_sizer)
         self._viewer_panel.Hide()
@@ -467,7 +493,14 @@ class StatusPanel(wx.Panel):
         return f"{i18n.t('my_status')}: {suffix}"
 
     def _on_status_list_key_down(self, event):
-        """Make Space activate the focused status item (same as Enter)."""
+        """Make Space activate the focused status item (same as Enter).
+
+        Select() below fires EVT_LIST_ITEM_SELECTED -> _on_status_contact_
+        selected() too, which is where the actual reset-position decision
+        lives — see its own comment. This handler never resets
+        _current_status_idx itself, so whichever of the two paths runs
+        first still leaves the user's position intact.
+        """
         if event.GetKeyCode() == wx.WXK_SPACE:
             idx = self._status_list.GetFocusedItem()
             if idx >= 0:
@@ -478,7 +511,6 @@ class StatusPanel(wx.Panel):
                     contact_idx = idx - 1
                     if 0 <= contact_idx < len(self._status_contacts):
                         self._selected_contact_idx = contact_idx
-                        self._current_status_idx   = 0
                         self._show_current_status()
         else:
             event.Skip()
@@ -503,8 +535,16 @@ class StatusPanel(wx.Panel):
             self.Layout()
             return
 
+        # Only jump back to the FIRST status when selecting a genuinely
+        # different contact. This event also fires from Select() calls
+        # elsewhere (e.g. Space re-activating the row the list already has
+        # focused, while the user has since moved forward within the viewer
+        # via Ctrl+Left/Right) — resetting unconditionally meant pressing
+        # Space while sitting on "status 3 de 5" silently snapped it back to
+        # "1 de 5" for no reason.
+        if contact_idx != self._selected_contact_idx:
+            self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
-        self._current_status_idx   = 0
         self._show_current_status()
 
     def _on_status_contact_activated(self, event):
@@ -558,14 +598,31 @@ class StatusPanel(wx.Panel):
         label    = f"{entry.get('name', '')} — {nav_info}: {content}"
         self._status_content_label.SetLabel(label)
 
-        is_video = msg_type == "videoMessage"
-        if is_video:
-            self._play_pause_btn.Show()
-        else:
-            self._stop_playback()
-            self._play_pause_btn.Hide()
+        # Kept for the action handlers below (copy text, save media, open
+        # video, reply) — all act on "whatever status is currently shown".
+        self._current_status       = status
+        self._current_status_entry = entry
 
-        # ── Like button — only for other people's statuses ────────────────
+        is_video = msg_type == "videoMessage"
+        is_image = msg_type == "imageMessage"
+        self._open_video_btn.Show(is_video)
+        self._save_media_btn.Show(is_video or is_image)
+
+        # Copy-text applies to the actual text content: the full text for a
+        # text status, or just the caption (not the "Foto:"/"Vídeo:" label
+        # prefix _show_current_status() built above) for a media status.
+        if msg_type in ("conversation", "extendedTextMessage"):
+            copy_text = content
+        elif msg_type == "imageMessage":
+            copy_text = (msg_obj.get("imageMessage") or {}).get("caption", "").strip()
+        elif msg_type == "videoMessage":
+            copy_text = (msg_obj.get("videoMessage") or {}).get("caption", "").strip()
+        else:
+            copy_text = ""
+        self._current_status_text = copy_text
+        self._copy_text_btn.Show(bool(copy_text))
+
+        # ── Like / reply — only for other people's statuses ────────────────
         status_key  = status.get("key", {})
         from_me     = status_key.get("fromMe", False)
         if not from_me:
@@ -576,8 +633,14 @@ class StatusPanel(wx.Panel):
                 i18n2.t("status_unlike") if is_liked else i18n2.t("status_like")
             )
             self._like_btn.Show()
+            self._reply_label.Show()
+            self._reply_field.Show()
+            self._reply_send_btn.Show()
         else:
             self._like_btn.Hide()
+            self._reply_label.Hide()
+            self._reply_field.Hide()
+            self._reply_send_btn.Hide()
 
         self._viewer_panel.Show()
         self.Layout()
@@ -651,117 +714,191 @@ class StatusPanel(wx.Panel):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    # ── Video/audio playback ─────────────────────────────────────────────────
+    # ── Open video status (external player) ─────────────────────────────────
+    #
+    # There is no in-app video playback here: sound_lib/BASS is an AUDIO
+    # engine (no video rendering at all) and can't even decode the AAC audio
+    # track of a plain WhatsApp .mp4 without an add-on WinZapp doesn't bundle
+    # (only bass_opus is shipped, in client/lib) — so the previous
+    # "play/pause" button silently failed on every single video status.
+    # Downloading and handing the file to the OS's own default video player
+    # actually works, with no extra bundled codec needed.
 
-    def _on_play_pause(self, event):
-        if self._audio_stream is not None:
-            if self._is_playing:
-                try:
-                    self._audio_stream.pause()
-                except Exception:
-                    pass
-                self._is_playing = False
-            else:
-                try:
-                    self._audio_stream.play()
-                    self._is_playing = True
-                except Exception:
-                    # BASS_Free()/BASS_Init() from a device switch (Settings,
-                    # or a startup fallback) invalidates this paused stream's
-                    # BASS handle — replaying it after falling back to the
-                    # default device would fail again the same way. There's
-                    # no cheap way to resume a freed stream at its old
-                    # position, so restart this status's audio from the
-                    # beginning instead of leaving it silently stuck paused.
-                    if self.main_window.sound_system.handle_playback_failure():
-                        temp_file = self._audio_temp_file
-                        self._audio_stream = None
-                        # _play_file() below calls _stop_playback() first,
-                        # which deletes self._audio_temp_file from disk if
-                        # it's still set — clear it here so that doesn't
-                        # unlink the very file we're about to reopen.
-                        self._audio_temp_file = None
-                        if temp_file:
-                            self._play_file(temp_file)
-        else:
-            self._start_playback()
-
-    def _start_playback(self):
-        if self._selected_contact_idx < 0:
+    def _on_open_video(self, event):
+        if self._current_status is None:
             return
-        entry    = self._status_contacts[self._selected_contact_idx]
-        statuses = entry.get("statuses", [])
-        if not statuses:
+        if self._current_status.get("messageType") != "videoMessage":
             return
-        status = statuses[self._current_status_idx]
-        threading.Thread(target=self._load_and_play, args=(status,), daemon=True).start()
+        threading.Thread(
+            target=self._download_and_open_video,
+            args=(self._current_status,),
+            daemon=True,
+        ).start()
 
-    def _load_and_play(self, status):
+    def _download_and_open_video(self, status):
         mw = self.main_window
         try:
             b64 = mw.get_base64_from_media(status)
             if not b64:
-                return
-            content  = base64.b64decode(b64)
-            msg_type = status.get("messageType", "")
-            suffix   = ".mp4" if msg_type == "videoMessage" else ".ogg"
-            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+                raise ValueError("empty media response")
+            content = base64.b64decode(b64)
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
             tmp.write(content)
             tmp.close()
-            wx.CallAfter(self._play_file, tmp.name)
+            wx.CallAfter(self._open_file_safely, tmp.name)
         except Exception:
-            pass
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("status_video_open_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
 
-    def _play_file(self, path: str):
-        self._stop_playback()
-        try:
-            self._audio_stream    = sl_stream.FileStream(file=path, decode=True)
-            self._audio_temp_file = path
+    def _open_file_safely(self, filepath: str):
+        """Open a file with the default associated program in the foreground.
+        Falls back to Windows' 'openas' dialog if no program is associated.
+        Same approach as ConversationsPanel._open_file_safely()."""
+        import sys
+        import ctypes
+        if sys.platform == "win32":
             try:
-                self._audio_stream.play()
+                res = ctypes.windll.shell32.ShellExecuteW(None, "open", filepath, None, None, 5)
+                if res <= 32:
+                    if res == 31:  # SE_ERR_NOASSOC
+                        ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
+                    else:
+                        raise OSError(f"ShellExecuteW failed with code {res}")
             except Exception:
-                # A device switch just before this (Settings, or a startup
-                # fallback) invalidates the stream we just created — BASS_Free()/
-                # BASS_Init() during handle_playback_failure()'s own fallback
-                # frees it too, so retrying play() on that same object would
-                # fail again the same way. Reopen a fresh one instead.
-                if self.main_window.sound_system.handle_playback_failure():
-                    self._audio_stream = sl_stream.FileStream(file=path, decode=True)
-                    self._audio_stream.play()
-                else:
-                    raise
-            self._is_playing  = True
-            self._audio_timer.Start(500)
-        except Exception:
-            self._stop_playback()
+                try:
+                    ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
+                except Exception:
+                    os.startfile(filepath)
+        else:
+            import subprocess
+            if sys.platform == "darwin":
+                subprocess.call(["open", filepath])
+            else:
+                try:
+                    subprocess.call(["xdg-open", filepath])
+                except Exception:
+                    if hasattr(os, "startfile"):
+                        os.startfile(filepath)
 
-    def _stop_playback(self):
-        if self._audio_timer.IsRunning():
-            self._audio_timer.Stop()
-        if self._audio_stream is not None:
-            try:
-                self._audio_stream.stop()
-            except Exception:
-                pass
-            self._audio_stream = None
-        self._is_playing = False
-        if self._audio_temp_file and os.path.exists(self._audio_temp_file):
-            try:
-                os.unlink(self._audio_temp_file)
-            except Exception:
-                pass
-            self._audio_temp_file = None
+    # ── Copy status text ──────────────────────────────────────────────────────
 
-    def _on_audio_timer(self, event):
-        if self._audio_stream is None:
+    def _on_copy_status_text(self, event):
+        text = self._current_status_text
+        mw   = self.main_window
+        if not text:
+            mw.output(mw.i18n.t("status_copy_error"))
             return
+        import pyperclip
         try:
-            pos   = self._audio_stream.get_position()
-            total = self._audio_stream.get_length()
-            if total > 0 and pos >= total:
-                self._stop_playback()
+            pyperclip.copy(text)
+            mw.output(mw.i18n.t("status_text_copied"))
         except Exception:
-            pass
+            wx.MessageBox(
+                mw.i18n.t("status_copy_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+
+    # ── Save status media (photo/video) ──────────────────────────────────────
+
+    def _on_save_status_media(self, event):
+        status = self._current_status
+        if status is None:
+            return
+        msg_type = status.get("messageType", "")
+        if msg_type not in ("imageMessage", "videoMessage"):
+            return
+        mw = self.main_window
+        if msg_type == "imageMessage":
+            mimetype = (status.get("message", {}).get("imageMessage") or {}).get("mimetype", "image/jpeg")
+            ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "jpg")
+            wildcard = f"{mw.i18n.t('photo')} (*{ext})|*{ext}|*.*|*.*"
+        else:
+            mimetype = (status.get("message", {}).get("videoMessage") or {}).get("mimetype", "video/mp4")
+            ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "mp4")
+            wildcard = f"{mw.i18n.t('video')} (*{ext})|*{ext}|*.*|*.*"
+
+        with wx.FileDialog(
+            self, mw.i18n.t("status_save_media"),
+            defaultFile=f"status{ext}",
+            wildcard=wildcard,
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            save_path = dlg.GetPath()
+
+        threading.Thread(
+            target=self._save_status_media_bg,
+            args=(status, save_path),
+            daemon=True,
+        ).start()
+
+    def _save_status_media_bg(self, status, save_path: str):
+        mw = self.main_window
+        try:
+            b64 = mw.get_base64_from_media(status)
+            if not b64:
+                raise ValueError("empty media response")
+            content = base64.b64decode(b64)
+            with open(save_path, "wb") as fh:
+                fh.write(content)
+            wx.CallAfter(mw.output, mw.i18n.t("status_media_saved"))
+        except Exception:
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("status_media_save_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+
+    # ── Reply to the currently viewed status ─────────────────────────────────
+
+    def _on_send_status_reply(self, event):
+        status = self._current_status
+        entry  = self._current_status_entry
+        if status is None or entry is None:
+            return
+        if status.get("key", {}).get("fromMe"):
+            return  # no reply UI for own statuses — see _show_current_status()
+        text = self._reply_field.GetValue().strip()
+        if not text:
+            return
+        poster_jid = entry.get("jid", "")
+        if not poster_jid:
+            return
+        threading.Thread(
+            target=self._send_status_reply_bg,
+            args=(poster_jid, text, status),
+            daemon=True,
+        ).start()
+
+    def _send_status_reply_bg(self, poster_jid: str, text: str, status: dict):
+        mw = self.main_window
+        try:
+            result = mw.send_text_message(poster_jid, text, quoted=status)
+        except Exception:
+            result = None
+        # send_text_message() returns a message-id string or True on success,
+        # or a dict ({"ok": False, ...}) on a definite failure.
+        ok = bool(result) and not isinstance(result, dict)
+        if ok:
+            wx.CallAfter(self._on_status_reply_sent)
+        else:
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("status_reply_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+
+    def _on_status_reply_sent(self):
+        self._reply_field.SetValue("")
+        self.main_window.output(self.main_window.i18n.t("status_reply_sent"))
 
     # ── Add status (PopupMenu) ───────────────────────────────────────────────
 
@@ -872,6 +1009,7 @@ class StatusPanel(wx.Panel):
         self._media_post_panel.Hide()
         self.Layout()
         self._status_list.SetFocus()
+        self.main_window.output(self.main_window.i18n.t("status_posted"))
         threading.Thread(target=self._load_statuses, daemon=True).start()
 
     # ── Send media status ────────────────────────────────────────────────────
@@ -1008,7 +1146,11 @@ class StatusPanel(wx.Panel):
         self._add_status_btn.SetLabel(i18n.t("status_add"))
         self._prev_status_btn.SetLabel(i18n.t("status_prev"))
         self._next_status_btn.SetLabel(i18n.t("status_next"))
-        self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
+        self._open_video_btn.SetLabel(i18n.t("status_open_video"))
+        self._copy_text_btn.SetLabel(i18n.t("status_copy_text"))
+        self._save_media_btn.SetLabel(i18n.t("status_save_media"))
+        self._reply_label.SetLabel(i18n.t("status_reply_label"))
+        self._reply_send_btn.SetLabel(i18n.t("status_reply_send"))
         # Like button label depends on current state; only refresh if visible
         if self._like_btn.IsShown():
             if self._selected_contact_idx >= 0:
