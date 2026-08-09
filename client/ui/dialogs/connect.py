@@ -503,6 +503,15 @@ class Connect:
         token = getattr(self, 'raw_token', '')
         if not token:
             token = getattr(self.main_window, 'token', '')
+        if not token:
+            # The main_window token may be empty (e.g. a fresh pairing where
+            # start_qrcode_connection hasn't persisted it yet, or a switch
+            # between QR and phone before pairing completed) — fall back to
+            # the session this dialog itself started, so switching modes /
+            # quitting actually closes the previous session's browser on the
+            # server instead of leaking an orphaned Chrome (observed: 4
+            # userDataDirs + 22 chrome-headless shells after a few switches).
+            token = getattr(self, '_last_started_qr_token', '')
         logging.info("[_close_active_session] Active token retrieved: %s", token)
         if token:
             session_name = token.split(':')[0]
