@@ -560,13 +560,12 @@ class MainWindow(wx.Frame):
                 with open(marker_file, "r", encoding="utf-8", errors="ignore") as _mf:
                     marker_content = _mf.read().strip()
                 logging.error("[UPDATER_STATUS] WARNING: Found update_failed.marker from previous update: %s", marker_content)
-                if is_post_update:
-                    # Clean up old marker on successful post-update start
-                    try:
-                        os.remove(marker_file)
-                        logging.info("[UPDATER_STATUS] Cleaned up old update_failed.marker after successful launch.")
-                    except OSError:
-                        pass
+                # Clean up old marker file on successful application startup
+                try:
+                    os.remove(marker_file)
+                    logging.info("[UPDATER_STATUS] Cleaned up old update_failed.marker after successful launch.")
+                except OSError:
+                    pass
             else:
                 logging.info("[UPDATER_STATUS] Application started cleanly without update_failed.marker.")
         except Exception as _me:
