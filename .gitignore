@@ -198,3 +198,20 @@ db.sqlite3-journal
 .ipynb_checkpoints
 
 wppconnect_repos/
+
+# ── AUDITORIA EXCLUSIVA (branch audit/gabriel-reference) ────────────────────
+# Os 10 arquivos protegidos do WinZapp do Joao. Nesta branch de auditoria estes
+# arquivos DEVEM ser rigidamente ignorados: nunca comparar, nunca integrar,
+# nunca modificar. Eles pertencem exclusivamente a base do Joao.
+build.py
+updater.py
+config.py
+version.py
+setup_api.py
+package.json
+api_setup.py
+README
+README.md
+CHANGELOG
+CHANGELOG.md
+release.imo
