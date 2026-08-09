@@ -1512,12 +1512,14 @@ class MainWindow(wx.Frame):
             activated = switch_to_account(self.global_dir, account_id)
             logging.info("[accounts] switch to %s -> %s", account_id,
                          "activated existing process" if activated else "spawned new process")
-            # Option 2 UX: single visible window. Once the target account's
-            # window is coming forward (activated now, or spawning and will show
-            # itself when ready), hide THIS window to the tray. The process
-            # stays alive in the background so this account keeps receiving its
-            # messages/notifications; the user just sees one window at a time.
-            self.hide_to_tray()
+            switch_behavior = "single"
+            if getattr(self, "app_settings", None):
+                switch_behavior = self.app_settings.get("switch_behavior")
+            elif getattr(self, "settings", None):
+                switch_behavior = self.settings.get("general", {}).get("switch_behavior", "single")
+
+            if switch_behavior != "keep_open":
+                self.hide_to_tray()
         except Exception:
             logging.exception("[accounts] switch to %s failed", account_id)
 

@@ -37,6 +37,7 @@ _DEFAULTS: dict[str, Any] = {
     "first_run": True,
     "hotkey_first_run_asked": False,
     "api_type_first_run_asked": False,
+    "switch_behavior": "single",  # "single" (ocultar para a bandeja) ou "keep_open" (manter ambas abertas)
     # single shared WPPConnect connection
     "wpp_server": "http://127.0.0.1",
     "wpp_port": 6300,
@@ -50,7 +51,8 @@ _DEFAULTS: dict[str, Any] = {
 
 # Which legacy general.* keys are global (the rest stay per-account).
 _GENERAL_GLOBAL = ("language", "updates_enabled", "show_tray_icon", "autostart",
-                   "first_run", "hotkey_first_run_asked", "api_type_first_run_asked")
+                   "first_run", "hotkey_first_run_asked", "api_type_first_run_asked",
+                   "switch_behavior")
 _CONNECTION_GLOBAL = ("wpp_server", "wpp_port", "wpp_ws_server", "wpp_api_key", "wpp_custom_api")
 
 

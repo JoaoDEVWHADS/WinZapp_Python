@@ -234,6 +234,26 @@ class SettingsDialog(wx.Dialog):
         self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))
         gen_sizer.Add(self._hotkey_field, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._switch_behavior_box = wx.StaticBox(
+            self._general_page, label=i18n.t("acc_switch_behavior_label")
+        )
+        switch_behavior_sizer = wx.StaticBoxSizer(self._switch_behavior_box, wx.VERTICAL)
+
+        self._switch_behavior_single_rb = wx.RadioButton(
+            self._general_page,
+            label=i18n.t("acc_switch_behavior_single"),
+            style=wx.RB_GROUP,
+        )
+        switch_behavior_sizer.Add(self._switch_behavior_single_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._switch_behavior_keep_open_rb = wx.RadioButton(
+            self._general_page,
+            label=i18n.t("acc_switch_behavior_keep_open"),
+        )
+        switch_behavior_sizer.Add(self._switch_behavior_keep_open_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+
+        gen_sizer.Add(switch_behavior_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
         self._general_page.SetSizer(gen_sizer)
         self._notebook.AddPage(self._general_page, i18n.t("tab_general"))
 
@@ -676,6 +696,17 @@ class SettingsDialog(wx.Dialog):
             self._hotkey_field.SetValue("")
             self._hotkey_field._vk  = 0
             self._hotkey_field._mod = 0
+
+        switch_behavior = "single"
+        if getattr(self.main_window, "app_settings", None):
+            switch_behavior = self.main_window.app_settings.get("switch_behavior")
+        elif getattr(self.main_window, "settings", None):
+            switch_behavior = self.main_window.settings.get("general", {}).get("switch_behavior", "single")
+
+        if switch_behavior == "keep_open":
+            self._switch_behavior_keep_open_rb.SetValue(True)
+        else:
+            self._switch_behavior_single_rb.SetValue(True)
 
         page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
@@ -1468,6 +1499,14 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("general", {})["updates_enabled"] = (
             self._updates_check.GetValue()
         )
+
+        # Account switch behavior
+        new_switch_behavior = (
+            "keep_open" if self._switch_behavior_keep_open_rb.GetValue() else "single"
+        )
+        if getattr(self.main_window, "app_settings", None):
+            self.main_window.app_settings.set("switch_behavior", new_switch_behavior)
+        self.main_window.settings.setdefault("general", {})["switch_behavior"] = new_switch_behavior
 
         # Tray icon
         new_show_tray = self._tray_icon_check.GetValue()
