@@ -29,6 +29,36 @@ from core.sound_system import (
 )
 
 
+def _participant_phone_part(j) -> str:
+    """Strip both the @suffix AND any ":device" companion suffix (e.g.
+    "5511999999999:60@s.whatsapp.net" -> "5511999999999") from a participant
+    JID. WPPConnect's group-participant "id" values commonly carry the
+    device suffix; comparing against it verbatim (a bare ``.split("@")[0]``)
+    never matched the current user's own JID, so the "am I an admin of this
+    group" check always came back False even for a genuine admin — mirrors
+    MainWindow._is_group_send_restricted()'s identical helper (main.py).
+    """
+    if not isinstance(j, str):
+        return ""
+    return j.rsplit("@", 1)[0].split(":")[0]
+
+
+def _participant_is_me(p_jid: str, my_phone_digits: str, my_lid_digits: str, phone_digits_equivalent) -> bool:
+    """True if participant JID *p_jid* is the current user, matching either
+    their phone JID (tolerating the Brazilian 8/9-digit variant via
+    *phone_digits_equivalent*, e.g. MainWindow._phone_digits_equivalent) or
+    their @lid JID (exact digit match — @lid digits are an opaque device
+    identifier, not a phone number, so no digit-count tolerance applies)."""
+    p_digits = _participant_phone_part(p_jid)
+    if not p_digits:
+        return False
+    if my_phone_digits and phone_digits_equivalent(p_digits, my_phone_digits):
+        return True
+    if my_lid_digits and p_digits == my_lid_digits:
+        return True
+    return False
+
+
 def _fmt_ts(ts, i18n):
     """Format a Unix timestamp to a localised date string."""
     if not ts:
@@ -510,9 +540,9 @@ class ConversationDataDialog(wx.Dialog):
         self._participant_names: list = []
         self._participant_is_admin: list = []
         participants = data.get("participants", [])
-        my_jid = getattr(self._mw, "my_jid", "") or ""
-        my_lid = getattr(self._mw, "my_lid", "") or ""
-        my_digits = {j.split("@")[0] for j in (my_jid, my_lid) if j}
+
+        my_phone_digits = _participant_phone_part(getattr(self._mw, "my_jid", ""))
+        my_lid_digits   = _participant_phone_part(getattr(self._mw, "my_lid", ""))
         user_is_admin = False
         lid_to_phone  = getattr(self._mw, "_lid_to_phone", {})
         for p in participants:
@@ -536,7 +566,9 @@ class ConversationDataDialog(wx.Dialog):
             # get_group_info()'s real participant shape is {"id", "isAdmin"}
             # — "admin" doesn't exist on it, so this always read False.
             is_admin_bool = bool(p.get("isAdmin") or p.get("admin"))
-            if is_admin_bool and my_digits and p_jid.split("@")[0] in my_digits:
+            if is_admin_bool and _participant_is_me(
+                p_jid, my_phone_digits, my_lid_digits, self._mw._phone_digits_equivalent
+            ):
                 user_is_admin = True
             idx = self._part_list.GetItemCount()
             # Append the admin status directly onto the row's own text (not
@@ -559,7 +591,7 @@ class ConversationDataDialog(wx.Dialog):
         # buttons, only if the current user is a group admin. If we cannot
         # determine my_jid, enable them anyway (the API will reject the
         # request if the user turns out not to be an admin).
-        self._user_is_admin = bool(user_is_admin or not my_digits)
+        self._user_is_admin = bool(user_is_admin or not (my_phone_digits or my_lid_digits))
         if self._user_is_admin:
             self._add_members_btn.Enable()
             self._add_members_btn_overview.Enable()

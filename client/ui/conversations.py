@@ -6379,6 +6379,23 @@ class ConversationsPanel(wx.Panel):
                     mw.register_jid_mapping(participant_jid, phone)
         if phone:
             return format_number(phone)
+        # No phone mapping for this @lid yet. Unlike a group opened via
+        # ConversationDataDialog (which proactively resolves every unmapped
+        # participant's @lid before showing the list), a participant
+        # mentioned only in a group notification (join/leave/promote/...)
+        # may never have gone through that path — e.g. someone who left
+        # right after being added, with no other message ever attributed to
+        # them. Kick off a background resolution (resolve_lid_jids_via_api
+        # makes a synchronous HTTP call and must never run on this — the UI
+        # — thread; it already dedupes concurrent/repeat requests for the
+        # same JID internally) so a LATER render of this same notification
+        # (conversation reopened, history resynced, ...) shows the real
+        # formatted phone number instead of the raw LID digits forever.
+        threading.Thread(
+            target=mw.resolve_lid_jids_via_api,
+            args=([participant_jid],),
+            daemon=True,
+        ).start()
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]
