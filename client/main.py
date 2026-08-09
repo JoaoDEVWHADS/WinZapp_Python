@@ -8681,21 +8681,26 @@ class MainWindow(wx.Frame):
                     # WPPConnect's list-chats returns every entry in WhatsApp's
                     # internal ChatStore, which includes 1:1 "phantom" chats the
                     # user never actually messaged (e.g. address-book contacts
-                    # WhatsApp matched but no conversation ever started with).
+                    # WhatsApp matched but no conversation ever started with) as
+                    # well as orphaned/ghost group entries from other sessions.
                     # Real chats always carry a last-activity timestamp ("t"),
                     # a last message, or unread messages; entries with none of
                     # these are not real conversations and would otherwise
                     # pollute the chat list and the forward-message picker.
-                    # Groups are exempt: a freshly-joined group can legitimately
-                    # have none of these yet.
-                    if jid not in chats and not jid.endswith("@g.us"):
+                    if jid not in chats:
                         has_activity = (
                             bool(chat.get("t"))
                             or bool(chat.get("lastMessage"))
                             or bool(chat.get("unreadCount"))
                         )
                         if not has_activity:
-                            continue
+                            if not jid.endswith("@g.us"):
+                                continue
+                            # For @g.us, also skip ghost groups that have 0 messages, no activity, and no valid name
+                            g_name = self._group_name_from_chat_dict(chat) or getattr(self, "_group_name_cache", {}).get(jid, "")
+                            if not g_name or g_name.strip() in ("", "Grupo sem nome", "Grupo"):
+                                logging.info(f"[get_remote_chats] Skipping ghost/inactive group without name: {jid}")
+                                continue
                     if jid not in chats:
                         if "messages" not in chat:
                             chat["messages"] = {"messages": {"records": []}}
