@@ -26,6 +26,17 @@ CLIENT_API_DIR   = os.path.join(ROOT_DIR, "client", "api")
 API_PATCHES_DIR  = os.path.join(ROOT_DIR, "client", "api_patches")
 WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 
+# client/core/wppconnect_host_layer_patch.py is the single source of truth
+# for the host.layer.js pairing-code patch text — shared with
+# ApiSetupDialog (client/ui/dialogs/api_setup.py), which needs the exact
+# same patch applied through the real end-user install flow. It's a
+# zero-dependency module (no wx, nothing else from client/), so importing
+# it here doesn't pull in anything setup_api.py couldn't already run before
+# client-side dependencies are installed.
+_CLIENT_DIR = os.path.join(ROOT_DIR, "client")
+if _CLIENT_DIR not in sys.path:
+    sys.path.insert(0, _CLIENT_DIR)
+
 # Files WinZapp patches on top of upstream wppconnect-server. client/api_patches/
 # is the permanent, always-git-tracked source of truth for all of these —
 # preferred below over whatever (if anything) happens to still be sitting in
@@ -181,21 +192,20 @@ def _restore_custom_files(custom_contents: dict):
         print(f"[INFO] Restored custom file: {rel_path}")
 
 
+from core.wppconnect_host_layer_patch import (
+    ORIGINAL_CHECK_QR_CODE as _HOST_LAYER_ORIGINAL_CHECK_QR_CODE,
+    V1_CHECK_QR_CODE as _HOST_LAYER_V1_CHECK_QR_CODE,
+    PATCHED_CHECK_QR_CODE as _HOST_LAYER_PATCHED_CHECK_QR_CODE,
+)
+
+
 def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
     """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
-    phone-number pairing code stops regenerating on every QR-code rotation.
-
-    Upstream bug (wppconnect-team/wppconnect#2836): checkQrCode() dedupes
-    the QR-image branch against `this.urlCode` before re-emitting it, but
-    the phoneNumber branch returns straight into loginByCode() with no
-    equivalent guard — so every ~20-60s WhatsApp-side QR rotation
-    (auth_code_change) generates a BRAND NEW pairing code via
-    genLinkDeviceCodeForPhoneNumber(), even though nothing about the login
-    attempt itself changed. A screen-reader user cannot finish reading an
-    8-character code that gets replaced before they're done — see WinZapp
-    issue #8. This adds a `linkCodeGenerated` guard mirroring the existing
-    `urlCode` one, reset only when a fresh login attempt begins (the same
-    `!needScan` branch that already resets `attempt`).
+    phone-number pairing code stops regenerating on every QR-code rotation,
+    WITHOUT freezing forever if it should ever need a refresh — see
+    client/core/wppconnect_host_layer_patch.py's module docstring for the
+    full v0 (upstream bug)/v1 (WinZapp's first, unsafe attempt)/v2 (current)
+    history. WinZapp issue #8.
 
     This lives in node_modules (a vendored dependency of WPPConnect Server,
     not WPPConnect Server itself), so it can't go through the
@@ -203,10 +213,11 @@ def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
     node_modules from scratch every time, so this must run AFTER npm
     install, same as the existing decrypt.js patch right above this call.
 
-    Idempotent (a no-op if already applied) and best-effort: if the
-    installed wppconnect version doesn't match this exact source text
-    (e.g. a future upstream release), it logs a warning and leaves the
-    file untouched rather than corrupting it or crashing setup_api.py.
+    Idempotent (a no-op if v2 is already applied — including automatically
+    upgrading a machine that still has v1 installed) and best-effort: if
+    the installed wppconnect version doesn't match either known source text
+    (e.g. a future upstream release), it logs a warning and leaves the file
+    untouched rather than corrupting it or crashing setup_api.py.
     """
     if client_api_dir is None:
         client_api_dir = CLIENT_API_DIR
@@ -221,39 +232,18 @@ def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
     with open(host_layer_path, encoding="utf-8") as f:
         content = f.read()
 
-    if "linkCodeGenerated" in content:
-        print("[INFO] host.layer.js pairing-code patch already applied.")
+    if _HOST_LAYER_PATCHED_CHECK_QR_CODE in content:
+        print("[INFO] host.layer.js pairing-code patch (v2) already applied.")
         return True
 
-    original_reset = (
-        "        if (!needScan) {\n"
-        "            this.attempt = 0;\n"
-        "            return;\n"
-        "        }\n"
-    )
-    patched_reset = (
-        "        if (!needScan) {\n"
-        "            this.attempt = 0;\n"
-        "            this.linkCodeGenerated = false;\n"
-        "            return;\n"
-        "        }\n"
-    )
-    original_branch = (
-        "        if (typeof this.options.phoneNumber === 'string') {\n"
-        "            return this.loginByCode(this.options.phoneNumber);\n"
-        "        }\n"
-    )
-    patched_branch = (
-        "        if (typeof this.options.phoneNumber === 'string') {\n"
-        "            if (this.linkCodeGenerated) {\n"
-        "                return;\n"
-        "            }\n"
-        "            this.linkCodeGenerated = true;\n"
-        "            return this.loginByCode(this.options.phoneNumber);\n"
-        "        }\n"
-    )
+    if _HOST_LAYER_V1_CHECK_QR_CODE in content:
+        content = content.replace(_HOST_LAYER_V1_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE, 1)
+        with open(host_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("[OK] Upgraded host.layer.js pairing-code patch from v1 (unsafe — could freeze forever) to v2 (60s cooldown, self-recovering).")
+        return True
 
-    if original_reset not in content or original_branch not in content:
+    if _HOST_LAYER_ORIGINAL_CHECK_QR_CODE not in content:
         print(
             "[WARNING] host.layer.js does not match the expected upstream "
             "source — skipping pairing-code patch (the installed "
@@ -262,11 +252,10 @@ def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
         )
         return False
 
-    content = content.replace(original_reset, patched_reset, 1)
-    content = content.replace(original_branch, patched_branch, 1)
+    content = content.replace(_HOST_LAYER_ORIGINAL_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE, 1)
     with open(host_layer_path, "w", encoding="utf-8") as f:
         f.write(content)
-    print("[OK] Patched host.layer.js — the phone-number pairing code no longer regenerates on every QR rotation.")
+    print("[OK] Patched host.layer.js — the phone-number pairing code no longer regenerates on every QR rotation (60s reuse cooldown).")
     return True
 
 
