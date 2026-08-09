@@ -49,8 +49,8 @@ class _FakeMainWindow:
         return False
 
 
-def _msg(mid):
-    return {"key": {"id": mid, "fromMe": False}, "messageType": "conversation",
+def _msg(mid, from_me=False):
+    return {"key": {"id": mid, "fromMe": from_me}, "messageType": "conversation",
             "message": {"conversation": "hi"}}
 
 
@@ -120,3 +120,42 @@ class TestSeparatorNotReusedAfterBeingRead:
 
         stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m3"))
         assert _sep(stub)["count"] == 2
+
+
+class TestOwnMessagesNeverGetSeparatorTreatment:
+    """Regression: on_incoming_message() also runs for the WebSocket echo of
+    OUR OWN just-sent message (when it isn't matched to its pending row by
+    main.py's by-type matching, e.g. sent from another linked device). An
+    own message must never insert/relocate/increment the unread separator —
+    it broke Alt+2 ("jump to last message"), which could land on a
+    separator/stale row placed just above the user's own just-sent message
+    instead of the message itself."""
+
+    def test_an_own_message_appends_without_touching_the_separator(self):
+        stub = _Stub()
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m1"))  # from someone else
+        assert stub._unread_sep_idx >= 0
+        sep_idx_before = stub._unread_sep_idx
+        sep_count_before = _sep(stub)["count"]
+
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("own1", from_me=True))
+
+        assert stub._unread_sep_idx == sep_idx_before
+        assert _sep(stub)["count"] == sep_count_before
+        # The own message is still appended as the true last row.
+        assert stub._sorted_messages[-1]["key"]["id"] == "own1"
+
+    def test_an_own_message_never_creates_a_separator_from_scratch(self):
+        stub = _Stub()
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("own1", from_me=True))
+        assert stub._unread_sep_idx == -1
+
+    def test_an_own_message_does_not_replace_a_sep_from_open_separator(self):
+        stub = _Stub()
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m1"))
+        stub._sep_from_open = True  # simulate: this separator was from conversation-open
+
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("own1", from_me=True))
+
+        assert stub._sep_from_open is True  # untouched
+        assert stub._sorted_messages[-1]["key"]["id"] == "own1"

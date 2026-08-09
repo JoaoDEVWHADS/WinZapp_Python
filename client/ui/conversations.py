@@ -7220,10 +7220,19 @@ class ConversationsPanel(wx.Panel):
     # ── Alt+2: jump to last message ────────────────────────────────────────
 
     def _on_accel_jump_last(self, event):
-        """Alt+2: move focus to the last message in the current conversation."""
-        count = self.messages_list.GetItemCount()
-        if count > 0:
-            last = count - 1
+        """Alt+2: move focus to the last REAL message in the current
+        conversation — never a sentinel row (unread separator/placeholder).
+        The bottom row is a sentinel whenever the unread separator gets
+        (re)placed at the very end of the list, e.g. right after
+        on_incoming_message() creates a fresh one for a message that just
+        arrived; skip backwards over any such rows instead of focusing them
+        directly, or Alt+2 would land on the separator (or, before that,
+        potentially on a stale earlier row) instead of the newest message.
+        """
+        last = len(self._sorted_messages) - 1
+        while last >= 0 and self._is_separator(self._sorted_messages[last]):
+            last -= 1
+        if last >= 0:
             if not self.messages_list.HasFocus():
                 self.messages_list.SetFocus()
             self.messages_list.Select(last, True)
@@ -8136,43 +8145,56 @@ class ConversationsPanel(wx.Panel):
 
         # Batch all list operations so the screen reader receives a single
         # accessibility event rather than one per insertion/update.
+        from_me = bool(msg.get("key", {}).get("fromMe"))
         self.messages_list.Freeze()
         try:
-            # Manage unread separator
-            # A new live message always represents genuinely new unread
-            # content, even if the user had already reached the bottom (and
-            # thus marked-as-read) earlier in this same conversation session.
-            # Re-arm the latch so _on_message_focused() fires mark-as-read
-            # again once focus reaches/crosses this message.
-            self._unread_sep_marked_read = False
-            if self._unread_sep_idx == -1:
-                # No separator yet — insert one before this new message
-                sep_pos = len(self._sorted_messages)
-                sep = {"_type": "unread_separator", "count": 1}
-                self._sorted_messages.insert(sep_pos, sep)
-                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
-                self._unread_sep_idx = sep_pos
-                self._sep_from_open = False
-            elif self._sep_from_open:
-                # Separator was placed when the conversation was opened (old
-                # unread messages). Move it just before this new message and
-                # reset the count to 1.
-                old_idx = self._unread_sep_idx
-                self._sorted_messages.pop(old_idx)
-                self.messages_list.DeleteItem(old_idx)
-                sep_pos = len(self._sorted_messages)
-                sep = {"_type": "unread_separator", "count": 1}
-                self._sorted_messages.insert(sep_pos, sep)
-                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
-                self._unread_sep_idx = sep_pos
-                self._sep_from_open = False
-            else:
-                # Separator was placed by a previous live message — increment count
-                sep = self._sorted_messages[self._unread_sep_idx]
-                sep["count"] = sep.get("count", 0) + 1
-                self.messages_list.SetItemText(
-                    self._unread_sep_idx, self._render_separator(sep["count"])
-                )
+            # Manage unread separator — never for our OWN messages. This
+            # branch also runs for the WebSocket echo of a message we just
+            # sent (when it isn't matched to its optimistic pending row by
+            # main.py's by-type matching, e.g. sent from another linked
+            # device) — an own message is never "unread", the same
+            # principle first_unread_index() already applies when placing
+            # the separator on conversation open. Without this guard, that
+            # echo could insert/relocate a separator directly above the
+            # user's own just-sent message, which is what made Alt+2 ("jump
+            # to last message") land on a stale earlier separator/row
+            # instead of the message the user actually just sent.
+            if not from_me:
+                # A new live message always represents genuinely new unread
+                # content, even if the user had already reached the bottom
+                # (and thus marked-as-read) earlier in this same
+                # conversation session. Re-arm the latch so
+                # _on_message_focused() fires mark-as-read again once focus
+                # reaches/crosses this message.
+                self._unread_sep_marked_read = False
+                if self._unread_sep_idx == -1:
+                    # No separator yet — insert one before this new message
+                    sep_pos = len(self._sorted_messages)
+                    sep = {"_type": "unread_separator", "count": 1}
+                    self._sorted_messages.insert(sep_pos, sep)
+                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self._unread_sep_idx = sep_pos
+                    self._sep_from_open = False
+                elif self._sep_from_open:
+                    # Separator was placed when the conversation was opened (old
+                    # unread messages). Move it just before this new message and
+                    # reset the count to 1.
+                    old_idx = self._unread_sep_idx
+                    self._sorted_messages.pop(old_idx)
+                    self.messages_list.DeleteItem(old_idx)
+                    sep_pos = len(self._sorted_messages)
+                    sep = {"_type": "unread_separator", "count": 1}
+                    self._sorted_messages.insert(sep_pos, sep)
+                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self._unread_sep_idx = sep_pos
+                    self._sep_from_open = False
+                else:
+                    # Separator was placed by a previous live message — increment count
+                    sep = self._sorted_messages[self._unread_sep_idx]
+                    sep["count"] = sep.get("count", 0) + 1
+                    self.messages_list.SetItemText(
+                        self._unread_sep_idx, self._render_separator(sep["count"])
+                    )
 
             # Append the real message (focus must NOT move)
             self._sorted_messages.append(msg)
