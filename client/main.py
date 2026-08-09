@@ -1521,10 +1521,21 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[accounts] switch to %s failed", account_id)
 
+    def update_account_name(self, new_name: str):
+        """Update the account name of this window dynamically when renamed in registry."""
+        if not new_name:
+            return
+        self.account_name = new_name
+        self.SetTitle(self._format_title())
+
     def _rebuild_accounts_menu(self):
         """Rebuild the whole menu bar so the Accounts list reflects registry
-        changes (add/rename/archive/delete)."""
+        changes (add/rename/archive/delete), and update current account name/title."""
         try:
+            if getattr(self, "account_id", None) and getattr(self, "registry", None):
+                acc = self.registry.get(self.account_id)
+                if acc and acc.get("name"):
+                    self.update_account_name(acc["name"])
             self._build_menubar()
         except Exception:
             logging.exception("[accounts] menu rebuild failed")
@@ -1548,6 +1559,9 @@ class MainWindow(wx.Frame):
                 logging.info("[accounts] menu stale on focus — rebuilding "
                              "(was=%s now=%s)",
                              getattr(self, "_accounts_menu_signature", None), current)
+                acc = registry.get(self.account_id)
+                if acc and acc.get("name"):
+                    self.update_account_name(acc["name"])
                 self._build_menubar()  # rebuilds menu + hotkey slots + signature
         except Exception:
             logging.exception("[accounts] stale-menu refresh failed (non-fatal)")

@@ -425,6 +425,8 @@ class AccountManagerDialog:
                 if name:
                     self.registry.update_fields(acc["id"], name=name)
                     self._reload()
+                    if acc["id"] == self.current and hasattr(self.dlg.GetParent(), "update_account_name"):
+                        self.dlg.GetParent().update_account_name(name)
         finally:
             dlg.Destroy()
 
