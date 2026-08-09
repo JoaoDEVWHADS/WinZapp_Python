@@ -1083,12 +1083,7 @@ class MainWindow(wx.Frame):
                     self.ws = WebSocketClient(self, self.connect, self.token)
                     logging.info("[post_ui_init] STEP 3 — WebSocketClient created OK.")
 
-                logging.info("[post_ui_init] STEP 4 — calling prepare_sync()...")
-                self.prepare_sync()
-                logging.info("[post_ui_init] STEP 4 — prepare_sync() done. Calling wx.CallAfter(set_chats)...")
-                # Refresh the chat list on the GUI thread now that the DB is populated.
-                wx.CallAfter(self.set_chats)
-                logging.info("[post_ui_init] STEP 4 — set_chats scheduled on GUI thread.")
+                logging.info("[post_ui_init] STEP 4 — prepare_sync already performed during window initialization.")
 
                 logging.info("[post_ui_init] STEP 5 — calling check_wa_connection_http()...")
                 self.check_wa_connection_http()
