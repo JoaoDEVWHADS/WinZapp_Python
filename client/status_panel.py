@@ -7,6 +7,7 @@ import wx
 import requests
 from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext
 from core.utils import format_number
+from core.video_player import VideoPlayer
 
 
 # ── My Status dialog ─────────────────────────────────────────────────────────
@@ -166,8 +167,21 @@ class StatusPanel(wx.Panel):
         # Liked status tracking: status_id → bool
         self._liked_statuses: dict = {}
 
+        # Local path of the currently downloaded video status, if any (kept
+        # so re-pressing Play/Pause doesn't re-download the same file).
+        self._video_local_path = None
+        self._video_download_status_id = None
+
         self.init_UI()
         self._create_accelerators()
+
+        self._video_player = VideoPlayer(main_window, self._video_bitmap)
+        # Stop playback (audio + frame decoding) whenever this panel is
+        # hidden — Alt+1/Alt+4 switching away from the Status tab, or the
+        # window closing — regardless of which of the several call sites in
+        # main.py does the hiding. Without this a video kept playing (audio
+        # audible, ffmpeg still decoding) in the background indefinitely.
+        self.Bind(wx.EVT_SHOW, self._on_panel_show)
 
     # ── UI ───────────────────────────────────────────────────────────────────
 
@@ -212,15 +226,19 @@ class StatusPanel(wx.Panel):
 
         viewer_sizer.Add(nav_sizer, 0, wx.LEFT | wx.BOTTOM, 5)
 
-        # Video statuses have no in-app player (BASS is audio-only and can't
-        # decode WhatsApp's H.264/AAC .mp4 anyway — the previous "play/pause"
-        # button silently failed on every video). Opening it in the system's
-        # default video player actually works and needs no extra bundled
-        # codec/plugin.
-        self._open_video_btn = wx.Button(self._viewer_panel, label=i18n.t("status_open_video"))
-        self._open_video_btn.Bind(wx.EVT_BUTTON, self._on_open_video)
-        viewer_sizer.Add(self._open_video_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-        self._open_video_btn.Hide()
+        # Video statuses: audio plays through BASS (as everywhere else in
+        # WinZapp); the picture is decoded by the bundled ffmpeg binary as a
+        # capped-rate JPEG frame sequence and drawn into this bitmap — see
+        # core/video_player.py's module docstring for why (BASS alone can't
+        # decode WhatsApp's AAC track or render video at all).
+        self._video_bitmap = wx.StaticBitmap(self._viewer_panel, size=(320, 240))
+        viewer_sizer.Add(self._video_bitmap, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._video_bitmap.Hide()
+
+        self._play_pause_btn = wx.Button(self._viewer_panel, label=i18n.t("status_play_pause"))
+        self._play_pause_btn.Bind(wx.EVT_BUTTON, self._on_play_pause_video)
+        viewer_sizer.Add(self._play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._play_pause_btn.Hide()
 
         self._like_btn = wx.Button(self._viewer_panel, label=i18n.t("status_like"))
         self._like_btn.Bind(wx.EVT_BUTTON, self._on_like_status)
@@ -339,6 +357,16 @@ class StatusPanel(wx.Panel):
     def on_show(self):
         """Called when the panel becomes visible — refresh the status list."""
         threading.Thread(target=self._load_statuses, daemon=True).start()
+
+    def _on_panel_show(self, event):
+        """Stop any playing video the moment this panel is hidden (Alt+1/
+        Alt+4 switching away, window close, ...) — regardless of which of
+        main.py's several `status_panel.Hide()` call sites did it. Without
+        this a video's audio kept playing (and ffmpeg kept decoding) in the
+        background indefinitely after leaving the Status tab."""
+        if not event.IsShown():
+            self._video_player.stop()
+        event.Skip()
 
     def _load_statuses(self):
         """
@@ -598,6 +626,16 @@ class StatusPanel(wx.Panel):
         label    = f"{entry.get('name', '')} — {nav_info}: {content}"
         self._status_content_label.SetLabel(label)
 
+        # Switching to a (possibly different) status always stops whatever
+        # video was playing — resuming stale audio/frames for a status the
+        # user has since navigated away from would be actively wrong, not
+        # just unhelpful.
+        self._video_player.stop()
+        self._video_local_path = None
+        self._video_download_status_id = None
+        self._video_bitmap.Hide()
+        self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
+
         # Kept for the action handlers below (copy text, save media, open
         # video, reply) — all act on "whatever status is currently shown".
         self._current_status       = status
@@ -605,7 +643,7 @@ class StatusPanel(wx.Panel):
 
         is_video = msg_type == "videoMessage"
         is_image = msg_type == "imageMessage"
-        self._open_video_btn.Show(is_video)
+        self._play_pause_btn.Show(is_video)
         self._save_media_btn.Show(is_video or is_image)
 
         # Copy-text applies to the actual text content: the full text for a
@@ -714,28 +752,39 @@ class StatusPanel(wx.Panel):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    # ── Open video status (external player) ─────────────────────────────────
+    # ── Play/pause video status (in-app: audio via BASS, frames via ffmpeg) ──
     #
-    # There is no in-app video playback here: sound_lib/BASS is an AUDIO
-    # engine (no video rendering at all) and can't even decode the AAC audio
-    # track of a plain WhatsApp .mp4 without an add-on WinZapp doesn't bundle
-    # (only bass_opus is shipped, in client/lib) — so the previous
-    # "play/pause" button silently failed on every single video status.
-    # Downloading and handing the file to the OS's own default video player
-    # actually works, with no extra bundled codec needed.
+    # See core/video_player.py's module docstring for the full explanation:
+    # BASS alone is audio-only and can't decode WhatsApp's .mp4 either way,
+    # so the video's audio is extracted to WAV (bundled ffmpeg) for BASS,
+    # and its picture is decoded by that same ffmpeg binary as a capped-rate
+    # JPEG frame sequence drawn into self._video_bitmap.
 
-    def _on_open_video(self, event):
+    def _on_play_pause_video(self, event):
         if self._current_status is None:
             return
         if self._current_status.get("messageType") != "videoMessage":
             return
+        if self._video_player.is_playing:
+            self._video_player.toggle_pause()
+            self._update_play_pause_label()
+            return
+        status_id = self._current_status.get("key", {}).get("id", "")
+        if self._video_local_path and self._video_download_status_id == status_id:
+            # Already downloaded (e.g. finished playing once) — replay
+            # without hitting the network again.
+            self._video_bitmap.Show()
+            self.Layout()
+            self._video_player.load_and_play(self._video_local_path)
+            self._update_play_pause_label()
+            return
         threading.Thread(
-            target=self._download_and_open_video,
-            args=(self._current_status,),
+            target=self._download_and_play_video,
+            args=(self._current_status, status_id),
             daemon=True,
         ).start()
 
-    def _download_and_open_video(self, status):
+    def _download_and_play_video(self, status, status_id: str):
         mw = self.main_window
         try:
             b64 = mw.get_base64_from_media(status)
@@ -745,7 +794,7 @@ class StatusPanel(wx.Panel):
             tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
             tmp.write(content)
             tmp.close()
-            wx.CallAfter(self._open_file_safely, tmp.name)
+            wx.CallAfter(self._start_downloaded_video, tmp.name, status_id)
         except Exception:
             wx.CallAfter(
                 wx.MessageBox,
@@ -754,35 +803,30 @@ class StatusPanel(wx.Panel):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    def _open_file_safely(self, filepath: str):
-        """Open a file with the default associated program in the foreground.
-        Falls back to Windows' 'openas' dialog if no program is associated.
-        Same approach as ConversationsPanel._open_file_safely()."""
-        import sys
-        import ctypes
-        if sys.platform == "win32":
+    def _start_downloaded_video(self, path: str, status_id: str):
+        # The user may have navigated to a different status while this was
+        # downloading — don't start playback for a status that isn't the
+        # one currently shown.
+        current_id = (self._current_status or {}).get("key", {}).get("id", "")
+        if current_id != status_id:
             try:
-                res = ctypes.windll.shell32.ShellExecuteW(None, "open", filepath, None, None, 5)
-                if res <= 32:
-                    if res == 31:  # SE_ERR_NOASSOC
-                        ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
-                    else:
-                        raise OSError(f"ShellExecuteW failed with code {res}")
+                os.unlink(path)
             except Exception:
-                try:
-                    ctypes.windll.shell32.ShellExecuteW(None, "openas", filepath, None, None, 5)
-                except Exception:
-                    os.startfile(filepath)
-        else:
-            import subprocess
-            if sys.platform == "darwin":
-                subprocess.call(["open", filepath])
-            else:
-                try:
-                    subprocess.call(["xdg-open", filepath])
-                except Exception:
-                    if hasattr(os, "startfile"):
-                        os.startfile(filepath)
+                pass
+            return
+        self._video_local_path = path
+        self._video_download_status_id = status_id
+        self._video_bitmap.Show()
+        self.Layout()
+        self._video_player.load_and_play(path)
+        self._update_play_pause_label()
+
+    def _update_play_pause_label(self):
+        # Single toggle label ("Reproduzir/Pausar status"), same convention
+        # this button already used before video playback existed at all —
+        # its pressed/not-pressed meaning is announced via the state change
+        # itself, not a swapping label.
+        self._play_pause_btn.SetLabel(self.main_window.i18n.t("status_play_pause"))
 
     # ── Copy status text ──────────────────────────────────────────────────────
 
@@ -1146,7 +1190,7 @@ class StatusPanel(wx.Panel):
         self._add_status_btn.SetLabel(i18n.t("status_add"))
         self._prev_status_btn.SetLabel(i18n.t("status_prev"))
         self._next_status_btn.SetLabel(i18n.t("status_next"))
-        self._open_video_btn.SetLabel(i18n.t("status_open_video"))
+        self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
         self._copy_text_btn.SetLabel(i18n.t("status_copy_text"))
         self._save_media_btn.SetLabel(i18n.t("status_save_media"))
         self._reply_label.SetLabel(i18n.t("status_reply_label"))
