@@ -476,6 +476,68 @@ def is_countable_message(msg: dict) -> bool:
     return msg.get("messageType") not in _PREVIEW_ONLY_MESSAGE_TYPES
 
 
+def _message_ts(msg: dict) -> int:
+    """The timestamp of a message record, whichever key it arrived under."""
+    if not isinstance(msg, dict):
+        return 0
+    try:
+        return int(msg.get("messageTimestamp") or msg.get("timestamp") or msg.get("t") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def history_gap_detected(fetched: list, local_records: list, page_size: int) -> bool:
+    """True when a freshly fetched page cannot be joined onto stored history.
+
+    sync_chat_messages() asks get-messages for the newest `page_size`
+    messages and nothing else. Whenever a chat received more than that while
+    WinZapp was closed, the window lands entirely *after* the newest message
+    on disk and the messages in between are never requested by anything —
+    reported live on an active group: 1391 messages stored with a 14.5-hour
+    hole (08/08 01:56 -> 16:28) and exactly 201 messages on the newer side,
+    i.e. one saturated 200-page. WhatsApp's own unread count still counted
+    the missing ones, so the chat announced 433 unread and produced ~200.
+
+    Three conditions, because each alone gives a false positive:
+
+    * The page must be **full**. A short page is everything the store had, so
+      nothing can be hiding behind it and a wider request would not help.
+    * There must be stored messages **older** than the page. With nothing
+      older there is no second block to be disjoint from — that is a first
+      sync, not a hole.
+    * The page must be **mostly new to us**. This is what separates a hole
+      from the ordinary case of re-syncing a chat we already hold: a routine
+      re-sync returns the same newest messages we already stored, so the
+      overlap is near total, while a page on the far side of a hole shares
+      almost nothing with what is on disk. Comparing timestamps instead
+      cannot tell the two apart — a single live message arriving mid-sync
+      drags the newest stored timestamp past the fetched window and masks
+      the hole permanently.
+    """
+    if not fetched or not local_records or page_size <= 0:
+        return False
+    if len(fetched) < page_size:
+        return False
+
+    oldest_fetched = min(_message_ts(m) for m in fetched)
+    if not oldest_fetched:
+        return False
+    if not any(0 < _message_ts(r) < oldest_fetched for r in local_records):
+        return False
+
+    fetched_ids = {m.get("key", {}).get("id") for m in fetched if isinstance(m, dict)}
+    fetched_ids.discard(None)
+    fetched_ids.discard("")
+    known = sum(
+        1 for r in local_records
+        if isinstance(r, dict) and r.get("key", {}).get("id") in fetched_ids
+    )
+    # Half is deliberately loose: the point is to separate "we already had
+    # this window" (overlap near 100%) from "this window is new" (near 0),
+    # not to pin down a precise ratio.
+    return known * 2 < len(fetched)
+
+
 class MainWindow(wx.Frame):
     def __init__(self):
         import time as _time
@@ -9168,7 +9230,14 @@ class MainWindow(wx.Frame):
             return
 
         count = len(records)
-        if count >= self.history_page_target():
+        # A full page used to retire the chat unconditionally, and that is the
+        # one signal that most deserves a second look: the page is full
+        # *because* the window saturated, which is exactly when there can be
+        # more history behind it. sync_chat_messages() flags the chats where
+        # that turned out to be true and its widened re-query still could not
+        # reach stored history — those stay in the queue.
+        gap = remote_jid in getattr(self, "_history_gap_jids", ())
+        if count >= self.history_page_target() and not gap:
             _done()
             return
 
@@ -9177,7 +9246,11 @@ class MainWindow(wx.Frame):
         grew = previous is not None and count > previous
         still_landing = getattr(self, "_history_still_landing", False)
         _done()
-        if still_landing or grew:
+        # `gap and previous is None` queues a gap chat once; from the next pass
+        # on it is kept only while it keeps growing, exactly like a short chat.
+        # Without that the queue would never drain for a hole WhatsApp Web
+        # cannot fill.
+        if still_landing or grew or (gap and previous is None):
             counts[remote_jid] = count
             pending.add(remote_jid)
 
@@ -9695,6 +9768,82 @@ class MainWindow(wx.Frame):
                 cp.refresh_messages_if_changed()
         wx.CallAfter(_apply)
 
+    # Multipliers applied to the page size when re-querying a chat whose newest
+    # page turned out to be disjoint from stored history. The API pages
+    # backwards on its own (deviceController.ts walks up to 10 extra pages
+    # under one `count`), so each step here is a single request, not N.
+    _HISTORY_GAP_FACTORS = (4, 10)
+    # Ceiling for one gap-closing request, matching what the API can actually
+    # deliver: its internal loop stops at 10 extra pages.
+    _HISTORY_GAP_MAX_COUNT = 2000
+
+    def _normalize_fetched_messages(self, raw_messages, remote_jid: str) -> list:
+        """WPPConnect get-messages payload -> WinZapp's canonical message dicts."""
+        out = []
+        for wm in raw_messages or []:
+            if isinstance(wm, dict) and self.ws:
+                try:
+                    normalized = self.ws._normalize_wpp_message(wm)
+                    prune_message_record(normalized)
+                    out.append(normalized)
+                except Exception as e:
+                    logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
+        return out
+
+    def _refetch_history_gap(self, remote_jid: str, phone: str, headers: dict,
+                             page_size: int, local_records: list) -> list:
+        """Re-query a chat with a wider window until it reaches stored history.
+
+        Only called once history_gap_detected() has said the newest page is
+        disjoint from what is on disk. Escalates `count` instead of walking
+        page by page because the API already does the walking internally, and
+        stops as soon as the widened window overlaps stored history — or as
+        soon as the store stops yielding more, which is the honest signal that
+        WhatsApp Web simply does not have the missing stretch (yet).
+
+        Returns the widest set of messages it managed to fetch, or [] when the
+        first widened request failed outright — never a *narrower* set than the
+        caller already had.
+        """
+        widest = []
+        best_len = page_size
+        for factor in self._HISTORY_GAP_FACTORS:
+            count = min(page_size * factor, self._HISTORY_GAP_MAX_COUNT)
+            if count <= best_len:
+                break
+            url = (f"{self.wpp_server}:{self.wpp_port}/api/{self.token}"
+                   f"/get-messages/{phone}?count={count}")
+            try:
+                # Deliberately longer than the 30s of the normal page: this
+                # request makes WhatsApp Web walk back through up to ten pages.
+                resp = requests.get(url, headers=headers, timeout=90)
+            except Exception as exc:
+                logging.warning("[history-gap] %s: request failed at count=%d: %s",
+                                remote_jid, count, exc)
+                break
+            if resp.status_code not in (200, 201):
+                logging.warning("[history-gap] %s: HTTP %s at count=%d",
+                                remote_jid, resp.status_code, count)
+                break
+            try:
+                body = resp.json()
+            except Exception:
+                break
+            raw = body.get("response", []) if isinstance(body, dict) else []
+            if not isinstance(raw, list) or len(raw) <= best_len:
+                logging.info(
+                    "[history-gap] %s: store returned %d at count=%d — no more history "
+                    "available, leaving the gap for a later pass.",
+                    remote_jid, len(raw) if isinstance(raw, list) else 0, count)
+                break
+            best_len = len(raw)
+            widest = self._normalize_fetched_messages(raw, remote_jid)
+            if not history_gap_detected(widest, local_records, count):
+                logging.info("[history-gap] %s: closed at count=%d (%d messages).",
+                             remote_jid, count, len(widest))
+                break
+        return widest
+
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
@@ -9725,6 +9874,11 @@ class MainWindow(wx.Frame):
 
         all_messages = []
         api_ok = False
+        # The JID form that actually answered. Starts as the one built above and
+        # is corrected when the alternate-JID fallback below is what worked —
+        # the history-gap re-query has to reuse the form the store recognises,
+        # not the one that just 401'd.
+        fetch_jid = phone
         # Skip API call entirely if session is known disconnected
         if getattr(self, "_wa_connected", False):
             max_retries = 3
@@ -9779,6 +9933,7 @@ class MainWindow(wx.Frame):
                                 alt_response = requests.get(alt_url, headers=headers, timeout=30)
                                 if alt_response.status_code in (200, 201):
                                     response = alt_response
+                                    fetch_jid = alternate_jid
                                     logging.info("[sync_chat_messages] Fallback alternate JID query succeeded!")
                                 else:
                                     both_jid_forms_failed = True
@@ -9792,14 +9947,8 @@ class MainWindow(wx.Frame):
                         logging.info(f"[sync_chat_messages] Fetched {len(wpp_messages)} messages from API for {remote_jid}")
                         if not isinstance(wpp_messages, list):
                             wpp_messages = []
-                        for wm in wpp_messages:
-                            if isinstance(wm, dict) and self.ws:
-                                try:
-                                    normalized = self.ws._normalize_wpp_message(wm)
-                                    prune_message_record(normalized)
-                                    all_messages.append(normalized)
-                                except Exception as e:
-                                    logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
+                        all_messages.extend(
+                            self._normalize_fetched_messages(wpp_messages, remote_jid))
                         api_ok = True
                         break
                     elif response.status_code in (401, 404, 500):
@@ -9839,6 +9988,41 @@ class MainWindow(wx.Frame):
                     break
         else:
             logging.info(f"[sync_chat_messages] Session disconnected, using cached messages for {remote_jid}")
+
+        # ── History-gap repair ───────────────────────────────────────────────
+        # The page above is always the newest `limit` messages and nothing
+        # else, so a chat that outran that window while WinZapp was closed
+        # comes back describing a stretch of time we have no messages for, and
+        # nothing downstream ever asks for the middle: the merge below unions
+        # two disjoint blocks, and _note_backfill_state() reads a full page as
+        # proof the chat is complete. See history_gap_detected().
+        gap_jids = getattr(self, "_history_gap_jids", None)
+        if gap_jids is None:
+            gap_jids = self._history_gap_jids = set()
+        gap_jids.discard(remote_jid)
+        if api_ok and all_messages:
+            # Snapshot before the merge below folds the fetched page into it.
+            gap_reference = (self.chats.get(remote_jid, {})
+                             .get("messages", {})
+                             .get("messages", {})
+                             .get("records") or [])
+            if history_gap_detected(all_messages, gap_reference, limit):
+                logging.warning(
+                    "[history-gap] %s: newest page of %d is disjoint from %d stored "
+                    "message(s) — widening the window.",
+                    remote_jid, len(all_messages), len(gap_reference))
+                wider = self._refetch_history_gap(
+                    remote_jid, fetch_jid, headers, limit, gap_reference)
+                if len(wider) > len(all_messages):
+                    all_messages = wider
+                if history_gap_detected(all_messages, gap_reference, len(all_messages)):
+                    # Still disjoint: WhatsApp Web has not decoded that stretch
+                    # yet. Flag it so the backfill keeps the chat in its queue
+                    # instead of retiring it for holding a full page.
+                    gap_jids.add(remote_jid)
+                    logging.warning(
+                        "[history-gap] %s: gap still open after widening — queued "
+                        "for the backfill.", remote_jid)
 
         # NOTE on "conversation cleared from the phone": there is deliberately
         # no automatic mirroring here.  The only local evidence would be
