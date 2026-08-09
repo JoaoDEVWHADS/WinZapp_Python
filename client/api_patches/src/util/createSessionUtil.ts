@@ -695,6 +695,7 @@ export default class CreateSessionUtil {
         (chatId: string, unreadCount: number) => {
           req.io.emit('chats-update', {
             data: [{ remoteJid: chatId, unreadCount }],
+            session: client.session,
           });
         }
       );
@@ -806,27 +807,33 @@ export default class CreateSessionUtil {
         await autoDownload(client, req, message);
       }
 
-      req.io.emit('received-message', { response: message });
+      req.io.emit('received-message', {
+        response: message,
+        session: client.session,
+      });
       if (req.serverOptions.webhook.onSelfMessage && message.fromMe)
         callWebHook(client, req, 'onselfmessage', message);
     });
 
     await client.onIncomingCall(async (call) => {
-      req.io.emit('incomingcall', call);
+      req.io.emit('incomingcall', { ...call, session: client.session });
       callWebHook(client, req, 'incomingcall', call);
     });
   }
 
   async listenAcks(client: WhatsAppServer, req: Request) {
     await client.onAck(async (ack) => {
-      req.io.emit('onack', ack);
+      req.io.emit('onack', { ...ack, session: client.session });
       callWebHook(client, req, 'onack', ack);
     });
   }
 
   async onPresenceChanged(client: WhatsAppServer, req: Request) {
     await client.onPresenceChanged(async (presenceChangedEvent) => {
-      req.io.emit('onpresencechanged', presenceChangedEvent);
+      req.io.emit('onpresencechanged', {
+        ...presenceChangedEvent,
+        session: client.session,
+      });
       callWebHook(client, req, 'onpresencechanged', presenceChangedEvent);
     });
   }
@@ -834,7 +841,10 @@ export default class CreateSessionUtil {
   async onReactionMessage(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onReactionMessage(async (reaction: any) => {
-      req.io.emit('onreactionmessage', reaction);
+      req.io.emit('onreactionmessage', {
+        ...reaction,
+        session: client.session,
+      });
       callWebHook(client, req, 'onreactionmessage', reaction);
     });
   }
@@ -842,21 +852,30 @@ export default class CreateSessionUtil {
   async onRevokedMessage(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onRevokedMessage(async (response: any) => {
-      req.io.emit('onrevokedmessage', response);
+      req.io.emit('onrevokedmessage', {
+        ...response,
+        session: client.session,
+      });
       callWebHook(client, req, 'onrevokedmessage', response);
     });
   }
   async onPollResponse(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onPollResponse(async (response: any) => {
-      req.io.emit('onpollresponse', response);
+      req.io.emit('onpollresponse', {
+        ...response,
+        session: client.session,
+      });
       callWebHook(client, req, 'onpollresponse', response);
     });
   }
   async onLabelUpdated(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onUpdateLabel(async (response: any) => {
-      req.io.emit('onupdatelabel', response);
+      req.io.emit('onupdatelabel', {
+        ...response,
+        session: client.session,
+      });
       callWebHook(client, req, 'onupdatelabel', response);
     });
   }

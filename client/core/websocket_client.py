@@ -741,6 +741,8 @@ class WebSocketClient:
                      "update": {"status": 4}}]}
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -764,6 +766,8 @@ class WebSocketClient:
           {"data": [{"remoteJid": ..., "unreadCount": 0, ...}]}
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -824,6 +828,8 @@ class WebSocketClient:
                         "lastSeen": <unix_ts>|null}}}}
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data      = info.get("data", {})
             jid       = data.get("id", "")
             presences = data.get("presences", {})
@@ -841,6 +847,9 @@ class WebSocketClient:
         if not info or not isinstance(info, dict):
             return
         try:
+            # Ignore presence events for other sessions (multi-session server).
+            if not self._belongs_to_this_session(info):
+                return
             # The id can be a string or a dict/object (Wid)
             raw_id = info.get("id")
             if isinstance(raw_id, dict):
@@ -925,6 +934,8 @@ class WebSocketClient:
         New messages (1:1 and group) arrive via messages.upsert.
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -991,7 +1002,7 @@ class WebSocketClient:
 
     def on_wpp_qrcode(self, data):
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             # WPPConnect emits: {"data": "data:image/png;base64,...", "session": "..."}
             qrcode_base64 = data.get("data")
@@ -1118,7 +1129,7 @@ class WebSocketClient:
         can unblock its wait loop and immediately show the pairing dialog.
         """
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
@@ -1152,9 +1163,20 @@ class WebSocketClient:
         if not isinstance(info, dict):
             return True
         sess = info.get("session") or info.get("sessionName") or info.get("instanceName")
+        # received-message shape: {response: message} where the server sets
+        # message.session = client.session *inside* the response object. Look
+        # there too so the guard works even if the top level ever lacks it.
+        if not sess:
+            resp = info.get("response")
+            if isinstance(resp, dict):
+                sess = resp.get("session")
         if not sess:
             return True
         sess_clean = str(sess).split(":")[0]
+        if not self.instance_name:
+            # No identity yet (first pairing): accept everything rather than
+            # deadlocking the flow on events whose session we cannot know.
+            return True
         if sess_clean != self.instance_name:
             logging.info("[WebSocketClient] Ignored event for session '%s' (this client is '%s')", sess_clean, self.instance_name)
             return False
