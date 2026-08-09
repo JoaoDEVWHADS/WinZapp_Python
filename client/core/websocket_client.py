@@ -1148,9 +1148,21 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
 
+    def _belongs_to_this_session(self, info) -> bool:
+        if not isinstance(info, dict):
+            return True
+        sess = info.get("session") or info.get("sessionName") or info.get("instanceName")
+        if not sess:
+            return True
+        sess_clean = str(sess).split(":")[0]
+        if sess_clean != self.instance_name:
+            logging.info("[WebSocketClient] Ignored event for session '%s' (this client is '%s')", sess_clean, self.instance_name)
+            return False
+        return True
+
     def on_wpp_message_received(self, data):
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             wpp_msg = data.get("response")
             if not wpp_msg:
@@ -1165,23 +1177,8 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_message_received error")
 
     def on_wpp_reaction(self, data):
-        """Handle the 'onreactionmessage' Socket.IO event.
-
-        WPPConnect emits reactions on a dedicated channel (NOT received-message),
-        with the shape: {id, msgId, reactionText, timestamp, ...}.
-          - `msgId` is the serialized id of the *reacted-to* message
-            (`<fromMe>_<chatId>_<id>[_<participant>]`) — a `true_` prefix means
-            the reaction targets one of YOUR messages.
-          - `id` is the serialized id of the reaction itself; its `<fromMe>`
-            prefix tells whether YOU are the one reacting, and its trailing
-            participant (in groups) identifies the reactor.
-
-        We rebuild the Baileys-style reactionMessage structure the rest of the
-        app expects and route it through on_new_message, which updates the live
-        display and fires a notification when someone reacts to your message.
-        """
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             payload = data.get("response") if isinstance(data.get("response"), dict) else data
             emoji = (payload.get("reactionText") or payload.get("text") or "").strip()
@@ -1239,7 +1236,7 @@ class WebSocketClient:
 
     def on_wpp_ack(self, data):
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             wpp_ack = data.get("ack")
             status = ack_to_status(wpp_ack)
