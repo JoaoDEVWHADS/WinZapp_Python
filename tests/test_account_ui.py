@@ -113,6 +113,20 @@ def test_can_pair_rules():
     assert can_pair(_acc(A, "archived"), current_account_id=B)[0] is False
 
 
+def test_can_open_rules():
+    from account_ui import can_open
+    paired = _acc(A, "paired")
+    pending = _acc(A, "pending")
+    archived = _acc(A, "archived")
+    # another paired or pending account can be opened
+    assert can_open(paired, current_account_id=B)[0] is True
+    assert can_open(pending, current_account_id=B)[0] is True
+    # current account cannot be opened (already active)
+    assert can_open(paired, current_account_id=A)[0] is False
+    # archived account cannot be opened
+    assert can_open(archived, current_account_id=B)[0] is False
+
+
 def test_build_accounts_menu_uses_factory_ids_verbatim(monkeypatch):
     """REGRESSION: the menu must use the EXACT id object the factory returns
     (e.g. wx.WindowIDRef), never a cast. Casting a reserved WindowIDRef to int()

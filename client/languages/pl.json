@@ -693,5 +693,8 @@
     "acc_unpaired_label": "Konto \"{name}\" nie jest połączone. Co chcesz zrobić?",
     "acc_unpaired_pair": "Połącz to konto",
     "acc_unpaired_switch": "Przełącz na wybrane konto",
-    "acc_unpaired_quit": "Zakończ"
+    "acc_unpaired_quit": "Zakończ",
+    "acc_btn_open": "Otwórz",
+    "acc_err_open_current": "To jest bieżące konto — jest już otwarte.",
+    "acc_err_open_invalid_state": "Nie można otworzyć zarchiwizowanego lub usuwanego konta."
 }

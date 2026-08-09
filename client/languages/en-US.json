@@ -709,5 +709,8 @@
   "acc_unpaired_pair": "Connect this account",
   "acc_unpaired_switch": "Switch to selected account",
   "acc_unpaired_quit": "Quit",
+  "acc_btn_open": "Open",
+  "acc_err_open_current": "This is the current account — it is already open.",
+  "acc_err_open_invalid_state": "Cannot open an archived or deleting account.",
   "soundpack_import_error_invalid_zip": "Invalid folder."
 }

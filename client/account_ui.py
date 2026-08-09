@@ -104,6 +104,16 @@ def can_pair(account: dict, current_account_id: str) -> tuple[bool, str]:
     return True, ""
 
 
+def can_open(account: dict, current_account_id: str) -> tuple[bool, str]:
+    """(allowed, reason_key). 'Abrir' traz para o foco / abre o processo da conta.
+    Permitido para contas pareadas ou pendentes que não sejam a conta atual."""
+    if account.get("id") == current_account_id:
+        return False, "acc_err_open_current"
+    if account.get("state") not in ("paired", "pending"):
+        return False, "acc_err_open_invalid_state"
+    return True, ""
+
+
 # ── wx dialogs (Windows / running wx.App only) ───────────────────────────────
 def _wx():
     import wx
@@ -325,13 +335,14 @@ class AccountManagerDialog:
         vbox.Add(self.lst, 1, wx.EXPAND | wx.ALL, 8)
         # buttons
         hbox = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_open = wx.Button(panel, label=i18n.t("acc_btn_open") if hasattr(i18n, 't') and i18n.t("acc_btn_open") != "acc_btn_open" else "Abrir")
         self.btn_add = wx.Button(panel, label=i18n.t("acc_btn_add"))
         self.btn_pair = wx.Button(panel, label=i18n.t("acc_btn_pair"))
         self.btn_rename = wx.Button(panel, label=i18n.t("acc_btn_rename"))
         self.btn_archive = wx.Button(panel, label=i18n.t("acc_btn_archive"))
         self.btn_restore = wx.Button(panel, label=i18n.t("acc_btn_restore"))
         self.btn_delete = wx.Button(panel, label=i18n.t("acc_btn_delete"))
-        for b in (self.btn_add, self.btn_pair, self.btn_rename, self.btn_archive,
+        for b in (self.btn_open, self.btn_add, self.btn_pair, self.btn_rename, self.btn_archive,
                   self.btn_restore, self.btn_delete):
             hbox.Add(b, 0, wx.ALL, 4)
         vbox.Add(hbox, 0, wx.ALL, 4)
@@ -345,16 +356,18 @@ class AccountManagerDialog:
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(panel, 1, wx.EXPAND)
         self.dlg.SetSizer(outer)
-        self.dlg.SetSize((480, 420))
+        self.dlg.SetSize((540, 420))
         self.btn_close.Bind(wx.EVT_BUTTON, lambda e: self.dlg.EndModal(wx.ID_CLOSE))
         self.dlg.SetAffirmativeId(wx.ID_CLOSE)
         self.dlg.SetEscapeId(wx.ID_CLOSE)
+        self.btn_open.Bind(wx.EVT_BUTTON, self._on_open)
         self.btn_add.Bind(wx.EVT_BUTTON, self._on_add)
         self.btn_pair.Bind(wx.EVT_BUTTON, self._on_pair)
         self.btn_rename.Bind(wx.EVT_BUTTON, self._on_rename)
         self.btn_archive.Bind(wx.EVT_BUTTON, self._on_archive)
         self.btn_restore.Bind(wx.EVT_BUTTON, self._on_restore)
         self.btn_delete.Bind(wx.EVT_BUTTON, self._on_delete)
+        self.lst.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_open)
         self._reload()
         self.lst.SetFocus()
 
@@ -378,6 +391,18 @@ class AccountManagerDialog:
         return self._rows[i]
 
     # ── actions ──────────────────────────────────────────────────────────
+    def _on_open(self, _e):
+        acc = self._selected()
+        if not acc:
+            return
+        ok, reason = can_open(acc, self.current)
+        if not ok:
+            self._error(reason)
+            return
+        if self._pair_cb:
+            self._pair_cb(acc["id"])
+            self.dlg.EndModal(_wx().ID_CLOSE)
+
     def _on_add(self, _e):
         wx = _wx()
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_add_prompt"),

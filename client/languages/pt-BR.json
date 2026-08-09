@@ -709,5 +709,8 @@
   "acc_unpaired_pair": "Conectar esta conta",
   "acc_unpaired_switch": "Alternar para a conta selecionada",
   "acc_unpaired_quit": "Sair",
+  "acc_btn_open": "Abrir",
+  "acc_err_open_current": "Esta é a conta atual — já está aberta em segundo plano ou em exibição.",
+  "acc_err_open_invalid_state": "Não é possível abrir uma conta arquivada ou em exclusão.",
   "soundpack_import_error_invalid_zip": "Pasta inválida."
 }
