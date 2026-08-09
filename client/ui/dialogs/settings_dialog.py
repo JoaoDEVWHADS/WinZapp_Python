@@ -456,10 +456,16 @@ class SettingsDialog(wx.Dialog):
         self._sound_pack_combo = wx.ComboBox(self._sound_events_page, style=wx.CB_READONLY)
         se_sizer.Add(self._sound_pack_combo, 0, wx.EXPAND | wx.ALL, 8)
 
-        self._import_sound_pack_btn = wx.Button(
-            self._sound_events_page, label=i18n.t("import_sound_pack_button")
+        import_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self._import_folder_btn = wx.Button(
+            self._sound_events_page, label=i18n.t("import_sound_pack_folder_button")
         )
-        se_sizer.Add(self._import_sound_pack_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._import_zip_btn = wx.Button(
+            self._sound_events_page, label=i18n.t("import_sound_pack_zip_button")
+        )
+        import_btn_sizer.Add(self._import_folder_btn, 0, wx.RIGHT, 8)
+        import_btn_sizer.Add(self._import_zip_btn, 0, 0, 0)
+        se_sizer.Add(import_btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         self._sound_events_list_label = wx.StaticText(
             self._sound_events_page, label=i18n.t("sound_events_list_label")
@@ -496,7 +502,8 @@ class SettingsDialog(wx.Dialog):
         self._notebook.AddPage(self._sound_events_page, i18n.t("tab_sound_events"))
 
         self._sound_pack_combo.Bind(wx.EVT_COMBOBOX, self._on_sound_pack_selected)
-        self._import_sound_pack_btn.Bind(wx.EVT_BUTTON, self._on_import_sound_pack)
+        self._import_folder_btn.Bind(wx.EVT_BUTTON, self._on_import_sound_pack_folder)
+        self._import_zip_btn.Bind(wx.EVT_BUTTON, self._on_import_sound_pack_zip)
         self._sound_events_list.Bind(wx.EVT_LISTBOX, self._on_sound_event_selected)
         self._sound_events_list.Bind(wx.EVT_KEY_DOWN, self._on_sound_event_list_key_down)
         self._sound_event_path_field.Bind(wx.EVT_TEXT, self._on_sound_event_path_changed)
@@ -942,7 +949,7 @@ class SettingsDialog(wx.Dialog):
         self._current_pack_id = self._sound_pack_ids[idx]
         self._load_sound_events_display(self._current_pack_id)
 
-    def _on_import_sound_pack(self, event):
+    def _on_import_sound_pack_folder(self, event):
         i18n = self.main_window.i18n
         with wx.DirDialog(
             self, message=i18n.t("select_folder_dialog_title"),
@@ -950,10 +957,30 @@ class SettingsDialog(wx.Dialog):
         ) as dir_dlg:
             if dir_dlg.ShowModal() != wx.ID_OK:
                 return
-            source_folder = dir_dlg.GetPath()
+            source_path = dir_dlg.GetPath()
 
+        self._process_imported_soundpack(source_path)
+
+    def _on_import_sound_pack_zip(self, event):
+        i18n = self.main_window.i18n
+        dlg = wx.FileDialog(
+            self,
+            message=i18n.t("select_soundpack_zip_dialog_title"),
+            wildcard="Sound Packs (*.zip)|*.zip",
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+        )
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+        source_path = dlg.GetPath()
+        dlg.Destroy()
+
+        self._process_imported_soundpack(source_path)
+
+    def _process_imported_soundpack(self, source_path: str):
+        i18n = self.main_window.i18n
         ok, err_key, new_pack_id = import_soundpack(
-            source_folder, self.main_window.sound_system.sound_dir
+            source_path, self.main_window.sound_system.sound_dir
         )
         if not ok:
             wx.MessageBox(
@@ -1605,7 +1632,8 @@ class SettingsDialog(wx.Dialog):
 
         # Sound events tab
         self._sound_pack_label.SetLabel(i18n.t("sound_pack_label"))
-        self._import_sound_pack_btn.SetLabel(i18n.t("import_sound_pack_button"))
+        self._import_folder_btn.SetLabel(i18n.t("import_sound_pack_folder_button"))
+        self._import_zip_btn.SetLabel(i18n.t("import_sound_pack_zip_button"))
         packs = self.main_window._sound_packs
         pack_sel = self._sound_pack_combo.GetSelection()
         self._sound_pack_combo.Set([
