@@ -41,7 +41,10 @@ _DEFAULTS: dict[str, Any] = {
     "wpp_server": "http://127.0.0.1",
     "wpp_port": 6300,
     "wpp_ws_server": "ws://127.0.0.1",
-    "wpp_api_key": "",
+    # Same default as client/core/utils.py DEFAULT_SETTINGS / settings_default.json
+    # — a blank key makes /api/<token>//generate-token (double slash) → HTTP 404
+    # on every new-account pairing under the multi-account flow.
+    "wpp_api_key": "70733f08be1ed195bda1c31b6e135f5ebeb9fb8c6c28530a3a46e4093357b037",
     "wpp_custom_api": False,
 }
 
@@ -78,7 +81,13 @@ class AppSettings:
     def get(self, key: str) -> Any:
         if key not in _DEFAULTS:
             raise KeyError(f"{key!r} is not a global setting")
-        return self._read().get(key, _DEFAULTS[key])
+        value = self._read().get(key, _DEFAULTS[key])
+        # A blank api key was written by an early multi-account build and makes
+        # /api/<token>//generate-token double-slash → HTTP 404 on pairing.
+        # Treat empty as "unset" so the real default is used instead.
+        if key == "wpp_api_key" and not value:
+            return _DEFAULTS[key]
+        return value
 
     def set(self, key: str, value: Any) -> None:
         if key not in _DEFAULTS:
@@ -90,6 +99,9 @@ class AppSettings:
     def all(self) -> dict:
         merged = dict(_DEFAULTS)
         merged.update({k: v for k, v in self._read().items() if k in _DEFAULTS})
+        # Blank stored api key → fall back to the real default (see get()).
+        if not merged.get("wpp_api_key"):
+            merged["wpp_api_key"] = _DEFAULTS["wpp_api_key"]
         return merged
 
 
