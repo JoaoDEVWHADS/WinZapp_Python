@@ -16828,6 +16828,37 @@ def setup_logging():
 
 if __name__ == "__main__":
     try:
+        import signal
+
+        # Ctrl+C on the console must close WinZapp gracefully no matter which
+        # wx handler happens to be running when the interrupt lands. python-
+        # socketio installs its own SIGINT handler that re-raises
+        # KeyboardInterrupt on the main thread; wx then surfaces that inside
+        # whatever handler is dispatching (observed live: _on_window_activate),
+        # far away from MainLoop()'s own try/except, producing an ugly
+        # traceback and an unclean exit. Installing OUR handler BEFORE the
+        # socketio client is created makes engineio save it as the "original"
+        # handler and call it after it has disconnected its clients — so a
+        # single top-level handler covers every code path. It schedules the
+        # graceful teardown on the wx main thread (thread-safe via
+        # wx.CallAfter) instead of raising, and the __main__ KeyboardInterrupt
+        # guard below is kept as a fallback for any interrupt that bypasses it.
+        _main_frame_ref = []
+
+        def _sigint_graceful(sig, frame):
+            logging.info("[main] SIGINT (Ctrl+C) received — closing WinZapp gracefully")
+            try:
+                if _main_frame_ref:
+                    import wx as _wx
+                    _wx.CallAfter(_main_frame_ref[0].real_exit)
+                    return
+            except Exception:
+                pass
+            os._exit(0)
+
+        signal.signal(signal.SIGINT, _sigint_graceful)
+        signal.signal(signal.SIGTERM, _sigint_graceful)
+
         import app_paths
         from account_bootstrap import resolve_startup, parse_startup_source
         from account_migration import migrate_if_needed
@@ -16921,8 +16952,24 @@ if __name__ == "__main__":
         frame = MainWindow(account_id=_account_id, account_name=_account_name,
                            startup_source=startup_source, resume_pending=_resume_pending,
                            registry=_registry, global_dir=gd)
+        _main_frame_ref.append(frame)
     except SystemExit:
         raise
+    except KeyboardInterrupt:
+        # Ctrl+C on the console: python-socketio's signal handler re-raises
+        # KeyboardInterrupt on the main thread, which wx may surface inside
+        # any dispatched handler (e.g. _on_window_activate) instead of inside
+        # MainLoop()'s own try/except — producing an ugly traceback and an
+        # unclean exit. Catch it at the top level and shut down gracefully,
+        # exactly like closing the window would.
+        logging.info("[main] KeyboardInterrupt (Ctrl+C) received — shutting down gracefully")
+        try:
+            frame.real_exit()
+        except Exception:
+            try:
+                frame._terminate_process()
+            except Exception:
+                os._exit(0)
     except Exception:
         tb = format_exc()
         try:
