@@ -22,6 +22,7 @@ from datetime import datetime
 import wx
 import wx.adv
 from core.utils import format_number
+from core.locale_format import get_datetime_format
 from app_paths import data_path
 from core.sound_system import (
     ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path, AlertPreviewController,
@@ -37,7 +38,7 @@ def _fmt_ts(ts, i18n):
         if ts_val > 1_000_000_000_000:
             ts_val //= 1000
         dt = datetime.fromtimestamp(ts_val)
-        return dt.strftime(i18n.t("datetime_fmt"))
+        return dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
     except Exception:
         return str(ts)
 

@@ -34,6 +34,7 @@ from ui.accessible import (
     CompatListBoxMessagesCtrl,
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
+from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -53,12 +54,12 @@ def _fmt_last_seen(ts, i18n) -> str:
             ts_val //= 1000
         dt       = _dt.fromtimestamp(ts_val)
         now      = _dt.now()
-        time_str = dt.strftime(i18n.t("time_fmt"))
+        time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
         if dt.date() == now.date():
             return i18n.t("last_seen_today").format(time=time_str)
         if dt.date() == (now - _td(days=1)).date():
             return i18n.t("last_seen_yesterday").format(time=time_str)
-        date_str = dt.strftime(i18n.t("date_fmt"))
+        date_str = dt.strftime(get_date_format(i18n.t("date_fmt")))
         return i18n.t("last_seen_date").format(date=date_str, time=time_str)
     except Exception:
         return ""
@@ -1388,6 +1389,15 @@ class ConversationsPanel(wx.Panel):
                 # builds it from there without copying) — persist it so the
                 # "Editada" marker and new text survive a restart.
                 self.main_window._schedule_save(dirty_jid=remote_jid)
+                # Refresh the conversations list too — _last_msg_preview()
+                # reads straight from these records, but nothing tells the
+                # list widget to redraw the row on its own. Without this the
+                # preview kept showing the pre-edit text until the
+                # conversation was closed (which rebuilds the list from
+                # scratch for an unrelated reason) — see the remote-edit
+                # path (_apply_possible_edit(), main.py), which already
+                # does this and never had the bug.
+                self.main_window._schedule_set_chats()
                 # Rebuild the links/mentions panels if the edited row is the one
                 # currently focused — they are only refreshed on a focus change,
                 # so without this the panels below the list keep describing the
@@ -4801,8 +4811,8 @@ class ConversationsPanel(wx.Panel):
             dt    = datetime.fromtimestamp(ts_val)
             today = datetime.now()
             if dt.date() == today.date():
-                return dt.strftime(self.main_window.i18n.t("time_fmt"))
-            return dt.strftime(self.main_window.i18n.t("datetime_fmt"))
+                return dt.strftime(get_time_format(self.main_window.i18n.t("time_fmt")))
+            return dt.strftime(get_datetime_format(self.main_window.i18n.t("datetime_fmt")))
         except Exception:
             return ""
 

@@ -181,6 +181,95 @@ def _restore_custom_files(custom_contents: dict):
         print(f"[INFO] Restored custom file: {rel_path}")
 
 
+def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
+    """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
+    phone-number pairing code stops regenerating on every QR-code rotation.
+
+    Upstream bug (wppconnect-team/wppconnect#2836): checkQrCode() dedupes
+    the QR-image branch against `this.urlCode` before re-emitting it, but
+    the phoneNumber branch returns straight into loginByCode() with no
+    equivalent guard — so every ~20-60s WhatsApp-side QR rotation
+    (auth_code_change) generates a BRAND NEW pairing code via
+    genLinkDeviceCodeForPhoneNumber(), even though nothing about the login
+    attempt itself changed. A screen-reader user cannot finish reading an
+    8-character code that gets replaced before they're done — see WinZapp
+    issue #8. This adds a `linkCodeGenerated` guard mirroring the existing
+    `urlCode` one, reset only when a fresh login attempt begins (the same
+    `!needScan` branch that already resets `attempt`).
+
+    This lives in node_modules (a vendored dependency of WPPConnect Server,
+    not WPPConnect Server itself), so it can't go through the
+    api_patches/ full-file-restore mechanism — npm install rebuilds
+    node_modules from scratch every time, so this must run AFTER npm
+    install, same as the existing decrypt.js patch right above this call.
+
+    Idempotent (a no-op if already applied) and best-effort: if the
+    installed wppconnect version doesn't match this exact source text
+    (e.g. a future upstream release), it logs a warning and leaves the
+    file untouched rather than corrupting it or crashing setup_api.py.
+    """
+    if client_api_dir is None:
+        client_api_dir = CLIENT_API_DIR
+    host_layer_path = os.path.join(
+        client_api_dir, "node_modules", "@wppconnect-team", "wppconnect",
+        "dist", "api", "layers", "host.layer.js",
+    )
+    if not os.path.isfile(host_layer_path):
+        print("[WARNING] host.layer.js not found — skipping pairing-code patch.")
+        return False
+
+    with open(host_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    if "linkCodeGenerated" in content:
+        print("[INFO] host.layer.js pairing-code patch already applied.")
+        return True
+
+    original_reset = (
+        "        if (!needScan) {\n"
+        "            this.attempt = 0;\n"
+        "            return;\n"
+        "        }\n"
+    )
+    patched_reset = (
+        "        if (!needScan) {\n"
+        "            this.attempt = 0;\n"
+        "            this.linkCodeGenerated = false;\n"
+        "            return;\n"
+        "        }\n"
+    )
+    original_branch = (
+        "        if (typeof this.options.phoneNumber === 'string') {\n"
+        "            return this.loginByCode(this.options.phoneNumber);\n"
+        "        }\n"
+    )
+    patched_branch = (
+        "        if (typeof this.options.phoneNumber === 'string') {\n"
+        "            if (this.linkCodeGenerated) {\n"
+        "                return;\n"
+        "            }\n"
+        "            this.linkCodeGenerated = true;\n"
+        "            return this.loginByCode(this.options.phoneNumber);\n"
+        "        }\n"
+    )
+
+    if original_reset not in content or original_branch not in content:
+        print(
+            "[WARNING] host.layer.js does not match the expected upstream "
+            "source — skipping pairing-code patch (the installed "
+            "@wppconnect-team/wppconnect version may have changed this "
+            "file). Please report this to the WinZapp maintainers."
+        )
+        return False
+
+    content = content.replace(original_reset, patched_reset, 1)
+    content = content.replace(original_branch, patched_branch, 1)
+    with open(host_layer_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("[OK] Patched host.layer.js — the phone-number pairing code no longer regenerates on every QR rotation.")
+    return True
+
+
 def _merge_package_json_dependencies():
     """Apply WinZapp's specific dependency patches onto whatever
     package.json the clone/checkout actually left on disk, instead of
@@ -345,7 +434,12 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
-
+        # Slow down phone-number pairing-code rotation (WinZapp issue #8) —
+        # see _patch_wppconnect_host_layer()'s docstring for the upstream bug.
+        try:
+            _patch_wppconnect_host_layer()
+        except Exception as e:
+            print(f"[WARNING] Failed to patch host.layer.js pairing-code rotation: {e}")
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")
