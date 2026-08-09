@@ -817,6 +817,7 @@ class MainWindow(wx.Frame):
         # seconds.
         self._wa_offline_strikes = 0
         self._wa_startup_time = time.time()
+        self._reset_startup_probe()
         # (Locks initialized early at the top of __init__)
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando").
         # Starts as "connecting" rather than blank/offline — the connection
@@ -1336,6 +1337,7 @@ class MainWindow(wx.Frame):
         self._auto_offline = False
         self._wa_offline_strikes = 0
         self._wa_startup_time = time.time()
+        self._reset_startup_probe()
         # Best-effort: close the WPPConnect session so Chrome is released.
         if old_token:
             def _close():
@@ -1531,15 +1533,90 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[power] _recover_from_suspend failed")
 
-    # How long, and how many consecutive not-yet-connected results, the very
-    # first connection attempt of a session gets before the UI is allowed to
-    # declare "offline". WPPConnect/Chrome routinely take several seconds to
-    # finish booting, during which every status probe looks identical to a
-    # real outage (connection refused, CLOSED/INITIALIZING status, etc.) —
-    # without this grace window the app announced itself offline within the
-    # first second or two of every single launch.
+    # How long the very first connection attempt of a session gets before the
+    # UI is allowed to declare "offline". WPPConnect/Chrome routinely take
+    # several seconds to finish booting, during which every status probe looks
+    # identical to a real outage (connection refused, CLOSED/INITIALIZING
+    # status, etc.) — without this grace window the app announced itself
+    # offline within the first second or two of every single launch.
+    #
+    # A companion cap on the *number* of not-yet-connected readings used to sit
+    # alongside this and was removed: see _set_wa_connected(), where callers
+    # polling at different rates made a reading count mean different amounts of
+    # time and silently shrank this window to about a second.
+    #
+    # The window can stay generous because it is no longer the only thing
+    # separating "still booting" from "no internet" — see
+    # _startup_offline_confirmed(), which ends it early once the machine is
+    # shown to have no network at all.
     _WA_STARTUP_GRACE_SECONDS = 45
-    _WA_STARTUP_GRACE_STRIKES = 6
+
+    # How often the network itself may be probed while the startup grace is
+    # open, and how many consecutive failures confirm the machine really has no
+    # connectivity. Two, because a single failure a second after login is just
+    # as likely to be DNS not being warm yet as a genuine outage.
+    _STARTUP_PROBE_INTERVAL = 3.0
+    _STARTUP_PROBE_STRIKES = 2
+
+    def _startup_offline_confirmed(self) -> bool:
+        """True once the machine has been shown to have no internet at all
+        while the startup grace is still open.
+
+        The grace exists because a booting WPPConnect looks exactly like an
+        outage from the status endpoint, so the app must not shout "offline"
+        over what is really a slow launch. But the reverse case — the user
+        genuinely opened WinZapp with no connection — then waits out the whole
+        window before being told anything, and a screen-reader user staring at
+        "conectando" for 45 seconds is badly served by that.
+
+        Those two cases are not actually ambiguous: they only look alike
+        through WPPConnect's status string. Asking the network directly tells
+        them apart, so the grace can stay long for a slow boot and end almost
+        immediately when there is nothing to connect to.
+
+        Never blocks the caller. _set_wa_connected() runs on whatever thread
+        happened to poll — including the 0.2 s wait loop in _run_sync() — so
+        the probe is fired into the background and only its cached verdict is
+        read here; the next poll picks the answer up. Rate-limited so that loop
+        cannot spawn one probe every 200 ms.
+        """
+        if getattr(self, "_startup_probe_offline", False):
+            return True
+        now = time.time()
+        if getattr(self, "_startup_probe_running", False):
+            return False
+        if now - getattr(self, "_startup_probe_at", 0.0) < self._STARTUP_PROBE_INTERVAL:
+            return False
+        self._startup_probe_at = now
+        self._startup_probe_running = True
+
+        def _probe():
+            try:
+                if self._probe_whatsapp_host():
+                    self._startup_probe_fails = 0
+                    return
+                fails = getattr(self, "_startup_probe_fails", 0) + 1
+                self._startup_probe_fails = fails
+                if fails >= self._STARTUP_PROBE_STRIKES:
+                    self._startup_probe_offline = True
+                    logging.warning(
+                        "[connection] No route to WhatsApp on %d consecutive probes "
+                        "— ending the startup grace early.", fails)
+            except Exception:
+                logging.exception("[connection] startup network probe failed")
+            finally:
+                self._startup_probe_running = False
+
+        threading.Thread(target=_probe, daemon=True, name="startup-net-probe").start()
+        return False
+
+    def _reset_startup_probe(self) -> None:
+        """Forget the startup network verdict, so a later grace window (a
+        re-pair, a reconnect) starts from a clean slate instead of inheriting
+        a stale "this machine is offline"."""
+        self._startup_probe_offline = False
+        self._startup_probe_fails = 0
+        self._startup_probe_at = 0.0
 
     def _set_wa_connected(self, connected: bool, reason: str = "", announce: bool = True,
                            confirmed: bool = False):
@@ -1582,6 +1659,7 @@ class MainWindow(wx.Frame):
             # online; only a real transition should force anything below).
             was_offline = not was
             self._wa_offline_strikes = 0
+            self._reset_startup_probe()
             self._dead_browser_strikes = 0
             self._auto_repair_dialog_shown = False
             self._auto_offline = False
@@ -1628,11 +1706,31 @@ class MainWindow(wx.Frame):
         self._wa_offline_strikes += 1
         if not confirmed:
             never_connected_yet = not self._wa_connect_announced
+            # Bounded by elapsed time alone, deliberately. This used to also
+            # cap the number of not-yet-connected readings, and the two bounds
+            # were measured in incompatible units: the window was sized for the
+            # health checker's 30 s cadence (6 readings would span 3 minutes,
+            # so the 45 s clock always ran out first), but _run_sync() polls
+            # check_wa_connection_http() every 0.2 s while waiting for the
+            # connection. Under that loop the same 6 readings were spent in
+            # 1.2 s, collapsing a 45-second grace into barely one second.
+            # Observed live: six "INITIALIZING" readings 265 ms apart, then a
+            # full "modo offline" announcement with sound and speech — and the
+            # session reported itself connected 54 ms later. A reading count is
+            # a proxy for elapsed time that breaks the moment anything polls at
+            # a different rate; the clock is the thing actually meant here.
             within_grace = (
                 never_connected_yet
                 and (time.time() - self._wa_startup_time) < self._WA_STARTUP_GRACE_SECONDS
-                and self._wa_offline_strikes <= self._WA_STARTUP_GRACE_STRIKES
             )
+            if within_grace and self._startup_offline_confirmed():
+                # Not a slow boot — there is no network to boot onto. Say so
+                # now instead of holding "conectando" for the rest of the
+                # window.
+                logging.warning(
+                    "[connection] Startup grace cut short (%s): the machine cannot "
+                    "reach WhatsApp at all.", reason or "checked")
+                within_grace = False
             if within_grace:
                 logging.info(
                     "[connection] Not connected yet during startup grace "
