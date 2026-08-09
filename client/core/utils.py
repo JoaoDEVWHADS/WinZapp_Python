@@ -50,6 +50,7 @@ DEFAULT_SETTINGS = {
     },
     "audio_devices": {
         "output_device_name": "",
+        "effects_output_device_name": "",
         "input_device_name": ""
     },
     "speech_content": {
@@ -57,12 +58,14 @@ DEFAULT_SETTINGS = {
         "announce_recording": True
     },
     "active_sound_pack": "default",
+    "sound_events": {},
     "alert_tones": {
         "private": "default",
         "private_custom_path": "",
         "group": "default",
         "group_custom_path": ""
     },
+    "conversation_sounds": {},
     "storage": {
         "auto_download_media": True,
         "media_max_days": 30,
