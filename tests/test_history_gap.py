@@ -24,7 +24,7 @@ tests/test_message_backfill.py.
 
 import pytest
 
-from main import MainWindow, history_gap_detected
+from main import MainWindow, history_gap_closed, history_gap_detected
 
 PAGE = 200
 
@@ -96,6 +96,53 @@ class TestHistoryGapDetected:
         assert history_gap_detected(junk, OLD, PAGE) is False
 
 
+HOLE_TOP = min(m["messageTimestamp"] for m in DISJOINT)
+
+
+class TestHistoryGapClosed:
+    """The closing test is a separate question from the detecting one, and
+    reusing history_gap_detected() for it was wrong: `known` is counted over
+    the local snapshot (200 records, what get_chats() keeps in memory) while
+    the widened page holds 800 or 2000. When the widened window reaches past
+    the whole snapshot the ratio happens to answer correctly, but when it
+    lands *inside* it the ratio calls a reached hole still open — costing an
+    escalation to the ceiling and a spurious backfill entry."""
+
+    def test_reaching_a_message_from_below_the_hole_closes_it(self):
+        widened = OLD[-50:] + DISJOINT
+        assert history_gap_closed(widened, OLD, HOLE_TOP) is True
+
+    def test_a_page_that_never_reaches_the_far_side_stays_open(self):
+        assert history_gap_closed(DISJOINT, OLD, HOLE_TOP) is False
+
+    def test_a_widened_page_landing_inside_the_local_snapshot(self):
+        """The band where the ratio test misreads: the widened page reaches
+        back into the middle of the 200-record snapshot rather than past it,
+        so some stored records are still older than it. `known` tops out at
+        the snapshot size while the page holds 800 — the ratio calls that a
+        gap and burns another escalation, though the far side was reached."""
+        local = _run("old", 200, 40_000)
+        widened = local[100:] + _run("new", 700, 200_000)
+
+        assert history_gap_closed(widened, local, HOLE_TOP) is True
+        # The ratio test, asked the same question, gets it wrong:
+        assert history_gap_detected(widened, local, len(widened)) is True
+
+    def test_a_live_message_above_the_hole_cannot_fake_a_close(self):
+        """Only messages stored *below* the ceiling count as the far side."""
+        local = [_msg("live", 999_999)]
+        widened = DISJOINT + local
+        assert history_gap_closed(widened, local, HOLE_TOP) is False
+
+    @pytest.mark.parametrize("fetched, local, top", [
+        ([], OLD, HOLE_TOP),
+        (DISJOINT, [], HOLE_TOP),
+        (DISJOINT, OLD, 0),
+    ])
+    def test_degenerate_inputs_never_claim_a_close(self, fetched, local, top):
+        assert history_gap_closed(fetched, local, top) is False
+
+
 class _Resp:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
@@ -142,7 +189,7 @@ class TestRefetchHistoryGap:
 
         s = _RefetchStub()
         monkeypatch.setattr("main.requests.get", _fake_get(s, _by_count))
-        out = s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD)
+        out = s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD, HOLE_TOP)
 
         assert s.requested == [800]          # stopped as soon as it closed
         assert len(out) == 250
@@ -155,7 +202,7 @@ class TestRefetchHistoryGap:
 
         s = _RefetchStub()
         monkeypatch.setattr("main.requests.get", _fake_get(s, _by_count))
-        s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD)
+        s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD, HOLE_TOP)
         assert s.requested == [800, 2000]
 
     def test_stops_when_the_store_has_nothing_more_to_give(self, monkeypatch):
@@ -164,7 +211,7 @@ class TestRefetchHistoryGap:
         s = _RefetchStub()
         monkeypatch.setattr(
             "main.requests.get", _fake_get(s, lambda c: _Resp(200, {"response": DISJOINT})))
-        out = s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD)
+        out = s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD, HOLE_TOP)
         assert s.requested == [800]
         assert out == []
 
@@ -173,13 +220,13 @@ class TestRefetchHistoryGap:
         monkeypatch.setattr(
             "main.requests.get",
             _fake_get(s, lambda c: _Resp(200, {"response": _run("m", c, 1)})))
-        s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD)
+        s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD, HOLE_TOP)
         assert max(s.requested) <= MainWindow._HISTORY_GAP_MAX_COUNT
 
     def test_an_http_error_gives_up_without_raising(self, monkeypatch):
         s = _RefetchStub()
         monkeypatch.setattr("main.requests.get", _fake_get(s, lambda c: _Resp(500)))
-        assert s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD) == []
+        assert s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD, HOLE_TOP) == []
 
     def test_a_request_exception_gives_up_without_raising(self, monkeypatch):
         def _boom(*a, **kw):
@@ -187,7 +234,7 @@ class TestRefetchHistoryGap:
 
         monkeypatch.setattr("main.requests.get", _boom)
         s = _RefetchStub()
-        assert s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD) == []
+        assert s._refetch_history_gap("g@g.us", "g@g.us", {}, PAGE, OLD, HOLE_TOP) == []
 
 
 class _BackfillStub:
