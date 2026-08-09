@@ -484,6 +484,29 @@ def first_unread_index(displayable, unread_count: int) -> int:
     return -1
 
 
+def db_fetch_limit(configured_limit: int, unread_count: int, cap: int = 2000, buffer: int = 50) -> int:
+    """How many messages navigate_to_conversation() should pull from the DB.
+
+    The configured "messages per conversation" page size is meant to bound a
+    *display* window, not to cap how much unread history gets loaded. When a
+    conversation has more unread messages than that page size (e.g. 350
+    unread against the default 200), fetching only ``configured_limit``
+    messages leaves the unread separator (and every message after it)
+    entirely outside what's loaded — paginated_window()'s widening logic
+    never gets a chance to run because first_unread_index() can't find enough
+    incoming messages in the truncated list to begin with. Alt+3 then reports
+    "no unread" and initial focus falls back to the last message instead of
+    the separator.
+
+    Widen the fetch to cover the unread backlog (plus a small buffer of
+    already-read context above it), capped so a corrupt/absurd unread count
+    can't pull an unbounded amount of history into memory at once.
+    """
+    if unread_count > configured_limit:
+        return min(unread_count + buffer, cap)
+    return configured_limit
+
+
 def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:
     """Where populate_messages()'s pagination window should start.
 

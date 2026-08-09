@@ -2910,6 +2910,14 @@ class MainWindow(wx.Frame):
             )
             if not (_open and _visible):
                 chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+                # Track how many messages have genuinely arrived since the
+                # last local mark-as-read, so on_chat_unread_update() can
+                # tell a real new-unread total apart from a stale server
+                # count that still includes messages we already read locally
+                # but the server hasn't acknowledged as read yet.
+                if not hasattr(self, "_new_since_read"):
+                    self._new_since_read = {}
+                self._new_since_read[remote_jid] = self._new_since_read.get(remote_jid, 0) + 1
 
         # ── Persist in background — debounced so rapid bursts produce one write ─
         self._schedule_save(dirty_jid=remote_jid)
@@ -12003,7 +12011,19 @@ class MainWindow(wx.Frame):
                 if incoming_t <= read_at_t:
                     unread_count = 0
                 else:
+                    # A genuinely new message arrived after the local
+                    # read-ack, so the guard above no longer applies. But the
+                    # server-reported total can still be stale/inflated —
+                    # e.g. it may still include messages we already read
+                    # locally that WhatsApp's own servers haven't caught up
+                    # with yet. Clamp to what we actually know arrived since
+                    # the read-ack instead of trusting the raw server count.
+                    local_new = getattr(self, "_new_since_read", {}).get(normalized)
+                    if local_new:
+                        unread_count = min(unread_count, local_new)
                     self._locally_read_at.pop(normalized, None)
+                    if hasattr(self, "_new_since_read"):
+                        self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
@@ -12467,6 +12487,9 @@ class MainWindow(wx.Frame):
         if not hasattr(self, "_locally_read_at"):
             self._locally_read_at = {}
         self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
+        if not hasattr(self, "_new_since_read"):
+            self._new_since_read = {}
+        self._new_since_read[remote_jid] = 0
         self._schedule_save(dirty_jid=remote_jid)
         # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
         # this isn't suppressed while a media sync is running, so the badge

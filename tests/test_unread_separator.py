@@ -20,7 +20,7 @@ approach as tests/test_message_bookmarks.py.
 
 import pytest
 
-from core.utils import first_unread_index, paginated_window
+from core.utils import first_unread_index, paginated_window, db_fetch_limit
 from ui.conversations import ConversationsPanel
 
 
@@ -128,6 +128,29 @@ class TestPaginatedWindow:
         offset, sep = paginated_window(total_len=100, limit=50, unread_sep_idx=0)
         assert offset == 0
         assert sep == 0
+
+
+# ── How much history navigate_to_conversation() pulls from the DB ──────────
+
+
+class TestDbFetchLimit:
+    def test_unread_within_the_page_size_uses_the_configured_limit(self):
+        assert db_fetch_limit(configured_limit=200, unread_count=15) == 200
+
+    def test_zero_unread_uses_the_configured_limit(self):
+        assert db_fetch_limit(configured_limit=200, unread_count=0) == 200
+
+    def test_unread_beyond_the_page_size_widens_the_fetch(self):
+        """The reported case: 350 unread against a 200-message page size —
+        the plain limit would leave first_unread_index() unable to find the
+        separator at all."""
+        assert db_fetch_limit(configured_limit=200, unread_count=350) == 400
+
+    def test_widened_fetch_is_capped(self):
+        assert db_fetch_limit(configured_limit=200, unread_count=50000, cap=2000) == 2000
+
+    def test_unread_exactly_at_the_page_size_changes_nothing(self):
+        assert db_fetch_limit(configured_limit=200, unread_count=200) == 200
 
 
 # ── When the separator goes away ────────────────────────────────────────────
