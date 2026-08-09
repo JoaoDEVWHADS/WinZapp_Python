@@ -999,7 +999,11 @@ class Connect:
                 def _call_start_session():
                     try:
                         resp = requests.post(url, json=payload, headers=headers, timeout=120)
-                        # If the code came back inline (rare), unblock the wait loop.
+                        logging.info("[_call_start_session] start-session response status: %s, body: %s", resp.status_code, resp.text[:300])
+                        if resp.status_code not in (200, 201):
+                            logging.error("[_call_start_session] start-session failed with HTTP %s: %s", resp.status_code, resp.text[:200])
+                            ws_ref._phone_code_event.set()
+                            return
                         inline_code = resp.json().get("phoneCode", "")
                         if inline_code and not ws_ref._phone_code_event.is_set():
                             ws_ref._phone_code_value = str(inline_code)
