@@ -6,6 +6,8 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
+import zipfile
 import wx
 import sound_lib, sound_lib.output
 from sound_lib import stream
@@ -540,15 +542,47 @@ def validate_soundpack_folder(folder: str):
     return True, "", {"name": str(data["name"]), "events": events, "alerts": alerts}
 
 
-def import_soundpack(source_folder: str, sounds_root: str):
-    """Validate `source_folder` as a soundpack, then copy it into
-    `sounds_root` as a new subfolder (named after the source folder,
-    de-duplicated if one with that name already exists).
+def import_soundpack(source_path, sounds_root: str):
+    """Validate `source_path` (folder or .zip archive) as a soundpack, then
+    copy/extract it into `sounds_root` as a new subfolder (named after the
+    source folder, de-duplicated if one with that name already exists).
 
     Returns (ok: bool, error_i18n_key: str, new_pack_id: str|None).
     """
+    if not source_path:
+        return False, "soundpack_import_error_no_folder", None
+
+    temp_dir_obj = None
+    source_folder = source_path
+
+    # If user selected a .zip file, extract it to a temporary folder first
+    if os.path.isfile(source_path) and source_path.lower().endswith(".zip"):
+        try:
+            temp_dir_obj = tempfile.TemporaryDirectory()
+            with zipfile.ZipFile(source_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir_obj.name)
+            source_folder = temp_dir_obj.name
+            # If the zip extracted a single root folder containing the pack,
+            # use that subfolder.
+            entries = [os.path.join(source_folder, e) for e in os.listdir(source_folder)]
+            dirs = [e for e in entries if os.path.isdir(e)]
+            if len(dirs) == 1 and not validate_soundpack_folder(source_folder)[0]:
+                source_folder = dirs[0]
+        except Exception:
+            if temp_dir_obj is not None:
+                try:
+                    temp_dir_obj.cleanup()
+                except Exception:
+                    pass
+            return False, "soundpack_import_error_invalid_zip", None
+
     ok, err_key, _data = validate_soundpack_folder(source_folder)
     if not ok:
+        if temp_dir_obj is not None:
+            try:
+                temp_dir_obj.cleanup()
+            except Exception:
+                pass
         return False, err_key, None
 
     base_name = os.path.basename(os.path.normpath(source_folder)) or "soundpack"
@@ -563,8 +597,18 @@ def import_soundpack(source_folder: str, sounds_root: str):
     try:
         shutil.copytree(source_folder, dest_folder)
     except OSError:
+        if temp_dir_obj is not None:
+            try:
+                temp_dir_obj.cleanup()
+            except Exception:
+                pass
         return False, "soundpack_import_error_copy_failed", None
 
+    if temp_dir_obj is not None:
+        try:
+            temp_dir_obj.cleanup()
+        except Exception:
+            pass
     return True, "", dest_id
 
 
