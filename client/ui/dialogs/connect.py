@@ -1423,30 +1423,22 @@ class Connect:
             except Exception as e:
                 logging.error("[on_dialog_close] Error disconnecting WebSocket: %s", e)
             self.main_window.ws = None
-        
-        token = getattr(self.main_window, 'token', '')
-        logging.info("[on_dialog_close] Retrieved token: %s", token)
-        if token:
-            headers = self._wpp_headers(use_global_key=False)
-            try:
-                close_url = (
-                    f"{self.main_window.wpp_server}"
-                    f":{self.main_window.wpp_port}/api/{token}/close-session"
-                )
-                logging.info("[on_dialog_close] Sending close-session request to: %s", close_url)
-                resp = requests.post(close_url, headers=headers, timeout=3)
-                logging.info("[on_dialog_close] close-session response status: %s", resp.status_code)
-            except Exception as e:
-                logging.error("[on_dialog_close] Error sending close-session request: %s", e)
+
+        self._close_active_session()
         event.Skip()
 
     def on_quit_from_connect(self, event):
-        token = getattr(self.main_window, 'token', '')
-        if token:
+        logging.info("[on_quit_from_connect] Quit requested from connection dialog.")
+        self._pairing_attempt_id += 1
+        self.main_window._pairing_in_progress = False
+        if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:
-                headers = self._wpp_headers(use_global_key=False)
-                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token}/close-session"
-                requests.post(url, headers=headers, timeout=2)
-            except Exception:
-                pass
+                logging.info("[on_quit_from_connect] Disconnecting WebSocket...")
+                self.main_window.ws.sio.disconnect()
+            except Exception as e:
+                logging.error("[on_quit_from_connect] Error disconnecting WebSocket: %s", e)
+            self.main_window.ws = None
+
+        self._close_active_session()
         sys.exit()
+
