@@ -34,7 +34,7 @@ def _msg(mtype, ts, **extra):
 class TestWhatCountsAsActivity:
     @pytest.mark.parametrize("mtype", [
         "conversation", "extendedTextMessage", "imageMessage", "audioMessage",
-        "documentMessage", "stickerMessage", "reactionMessage", "pollCreationMessage",
+        "documentMessage", "stickerMessage", "pollCreationMessage",
         "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage",
     ])
     def test_real_messages_count(self, mtype):
@@ -46,6 +46,20 @@ class TestWhatCountsAsActivity:
     ])
     def test_bookkeeping_does_not_count(self, mtype):
         assert counts(_msg(mtype, 100)) is False
+
+    def test_reaction_message_does_not_count(self):
+        """A reactionMessage record legitimately sits in `records` (needed
+        for ConversationsPanel to rebuild the in-conversation reaction
+        display on reopen), but must never be treated as "the conversation's
+        last message" for preview or sort purposes — that would either float
+        a chat to the top based on a bare reaction's timestamp, or (when no
+        real message follows it and chat["_last_reaction"] hasn't been
+        (re)populated for it — e.g. right after an app restart or F5 resync)
+        render the chat-list preview as "Mensagem incompatível", since
+        _last_msg_preview() has no rendering case for this type. Reactions
+        have their own dedicated preview channel — chat["_last_reaction"],
+        checked before this allowlist ever comes into play."""
+        assert counts(_msg("reactionMessage", 100)) is False
 
     def test_a_revoke_counts_because_it_is_shown(self):
         m = _msg("protocolMessage", 100, message={"protocolMessage": {"type": 3}})

@@ -87,16 +87,21 @@ class TestEdgeCases:
         assert is_countable_message(None) is False
         assert is_countable_message("not a dict") is False
 
-    def test_reaction_message_follows_the_shared_allowlist(self):
+    def test_reaction_message_does_not_count(self):
         """reactionMessage never actually reaches is_countable_message() via
         on_new_message() (which special-cases and returns early for it
-        before this check), but MainWindow._PREVIEW_MESSAGE_TYPES
-        deliberately includes it (reactions have their own dedicated
-        preview/ordering handling — _track_last_reaction()/
-        _reacted_message_preview()) — is_countable_message() must follow
-        that existing, considered design rather than silently overriding it
-        with a third opinion."""
-        assert is_countable_message(_msg("reactionMessage")) is True
+        before this check), but a stray reactionMessage record CAN reach
+        on_historical_message()'s equivalent gate on history-sync redelivery
+        (e.g. after an app restart or F5 resync) — it must not count there
+        either, or a bare reaction (no real message) could bump a chat's
+        unread badge/sort position/notifications. Reactions have their own
+        dedicated preview/ordering channel: chat["_last_reaction"], set by
+        _track_last_reaction() and consumed directly by _last_msg_preview()
+        — see tests/test_chat_ordering.py's
+        test_reaction_message_does_not_count() for the companion coverage
+        on MainWindow._counts_as_last_message() itself, which this derives
+        from."""
+        assert is_countable_message(_msg("reactionMessage")) is False
 
 
 class TestBuiltOnTheSharedAllowlist:
