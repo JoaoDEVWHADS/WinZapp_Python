@@ -5207,6 +5207,19 @@ class MainWindow(wx.Frame):
             except Exception:
                 logging.exception("[shutdown] lease release failed (non-fatal)")
 
+        # STEP 1.5 (custom API / shared server): after closing OUR OWN session,
+        # sweep the server for ORPHANED sessions — ones whose token exists but
+        # that are not CONNECTED (QR pending, abandoned, or left over from a
+        # crash). On a shared/custom server those otherwise pile up as live
+        # Chrome processes forever (observed: 22 chrome-headless shells after a
+        # few pairings). Never touch another account's ACTIVE session: we only
+        # close sessions whose own status is not connected.
+        if getattr(self, "wpp_custom_api", False):
+            try:
+                self._close_orphaned_server_sessions()
+            except Exception:
+                logging.exception("[shutdown] orphaned-session sweep failed (non-fatal)")
+
         pid = None
         if proc and proc.poll() is None:
             pid = proc.pid
@@ -5244,6 +5257,71 @@ class MainWindow(wx.Frame):
                         pass
         else:
             self._shutdown_audit("no node pid to kill (proc gone / port free)")
+
+    def _close_orphaned_server_sessions(self):
+        """Close orphaned sessions on a shared/custom WPPConnect server.
+
+        Called on shutdown when wpp_custom_api is active. A session is orphaned
+        when its token exists server-side but its connection status is NOT
+        connected (QR pending, abandoned, or leftover from a crash) — such
+        sessions keep a live Chrome process on the server forever otherwise.
+
+        We only ever close sessions that report a non-connected status, so an
+        ACTIVE session of another account is never touched. Runs on the
+        shutdown worker thread; best-effort, never raises.
+        """
+        base = f"{self.wpp_server}:{self.wpp_port}"
+        api_key = getattr(self, "wpp_api_key", "") or ""
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        current = (getattr(self, "token", "") or "").split(":")[0]
+        try:
+            resp = requests.get(
+                f"{base}/api/{api_key}/show-all-sessions",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code not in (200, 201):
+                logging.info("[orphan-sweep] show-all-sessions HTTP %s — skipping",
+                             resp.status_code)
+                return
+            data = resp.json()
+            sessions = data.get("response", []) if isinstance(data, dict) else []
+        except Exception as exc:
+            logging.info("[orphan-sweep] could not list server sessions: %s", exc)
+            return
+
+        closed = 0
+        for sess in sessions:
+            # Each entry is a session NAME (token id). getAllTokens returns
+            # the stored token keys; guard both dict and plain-string shapes.
+            name = sess.get("session") if isinstance(sess, dict) else str(sess)
+            if not name:
+                continue
+            if name == current:
+                continue  # ours — already closed in STEP 1
+            # Check the session's real status: only close non-connected ones.
+            try:
+                st = requests.get(
+                    f"{base}/api/{name}/check-connection-session",
+                    headers=headers, timeout=8,
+                )
+                payload = st.json() if st.headers.get("content-type", "").startswith("application/json") else {}
+                status = (payload.get("status") if isinstance(payload, dict) else None)
+                if status is True:
+                    continue  # genuinely connected — another account's live session
+            except Exception:
+                continue  # unreadable status → leave it alone (fail-safe)
+            try:
+                requests.post(
+                    f"{base}/api/{name}/close-session",
+                    headers=headers, timeout=8,
+                )
+                closed += 1
+                logging.info("[orphan-sweep] closed non-connected session %s", name[:12])
+                self._shutdown_audit(f"orphan-sweep closed {name[:12]}")
+            except Exception:
+                continue
+        if closed:
+            logging.info("[orphan-sweep] closed %d orphaned server session(s)", closed)
 
     def _find_pid_listening_on_port(self, port):
         """Return the PID of the node.exe process listening on *port* (Windows only).
