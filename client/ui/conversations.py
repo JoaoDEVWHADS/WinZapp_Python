@@ -4079,34 +4079,30 @@ class ConversationsPanel(wx.Panel):
             file_name = os.path.basename(local_path)
 
         # 2. Deep search for original filename across all Baileys/WPPConnect payload fields
-        if not file_name:
-            file_name = (
-                inner.get("fileName")
-                or inner.get("filename")
-                or inner.get("title")
-                or inner.get("name")
-                or msg.get("fileName")
-                or msg.get("filename")
-                or msg.get("title")
-                or media_data.get("filename")
-                or media_data.get("fileName")
-                or inner.get("caption")
-                or msg.get("caption")
-                or ""
-            )
-        elif msg_type == "imageMessage":
-            mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
-            ext  = mime.split("/")[-1] if "/" in mime else "jpg"
-            default_file = f"foto_{msg_id}.{ext}"
-        elif msg_type == "videoMessage":
-            ext = guessed_ext or ".mp4"
-            default_file = f"video_{time_str or msg_id}{ext}"
-        elif msg_type == "audioMessage":
-            ext = guessed_ext or ".mp3"
-            default_file = f"audio_{time_str or msg_id}{ext}"
+        if file_name:
+            default_file = file_name
         else:
-            ext = guessed_ext or ".bin"
-            default_file = f"arquivo_{time_str or msg_id}{ext}"
+            mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
+            guessed_ext = ""
+            if mimetype and "/" in mimetype:
+                raw_sub = mimetype.split("/")[1].split(";")[0].strip()
+                guessed_ext = f".{raw_sub}" if raw_sub else ""
+
+            if msg_type == "imageMessage":
+                ext = guessed_ext or ".jpg"
+                default_file = f"foto_{msg_id}{ext}"
+            elif msg_type == "videoMessage":
+                ext = guessed_ext or ".mp4"
+                default_file = f"video_{msg_id}{ext}"
+            elif msg_type == "audioMessage":
+                ext = guessed_ext or ".ogg"
+                default_file = f"audio_{msg_id}{ext}"
+            elif msg_type == "documentMessage":
+                ext = guessed_ext or ".pdf"
+                default_file = f"documento_{msg_id}{ext}"
+            else:
+                ext = guessed_ext or ".bin"
+                default_file = f"arquivo_{msg_id}{ext}"
 
         # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
         return re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
