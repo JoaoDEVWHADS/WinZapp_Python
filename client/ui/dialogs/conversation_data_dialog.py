@@ -82,9 +82,18 @@ class ConversationDataDialog(wx.Dialog):
         self._jid    = jid
         self._name   = name
         self._is_group = is_group
-        # Parallel list of participant JIDs, populated by _populate_group().
-        # Index matches the row index in _part_list.
+        # Parallel lists describing each participant row, populated by
+        # _populate_group(). Index matches the row index in _part_list.
         self._participant_jids: list = []
+        self._participant_names: list = []
+        self._participant_is_admin: list = []
+        # False until _populate_group() confirms the current user is a
+        # group admin — the context menu / edit buttons stay hidden/disabled
+        # until then, so a click landing before the background fetch
+        # finishes can't reach an action that isn't actually available.
+        self._user_is_admin = False
+        self._group_subject     = name if is_group else ""
+        self._group_description = ""
 
         title_key  = "group_data" if self._is_group else "conversation_data"
         dlg_title  = f"{name} | {self._i18n.t(title_key)}"
@@ -274,6 +283,18 @@ class ConversationDataDialog(wx.Dialog):
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         ov_sizer.Add(self._overview_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+        # Admin-only group-editing buttons — hidden entirely (not just
+        # disabled) until we confirm the current user is a group admin.
+        self._edit_name_btn = wx.Button(overview_page, label=self._i18n.t("edit_group_name"))
+        self._edit_name_btn.Hide()
+        self._edit_name_btn.Bind(wx.EVT_BUTTON, self._on_edit_group_name)
+        ov_sizer.Add(self._edit_name_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self._edit_desc_btn = wx.Button(overview_page, label=self._i18n.t("edit_group_description"))
+        self._edit_desc_btn.Hide()
+        self._edit_desc_btn.Bind(wx.EVT_BUTTON, self._on_edit_group_description)
+        ov_sizer.Add(self._edit_desc_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self._add_members_btn_overview = wx.Button(overview_page, label=self._i18n.t("add_member"))
         self._add_members_btn_overview.Disable()   # enabled after we confirm user is admin
         self._add_members_btn_overview.Bind(wx.EVT_BUTTON, self._on_add_members)
@@ -293,6 +314,7 @@ class ConversationDataDialog(wx.Dialog):
         self._part_list.InsertColumn(2, self._i18n.t("group_admin"),   width=80)
         self._part_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_participant_activated)
         self._part_list.Bind(wx.EVT_KEY_DOWN, self._on_part_list_key_down)
+        self._part_list.Bind(wx.EVT_CONTEXT_MENU, self._on_participant_context_menu)
         pt_sizer.Add(self._part_list, 1, wx.EXPAND | wx.ALL, 8)
         self._add_members_btn = wx.Button(part_page, label=self._i18n.t("add_member"))
         self._add_members_btn.Disable()   # enabled after we confirm user is admin
@@ -475,10 +497,17 @@ class ConversationDataDialog(wx.Dialog):
             ov_lines.append(f"{i18n.t('created_at').format(date=creation)}")
         ov_lines.append(f"{i18n.t('group_size').format(count=size)}")
         self._overview_ctrl.SetValue("\n".join(ov_lines))
+        # Kept for the "edit name/description" dialogs below, pre-filled
+        # with whatever is currently set (blank string if the group has no
+        # description).
+        self._group_subject     = subject
+        self._group_description = desc
 
         # ── Participants ──────────────────────────────────────────────────────
         self._part_list.DeleteAllItems()
         self._participant_jids = []
+        self._participant_names: list = []
+        self._participant_is_admin: list = []
         participants = data.get("participants", [])
         my_jid = getattr(self._mw, "my_jid", "") or ""
         my_lid = getattr(self._mw, "my_lid", "") or ""
@@ -505,22 +534,40 @@ class ConversationDataDialog(wx.Dialog):
                 p_name = p_phone
             # get_group_info()'s real participant shape is {"id", "isAdmin"}
             # — "admin" doesn't exist on it, so this always read False.
-            is_admin = "admin" if (p.get("isAdmin") or p.get("admin")) else ""
-            if is_admin and my_digits and p_jid.split("@")[0] in my_digits:
+            is_admin_bool = bool(p.get("isAdmin") or p.get("admin"))
+            if is_admin_bool and my_digits and p_jid.split("@")[0] in my_digits:
                 user_is_admin = True
             idx = self._part_list.GetItemCount()
-            self._part_list.InsertItem(idx, p_name)
+            # Append the admin status directly onto the row's own text (not
+            # just a separate column) so a screen reader always announces it
+            # when arrowing through the list, regardless of whether it's
+            # configured to report every column of a report-view ListCtrl.
+            row_label = (
+                f"{p_name}, {i18n.t('group_admin_suffix')}" if is_admin_bool else p_name
+            )
+            self._part_list.InsertItem(idx, row_label)
             self._part_list.SetItem(idx, 1, p_phone)
-            self._part_list.SetItem(idx, 2, is_admin)
+            self._part_list.SetItem(idx, 2, i18n.t("group_admin") if is_admin_bool else "")
             # Store the best available JID for conversation navigation
             resolved_jid = lid_to_phone.get(p_jid, p_jid) if p_jid.endswith("@lid") else p_jid
             self._participant_jids.append(resolved_jid)
+            self._participant_names.append(p_name)
+            self._participant_is_admin.append(is_admin_bool)
 
-        # Enable "Add members" buttons only if current user is a group admin.
-        # If we cannot determine my_jid, enable them anyway (API will reject if not admin).
-        if user_is_admin or not my_digits:
+        # Enable "Add members" buttons, and show the admin-only group-editing
+        # buttons, only if the current user is a group admin. If we cannot
+        # determine my_jid, enable them anyway (the API will reject the
+        # request if the user turns out not to be an admin).
+        self._user_is_admin = bool(user_is_admin or not my_digits)
+        if self._user_is_admin:
             self._add_members_btn.Enable()
             self._add_members_btn_overview.Enable()
+            self._edit_name_btn.Show()
+            self._edit_desc_btn.Show()
+        else:
+            self._edit_name_btn.Hide()
+            self._edit_desc_btn.Hide()
+        self._edit_name_btn.GetParent().Layout()
 
         # A pre-populated list must never leave focus/selection pointing at
         # nothing — mirrors the conversation list's own convention (see
@@ -621,3 +668,207 @@ class ConversationDataDialog(wx.Dialog):
                 self._on_participant_activated(_E())
         else:
             event.Skip()
+
+    # ── Participant context menu (admin-only actions) ──────────────────────────
+
+    def _on_participant_context_menu(self, event):
+        """Right-click / Menu key / Shift+F10 on a participant row.
+
+        Remove/promote/demote are admin-only server-side actions — the menu
+        items are left out entirely (not just disabled) when the current
+        user isn't a group admin, rather than showing options that would
+        just fail.
+        """
+        idx = self._part_list.GetFirstSelected()
+        if idx < 0:
+            idx = self._part_list.GetFocusedItem()
+        if idx < 0 or idx >= len(self._participant_jids):
+            return
+        if not self._user_is_admin:
+            return
+        jid       = self._participant_jids[idx]
+        name      = self._participant_names[idx] if idx < len(self._participant_names) else jid
+        is_admin  = self._participant_is_admin[idx] if idx < len(self._participant_is_admin) else False
+        i18n      = self._i18n
+
+        menu = wx.Menu()
+        remove_item = menu.Append(wx.ID_ANY, i18n.t("remove_member"))
+        self.Bind(wx.EVT_MENU, lambda e, j=jid, n=name: self._on_remove_member(j, n), remove_item)
+
+        if is_admin:
+            demote_item = menu.Append(wx.ID_ANY, i18n.t("demote_from_admin"))
+            self.Bind(wx.EVT_MENU, lambda e, j=jid, n=name: self._on_demote_member(j, n), demote_item)
+        else:
+            promote_item = menu.Append(wx.ID_ANY, i18n.t("promote_to_admin"))
+            self.Bind(wx.EVT_MENU, lambda e, j=jid, n=name: self._on_promote_member(j, n), promote_item)
+
+        self.PopupMenu(menu)
+        menu.Destroy()
+
+    def _show_group_action_error(self, message: str):
+        wx.MessageBox(
+            message,
+            self._i18n.t("error").format(app_name=self._mw.app_name),
+            wx.OK | wx.ICON_ERROR,
+            self,
+        )
+
+    def _run_group_participant_action(self, api_fn, jid: str, name: str, fail_key: str):
+        """Call a remove/promote/demote API method on a background thread
+        and refresh the participants tab on success, or surface the error
+        on failure — including a genuine permission rejection from the
+        server (the client-side is-admin check above is only a best-effort
+        guard against showing options that can't work; the server is the
+        real authority)."""
+        ok, err = api_fn(self._jid, [jid])
+
+        def _done():
+            if ok:
+                threading.Thread(target=self._fetch_data, daemon=True).start()
+            else:
+                self._show_group_action_error(
+                    self._i18n.t(fail_key).format(name=name, error=err or "?")
+                )
+        wx.CallAfter(_done)
+
+    def _on_remove_member(self, jid: str, name: str):
+        if not self._user_is_admin:
+            self._show_group_action_error(self._i18n.t("group_action_no_permission"))
+            return
+        i18n = self._i18n
+        confirmed = wx.MessageBox(
+            i18n.t("remove_member_confirm").format(name=name),
+            i18n.t("remove_member"),
+            wx.YES_NO | wx.ICON_QUESTION,
+            self,
+        )
+        if confirmed != wx.YES:
+            return
+        threading.Thread(
+            target=self._run_group_participant_action,
+            args=(self._mw.remove_group_members, jid, name, "remove_member_failed"),
+            daemon=True,
+        ).start()
+
+    def _on_promote_member(self, jid: str, name: str):
+        if not self._user_is_admin:
+            self._show_group_action_error(self._i18n.t("group_action_no_permission"))
+            return
+        i18n = self._i18n
+        confirmed = wx.MessageBox(
+            i18n.t("promote_confirm").format(name=name),
+            i18n.t("promote_to_admin"),
+            wx.YES_NO | wx.ICON_QUESTION,
+            self,
+        )
+        if confirmed != wx.YES:
+            return
+        threading.Thread(
+            target=self._run_group_participant_action,
+            args=(self._mw.promote_group_members, jid, name, "promote_failed"),
+            daemon=True,
+        ).start()
+
+    def _on_demote_member(self, jid: str, name: str):
+        if not self._user_is_admin:
+            self._show_group_action_error(self._i18n.t("group_action_no_permission"))
+            return
+        i18n = self._i18n
+        confirmed = wx.MessageBox(
+            i18n.t("demote_confirm").format(name=name),
+            i18n.t("demote_from_admin"),
+            wx.YES_NO | wx.ICON_QUESTION,
+            self,
+        )
+        if confirmed != wx.YES:
+            return
+        threading.Thread(
+            target=self._run_group_participant_action,
+            args=(self._mw.demote_group_members, jid, name, "demote_failed"),
+            daemon=True,
+        ).start()
+
+    # ── Admin-only group name/description editing ───────────────────────────────
+
+    def _prompt_text_edit(self, title: str, label: str, initial: str, multiline: bool = False):
+        """Small Save/Cancel dialog pre-filled with *initial*. Returns the
+        new text on Save, or None on Cancel/close."""
+        dlg = wx.Dialog(self, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        lbl = wx.StaticText(dlg, label=label)
+        sizer.Add(lbl, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        style = wx.TE_MULTILINE if multiline else 0
+        field = wx.TextCtrl(dlg, value=initial or "", style=style)
+        sizer.Add(field, 1 if multiline else 0, wx.EXPAND | wx.ALL, 8)
+
+        btn_sizer = wx.StdDialogButtonSizer()
+        save_btn = wx.Button(dlg, wx.ID_OK, label=self._i18n.t("save_btn"))
+        cancel_btn = wx.Button(dlg, wx.ID_CANCEL, label=self._i18n.t("cancel"))
+        btn_sizer.AddButton(save_btn)
+        btn_sizer.AddButton(cancel_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+
+        dlg.SetSizer(sizer)
+        dlg.SetSize((420, 260 if multiline else 150))
+        save_btn.SetDefault()
+        field.SetFocus()
+        field.SetInsertionPointEnd()
+
+        result = dlg.ShowModal()
+        value = field.GetValue() if result == wx.ID_OK else None
+        dlg.Destroy()
+        return value
+
+    def _run_group_edit(self, api_fn, new_value: str, fail_key: str):
+        ok, err = api_fn(self._jid, new_value)
+
+        def _done():
+            if ok:
+                threading.Thread(target=self._fetch_data, daemon=True).start()
+            else:
+                self._show_group_action_error(self._i18n.t(fail_key).format(error=err or "?"))
+        wx.CallAfter(_done)
+
+    def _on_edit_group_name(self, event):
+        if not self._user_is_admin:
+            self._show_group_action_error(self._i18n.t("group_action_no_permission"))
+            return
+        new_name = self._prompt_text_edit(
+            self._i18n.t("edit_group_name"),
+            self._i18n.t("group_name_label"),
+            self._group_subject,
+        )
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == (self._group_subject or ""):
+            return
+        threading.Thread(
+            target=self._run_group_edit,
+            args=(self._mw.set_group_subject, new_name, "edit_group_name_failed"),
+            daemon=True,
+        ).start()
+
+    def _on_edit_group_description(self, event):
+        if not self._user_is_admin:
+            self._show_group_action_error(self._i18n.t("group_action_no_permission"))
+            return
+        new_desc = self._prompt_text_edit(
+            self._i18n.t("edit_group_description"),
+            self._i18n.t("group_description_label"),
+            self._group_description,
+            multiline=True,
+        )
+        if new_desc is None:
+            return
+        new_desc = new_desc.strip()
+        if new_desc == (self._group_description or "").strip():
+            return
+        threading.Thread(
+            target=self._run_group_edit,
+            args=(self._mw.set_group_description, new_desc, "edit_group_description_failed"),
+            daemon=True,
+        ).start()
