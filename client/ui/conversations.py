@@ -35,6 +35,7 @@ from ui.accessible import (
 )
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
+from core.video_player import VideoPlayer
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -230,6 +231,11 @@ class ConversationsPanel(wx.Panel):
         self.init_UI()
         self.create_accelerator_table()
         self.create_accel_conversation()
+
+        # In-app video-message playback (audio via BASS, frames via ffmpeg —
+        # see core/video_player.py). Created after init_UI() since it needs
+        # _media_bitmap to already exist.
+        self._video_player = VideoPlayer(self.main_window, self._media_bitmap)
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -450,6 +456,17 @@ class ConversationsPanel(wx.Panel):
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
         conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._action_download_btn.Hide()
+
+        # ── In-app video playback (audio via BASS, frames via ffmpeg — see
+        # core/video_player.py) — shown alongside Open/Save As for a
+        # selected video message, reusing _media_bitmap (the same widget
+        # the static thumbnail above renders into) to draw live frames.
+        self._video_play_pause_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("status_play_pause")
+        )
+        self._video_play_pause_btn.Bind(wx.EVT_BUTTON, self._on_play_pause_video_message)
+        conv_sizer.Add(self._video_play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._video_play_pause_btn.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
@@ -1844,6 +1861,8 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 pass
             self._recording_pa = None
+        if getattr(self, "_video_player", None) is not None:
+            self._video_player.stop()
         event.Skip()
 
     def _hide_voice_panel(self):
@@ -2339,6 +2358,11 @@ class ConversationsPanel(wx.Panel):
                     self._action_save_as_btn.Show()
                 else:
                     self._action_download_btn.Show()
+                # Play/Pause downloads (if needed) and plays in-app — see
+                # core/video_player.py. Shown regardless of is_downloaded:
+                # the handler downloads first when the .wzmedia cache is
+                # still missing, same as Open/Save As already do.
+                self._video_play_pause_btn.Show()
             self.conversation_panel.Layout()
 
         elif msg_type == "buttonsMessage":
@@ -2666,6 +2690,15 @@ class ConversationsPanel(wx.Panel):
     # ── Media controls helpers ──────────────────────────────────────────────
 
     def _hide_all_media_controls(self):
+        # Selection moved off the playing video row — stop it. Unlike audio
+        # playback elsewhere in this file (which is allowed to keep playing
+        # while the user scrolls/selects elsewhere), video also holds a
+        # live ffmpeg subprocess; leaving it running unattended is worth
+        # avoiding outright rather than matching audio's more permissive
+        # behaviour.
+        if getattr(self, "_video_player", None) is not None:
+            self._video_player.stop()
+        self._video_play_pause_btn.Hide()
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -4036,6 +4069,56 @@ class ConversationsPanel(wx.Panel):
                 tmp.write(content)
                 tmp.close()
                 wx.CallAfter(lambda: self._open_file_safely(tmp.name))
+            except Exception as exc:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    str(exc),
+                    self.main_window.i18n.t("error").format(
+                        app_name=self.main_window.app_name
+                    ),
+                    wx.OK | wx.ICON_ERROR,
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ── Play/pause a video message in-app (audio via BASS, frames via
+    # ffmpeg — see core/video_player.py and _hide_all_media_controls(),
+    # which stops this whenever selection/conversation moves away) ────────
+
+    def _on_play_pause_video_message(self, event):
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if msg.get("messageType") != "videoMessage":
+            return
+        if self._video_player.is_playing:
+            self._video_player.toggle_pause()
+            return
+
+        msg_id = msg.get("key", {}).get("id", "")
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
+
+        def _run():
+            if not os.path.isfile(media_path):
+                wx.CallAfter(
+                    self.main_window.output, self.main_window.i18n.t("downloading")
+                )
+                try:
+                    self.main_window.handle_media_message(msg)
+                except Exception:
+                    return
+            try:
+                with open(media_path, "rb") as fh:
+                    content = decrypt_bytes(fh.read(), self.main_window.key)
+                tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                tmp.write(content)
+                tmp.close()
+                wx.CallAfter(self._video_player.load_and_play, tmp.name)
             except Exception as exc:
                 wx.CallAfter(
                     wx.MessageBox,

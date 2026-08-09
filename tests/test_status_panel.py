@@ -9,12 +9,10 @@ Covers two of the reported bugs:
    when re-selecting the SAME contact the user was already viewing deeper
    into.
 
-2. The video "play/pause" button relied on sound_lib/BASS, an audio-only
-   engine with no video rendering and no bundled AAC/MP4 decoder plugin —
-   it silently failed on every single video status. Replaced with
-   downloading + opening in the OS's default video player (_on_open_video()
-   / _open_file_safely()), verified here via _show_current_status()'s
-   button-visibility decisions (is_video -> _open_video_btn shown).
+2. The video "play/pause" button, and _show_current_status()'s handling of
+   switching away from a playing video (must stop it) — verified here via
+   button-visibility decisions (is_video -> _play_pause_btn shown) and the
+   fake VideoPlayer's stop() call count.
 
 Also covers the new copy-status-text computation (feature request #5): the
 text handed to the clipboard must be the actual content — the full text for
@@ -72,6 +70,18 @@ class _FakeMainWindow:
         self.outputs.append(text)
 
 
+class _FakeVideoPlayer:
+    def __init__(self):
+        self.stop_calls = 0
+        self.is_playing = False
+        self.is_paused  = False
+
+    def stop(self):
+        self.stop_calls += 1
+        self.is_playing = False
+        self.is_paused  = False
+
+
 class _Stub:
     _show_current_status         = StatusPanel._show_current_status
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
@@ -85,9 +95,13 @@ class _Stub:
         self._current_status_entry = None
         self._current_status_text  = ""
         self._liked_statuses       = {}
+        self._video_local_path          = None
+        self._video_download_status_id  = None
+        self._video_player = _FakeVideoPlayer()
 
         self._status_content_label = _FakeWidget()
-        self._open_video_btn       = _FakeWidget()
+        self._video_bitmap         = _FakeWidget()
+        self._play_pause_btn       = _FakeWidget()
         self._save_media_btn       = _FakeWidget()
         self._copy_text_btn        = _FakeWidget()
         self._like_btn              = _FakeWidget()
@@ -187,24 +201,42 @@ class TestPositionPreservedOnReselect:
         assert stub._viewer_panel.shown is False
 
 
-class TestVideoOpensExternallyInsteadOfBassPlayback:
-    def test_video_status_shows_the_open_video_button(self):
+class TestVideoPlayback:
+    def test_video_status_shows_the_play_pause_button(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
         stub._selected_contact_idx = 0
 
         stub._show_current_status()
 
-        assert stub._open_video_btn.shown is True
+        assert stub._play_pause_btn.shown is True
 
-    def test_text_status_hides_the_open_video_button(self):
+    def test_text_status_hides_the_play_pause_button(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
         stub._selected_contact_idx = 0
 
         stub._show_current_status()
 
-        assert stub._open_video_btn.shown is False
+        assert stub._play_pause_btn.shown is False
+
+    def test_switching_status_stops_any_playing_video(self):
+        """Reported live: leaving the video's status without stopping it
+        first would keep its audio playing / ffmpeg decoding in the
+        background — _show_current_status() must always stop() the player
+        first, whatever was showing before."""
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status(), _text_status("oi")])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._show_current_status()
+        assert stub._video_player.stop_calls == 1  # stopped once on first show too
+
+        stub._current_status_idx = 1
+        stub._show_current_status()
+
+        assert stub._video_player.stop_calls == 2
+        assert stub._video_bitmap.shown is False
 
 
 class TestCopyStatusText:
