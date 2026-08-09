@@ -439,18 +439,20 @@ class ApiSetupDialog(wx.Dialog):
         `npm install` just rebuilt from scratch a few lines above this call.
 
         Port of setup_api.py's post-`npm install` patch block (decrypt.js
-        copy + _patch_wppconnect_host_layer()) — until this existed, ONLY a
-        developer running setup_api.py directly ever got these two patches;
-        every real end-user install goes through this dialog instead, which
-        restored the patched decrypt.js/*.ts files into client/api/ itself
-        (see the ZIP-extract step above) but never copied/patched anything
-        inside node_modules, so both the decrypt.js RangeError/memory-leak
-        fix and the host.layer.js pairing-code-rotation fix (#8) silently
-        never applied for any shipped install.
+        copy + _patch_wppconnect_host_layer() + _patch_wppconnect_status_layer())
+        — until this existed, ONLY a developer running setup_api.py directly
+        ever got these patches; every real end-user install goes through
+        this dialog instead, which restored the patched decrypt.js/*.ts
+        files into client/api/ itself (see the ZIP-extract step above) but
+        never copied/patched anything inside node_modules, so the
+        decrypt.js RangeError/memory-leak fix, the host.layer.js
+        pairing-code-rotation fix (#8), and the status.layer.js
+        posting-result fix all silently never applied for any shipped
+        install.
 
         Best-effort and never fatal: node_modules is deleted/rebuilt by npm
         on every install, but a failure to patch it should not block the
-        rest of setup — the app still works, just without these two fixes,
+        rest of setup — the app still works, just without these fixes,
         exactly like the pre-existing decrypt.js situation this replaces.
         """
         node_modules_wppconnect = os.path.join(
@@ -475,6 +477,57 @@ class ApiSetupDialog(wx.Dialog):
             ApiSetupDialog._patch_wppconnect_host_layer(node_modules_wppconnect)
         except Exception as exc:
             logging.warning("[api_setup] Failed to patch host.layer.js: %s", exc)
+
+        # status.layer.js — status-posting always reported success fix.
+        try:
+            ApiSetupDialog._patch_wppconnect_status_layer(node_modules_wppconnect)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to patch status.layer.js: %s", exc)
+
+    @staticmethod
+    def _patch_wppconnect_status_layer(wppconnect_api_dir: str) -> bool:
+        """Patch @wppconnect-team/wppconnect's compiled status.layer.js so
+        posting a status (text/image/video) actually reports whether it
+        succeeded. Port of setup_api.py's function of the same name — see
+        client/core/wppconnect_status_layer_patch.py's module docstring for
+        the root cause.
+
+        Idempotent (each of the three patches is independently a no-op once
+        applied) and best-effort.
+        """
+        from core.wppconnect_status_layer_patch import ALL_PATCHES
+        status_layer_path = os.path.join(wppconnect_api_dir, "layers", "status.layer.js")
+        if not os.path.isfile(status_layer_path):
+            logging.warning("[api_setup] status.layer.js not found — skipping status-posting-result patch.")
+            return False
+
+        with open(status_layer_path, encoding="utf-8") as f:
+            content = f.read()
+
+        applied = 0
+        already = 0
+        missing = 0
+        for original, patched in ALL_PATCHES:
+            if patched in content:
+                already += 1
+            elif original in content:
+                content = content.replace(original, patched, 1)
+                applied += 1
+            else:
+                missing += 1
+
+        if applied:
+            with open(status_layer_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logging.info("[api_setup] Patched status.layer.js — %d status-posting method(s) now correctly report success/failure.", applied)
+        elif already == len(ALL_PATCHES):
+            logging.info("[api_setup] status.layer.js status-posting-result patch already applied.")
+        if missing:
+            logging.warning(
+                "[api_setup] status.layer.js: %d status-posting method(s) did not match the "
+                "expected upstream source — skipping those.", missing,
+            )
+        return missing == 0
 
     @staticmethod
     def _patch_wppconnect_host_layer(wppconnect_api_dir: str) -> bool:
