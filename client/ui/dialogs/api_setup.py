@@ -480,18 +480,27 @@ class ApiSetupDialog(wx.Dialog):
     def _patch_wppconnect_host_layer(wppconnect_api_dir: str) -> bool:
         """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
         phone-number pairing code stops regenerating on every QR-code
-        rotation (WinZapp issue #8). Port of setup_api.py's function of the
-        same name — see its docstring for the full upstream root-cause
-        explanation (wppconnect-team/wppconnect#2836). Idempotent and
-        best-effort: a no-op if already patched, and a logged warning
-        (never a crash) if the installed wppconnect version doesn't match
-        this exact source text.
+        rotation, WITHOUT freezing forever if it should ever need a refresh
+        (WinZapp issue #8). Port of setup_api.py's function of the same
+        name — see the three module-level `_HOST_LAYER_*_CHECK_QR_CODE`
+        constants there for the v0 (upstream bug) / v1 (WinZapp's first,
+        unsafe attempt — could freeze the code forever if loginByCode()
+        ever failed, or once a code genuinely needed to be refreshed) / v2
+        (current: 60s reuse cooldown, self-recovering) history.
+
+        Idempotent (a no-op if v2 is already applied — including
+        automatically upgrading a machine that still has v1 installed) and
+        best-effort: a logged warning, never a crash, if the installed
+        wppconnect version doesn't match either known source text.
 
         *wppconnect_api_dir* is .../node_modules/@wppconnect-team/wppconnect/dist/api
         (i.e. the caller has already descended into node_modules — unlike
         setup_api.py's copy of this function, which is given the outer
         client/api/ directory instead).
         """
+        from core.wppconnect_host_layer_patch import (
+            ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+        )
         host_layer_path = os.path.join(wppconnect_api_dir, "layers", "host.layer.js")
         if not os.path.isfile(host_layer_path):
             logging.warning("[api_setup] host.layer.js not found — skipping pairing-code patch.")
@@ -500,39 +509,18 @@ class ApiSetupDialog(wx.Dialog):
         with open(host_layer_path, encoding="utf-8") as f:
             content = f.read()
 
-        if "linkCodeGenerated" in content:
-            logging.info("[api_setup] host.layer.js pairing-code patch already applied.")
+        if PATCHED_CHECK_QR_CODE in content:
+            logging.info("[api_setup] host.layer.js pairing-code patch (v2) already applied.")
             return True
 
-        original_reset = (
-            "        if (!needScan) {\n"
-            "            this.attempt = 0;\n"
-            "            return;\n"
-            "        }\n"
-        )
-        patched_reset = (
-            "        if (!needScan) {\n"
-            "            this.attempt = 0;\n"
-            "            this.linkCodeGenerated = false;\n"
-            "            return;\n"
-            "        }\n"
-        )
-        original_branch = (
-            "        if (typeof this.options.phoneNumber === 'string') {\n"
-            "            return this.loginByCode(this.options.phoneNumber);\n"
-            "        }\n"
-        )
-        patched_branch = (
-            "        if (typeof this.options.phoneNumber === 'string') {\n"
-            "            if (this.linkCodeGenerated) {\n"
-            "                return;\n"
-            "            }\n"
-            "            this.linkCodeGenerated = true;\n"
-            "            return this.loginByCode(this.options.phoneNumber);\n"
-            "        }\n"
-        )
+        if V1_CHECK_QR_CODE in content:
+            content = content.replace(V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+            with open(host_layer_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logging.info("[api_setup] Upgraded host.layer.js pairing-code patch from v1 (unsafe) to v2 (60s cooldown, self-recovering).")
+            return True
 
-        if original_reset not in content or original_branch not in content:
+        if ORIGINAL_CHECK_QR_CODE not in content:
             logging.warning(
                 "[api_setup] host.layer.js does not match the expected "
                 "upstream source — skipping pairing-code patch (the "
@@ -541,11 +529,10 @@ class ApiSetupDialog(wx.Dialog):
             )
             return False
 
-        content = content.replace(original_reset, patched_reset, 1)
-        content = content.replace(original_branch, patched_branch, 1)
+        content = content.replace(ORIGINAL_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
         with open(host_layer_path, "w", encoding="utf-8") as f:
             f.write(content)
-        logging.info("[api_setup] Patched host.layer.js — pairing code by phone number no longer regenerates on every QR rotation.")
+        logging.info("[api_setup] Patched host.layer.js — pairing code by phone number no longer regenerates on every QR rotation (60s reuse cooldown).")
         return True
 
     def _extract_zip(self, zip_path: str, api_dir: str) -> bool:
