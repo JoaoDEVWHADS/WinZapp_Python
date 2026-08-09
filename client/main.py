@@ -538,6 +538,42 @@ def history_gap_detected(fetched: list, local_records: list, page_size: int) -> 
     return known * 2 < len(fetched)
 
 
+def history_gap_closed(fetched: list, local_records: list, hole_top_ts: int) -> bool:
+    """True when a widened fetch has reached back into the history we held.
+
+    Deliberately not "history_gap_detected() is now False". That ratio asks
+    whether *most* of a page is new, and it misreads the widened case: `known`
+    is counted over local_records — the 200 records get_chats() keeps in
+    memory — while the widened page holds 800 or 2000. Whenever the widened
+    window lands *inside* that snapshot instead of reaching past it, some
+    stored records are still older than the page, and `known * 2 <
+    len(fetched)` is then true however complete the overlap is — so a hole
+    that was in fact reached reads as still open and burns another
+    escalation.
+
+    The right question is narrower and has an exact answer: did the widened
+    window come back down far enough to touch a message we already had from
+    *below* the hole? `hole_top_ts` is the oldest timestamp of the original
+    narrow page — the hole's ceiling — so anything stored below it is history
+    on the far side. Restricting the comparison that way also makes it immune
+    to a live message landing mid-sync: those sit above the ceiling and are
+    excluded from the reference set entirely.
+    """
+    if not fetched or not local_records or not hole_top_ts:
+        return False
+    below = {
+        r.get("key", {}).get("id") for r in local_records
+        if isinstance(r, dict) and 0 < _message_ts(r) < hole_top_ts
+    }
+    below.discard(None)
+    below.discard("")
+    if not below:
+        # Nothing stored below the hole, so there is no far side to reach.
+        return False
+    got = {m.get("key", {}).get("id") for m in fetched if isinstance(m, dict)}
+    return bool(below & got)
+
+
 class MainWindow(wx.Frame):
     def __init__(self):
         import time as _time
@@ -9889,7 +9925,8 @@ class MainWindow(wx.Frame):
         return out
 
     def _refetch_history_gap(self, remote_jid: str, phone: str, headers: dict,
-                             page_size: int, local_records: list) -> list:
+                             page_size: int, local_records: list,
+                             hole_top_ts: int = 0) -> list:
         """Re-query a chat with a wider window until it reaches stored history.
 
         Only called once history_gap_detected() has said the newest page is
@@ -9936,7 +9973,7 @@ class MainWindow(wx.Frame):
                 break
             best_len = len(raw)
             widest = self._normalize_fetched_messages(raw, remote_jid)
-            if not history_gap_detected(widest, local_records, count):
+            if history_gap_closed(widest, local_records, hole_top_ts):
                 logging.info("[history-gap] %s: closed at count=%d (%d messages).",
                              remote_jid, count, len(widest))
                 break
@@ -10105,15 +10142,19 @@ class MainWindow(wx.Frame):
                              .get("messages", {})
                              .get("records") or [])
             if history_gap_detected(all_messages, gap_reference, limit):
+                # Ceiling of the hole: the oldest message the narrow page
+                # reached. Everything stored below it is the far side we are
+                # trying to get back down to.
+                hole_top_ts = min(_message_ts(m) for m in all_messages)
                 logging.warning(
                     "[history-gap] %s: newest page of %d is disjoint from %d stored "
                     "message(s) — widening the window.",
                     remote_jid, len(all_messages), len(gap_reference))
                 wider = self._refetch_history_gap(
-                    remote_jid, fetch_jid, headers, limit, gap_reference)
+                    remote_jid, fetch_jid, headers, limit, gap_reference, hole_top_ts)
                 if len(wider) > len(all_messages):
                     all_messages = wider
-                if history_gap_detected(all_messages, gap_reference, len(all_messages)):
+                if not history_gap_closed(all_messages, gap_reference, hole_top_ts):
                     # Still disjoint: WhatsApp Web has not decoded that stretch
                     # yet. Flag it so the backfill keeps the chat in its queue
                     # instead of retiring it for holding a full page.
