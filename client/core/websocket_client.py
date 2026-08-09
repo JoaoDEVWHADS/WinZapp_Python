@@ -1407,12 +1407,32 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "document":
+            # A normal send/receive populates the top-level convenience
+            # fields (filename/size) WPPConnect's wa-js model sets on the
+            # raw message object. A FORWARDED document doesn't get those
+            # top-level fields populated the same way — only the nested
+            # mediaData carries the real name/size — so without this
+            # fallback (mirroring the audio/video branches above, which
+            # already fall back into mediaData for duration) every forwarded
+            # document rendered as the generic "Document" placeholder with a
+            # 0-byte size.
+            media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
+            doc_file_name = (
+                wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title")
+                or media_data.get("filename") or media_data.get("fileName") or media_data.get("title")
+                or "Document"
+            )
+            doc_file_length = (
+                wpp_msg.get("size") or wpp_msg.get("fileLength")
+                or media_data.get("size") or media_data.get("fileLength")
+                or 0
+            )
             message_content = {
                 "documentMessage": {
-                    "fileName": wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or "Document",
-                    "fileLength": wpp_msg.get("size") or wpp_msg.get("fileLength") or 0,
+                    "fileName": doc_file_name,
+                    "fileLength": doc_file_length,
                     "url": wpp_msg.get("clientUrl", ""),
-                    "mimetype": wpp_msg.get("mimetype", ""),
+                    "mimetype": wpp_msg.get("mimetype") or media_data.get("mimetype", ""),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }

@@ -13865,6 +13865,71 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             return False, str(exc)
 
+    def _group_participant_action(self, endpoint: str, group_jid: str, participant_jids: list) -> tuple:
+        """Shared POST for remove/promote/demote-participant-group — all
+        three take the same {groupId, phone} shape."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "groupId": group_jid,
+            "phone": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def remove_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Remove one or more participants from a group.
+        Returns (True, "") on success, (False, error_message) on failure."""
+        return self._group_participant_action("remove-participant-group", group_jid, participant_jids)
+
+    def promote_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Promote one or more participants to group admin."""
+        return self._group_participant_action("promote-participant-group", group_jid, participant_jids)
+
+    def demote_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Demote one or more participants from group admin."""
+        return self._group_participant_action("demote-participant-group", group_jid, participant_jids)
+
+    def set_group_subject(self, group_jid: str, title: str) -> tuple:
+        """Change a group's name/subject. Returns (True, "") or (False, error)."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-subject"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"groupId": group_jid, "title": title}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def set_group_description(self, group_jid: str, description: str) -> tuple:
+        """Change a group's description. Returns (True, "") or (False, error)."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-description"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"groupId": group_jid, "description": description}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
     # ── Media / contact attachments ───────────────────────────────────────────
 
     def send_media_attachment(

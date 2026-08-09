@@ -163,7 +163,12 @@ class ConversationsPanel(wx.Panel):
         self._unread_sep_idx: int = -1
         # Unread count captured before mark-as-read thread starts (avoids race)
         self._pending_open_unread: int = 0
-        # True while the separator was placed from the initial open (not from a live message)
+        # True while the current separator anchors an already-read position —
+        # either it was placed from the initial open (unread messages that
+        # existed before this conversation was opened), or the user's focus
+        # has since passed it (see _on_message_focused()). In both cases the
+        # next live message must replace it with a fresh separator (count
+        # reset to 1) instead of just incrementing its count.
         self._sep_from_open: bool = False
         # Latch so the mark-as-read request fires once per separator, not on
         # every focus event at or below it. This used to be inferred from the
@@ -1589,6 +1594,19 @@ class ConversationsPanel(wx.Panel):
                             os.rename(old_file, new_file)
                     except Exception as e:
                         print(f"[_mark_message_sent] failed to rename local audio: {e}")
+                    # Same trick for document/image/video attachments —
+                    # rename the pre-cached local_id.wzmedia written by
+                    # _pre_cache_sent_media() to the real id so Open/Save As
+                    # find it without a redundant download.
+                    if msg.get("messageType") in ("documentMessage", "imageMessage", "videoMessage"):
+                        try:
+                            media_dir = data_path("media")
+                            old_media = os.path.join(media_dir, f"{local_id}.wzmedia")
+                            new_media = os.path.join(media_dir, f"{real_id}.wzmedia")
+                            if os.path.isfile(old_media) and not os.path.isfile(new_media):
+                                os.rename(old_media, new_media)
+                        except Exception as e:
+                            print(f"[_mark_message_sent] failed to rename local media: {e}")
                     if getattr(self, "_current_audio_id", None) == local_id:
                         self._current_audio_id = real_id
                     if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
@@ -3303,6 +3321,14 @@ class ConversationsPanel(wx.Panel):
                 if (not self._unread_sep_marked_read
                         and not getattr(self, "_populating_messages", False)):
                     self._unread_sep_marked_read = True
+                    # The user's focus has now actually passed this
+                    # separator, so it anchors an already-read position —
+                    # same situation as a separator placed at conversation
+                    # open time. The next live message must replace it
+                    # entirely (fresh separator, count reset to 1) rather
+                    # than just bumping its count, or the count would keep
+                    # accumulating on top of messages the user already read.
+                    self._sep_from_open = True
                     if self.conversation is not None:
                         jid = self.conversation.get("remoteJid", "")
                         if jid:
@@ -7778,6 +7804,33 @@ class ConversationsPanel(wx.Panel):
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
 
+    def _pre_cache_sent_media(self, local_id: str, path: str, media_type: str):
+        """Copy a just-sent attachment straight into the local media cache,
+        keyed by its local_id the same way a downloaded copy is keyed by
+        message id.
+
+        We're the sender, so the exact bytes already sit on disk at *path* —
+        there's no reason to require a redundant round-trip download through
+        WPPConnect just to unlock the Open/Save As buttons. This mirrors the
+        existing "rename the local audio file so we don't have to download
+        it" trick _mark_message_sent() already does for recorded voice
+        messages, extended to files sent via the attachment picker
+        (document/image/video/audio). _mark_message_sent() renames the cache
+        entry from local_id to the real WhatsApp id once the echo confirms it.
+        """
+        try:
+            with open(path, "rb") as fh:
+                content = fh.read()
+            encrypted = encrypt(content, self.main_window.key)
+            if media_type == "audio":
+                cache_path = data_path("voice_messages", f"{local_id}.msv")
+            else:
+                cache_path = data_path("media", f"{local_id}.wzmedia")
+            with open(cache_path, "wb") as fh:
+                fh.write(encrypted)
+        except Exception as e:
+            logging.error(f"[_pre_cache_sent_media] failed to pre-cache {path}: {e}")
+
     def _show_attachment_panel(self):
         self._rebuild_attachment_list()
         self.message_label.Hide()
@@ -7937,8 +7990,19 @@ class ConversationsPanel(wx.Panel):
                 media_path=path, media_type=media_type, caption=caption,
                 quoted=quoted,
             )
-            self.main_window.message_queue.enqueue(pm)
             self._register_virtual_msg(virtual_msg)
+
+            # Pre-cache the file under local_id BEFORE enqueueing the actual
+            # send: _mark_message_sent() renames the cache entry from
+            # local_id to the real WhatsApp id as soon as the send is
+            # confirmed, so the file must already exist under local_id by
+            # then, or that rename silently no-ops and the cache is never
+            # found under the real id afterwards.
+            def _cache_then_enqueue(pm=pm, local_id=local_id, path=path, media_type=media_type):
+                self._pre_cache_sent_media(local_id, path, media_type)
+                self.main_window.message_queue.enqueue(pm)
+
+            threading.Thread(target=_cache_then_enqueue, daemon=True).start()
 
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
