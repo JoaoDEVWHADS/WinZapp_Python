@@ -544,6 +544,10 @@ class WebSocketClient:
 
     def on_qrcode_update(self, info):
         logging.debug(f"[WebSocketClient] event payload: {info}")
+        # Ignore QR code events if WhatsApp is already connected or paired
+        if getattr(self.main_window, "_wa_connected", False) or self.main_window.settings.get("privateinfo", {}).get("paired", False):
+            logging.info("[on_qrcode_update] Session already connected/paired — ignoring qrCode event.")
+            return
         base64_img, pairing_code = self._extract_qr_payload(info)
         if not base64_img and not pairing_code:
             logging.warning("[on_qrcode_update] qrCode event carried nothing usable: %r",

@@ -498,26 +498,20 @@ class Connect:
         except Exception:
             pass
 
-    def _close_active_session(self):
+    def _close_active_session(self, sync=False):
         # Retrieve the active token from the dialog state
         token = getattr(self, 'raw_token', '')
         if not token:
             token = getattr(self.main_window, 'token', '')
         if not token:
-            # The main_window token may be empty (e.g. a fresh pairing where
-            # start_qrcode_connection hasn't persisted it yet, or a switch
-            # between QR and phone before pairing completed) — fall back to
-            # the session this dialog itself started, so switching modes /
-            # quitting actually closes the previous session's browser on the
-            # server instead of leaking an orphaned Chrome (observed: 4
-            # userDataDirs + 22 chrome-headless shells after a few switches).
             token = getattr(self, '_last_started_qr_token', '')
-        logging.info("[_close_active_session] Active token retrieved: %s", token)
+        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", token, sync)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=False)
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
+            self._last_started_qr_token = None
             mw_token = getattr(self.main_window, 'token', '')
             if mw_token.startswith(session_name):
                 if hasattr(self.main_window, 'token'):
@@ -540,7 +534,11 @@ class Connect:
                     logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
                     logging.error("[_close_active_session] Error sending close-session request: %s", e)
-            threading.Thread(target=_close_api_session, daemon=True).start()
+
+            if sync:
+                _close_api_session()
+            else:
+                threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_switch_to_phone(self, event):
         # Close the active QR code session first
@@ -1439,6 +1437,6 @@ class Connect:
                 logging.error("[on_quit_from_connect] Error disconnecting WebSocket: %s", e)
             self.main_window.ws = None
 
-        self._close_active_session()
+        self._close_active_session(sync=True)
         sys.exit()
 
