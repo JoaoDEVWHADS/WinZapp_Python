@@ -45,6 +45,7 @@ from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
+from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path
@@ -3732,6 +3733,19 @@ class MainWindow(wx.Frame):
                         )
                     else:
                         logging.info("[ensure_api_modules_installed] npm install completed OK")
+                        # This npm install (unlike the main ApiSetupDialog
+                        # flow) rebuilt node_modules outside that dialog, so
+                        # nothing else re-applies WinZapp's node_modules-level
+                        # patches (decrypt.js, host.layer.js pairing-code fix)
+                        # afterwards — without this they'd silently regress
+                        # every time this "missing package" repair path runs.
+                        try:
+                            from ui.dialogs.api_setup import ApiSetupDialog
+                            ApiSetupDialog._apply_node_modules_patches(api_dir)
+                        except Exception as exc:
+                            logging.warning(
+                                "[ensure_api_modules_installed] Failed to apply node_modules patches: %s", exc
+                            )
                 except Exception as exc:
                     logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
             return
@@ -14501,9 +14515,9 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime(i18n.t("time_fmt"))
+                        time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
                     else:
-                        time_str = dt.strftime(i18n.t("datetime_fmt"))
+                        time_str = dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
                 except Exception:
                     pass
             if last_reaction.get("from_me"):
@@ -14667,9 +14681,9 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime(i18n.t("time_fmt"))
+                    time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
                 else:
-                    time_str = dt.strftime(i18n.t("datetime_fmt"))
+                    time_str = dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
             except Exception:
                 pass
 
