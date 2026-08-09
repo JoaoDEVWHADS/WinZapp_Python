@@ -6379,6 +6379,16 @@ class MainWindow(wx.Frame):
     def _cleanup_abandoned_sessions_worker(self):
         import connection_state as cs
         from coord_locks import sessions_lock, LockTimeout
+        # Custom API: the user's own external WPPConnect server owns and
+        # manages userDataDir sessions — its session registry is not our
+        # per-account sessions.json, so we cannot PROVE which session is
+        # abandoned without risking another account's live session (observed:
+        # pairing a 2nd account on a custom API tore down the 1st account's
+        # browser via this cleanup). Let the external server manage its own
+        # sessions; never clean under custom API (plan Zad 3.2 + user config).
+        if getattr(self, "wpp_custom_api", False):
+            logging.info("[sessions] custom API active — skipping abandoned-session cleanup")
+            return
         try:
             import session_store
             store = self._get_session_store()
@@ -6412,6 +6422,12 @@ class MainWindow(wx.Frame):
                         name = s.get("name") or ""
                         if not name or name in protected:
                             continue  # never a current/active/pairing name of any account
+                        # Defense-in-depth: never delete the directory of THIS
+                        # process's live session, even if the store lost track
+                        # of it (e.g. sessions.json missing/corrupt mid-run).
+                        # Deleting it would kill our own WhatsApp page.
+                        if current and (name == current or name.startswith(current + ":")):
+                            continue
                         target = cs.safe_session_dir_to_delete(udd_root, name)
                         if not target:
                             logging.warning("[sessions] refusing unsafe session name for cleanup")
@@ -8352,6 +8368,12 @@ class MainWindow(wx.Frame):
                                 if not name:
                                     name = self._fill_group_name(jid)
                             chat["name"] = name
+                        # If chat exists in self.chats (passed in), preserve any higher unreadCount
+                        if hasattr(self, "chats") and jid in self.chats:
+                            local_unread = int(self.chats[jid].get("unreadCount") or 0)
+                            server_unread = int(chat.get("unreadCount") or 0)
+                            if local_unread > server_unread:
+                                chat["unreadCount"] = local_unread
                         chats[jid] = chat
                     else:
                         for k, v in chat.items():
