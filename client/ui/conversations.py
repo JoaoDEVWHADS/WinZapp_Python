@@ -33,7 +33,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -921,7 +921,9 @@ class ConversationsPanel(wx.Panel):
         try:
             _conv_jid = conversation.get("remoteJid", "")
             if _conv_jid:
-                limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
+                configured_limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
+                unread_count = int(conversation.get("unreadCount") or 0)
+                limit = db_fetch_limit(configured_limit, unread_count)
                 db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)
                 db_msgs.reverse()
                 if "messages" not in conversation:
@@ -8046,6 +8048,12 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Freeze()
         try:
             # Manage unread separator
+            # A new live message always represents genuinely new unread
+            # content, even if the user had already reached the bottom (and
+            # thus marked-as-read) earlier in this same conversation session.
+            # Re-arm the latch so _on_message_focused() fires mark-as-read
+            # again once focus reaches/crosses this message.
+            self._unread_sep_marked_read = False
             if self._unread_sep_idx == -1:
                 # No separator yet — insert one before this new message
                 sep_pos = len(self._sorted_messages)
