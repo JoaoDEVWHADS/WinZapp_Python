@@ -321,8 +321,12 @@ class Connect:
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
-                if is_paired:
-                    # Clear local cached data if it was previously paired
+                if not is_paired:
+                    # Only wipe local cached data when the session was never
+                    # really paired (a genuine orphan). A paired session that
+                    # reached this branch earlier was already kept above via the
+                    # warm-up guard; this 'if is_paired' used to be dead code
+                    # because paired sessions return True before reaching here.
                     self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
