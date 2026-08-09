@@ -432,6 +432,162 @@ class ApiSetupDialog(wx.Dialog):
             ", ".join(applied), pkg.get("version", "?"),
         )
 
+    @staticmethod
+    def _apply_node_modules_patches(api_dir: str) -> None:
+        """Apply WinZapp's patches to files INSIDE node_modules (a vendored
+        dependency of WPPConnect Server, not WPPConnect Server itself), which
+        `npm install` just rebuilt from scratch a few lines above this call.
+
+        Port of setup_api.py's post-`npm install` patch block (decrypt.js
+        copy + _patch_wppconnect_host_layer() + _patch_wppconnect_status_layer())
+        — until this existed, ONLY a developer running setup_api.py directly
+        ever got these patches; every real end-user install goes through
+        this dialog instead, which restored the patched decrypt.js/*.ts
+        files into client/api/ itself (see the ZIP-extract step above) but
+        never copied/patched anything inside node_modules, so the
+        decrypt.js RangeError/memory-leak fix, the host.layer.js
+        pairing-code-rotation fix (#8), and the status.layer.js
+        posting-result fix all silently never applied for any shipped
+        install.
+
+        Best-effort and never fatal: node_modules is deleted/rebuilt by npm
+        on every install, but a failure to patch it should not block the
+        rest of setup — the app still works, just without these fixes,
+        exactly like the pre-existing decrypt.js situation this replaces.
+        """
+        node_modules_wppconnect = os.path.join(
+            api_dir, "node_modules", "@wppconnect-team", "wppconnect", "dist", "api",
+        )
+
+        # decrypt.js — RangeError/memory-leak patch.
+        try:
+            custom_decrypt = os.path.join(api_dir, "decrypt.js")
+            decrypt_dest = os.path.join(node_modules_wppconnect, "helpers", "decrypt.js")
+            if os.path.isfile(custom_decrypt):
+                os.makedirs(os.path.dirname(decrypt_dest), exist_ok=True)
+                shutil.copy2(custom_decrypt, decrypt_dest)
+                logging.info("[api_setup] Copied decrypt.js patch into node_modules.")
+            else:
+                logging.warning("[api_setup] decrypt.js not found in api_dir — skipping node_modules patch.")
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to copy decrypt.js patch into node_modules: %s", exc)
+
+        # host.layer.js — pairing-code rotation fix (issue #8).
+        try:
+            ApiSetupDialog._patch_wppconnect_host_layer(node_modules_wppconnect)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to patch host.layer.js: %s", exc)
+
+        # status.layer.js — status-posting always reported success fix.
+        try:
+            ApiSetupDialog._patch_wppconnect_status_layer(node_modules_wppconnect)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to patch status.layer.js: %s", exc)
+
+    @staticmethod
+    def _patch_wppconnect_status_layer(wppconnect_api_dir: str) -> bool:
+        """Patch @wppconnect-team/wppconnect's compiled status.layer.js so
+        posting a status (text/image/video) actually reports whether it
+        succeeded. Port of setup_api.py's function of the same name — see
+        client/core/wppconnect_status_layer_patch.py's module docstring for
+        the root cause.
+
+        Idempotent (each of the three patches is independently a no-op once
+        applied) and best-effort.
+        """
+        from core.wppconnect_status_layer_patch import ALL_PATCHES
+        status_layer_path = os.path.join(wppconnect_api_dir, "layers", "status.layer.js")
+        if not os.path.isfile(status_layer_path):
+            logging.warning("[api_setup] status.layer.js not found — skipping status-posting-result patch.")
+            return False
+
+        with open(status_layer_path, encoding="utf-8") as f:
+            content = f.read()
+
+        applied = 0
+        already = 0
+        missing = 0
+        for original, patched in ALL_PATCHES:
+            if patched in content:
+                already += 1
+            elif original in content:
+                content = content.replace(original, patched, 1)
+                applied += 1
+            else:
+                missing += 1
+
+        if applied:
+            with open(status_layer_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logging.info("[api_setup] Patched status.layer.js — %d status-posting method(s) now correctly report success/failure.", applied)
+        elif already == len(ALL_PATCHES):
+            logging.info("[api_setup] status.layer.js status-posting-result patch already applied.")
+        if missing:
+            logging.warning(
+                "[api_setup] status.layer.js: %d status-posting method(s) did not match the "
+                "expected upstream source — skipping those.", missing,
+            )
+        return missing == 0
+
+    @staticmethod
+    def _patch_wppconnect_host_layer(wppconnect_api_dir: str) -> bool:
+        """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
+        phone-number pairing code stops regenerating on every QR-code
+        rotation, WITHOUT freezing forever if it should ever need a refresh
+        (WinZapp issue #8). Port of setup_api.py's function of the same
+        name — see the three module-level `_HOST_LAYER_*_CHECK_QR_CODE`
+        constants there for the v0 (upstream bug) / v1 (WinZapp's first,
+        unsafe attempt — could freeze the code forever if loginByCode()
+        ever failed, or once a code genuinely needed to be refreshed) / v2
+        (current: 60s reuse cooldown, self-recovering) history.
+
+        Idempotent (a no-op if v2 is already applied — including
+        automatically upgrading a machine that still has v1 installed) and
+        best-effort: a logged warning, never a crash, if the installed
+        wppconnect version doesn't match either known source text.
+
+        *wppconnect_api_dir* is .../node_modules/@wppconnect-team/wppconnect/dist/api
+        (i.e. the caller has already descended into node_modules — unlike
+        setup_api.py's copy of this function, which is given the outer
+        client/api/ directory instead).
+        """
+        from core.wppconnect_host_layer_patch import (
+            ORIGINAL_CHECK_QR_CODE, V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE,
+        )
+        host_layer_path = os.path.join(wppconnect_api_dir, "layers", "host.layer.js")
+        if not os.path.isfile(host_layer_path):
+            logging.warning("[api_setup] host.layer.js not found — skipping pairing-code patch.")
+            return False
+
+        with open(host_layer_path, encoding="utf-8") as f:
+            content = f.read()
+
+        if PATCHED_CHECK_QR_CODE in content:
+            logging.info("[api_setup] host.layer.js pairing-code patch (v2) already applied.")
+            return True
+
+        if V1_CHECK_QR_CODE in content:
+            content = content.replace(V1_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+            with open(host_layer_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logging.info("[api_setup] Upgraded host.layer.js pairing-code patch from v1 (unsafe) to v2 (60s cooldown, self-recovering).")
+            return True
+
+        if ORIGINAL_CHECK_QR_CODE not in content:
+            logging.warning(
+                "[api_setup] host.layer.js does not match the expected "
+                "upstream source — skipping pairing-code patch (the "
+                "installed @wppconnect-team/wppconnect version may have "
+                "changed this file)."
+            )
+            return False
+
+        content = content.replace(ORIGINAL_CHECK_QR_CODE, PATCHED_CHECK_QR_CODE, 1)
+        with open(host_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logging.info("[api_setup] Patched host.layer.js — pairing code by phone number no longer regenerates on every QR rotation (60s reuse cooldown).")
+        return True
+
     def _extract_zip(self, zip_path: str, api_dir: str) -> bool:
         """
         Extract the GitHub source ZIP into *api_dir*.
@@ -753,6 +909,14 @@ class ApiSetupDialog(wx.Dialog):
                     wx.CallAfter(self._finish_error,
                                  self._i18n.t("api_setup_error_npm_install").format(details=err))
                 return
+
+            if self._cancelled:
+                return
+
+            # node_modules was just (re)built from scratch by npm install
+            # above — apply WinZapp's patches to the files inside it now,
+            # same as setup_api.py does for a developer install.
+            self._apply_node_modules_patches(api_dir)
 
             if self._cancelled:
                 return

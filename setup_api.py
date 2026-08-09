@@ -26,6 +26,17 @@ CLIENT_API_DIR   = os.path.join(ROOT_DIR, "client", "api")
 API_PATCHES_DIR  = os.path.join(ROOT_DIR, "client", "api_patches")
 WPPCONNECT_REPO  = "https://github.com/wppconnect-team/wppconnect-server.git"
 
+# client/core/wppconnect_host_layer_patch.py is the single source of truth
+# for the host.layer.js pairing-code patch text — shared with
+# ApiSetupDialog (client/ui/dialogs/api_setup.py), which needs the exact
+# same patch applied through the real end-user install flow. It's a
+# zero-dependency module (no wx, nothing else from client/), so importing
+# it here doesn't pull in anything setup_api.py couldn't already run before
+# client-side dependencies are installed.
+_CLIENT_DIR = os.path.join(ROOT_DIR, "client")
+if _CLIENT_DIR not in sys.path:
+    sys.path.insert(0, _CLIENT_DIR)
+
 # Files WinZapp patches on top of upstream wppconnect-server. client/api_patches/
 # is the permanent, always-git-tracked source of truth for all of these —
 # preferred below over whatever (if anything) happens to still be sitting in
@@ -179,6 +190,127 @@ def _restore_custom_files(custom_contents: dict):
         with open(dest_path, "wb") as f:
             f.write(content)
         print(f"[INFO] Restored custom file: {rel_path}")
+
+
+from core.wppconnect_host_layer_patch import (
+    ORIGINAL_CHECK_QR_CODE as _HOST_LAYER_ORIGINAL_CHECK_QR_CODE,
+    V1_CHECK_QR_CODE as _HOST_LAYER_V1_CHECK_QR_CODE,
+    PATCHED_CHECK_QR_CODE as _HOST_LAYER_PATCHED_CHECK_QR_CODE,
+)
+from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
+
+
+def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
+    """Patch @wppconnect-team/wppconnect's compiled host.layer.js so the
+    phone-number pairing code stops regenerating on every QR-code rotation,
+    WITHOUT freezing forever if it should ever need a refresh — see
+    client/core/wppconnect_host_layer_patch.py's module docstring for the
+    full v0 (upstream bug)/v1 (WinZapp's first, unsafe attempt)/v2 (current)
+    history. WinZapp issue #8.
+
+    This lives in node_modules (a vendored dependency of WPPConnect Server,
+    not WPPConnect Server itself), so it can't go through the
+    api_patches/ full-file-restore mechanism — npm install rebuilds
+    node_modules from scratch every time, so this must run AFTER npm
+    install, same as the existing decrypt.js patch right above this call.
+
+    Idempotent (a no-op if v2 is already applied — including automatically
+    upgrading a machine that still has v1 installed) and best-effort: if
+    the installed wppconnect version doesn't match either known source text
+    (e.g. a future upstream release), it logs a warning and leaves the file
+    untouched rather than corrupting it or crashing setup_api.py.
+    """
+    if client_api_dir is None:
+        client_api_dir = CLIENT_API_DIR
+    host_layer_path = os.path.join(
+        client_api_dir, "node_modules", "@wppconnect-team", "wppconnect",
+        "dist", "api", "layers", "host.layer.js",
+    )
+    if not os.path.isfile(host_layer_path):
+        print("[WARNING] host.layer.js not found — skipping pairing-code patch.")
+        return False
+
+    with open(host_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    if _HOST_LAYER_PATCHED_CHECK_QR_CODE in content:
+        print("[INFO] host.layer.js pairing-code patch (v2) already applied.")
+        return True
+
+    if _HOST_LAYER_V1_CHECK_QR_CODE in content:
+        content = content.replace(_HOST_LAYER_V1_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE, 1)
+        with open(host_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("[OK] Upgraded host.layer.js pairing-code patch from v1 (unsafe — could freeze forever) to v2 (60s cooldown, self-recovering).")
+        return True
+
+    if _HOST_LAYER_ORIGINAL_CHECK_QR_CODE not in content:
+        print(
+            "[WARNING] host.layer.js does not match the expected upstream "
+            "source — skipping pairing-code patch (the installed "
+            "@wppconnect-team/wppconnect version may have changed this "
+            "file). Please report this to the WinZapp maintainers."
+        )
+        return False
+
+    content = content.replace(_HOST_LAYER_ORIGINAL_CHECK_QR_CODE, _HOST_LAYER_PATCHED_CHECK_QR_CODE, 1)
+    with open(host_layer_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("[OK] Patched host.layer.js — the phone-number pairing code no longer regenerates on every QR rotation (60s reuse cooldown).")
+    return True
+
+
+def _patch_wppconnect_status_layer(client_api_dir: str = None) -> bool:
+    """Patch @wppconnect-team/wppconnect's compiled status.layer.js so
+    posting a status (text/image/video) actually reports whether it
+    succeeded, instead of always reporting success — see
+    client/core/wppconnect_status_layer_patch.py's module docstring for the
+    root cause (a missing async/await/return in three methods there,
+    inconsistent with every other evaluateAndReturn() call in this same
+    package).
+
+    Idempotent (each of the three patches is independently a no-op once
+    applied) and best-effort — a mismatched method is logged and skipped
+    rather than corrupting the file.
+    """
+    if client_api_dir is None:
+        client_api_dir = CLIENT_API_DIR
+    status_layer_path = os.path.join(
+        client_api_dir, "node_modules", "@wppconnect-team", "wppconnect",
+        "dist", "api", "layers", "status.layer.js",
+    )
+    if not os.path.isfile(status_layer_path):
+        print("[WARNING] status.layer.js not found — skipping status-posting-result patch.")
+        return False
+
+    with open(status_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    applied = 0
+    already = 0
+    missing = 0
+    for original, patched in _STATUS_LAYER_PATCHES:
+        if patched in content:
+            already += 1
+        elif original in content:
+            content = content.replace(original, patched, 1)
+            applied += 1
+        else:
+            missing += 1
+
+    if applied:
+        with open(status_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[OK] Patched status.layer.js — {applied} status-posting method(s) now correctly report success/failure.")
+    elif already == len(_STATUS_LAYER_PATCHES):
+        print("[INFO] status.layer.js status-posting-result patch already applied.")
+    if missing:
+        print(
+            f"[WARNING] status.layer.js: {missing} status-posting method(s) did not match "
+            "the expected upstream source — skipping those (the installed "
+            "@wppconnect-team/wppconnect version may have changed this file)."
+        )
+    return missing == 0
 
 
 def _merge_package_json_dependencies():
@@ -345,7 +477,19 @@ def main():
         except Exception as e:
             print(f"[WARNING] Failed to copy decrypt.js patch: {e}")
 
+        # Slow down phone-number pairing-code rotation (WinZapp issue #8) —
+        # see _patch_wppconnect_host_layer()'s docstring for the upstream bug.
+        try:
+            _patch_wppconnect_host_layer()
+        except Exception as e:
+            print(f"[WARNING] Failed to patch host.layer.js pairing-code rotation: {e}")
 
+        # Status posting always reported success regardless of whether it
+        # actually worked — see _patch_wppconnect_status_layer()'s docstring.
+        try:
+            _patch_wppconnect_status_layer()
+        except Exception as e:
+            print(f"[WARNING] Failed to patch status.layer.js posting-result reporting: {e}")
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")

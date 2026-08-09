@@ -45,6 +45,7 @@ from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
+from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path
@@ -2910,6 +2911,14 @@ class MainWindow(wx.Frame):
             )
             if not (_open and _visible):
                 chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+                # Track how many messages have genuinely arrived since the
+                # last local mark-as-read, so on_chat_unread_update() can
+                # tell a real new-unread total apart from a stale server
+                # count that still includes messages we already read locally
+                # but the server hasn't acknowledged as read yet.
+                if not hasattr(self, "_new_since_read"):
+                    self._new_since_read = {}
+                self._new_since_read[remote_jid] = self._new_since_read.get(remote_jid, 0) + 1
 
         # ── Persist in background — debounced so rapid bursts produce one write ─
         self._schedule_save(dirty_jid=remote_jid)
@@ -3158,6 +3167,22 @@ class MainWindow(wx.Frame):
             self.chats[remote_jid] = chat
 
         self._apply_group_subject_change(remote_jid, chat, msg)
+
+        # The reactionMessage record still gets appended to `records` below
+        # (needed so ConversationsPanel can rebuild the in-conversation
+        # reaction display on reopen — see populate_messages()'s
+        # _reaction_map scan), but the chat-LIST preview relies on
+        # chat["_last_reaction"] (_track_last_reaction()) to show "you
+        # reacted with X to Y" instead of falling through to formatting the
+        # raw reactionMessage record, which has no case in
+        # _last_msg_preview() and renders as "Mensagem incompatível". The
+        # live path (on_new_message()) and the own-reaction path
+        # (_on_own_reaction_sent()) already call this; history-sync
+        # redelivering a reaction after an app restart or an F5 resync
+        # never did, so _last_reaction stayed empty (it's in-memory only)
+        # and the preview fell through to the raw record instead.
+        if msg.get("messageType") == "reactionMessage":
+            self._track_last_reaction(remote_jid, msg)
 
         records_wrapper = chat.setdefault("messages", {})
         if not isinstance(records_wrapper, dict):
@@ -3760,6 +3785,19 @@ class MainWindow(wx.Frame):
                         )
                     else:
                         logging.info("[ensure_api_modules_installed] npm install completed OK")
+                        # This npm install (unlike the main ApiSetupDialog
+                        # flow) rebuilt node_modules outside that dialog, so
+                        # nothing else re-applies WinZapp's node_modules-level
+                        # patches (decrypt.js, host.layer.js pairing-code fix)
+                        # afterwards — without this they'd silently regress
+                        # every time this "missing package" repair path runs.
+                        try:
+                            from ui.dialogs.api_setup import ApiSetupDialog
+                            ApiSetupDialog._apply_node_modules_patches(api_dir)
+                        except Exception as exc:
+                            logging.warning(
+                                "[ensure_api_modules_installed] Failed to apply node_modules patches: %s", exc
+                            )
                 except Exception as exc:
                     logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
             return
@@ -12003,7 +12041,19 @@ class MainWindow(wx.Frame):
                 if incoming_t <= read_at_t:
                     unread_count = 0
                 else:
+                    # A genuinely new message arrived after the local
+                    # read-ack, so the guard above no longer applies. But the
+                    # server-reported total can still be stale/inflated —
+                    # e.g. it may still include messages we already read
+                    # locally that WhatsApp's own servers haven't caught up
+                    # with yet. Clamp to what we actually know arrived since
+                    # the read-ack instead of trusting the raw server count.
+                    local_new = getattr(self, "_new_since_read", {}).get(normalized)
+                    if local_new:
+                        unread_count = min(unread_count, local_new)
                     self._locally_read_at.pop(normalized, None)
+                    if hasattr(self, "_new_since_read"):
+                        self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
@@ -12467,6 +12517,9 @@ class MainWindow(wx.Frame):
         if not hasattr(self, "_locally_read_at"):
             self._locally_read_at = {}
         self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
+        if not hasattr(self, "_new_since_read"):
+            self._new_since_read = {}
+        self._new_since_read[remote_jid] = 0
         self._schedule_save(dirty_jid=remote_jid)
         # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
         # this isn't suppressed while a media sync is running, so the badge
@@ -13883,6 +13936,71 @@ class MainWindow(wx.Frame):
         except Exception as exc:
             return False, str(exc)
 
+    def _group_participant_action(self, endpoint: str, group_jid: str, participant_jids: list) -> tuple:
+        """Shared POST for remove/promote/demote-participant-group — all
+        three take the same {groupId, phone} shape."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "groupId": group_jid,
+            "phone": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def remove_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Remove one or more participants from a group.
+        Returns (True, "") on success, (False, error_message) on failure."""
+        return self._group_participant_action("remove-participant-group", group_jid, participant_jids)
+
+    def promote_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Promote one or more participants to group admin."""
+        return self._group_participant_action("promote-participant-group", group_jid, participant_jids)
+
+    def demote_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Demote one or more participants from group admin."""
+        return self._group_participant_action("demote-participant-group", group_jid, participant_jids)
+
+    def set_group_subject(self, group_jid: str, title: str) -> tuple:
+        """Change a group's name/subject. Returns (True, "") or (False, error)."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-subject"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"groupId": group_jid, "title": title}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def set_group_description(self, group_jid: str, description: str) -> tuple:
+        """Change a group's description. Returns (True, "") or (False, error)."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-description"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"groupId": group_jid, "description": description}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
     # ── Media / contact attachments ───────────────────────────────────────────
 
     def send_media_attachment(
@@ -14289,6 +14407,22 @@ class MainWindow(wx.Frame):
     # a user would recognise as activity. Deliberately excludes the silent
     # bookkeeping WhatsApp stores alongside real messages: groupNotification
     # ("X entrou no grupo"), notification_template, and every unknown type.
+    #
+    # reactionMessage is ALSO deliberately excluded, even though a
+    # reactionMessage record legitimately sits in a chat's `records` (see
+    # on_historical_message() — needed there so ConversationsPanel can
+    # rebuild the in-conversation reaction display on reopen). A reaction
+    # has its own dedicated preview channel — chat["_last_reaction"], set by
+    # _track_last_reaction() and consumed directly by _last_msg_preview()
+    # before it ever reaches this allowlist — so letting a reactionMessage
+    # record ALSO count here served no purpose and was actively harmful:
+    # since _last_msg_preview() has no rendering case for messageType
+    # "reactionMessage", picking one as `last` (which happened whenever
+    # _last_reaction hadn't been (re)populated for it, e.g. right after an
+    # app restart or an F5 resync, since _last_reaction is in-memory only)
+    # rendered as literally "Mensagem incompatível". It also let a bare
+    # reaction's timestamp float a chat to the top of the list via
+    # _chat_last_ts(), independent of any real message ever being sent.
     _PREVIEW_MESSAGE_TYPES = frozenset({
         "conversation", "extendedTextMessage", "imageMessage", "videoMessage",
         "audioMessage", "documentMessage", "stickerMessage", "contactMessage",
@@ -14297,7 +14431,6 @@ class MainWindow(wx.Frame):
         "pollUpdateMessage",
         "buttonsMessage", "listMessage", "templateMessage", "interactiveMessage",
         "buttonsResponseMessage", "listResponseMessage", "protocolMessage",
-        "reactionMessage",
     })
 
     @classmethod
@@ -14454,9 +14587,9 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime(i18n.t("time_fmt"))
+                        time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
                     else:
-                        time_str = dt.strftime(i18n.t("datetime_fmt"))
+                        time_str = dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
                 except Exception:
                     pass
             if last_reaction.get("from_me"):
@@ -14620,9 +14753,9 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime(i18n.t("time_fmt"))
+                    time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
                 else:
-                    time_str = dt.strftime(i18n.t("datetime_fmt"))
+                    time_str = dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
             except Exception:
                 pass
 

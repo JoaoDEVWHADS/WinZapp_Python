@@ -70,6 +70,13 @@ class _FakeMainWindow:
     def _normalize_jid(self, jid):
         return jid
 
+    def resolve_lid_jids_via_api(self, jids):
+        # _get_participant_name() fires this on a background thread for an
+        # unresolved @lid with no other way to learn a name — a no-op stub
+        # is enough here since these tests assert on the immediate fallback
+        # value, not on resolution actually completing.
+        pass
+
 
 class _Stub:
     _get_message_content = ConversationsPanel._get_message_content
