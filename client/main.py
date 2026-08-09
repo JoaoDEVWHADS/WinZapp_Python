@@ -1203,7 +1203,20 @@ class MainWindow(wx.Frame):
             logging.error("[init_UI] _post_ui_init_fn is MISSING — connection/sync will NOT start! This is a bug.")
 
         logging.info("[init_UI] Entering app.MainLoop() — main thread will block here until app exits")
-        app.MainLoop()
+        try:
+            app.MainLoop()
+        except KeyboardInterrupt:
+            # Ctrl+C on the console: python-socketio installs its own signal
+            # handler that raises KeyboardInterrupt here instead of letting
+            # wx close the window normally. Do a graceful teardown instead of
+            # dumping an ugly traceback.
+            logging.info("[init_UI] KeyboardInterrupt (Ctrl+C) received — shutting down gracefully")
+            try:
+                self._perform_shutdown()
+                self._terminate_process()
+            except Exception:
+                logging.exception("[init_UI] Error during Ctrl+C shutdown")
+                os._exit(0)
 
     # ── Menu bar ─────────────────────────────────────────────────────────────
 
