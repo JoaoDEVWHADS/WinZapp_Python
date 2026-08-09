@@ -6103,10 +6103,12 @@ class MainWindow(wx.Frame):
 
         # Bootstrap settings.json if missing
         if not os.path.isfile(settings_file):
-            default_file = resource_path("data", "settings_default.json")
+            os.makedirs(os.path.dirname(settings_file), exist_ok=True)
             if os.path.isfile(default_file):
-                os.makedirs(os.path.dirname(settings_file), exist_ok=True)
                 shutil.copy2(default_file, settings_file)
+            else:
+                with open(settings_file, "w", encoding="utf-8") as f:
+                    json.dump(fallback_dict, f, indent=4)
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
                 self.settings = json.load(f)
