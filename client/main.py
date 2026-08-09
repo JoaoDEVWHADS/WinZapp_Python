@@ -478,6 +478,68 @@ def is_countable_message(msg: dict) -> bool:
     return msg.get("messageType") not in _PREVIEW_ONLY_MESSAGE_TYPES
 
 
+def _message_ts(msg: dict) -> int:
+    """The timestamp of a message record, whichever key it arrived under."""
+    if not isinstance(msg, dict):
+        return 0
+    try:
+        return int(msg.get("messageTimestamp") or msg.get("timestamp") or msg.get("t") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def history_gap_detected(fetched: list, local_records: list, page_size: int) -> bool:
+    """True when a freshly fetched page cannot be joined onto stored history.
+
+    sync_chat_messages() asks get-messages for the newest `page_size`
+    messages and nothing else. Whenever a chat received more than that while
+    WinZapp was closed, the window lands entirely *after* the newest message
+    on disk and the messages in between are never requested by anything —
+    reported live on an active group: 1391 messages stored with a 14.5-hour
+    hole (08/08 01:56 -> 16:28) and exactly 201 messages on the newer side,
+    i.e. one saturated 200-page. WhatsApp's own unread count still counted
+    the missing ones, so the chat announced 433 unread and produced ~200.
+
+    Three conditions, because each alone gives a false positive:
+
+    * The page must be **full**. A short page is everything the store had, so
+      nothing can be hiding behind it and a wider request would not help.
+    * There must be stored messages **older** than the page. With nothing
+      older there is no second block to be disjoint from — that is a first
+      sync, not a hole.
+    * The page must be **mostly new to us**. This is what separates a hole
+      from the ordinary case of re-syncing a chat we already hold: a routine
+      re-sync returns the same newest messages we already stored, so the
+      overlap is near total, while a page on the far side of a hole shares
+      almost nothing with what is on disk. Comparing timestamps instead
+      cannot tell the two apart — a single live message arriving mid-sync
+      drags the newest stored timestamp past the fetched window and masks
+      the hole permanently.
+    """
+    if not fetched or not local_records or page_size <= 0:
+        return False
+    if len(fetched) < page_size:
+        return False
+
+    oldest_fetched = min(_message_ts(m) for m in fetched)
+    if not oldest_fetched:
+        return False
+    if not any(0 < _message_ts(r) < oldest_fetched for r in local_records):
+        return False
+
+    fetched_ids = {m.get("key", {}).get("id") for m in fetched if isinstance(m, dict)}
+    fetched_ids.discard(None)
+    fetched_ids.discard("")
+    known = sum(
+        1 for r in local_records
+        if isinstance(r, dict) and r.get("key", {}).get("id") in fetched_ids
+    )
+    # Half is deliberately loose: the point is to separate "we already had
+    # this window" (overlap near 100%) from "this window is new" (near 0),
+    # not to pin down a precise ratio.
+    return known * 2 < len(fetched)
+
+
 class MainWindow(wx.Frame):
     def __init__(self, account_id=None, account_name=None, startup_source="user",
                  resume_pending=False, registry=None, global_dir=None):
@@ -786,6 +848,7 @@ class MainWindow(wx.Frame):
         # seconds.
         self._wa_offline_strikes = 0
         self._wa_startup_time = time.time()
+        self._reset_startup_probe()
         # (Locks initialized early at the top of __init__)
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando").
         # Starts as "connecting" rather than blank/offline — the connection
@@ -1782,6 +1845,7 @@ class MainWindow(wx.Frame):
         self._auto_offline = False
         self._wa_offline_strikes = 0
         self._wa_startup_time = time.time()
+        self._reset_startup_probe()
         # Best-effort: close the WPPConnect session so Chrome is released.
         if old_token:
             def _close():
@@ -2455,15 +2519,90 @@ class MainWindow(wx.Frame):
         except Exception as e:
             logging.warning("[power] zombie recovery: start-session failed: %s", e)
 
-    # How long, and how many consecutive not-yet-connected results, the very
-    # first connection attempt of a session gets before the UI is allowed to
-    # declare "offline". WPPConnect/Chrome routinely take several seconds to
-    # finish booting, during which every status probe looks identical to a
-    # real outage (connection refused, CLOSED/INITIALIZING status, etc.) —
-    # without this grace window the app announced itself offline within the
-    # first second or two of every single launch.
+    # How long the very first connection attempt of a session gets before the
+    # UI is allowed to declare "offline". WPPConnect/Chrome routinely take
+    # several seconds to finish booting, during which every status probe looks
+    # identical to a real outage (connection refused, CLOSED/INITIALIZING
+    # status, etc.) — without this grace window the app announced itself
+    # offline within the first second or two of every single launch.
+    #
+    # A companion cap on the *number* of not-yet-connected readings used to sit
+    # alongside this and was removed: see _set_wa_connected(), where callers
+    # polling at different rates made a reading count mean different amounts of
+    # time and silently shrank this window to about a second.
+    #
+    # The window can stay generous because it is no longer the only thing
+    # separating "still booting" from "no internet" — see
+    # _startup_offline_confirmed(), which ends it early once the machine is
+    # shown to have no network at all.
     _WA_STARTUP_GRACE_SECONDS = 45
-    _WA_STARTUP_GRACE_STRIKES = 6
+
+    # How often the network itself may be probed while the startup grace is
+    # open, and how many consecutive failures confirm the machine really has no
+    # connectivity. Two, because a single failure a second after login is just
+    # as likely to be DNS not being warm yet as a genuine outage.
+    _STARTUP_PROBE_INTERVAL = 3.0
+    _STARTUP_PROBE_STRIKES = 2
+
+    def _startup_offline_confirmed(self) -> bool:
+        """True once the machine has been shown to have no internet at all
+        while the startup grace is still open.
+
+        The grace exists because a booting WPPConnect looks exactly like an
+        outage from the status endpoint, so the app must not shout "offline"
+        over what is really a slow launch. But the reverse case — the user
+        genuinely opened WinZapp with no connection — then waits out the whole
+        window before being told anything, and a screen-reader user staring at
+        "conectando" for 45 seconds is badly served by that.
+
+        Those two cases are not actually ambiguous: they only look alike
+        through WPPConnect's status string. Asking the network directly tells
+        them apart, so the grace can stay long for a slow boot and end almost
+        immediately when there is nothing to connect to.
+
+        Never blocks the caller. _set_wa_connected() runs on whatever thread
+        happened to poll — including the 0.2 s wait loop in _run_sync() — so
+        the probe is fired into the background and only its cached verdict is
+        read here; the next poll picks the answer up. Rate-limited so that loop
+        cannot spawn one probe every 200 ms.
+        """
+        if getattr(self, "_startup_probe_offline", False):
+            return True
+        now = time.time()
+        if getattr(self, "_startup_probe_running", False):
+            return False
+        if now - getattr(self, "_startup_probe_at", 0.0) < self._STARTUP_PROBE_INTERVAL:
+            return False
+        self._startup_probe_at = now
+        self._startup_probe_running = True
+
+        def _probe():
+            try:
+                if self._probe_whatsapp_host():
+                    self._startup_probe_fails = 0
+                    return
+                fails = getattr(self, "_startup_probe_fails", 0) + 1
+                self._startup_probe_fails = fails
+                if fails >= self._STARTUP_PROBE_STRIKES:
+                    self._startup_probe_offline = True
+                    logging.warning(
+                        "[connection] No route to WhatsApp on %d consecutive probes "
+                        "— ending the startup grace early.", fails)
+            except Exception:
+                logging.exception("[connection] startup network probe failed")
+            finally:
+                self._startup_probe_running = False
+
+        threading.Thread(target=_probe, daemon=True, name="startup-net-probe").start()
+        return False
+
+    def _reset_startup_probe(self) -> None:
+        """Forget the startup network verdict, so a later grace window (a
+        re-pair, a reconnect) starts from a clean slate instead of inheriting
+        a stale "this machine is offline"."""
+        self._startup_probe_offline = False
+        self._startup_probe_fails = 0
+        self._startup_probe_at = 0.0
 
     def _set_wa_connected(self, connected: bool, reason: str = "", announce: bool = True,
                            confirmed: bool = False):
@@ -2506,6 +2645,7 @@ class MainWindow(wx.Frame):
             # online; only a real transition should force anything below).
             was_offline = not was
             self._wa_offline_strikes = 0
+            self._reset_startup_probe()
             self._dead_browser_strikes = 0
             self._auto_repair_dialog_shown = False
             self._auto_offline = False
@@ -2552,11 +2692,31 @@ class MainWindow(wx.Frame):
         self._wa_offline_strikes += 1
         if not confirmed:
             never_connected_yet = not self._wa_connect_announced
+            # Bounded by elapsed time alone, deliberately. This used to also
+            # cap the number of not-yet-connected readings, and the two bounds
+            # were measured in incompatible units: the window was sized for the
+            # health checker's 30 s cadence (6 readings would span 3 minutes,
+            # so the 45 s clock always ran out first), but _run_sync() polls
+            # check_wa_connection_http() every 0.2 s while waiting for the
+            # connection. Under that loop the same 6 readings were spent in
+            # 1.2 s, collapsing a 45-second grace into barely one second.
+            # Observed live: six "INITIALIZING" readings 265 ms apart, then a
+            # full "modo offline" announcement with sound and speech — and the
+            # session reported itself connected 54 ms later. A reading count is
+            # a proxy for elapsed time that breaks the moment anything polls at
+            # a different rate; the clock is the thing actually meant here.
             within_grace = (
                 never_connected_yet
                 and (time.time() - self._wa_startup_time) < self._WA_STARTUP_GRACE_SECONDS
-                and self._wa_offline_strikes <= self._WA_STARTUP_GRACE_STRIKES
             )
+            if within_grace and self._startup_offline_confirmed():
+                # Not a slow boot — there is no network to boot onto. Say so
+                # now instead of holding "conectando" for the rest of the
+                # window.
+                logging.warning(
+                    "[connection] Startup grace cut short (%s): the machine cannot "
+                    "reach WhatsApp at all.", reason or "checked")
+                within_grace = False
             if within_grace:
                 logging.info(
                     "[connection] Not connected yet during startup grace "
@@ -7100,8 +7260,13 @@ class MainWindow(wx.Frame):
           *throws*, so a False here is meaningful but a True is not conclusive.)
         * a direct reachability probe against WhatsApp's servers, which is what
           catches the plain "this machine has no internet" case.
+
+        Both negatives require _OFFLINE_PROBE_STRIKES *consecutive* readings
+        before they count — see the session-probe branch below for why the
+        first one is not proof of anything.
         """
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/check-connection-session"
+        session_down = False
         try:
             resp = requests.get(
                 url,
@@ -7111,13 +7276,44 @@ class MainWindow(wx.Frame):
             if resp.status_code in (200, 201):
                 data = resp.json()
                 if not data.get("status"):
-                    self._offline_probe_strikes = self._OFFLINE_PROBE_STRIKES
-                    return False
+                    session_down = True
             elif resp.status_code == 404:
-                self._offline_probe_strikes = self._OFFLINE_PROBE_STRIKES
-                return False
+                session_down = True
         except Exception as e:
             logging.warning("[check_whatsapp_reachable] session probe failed: %s", e)
+
+        if session_down:
+            # This used to skip the strike tally entirely — it set
+            # _offline_probe_strikes to the limit and returned False on the
+            # spot, so one negative reading was enough to declare an outage.
+            # But the commonest cause of a negative here is not an outage at
+            # all: WhatsApp Web reloads its own page from time to time, and
+            # while it does, WPPConnect's isConnected() evaluates
+            # WAPI.isConnected() against a page where the injected WAPI
+            # namespace no longer exists — it throws ReferenceError, and the
+            # endpoint duly answers "not connected".
+            #
+            # Observed live: a 28-second reload window (wppconnect.log:
+            # "Execution context was destroyed, most likely because of a
+            # navigation", then ~700 "WAPI is not defined", then "State
+            # Change CONNECTED") announced a full "modo offline" with sound
+            # and speech, aborted LID resolution, marked a complete 574-chat
+            # sync as incomplete and skipped the whole media phase — with the
+            # machine's internet perfectly fine throughout, and with the page
+            # already healthy again 4 seconds later.
+            #
+            # Requiring the same consecutive strikes the host probe already
+            # requires rides out a reload; a genuine outage still registers
+            # on the next health-check tick ~30 s later.
+            self._offline_probe_strikes = getattr(self, "_offline_probe_strikes", 0) + 1
+            if self._offline_probe_strikes >= self._OFFLINE_PROBE_STRIKES:
+                return False
+            logging.info(
+                "[check_whatsapp_reachable] session probe reports disconnected "
+                "(strike %d/%d) — holding the current state for one more cycle.",
+                self._offline_probe_strikes, self._OFFLINE_PROBE_STRIKES,
+            )
+            return bool(getattr(self, "_wa_connected", False))
 
         if self._probe_whatsapp_host():
             self._offline_probe_strikes = 0
@@ -7925,9 +8121,21 @@ class MainWindow(wx.Frame):
         # (UI init finished long before _run_sync), so this only delays when
         # "sync complete" fires, not startup itself. sync_if_media() still
         # applies the day/size caps from the same settings tab per message.
-        if self.settings.get("storage", {}).get("auto_download_media", True):
+        if not self.settings.get("storage", {}).get("auto_download_media", True):
+            logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
+        elif not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
+            # Nothing can be downloaded while offline: every sync_if_media()
+            # call returns at its first line. Running the phase anyway used to
+            # announce "download de mídias iniciado em segundo plano" and,
+            # 71 ms later, "download de mídias concluído" — a full start/finish
+            # pair spoken over a phase that fetched nothing at all. Skip it
+            # outright; the health checker's next sync retry runs it for real
+            # once the connection is back.
+            logging.info("[start_sync] Phase 2 media auto-download skipped — not connected.")
+        else:
             logging.info("[start_sync] Phase 2 media auto-download starting.")
             self._media_sync_running = True
+            announced = False
             try:
                 # Verifica se existem mídias a serem baixadas antes de anunciar
                 _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
@@ -7941,18 +8149,34 @@ class MainWindow(wx.Frame):
                 if has_media:
                     wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
                     if not self.background_mode:
+                        announced = True
                         wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
 
                 count = self.sync_media_for_all_chats()
-                if count > 0:
-                    logging.info("[start_sync] Phase 2 downloaded media for %d task(s).", count)
-                    if not self.background_mode:
+                logging.info("[start_sync] Phase 2 downloaded %d media file(s).", count)
+                # Announce the outcome iff the start was announced, so the two
+                # always come in pairs — a screen-reader user left with a
+                # "iniciado" and no ending has no way to tell a finished phase
+                # from a hung one. What the ending *says* depends on whether
+                # the connection survived: dropping mid-phase makes every
+                # remaining download a no-op, and calling that "concluído"
+                # is the same lie this whole block exists to stop telling.
+                if announced:
+                    if getattr(self, "_wa_connected", False) and not getattr(self, "offline_mode", False):
                         wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
+                    else:
+                        logging.warning(
+                            "[start_sync] Phase 2 lost the connection mid-download "
+                            "(%d file(s) fetched before it dropped).", count)
+                        wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
             except Exception:
                 logging.exception("[start_sync] Phase 2 media auto-download failed")
+                if announced:
+                    wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
+            finally:
+                self._media_sync_running = False
+                wx.CallAfter(self._set_status, "")
             logging.info("[start_sync] Phase 2 media auto-download finished.")
-        else:
-            logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
         # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
         # _initial_sync_running is reset by start_sync()'s finally block.
@@ -10820,7 +11044,14 @@ class MainWindow(wx.Frame):
             return
 
         count = len(records)
-        if count >= self.history_page_target():
+        # A full page used to retire the chat unconditionally, and that is the
+        # one signal that most deserves a second look: the page is full
+        # *because* the window saturated, which is exactly when there can be
+        # more history behind it. sync_chat_messages() flags the chats where
+        # that turned out to be true and its widened re-query still could not
+        # reach stored history — those stay in the queue.
+        gap = remote_jid in getattr(self, "_history_gap_jids", ())
+        if count >= self.history_page_target() and not gap:
             _done()
             return
 
@@ -10829,7 +11060,11 @@ class MainWindow(wx.Frame):
         grew = previous is not None and count > previous
         still_landing = getattr(self, "_history_still_landing", False)
         _done()
-        if still_landing or grew:
+        # `gap and previous is None` queues a gap chat once; from the next pass
+        # on it is kept only while it keeps growing, exactly like a short chat.
+        # Without that the queue would never drain for a hole WhatsApp Web
+        # cannot fill.
+        if still_landing or grew or (gap and previous is None):
             counts[remote_jid] = count
             pending.add(remote_jid)
 
@@ -11273,29 +11508,48 @@ class MainWindow(wx.Frame):
                 "[history-sync] Older-message request failed for %s: %s", jid, exc)
             return False
 
-    def sync_media_for_all_chats(self):
+    def sync_media_for_all_chats(self) -> int:
+        """Download every not-yet-stored media file across all chats.
+
+        Returns the number of files **actually downloaded**, not the number of
+        candidate messages considered. That distinction is the whole point: it
+        used to return len(tasks), which counts every media message in the
+        cache whether or not anything was fetched for it. When the app was
+        offline, sync_if_media() returned at its first line for all of them —
+        1579 "tasks" completed in 71 ms having downloaded nothing — and the
+        caller, seeing a count above zero, announced "download de mídias
+        concluído" to the user. See start_sync()'s Phase 2.
+        """
         _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
-                        "stickerMessage", "videoMessage"}
+                        "stickerMessage", "videoMessage",
+                        "audio", "ptt", "document", "doc", "image", "sticker", "video"}
         tasks = [
             msg
             for chat in self.chats.values()
             for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
-            if msg.get("messageType") in _MEDIA_TYPES
+            if (msg.get("messageType") in _MEDIA_TYPES or msg.get("type") in _MEDIA_TYPES)
         ]
         if not tasks:
-            return
+            return 0
 
+        downloaded = 0
         timeout = self._MEDIA_SYNC_TIMEOUT
         with ThreadPoolExecutor(max_workers=self._MEDIA_SYNC_WORKERS) as pool:
             futs = {pool.submit(self.sync_if_media, msg, timeout): msg for msg in tasks}
             for fut in as_completed(futs):
                 try:
-                    fut.result()
+                    if fut.result():
+                        downloaded += 1
                 except Exception:
                     pass
 
         # Persist the set of expired IDs accumulated during this sync run.
         self._save_media_failed_ids()
+        logging.info(
+            "[sync_media_for_all_chats] Downloaded %d of %d candidate media message(s).",
+            downloaded, len(tasks),
+        )
+        return downloaded
 
     def _refresh_open_conversation_after_sync(self, remote_jid: str, chat: dict) -> None:
         """Repaint the open conversation after sync_chat_messages() replaces
@@ -11328,6 +11582,82 @@ class MainWindow(wx.Frame):
                 cp.refresh_messages_if_changed()
         wx.CallAfter(_apply)
 
+    # Multipliers applied to the page size when re-querying a chat whose newest
+    # page turned out to be disjoint from stored history. The API pages
+    # backwards on its own (deviceController.ts walks up to 10 extra pages
+    # under one `count`), so each step here is a single request, not N.
+    _HISTORY_GAP_FACTORS = (4, 10)
+    # Ceiling for one gap-closing request, matching what the API can actually
+    # deliver: its internal loop stops at 10 extra pages.
+    _HISTORY_GAP_MAX_COUNT = 2000
+
+    def _normalize_fetched_messages(self, raw_messages, remote_jid: str) -> list:
+        """WPPConnect get-messages payload -> WinZapp's canonical message dicts."""
+        out = []
+        for wm in raw_messages or []:
+            if isinstance(wm, dict) and self.ws:
+                try:
+                    normalized = self.ws._normalize_wpp_message(wm)
+                    prune_message_record(normalized)
+                    out.append(normalized)
+                except Exception as e:
+                    logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
+        return out
+
+    def _refetch_history_gap(self, remote_jid: str, phone: str, headers: dict,
+                             page_size: int, local_records: list) -> list:
+        """Re-query a chat with a wider window until it reaches stored history.
+
+        Only called once history_gap_detected() has said the newest page is
+        disjoint from what is on disk. Escalates `count` instead of walking
+        page by page because the API already does the walking internally, and
+        stops as soon as the widened window overlaps stored history — or as
+        soon as the store stops yielding more, which is the honest signal that
+        WhatsApp Web simply does not have the missing stretch (yet).
+
+        Returns the widest set of messages it managed to fetch, or [] when the
+        first widened request failed outright — never a *narrower* set than the
+        caller already had.
+        """
+        widest = []
+        best_len = page_size
+        for factor in self._HISTORY_GAP_FACTORS:
+            count = min(page_size * factor, self._HISTORY_GAP_MAX_COUNT)
+            if count <= best_len:
+                break
+            url = (f"{self.wpp_server}:{self.wpp_port}/api/{self.token}"
+                   f"/get-messages/{phone}?count={count}")
+            try:
+                # Deliberately longer than the 30s of the normal page: this
+                # request makes WhatsApp Web walk back through up to ten pages.
+                resp = requests.get(url, headers=headers, timeout=90)
+            except Exception as exc:
+                logging.warning("[history-gap] %s: request failed at count=%d: %s",
+                                remote_jid, count, exc)
+                break
+            if resp.status_code not in (200, 201):
+                logging.warning("[history-gap] %s: HTTP %s at count=%d",
+                                remote_jid, resp.status_code, count)
+                break
+            try:
+                body = resp.json()
+            except Exception:
+                break
+            raw = body.get("response", []) if isinstance(body, dict) else []
+            if not isinstance(raw, list) or len(raw) <= best_len:
+                logging.info(
+                    "[history-gap] %s: store returned %d at count=%d — no more history "
+                    "available, leaving the gap for a later pass.",
+                    remote_jid, len(raw) if isinstance(raw, list) else 0, count)
+                break
+            best_len = len(raw)
+            widest = self._normalize_fetched_messages(raw, remote_jid)
+            if not history_gap_detected(widest, local_records, count):
+                logging.info("[history-gap] %s: closed at count=%d (%d messages).",
+                             remote_jid, count, len(widest))
+                break
+        return widest
+
     def sync_chat_messages(self, chat):
         remote_jid = self._normalize_jid(chat.get("remoteJid", ""))
         chat["remoteJid"] = remote_jid
@@ -11358,6 +11688,11 @@ class MainWindow(wx.Frame):
 
         all_messages = []
         api_ok = False
+        # The JID form that actually answered. Starts as the one built above and
+        # is corrected when the alternate-JID fallback below is what worked —
+        # the history-gap re-query has to reuse the form the store recognises,
+        # not the one that just 401'd.
+        fetch_jid = phone
         # Skip API call entirely if session is known disconnected
         if getattr(self, "_wa_connected", False):
             max_retries = 3
@@ -11412,6 +11747,7 @@ class MainWindow(wx.Frame):
                                 alt_response = requests.get(alt_url, headers=headers, timeout=30)
                                 if alt_response.status_code in (200, 201):
                                     response = alt_response
+                                    fetch_jid = alternate_jid
                                     logging.info("[sync_chat_messages] Fallback alternate JID query succeeded!")
                                 else:
                                     both_jid_forms_failed = True
@@ -11425,14 +11761,8 @@ class MainWindow(wx.Frame):
                         logging.info(f"[sync_chat_messages] Fetched {len(wpp_messages)} messages from API for {remote_jid}")
                         if not isinstance(wpp_messages, list):
                             wpp_messages = []
-                        for wm in wpp_messages:
-                            if isinstance(wm, dict) and self.ws:
-                                try:
-                                    normalized = self.ws._normalize_wpp_message(wm)
-                                    prune_message_record(normalized)
-                                    all_messages.append(normalized)
-                                except Exception as e:
-                                    logging.error(f"[sync_chat_messages] Failed to normalize message in {remote_jid}: {e}")
+                        all_messages.extend(
+                            self._normalize_fetched_messages(wpp_messages, remote_jid))
                         api_ok = True
                         break
                     elif response.status_code in (401, 404, 500):
@@ -11472,6 +11802,41 @@ class MainWindow(wx.Frame):
                     break
         else:
             logging.info(f"[sync_chat_messages] Session disconnected, using cached messages for {remote_jid}")
+
+        # ── History-gap repair ───────────────────────────────────────────────
+        # The page above is always the newest `limit` messages and nothing
+        # else, so a chat that outran that window while WinZapp was closed
+        # comes back describing a stretch of time we have no messages for, and
+        # nothing downstream ever asks for the middle: the merge below unions
+        # two disjoint blocks, and _note_backfill_state() reads a full page as
+        # proof the chat is complete. See history_gap_detected().
+        gap_jids = getattr(self, "_history_gap_jids", None)
+        if gap_jids is None:
+            gap_jids = self._history_gap_jids = set()
+        gap_jids.discard(remote_jid)
+        if api_ok and all_messages:
+            # Snapshot before the merge below folds the fetched page into it.
+            gap_reference = (self.chats.get(remote_jid, {})
+                             .get("messages", {})
+                             .get("messages", {})
+                             .get("records") or [])
+            if history_gap_detected(all_messages, gap_reference, limit):
+                logging.warning(
+                    "[history-gap] %s: newest page of %d is disjoint from %d stored "
+                    "message(s) — widening the window.",
+                    remote_jid, len(all_messages), len(gap_reference))
+                wider = self._refetch_history_gap(
+                    remote_jid, fetch_jid, headers, limit, gap_reference)
+                if len(wider) > len(all_messages):
+                    all_messages = wider
+                if history_gap_detected(all_messages, gap_reference, len(all_messages)):
+                    # Still disjoint: WhatsApp Web has not decoded that stretch
+                    # yet. Flag it so the backfill keeps the chat in its queue
+                    # instead of retiring it for holding a full page.
+                    gap_jids.add(remote_jid)
+                    logging.warning(
+                        "[history-gap] %s: gap still open after widening — queued "
+                        "for the backfill.", remote_jid)
 
         # NOTE on "conversation cleared from the phone": there is deliberately
         # no automatic mirroring here.  The only local evidence would be
@@ -11906,33 +12271,40 @@ class MainWindow(wx.Frame):
         return msg_jid == self._normalize_jid(open_jid)
 
     def sync_if_media(self, msg, timeout=60):
-        """Download media for a single message during the background sync phase."""
+        """Download media for a single message during the background sync phase.
+
+        Returns True only when a file was actually downloaded. Every skip
+        below — offline, not a media message, past the CDN TTL, past the
+        user's day/size caps, a known-expired id, already on disk — returns
+        False, so sync_media_for_all_chats() can count real work rather than
+        candidates.
+        """
         if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
-            return
+            return False
         message_type = msg.get("messageType", "")
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
         if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
-            return
+            return False
 
         # Skip messages older than the CDN TTL — URLs have certainly expired.
         ts = int(msg.get("messageTimestamp", 0) or 0)
         if ts and (time.time() - ts) > self._MEDIA_MAX_AGE_SECONDS:
-            return
+            return False
 
         # User-configurable age cap (Settings > Armazenamento > "Baixar
         # mídias de até (dias)"). 0 means unlimited — falls back to whatever
         # the CDN-TTL check above already allows.
         max_days = self._media_max_download_days()
         if ts and max_days > 0 and (time.time() - ts) > max_days * 86400:
-            return
+            return False
 
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id or "-" in msg_id or msg.get("_local_pending"):
-            return
+            return False
 
         # Skip IDs that previously returned 403/410 (expired CDN URL).
         if msg_id and msg_id in self._media_failed_ids:
-            return
+            return False
 
         # Skip oversized files during the automatic background sync — see
         # _media_max_download_bytes() (Settings > Armazenamento > "Baixar
@@ -11956,11 +12328,11 @@ class MainWindow(wx.Frame):
                     msg_id, message_type, file_length / (1024 * 1024),
                     max_bytes / (1024 * 1024),
                 )
-                return
+                return False
 
         try:
             if message_type == "audioMessage":
-                self.handle_audio_message(msg, timeout=timeout)
+                return bool(self.handle_audio_message(msg, timeout=timeout))
             else:
                 # Bulk background sync: download WITHOUT per-chunk progress
                 # callbacks. Streaming 64 KB chunks across 6 workers used to fire
@@ -11969,27 +12341,36 @@ class MainWindow(wx.Frame):
                 # which froze the app while media downloaded. Only refresh the
                 # row once, and only when its chat is the conversation currently
                 # on screen.
-                self.handle_media_message(msg, progress_callback=None, timeout=timeout)
+                downloaded = self.handle_media_message(
+                    msg, progress_callback=None, timeout=timeout)
                 if msg_id and self._is_conversation_open_for(msg):
                     conv = self.conversations_panel
                     wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
+                return bool(downloaded)
         except MediaExpiredError:
             if msg_id:
                 self._media_failed_ids[msg_id] = time.time()
         except Exception:
             pass
+        return False
 
     def handle_media_message(self, msg, progress_callback=None, timeout=60):
-        """Download and encrypt a document/image/sticker/video to data/media/."""
+        """Download and encrypt a document/image/sticker/video to data/media/.
+
+        Returns True only when this call actually wrote a new file — every
+        other path (no id, already on disk, not connected, empty response)
+        returns False. sync_media_for_all_chats() counts those return values
+        to report how much was really downloaded; see its own docstring.
+        """
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id:
-            return
+            return False
         if "_" in msg_id:
             parts = msg_id.split("_")
             msg_id = parts[2] if len(parts) > 2 else parts[-1]
         media_path = data_path("media", f"{msg_id}.wzmedia")
         if os.path.isfile(media_path):
-            return
+            return False
         if not getattr(self, "_wa_connected", False):
             # Covers both "confirmed offline" and "still connecting at
             # startup" (_wa_connected only flips True once the connection is
@@ -11999,15 +12380,16 @@ class MainWindow(wx.Frame):
             # as a generic "could not download this media file" instead of
             # something that tells the user to wait for the connection.
             logging.info("[handle_media_message] Skipping download for %s — not connected.", msg_id)
-            return
+            return False
         b64 = self.get_base64_from_media(msg, progress_callback=progress_callback,
                                          timeout=timeout)
         if not b64:
-            return
+            return False
         content = base64.b64decode(b64)
         encrypted = encrypt(content, self.key)
         with open(media_path, "wb") as f:
             f.write(encrypted)
+        return True
 
     def _check_wa_connection_closed(self, response) -> bool:
         """Detect a response that means "WhatsApp is not connected".
@@ -13337,6 +13719,11 @@ class MainWindow(wx.Frame):
         self._schedule_set_chats()
 
     def handle_audio_message(self, msg, timeout=60):
+        """Download and encrypt a voice message to data/voice_messages/.
+
+        Returns True only when this call actually wrote a new file — see
+        handle_media_message(), which follows the same contract.
+        """
         voice_messages_dir = data_path("voice_messages")
         msg_id = msg.get('key', {}).get('id', '')
         if "_" in msg_id:
@@ -13344,16 +13731,16 @@ class MainWindow(wx.Frame):
             msg_id = parts[2] if len(parts) > 2 else parts[-1]
         audio_file_path = os.path.join(voice_messages_dir, f"{msg_id}.msv")
         if os.path.isfile(audio_file_path):
-            return
+            return False
         if not getattr(self, "_wa_connected", False):
             # See handle_media_message() — same reasoning applies to audio.
             logging.info("[handle_audio_message] Skipping download for %s — not connected.", msg_id)
-            return
+            return False
         base64_audio = self.get_base64_from_media(msg, timeout=timeout)
         if not base64_audio:
-            return
+            return False
         audio_content = base64.b64decode(base64_audio)
-        self.save_audio_locally(msg, audio_content)
+        return self.save_audio_locally(msg, audio_content)
 
     def get_base64_from_media(self, media, progress_callback=None, timeout=60):
         """
@@ -13683,6 +14070,7 @@ class MainWindow(wx.Frame):
             return None
 
     def save_audio_locally(self, msg, audio_content):
+        """Encrypt and write a voice message to disk. Returns whether it worked."""
         voice_messages_dir = data_path("voice_messages")
         msg_id = msg.get('key', {}).get('id', '')
         if "_" in msg_id:
@@ -13693,9 +14081,10 @@ class MainWindow(wx.Frame):
             with open(audio_file_path, "wb") as audio_file:
                 encrypted_audio = encrypt(audio_content, self.key)
                 audio_file.write(encrypted_audio)
+            return True
         except Exception as e:
             #Ignore audios that couldn't be saved for now
-            pass
+            return False
 
     def mark_conversation_as_read(self, remote_jid: str, force: bool = False):
         """Mark conversation as read locally and notify WPPConnect."""

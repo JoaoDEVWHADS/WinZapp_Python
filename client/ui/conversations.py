@@ -2786,7 +2786,13 @@ class ConversationsPanel(wx.Panel):
             _ident = self._mention_identity
             participant_jids = {_ident(jid) for _, jid in participants}
             participant_jids.discard("")
-            if len(participant_jids) >= 2:
+            # Strictly more than 2: with exactly 2 participants the threshold
+            # below is len - 1 == 1, so mentioning one person is arithmetically
+            # indistinguishable from mentioning everyone, and every individual
+            # mention in a 2-person group gets silently swallowed. Relaxing
+            # this to >= 2 is what broke
+            # test_a_tiny_group_is_not_treated_as_mention_all.
+            if len(participant_jids) > 2:
                 mentioned_norm = {_ident(jid) for jid in mentioned if jid}
                 mentioned_norm.discard("")
                 # Primary check: JID intersection (works for received messages).
