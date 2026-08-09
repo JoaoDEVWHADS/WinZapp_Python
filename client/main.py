@@ -3132,6 +3132,22 @@ class MainWindow(wx.Frame):
 
         self._apply_group_subject_change(remote_jid, chat, msg)
 
+        # The reactionMessage record still gets appended to `records` below
+        # (needed so ConversationsPanel can rebuild the in-conversation
+        # reaction display on reopen — see populate_messages()'s
+        # _reaction_map scan), but the chat-LIST preview relies on
+        # chat["_last_reaction"] (_track_last_reaction()) to show "you
+        # reacted with X to Y" instead of falling through to formatting the
+        # raw reactionMessage record, which has no case in
+        # _last_msg_preview() and renders as "Mensagem incompatível". The
+        # live path (on_new_message()) and the own-reaction path
+        # (_on_own_reaction_sent()) already call this; history-sync
+        # redelivering a reaction after an app restart or an F5 resync
+        # never did, so _last_reaction stayed empty (it's in-memory only)
+        # and the preview fell through to the raw record instead.
+        if msg.get("messageType") == "reactionMessage":
+            self._track_last_reaction(remote_jid, msg)
+
         records_wrapper = chat.setdefault("messages", {})
         if not isinstance(records_wrapper, dict):
             records_wrapper = chat["messages"] = {}
@@ -14350,6 +14366,22 @@ class MainWindow(wx.Frame):
     # a user would recognise as activity. Deliberately excludes the silent
     # bookkeeping WhatsApp stores alongside real messages: groupNotification
     # ("X entrou no grupo"), notification_template, and every unknown type.
+    #
+    # reactionMessage is ALSO deliberately excluded, even though a
+    # reactionMessage record legitimately sits in a chat's `records` (see
+    # on_historical_message() — needed there so ConversationsPanel can
+    # rebuild the in-conversation reaction display on reopen). A reaction
+    # has its own dedicated preview channel — chat["_last_reaction"], set by
+    # _track_last_reaction() and consumed directly by _last_msg_preview()
+    # before it ever reaches this allowlist — so letting a reactionMessage
+    # record ALSO count here served no purpose and was actively harmful:
+    # since _last_msg_preview() has no rendering case for messageType
+    # "reactionMessage", picking one as `last` (which happened whenever
+    # _last_reaction hadn't been (re)populated for it, e.g. right after an
+    # app restart or an F5 resync, since _last_reaction is in-memory only)
+    # rendered as literally "Mensagem incompatível". It also let a bare
+    # reaction's timestamp float a chat to the top of the list via
+    # _chat_last_ts(), independent of any real message ever being sent.
     _PREVIEW_MESSAGE_TYPES = frozenset({
         "conversation", "extendedTextMessage", "imageMessage", "videoMessage",
         "audioMessage", "documentMessage", "stickerMessage", "contactMessage",
@@ -14358,7 +14390,6 @@ class MainWindow(wx.Frame):
         "pollUpdateMessage",
         "buttonsMessage", "listMessage", "templateMessage", "interactiveMessage",
         "buttonsResponseMessage", "listResponseMessage", "protocolMessage",
-        "reactionMessage",
     })
 
     @classmethod
