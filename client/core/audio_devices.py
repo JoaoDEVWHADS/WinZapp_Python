@@ -14,7 +14,10 @@ name is resolved back to the current index each time it's needed.
 import ctypes
 import logging
 
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
 
 
 def _match_device(name: str, devices: list):
@@ -90,6 +93,16 @@ def _pyaudio_input_devices(pa: "pyaudio.PyAudio") -> list:
 def enumerate_input_devices(pa: "pyaudio.PyAudio | None" = None) -> list:
     """[(device_index, friendly_name), ...] for input-capable devices. Opens
     a temporary PyAudio instance if `pa` isn't supplied."""
+    if pyaudio is None:
+        try:
+            import sounddevice as sd
+            devs = []
+            for idx, info in enumerate(sd.query_devices()):
+                if info.get("max_input_channels", 0) > 0:
+                    devs.append((idx, str(info.get("name", "")).strip()))
+            return devs
+        except Exception:
+            return []
     owns_pa = pa is None
     if owns_pa:
         pa = pyaudio.PyAudio()
@@ -153,6 +166,8 @@ def test_input_device(device_index: int) -> bool:
     """Try to briefly open (without starting) an input stream on
     `device_index`, across every sample-rate/channel combo recording itself
     would try. Returns True if any combo was accepted."""
+    if pyaudio is None:
+        return False
     pa = pyaudio.PyAudio()
     try:
         for rate, channels in RECORDING_SAMPLE_CONFIGS:
