@@ -3807,6 +3807,28 @@ class MainWindow(wx.Frame):
                             )
                 except Exception as exc:
                     logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
+            else:
+                # No new package was missing, so npm install above never ran —
+                # but WinZapp's own node_modules-level patches (host.layer.js
+                # pairing-code fix, status.layer.js posting-result fix,
+                # sender.layer.js sendFile error-detail fix, ...) can still be
+                # stale on their own: a WinZapp update that only ADDS or
+                # CHANGES one of these patches, without adding a new npm
+                # dependency, never reruns npm install, so the patch-reapply
+                # above (which only fires as a side effect of that install)
+                # never fires either — an already-fully-installed node_modules
+                # would otherwise only pick it up via a full API reinstall.
+                # Each _patch_* method is idempotent (a cheap string search,
+                # no-op if already applied), so checking on every startup is
+                # safe.
+                try:
+                    from ui.dialogs.api_setup import ApiSetupDialog
+                    api_dir = resource_path("api")
+                    ApiSetupDialog._apply_node_modules_patches(api_dir)
+                except Exception as exc:
+                    logging.warning(
+                        "[ensure_api_modules_installed] Failed to verify/reapply node_modules patches: %s", exc
+                    )
             return
 
         # Everything already set up — nothing to do.
