@@ -6,7 +6,7 @@ import threading
 import wx
 import requests
 from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext
-from core.utils import format_number
+from core.utils import format_number, get_downloads_folder
 from core.video_player import VideoPlayer
 
 
@@ -868,6 +868,7 @@ class StatusPanel(wx.Panel):
 
         with wx.FileDialog(
             self, mw.i18n.t("status_save_media"),
+            defaultDir=get_downloads_folder(),
             defaultFile=f"status{ext}",
             wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
