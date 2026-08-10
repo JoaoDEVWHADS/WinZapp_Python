@@ -197,6 +197,7 @@
     "reply_message": "Responder",
     "copy_message_text": "Copiar",
     "copy_file": "Copiar archivo",
+    "copy_caption": "Copiar leyenda",
     "delete_message": "Eliminar mensaje",
     "forward_message": "Reenviar",
     "star_message": "Destacar",

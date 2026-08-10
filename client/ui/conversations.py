@@ -730,6 +730,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_SHIFT_R    = wx.NewIdRef()  # react to message        (Ctrl+Shift+R)
         self.ID_DELETE_MSG      = wx.NewIdRef()  # delete focused message  (Delete)
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
+        self.ID_CTRL_SHIFT_C    = wx.NewIdRef()  # copy caption (photo/video/doc) (Ctrl+Shift+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         self.ID_ALT_E           = wx.NewIdRef()  # edit message            (Alt+E)
         self.ID_ALT_L           = wx.NewIdRef()  # read-more (truncated)   (Alt+L)
@@ -805,6 +806,7 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("R"),          self.ID_CTRL_SHIFT_R),
             (wx.ACCEL_NORMAL,  wx.WXK_DELETE,     self.ID_DELETE_MSG),
             (wx.ACCEL_CTRL,    ord("C"),          self.ID_CTRL_C),
+            (CS,               ord("C"),          self.ID_CTRL_SHIFT_C),
             (wx.ACCEL_ALT,     ord("C"),          self.ID_ALT_C),
             (wx.ACCEL_ALT,     ord("E"),          self.ID_ALT_E),
             (wx.ACCEL_ALT,     ord("L"),          self.ID_ALT_L),
@@ -849,6 +851,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_react,               id=self.ID_CTRL_SHIFT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_delete_message,      id=self.ID_DELETE_MSG)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_message,        id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_caption,        id=self.ID_CTRL_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup,     id=self.ID_ALT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_edit_message,        id=self.ID_ALT_E)
         self.Bind(wx.EVT_MENU, self._on_read_more,                 id=self.ID_ALT_L)
@@ -2558,6 +2561,18 @@ class ConversationsPanel(wx.Panel):
                 copy_file_item,
             )
 
+        # Copy caption (photo/video/document messages that have one) — a
+        # separate shortcut from Ctrl+C, which for these types already
+        # copies the file itself (see _on_accel_copy_message).
+        _has_caption = bool(self._get_message_caption(msg))
+        if _has_caption:
+            copy_caption_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_caption')}\tCtrl+Shift+C")
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_copy_caption(m),
+                copy_caption_item,
+            )
+
         # Reply (Alt+R)
         reply_item = menu.Append(wx.ID_ANY, f"{i18n.t('reply_message')}\tAlt+R")
         self.Bind(
@@ -2604,8 +2619,8 @@ class ConversationsPanel(wx.Panel):
             react_item,
         )
 
-        # Show text popup (only for text messages)
-        if msg_type in _TEXT_TYPES:
+        # Show text popup (text messages, or a photo/video/document that has a caption)
+        if msg_type in _TEXT_TYPES or _has_caption:
             show_text_item = menu.Append(wx.ID_ANY, f"{i18n.t('show_msg_text')}\tAlt+C")
             self.Bind(
                 wx.EVT_MENU,
@@ -6273,6 +6288,21 @@ class ConversationsPanel(wx.Panel):
         dlg.ShowModal()
         dlg.Destroy()
 
+    # Media types WhatsApp allows a caption on (audio/sticker never do).
+    _CAPTIONABLE_TYPES = ("imageMessage", "videoMessage", "documentMessage")
+
+    def _get_message_caption(self, msg: dict) -> str:
+        """Caption text for a photo/video/document message, or "" if none
+        (either the type doesn't support captions, or this one has none)."""
+        msg_type = msg.get("messageType", "")
+        if msg_type not in self._CAPTIONABLE_TYPES:
+            return ""
+        msg_obj = msg.get("message") or {}
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            return ""
+        return (inner.get("caption") or "").strip()
+
     def _on_menu_copy_message(self, msg: dict):
         msg_obj  = msg.get("message") or {}
         msg_type = msg.get("messageType", "")
@@ -6281,6 +6311,20 @@ class ConversationsPanel(wx.Panel):
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        if text:
+            try:
+                pyperclip.copy(text)
+                self.main_window.output(self.main_window.i18n.t("msg_copied"))
+            except Exception:
+                self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+        else:
+            self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+
+    def _on_menu_copy_caption(self, msg: dict):
+        """Copy a photo/video/document message's caption text — kept
+        separate from _on_menu_copy_message()/Ctrl+C, which for these
+        types already copies the actual file to the clipboard."""
+        text = self._get_message_caption(msg)
         if text:
             try:
                 pyperclip.copy(text)
@@ -7171,6 +7215,18 @@ class ConversationsPanel(wx.Panel):
         else:
             self._on_menu_copy_message(msg)
 
+    def _on_accel_copy_caption(self, event):
+        """Ctrl+Shift+C: copy the caption of the focused photo/video/document
+        message. Kept on a separate shortcut from Ctrl+C, which already
+        copies the file itself for these message types."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._on_menu_copy_caption(msg)
+
     def _on_accel_show_text_popup(self, event):
         """Alt+C: show focused message text in a popup dialog."""
         index = self.messages_list.GetFirstSelected()
@@ -7556,7 +7612,8 @@ class ConversationsPanel(wx.Panel):
         self.main_window.output(ann, interrupt=True)
 
     def _show_message_text_popup(self, msg: dict):
-        """Open a read-only dialog showing the full message text."""
+        """Open a read-only dialog showing the full message text (or, for a
+        photo/video/document message, its caption)."""
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         text = ""
@@ -7564,6 +7621,8 @@ class ConversationsPanel(wx.Panel):
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        else:
+            text = self._get_message_caption(msg)
         if not text:
             return
 
