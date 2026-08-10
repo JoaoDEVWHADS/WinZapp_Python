@@ -81,6 +81,13 @@ class AccessibleSaveAs(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+S")
 
 
+class AccessibleStatusCopyText(wx.Accessible):
+    """Reports Ctrl+C as the keyboard shortcut for the status copy-text button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+C")
+
+
 class AccessibleReadMoreButton(wx.Accessible):
     """Reports Alt+L as the keyboard shortcut for the Read-more button."""
 

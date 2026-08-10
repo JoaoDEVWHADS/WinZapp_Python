@@ -343,6 +343,23 @@ class VideoPlayer:
         self.is_playing = False
         self._timer.Stop()
 
+    def _audio_still_active(self) -> bool:
+        """True if the BASS channel reports anything other than fully
+        stopped (playing, paused, or stalled) — used by _on_timer() to
+        decide whether ffmpeg's frame pipe reaching EOF actually means
+        "done" or not. Deliberately NOT Channel.is_playing (True only for
+        BASS_ACTIVE_PLAYING specifically) — a channel the USER just
+        paused would then read as "not active" too, which would make this
+        wrongly finish/reset a deliberately-paused player."""
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is None:
+            return False
+        try:
+            from sound_lib.external.pybass import BASS_ACTIVE_STOPPED
+            return ctrl.is_active() != BASS_ACTIVE_STOPPED
+        except Exception:
+            return False
+
     # ── Internals: frame rendering (UI thread, via wx.Timer) ────────────
 
     def _on_timer(self, event):
@@ -350,6 +367,20 @@ class VideoPlayer:
             frame_bytes = self._frame_queue.get_nowait()
         except queue.Empty:
             if self._eof_reached:
+                # ffmpeg's frame pipe reaching EOF means "no more VIDEO to
+                # show" — for a real video that's also roughly when the
+                # audio ends, but for an audio-only status/message (no
+                # video stream at all) ffmpeg has nothing to output and
+                # hits EOF almost immediately, long before BASS is
+                # actually done playing. Only really finish once the
+                # audio itself has stopped too, instead of ending
+                # (and dropping is_playing back to False) while the
+                # audio the user is still listening to keeps going —
+                # reported live as "pause always restarts instead of
+                # pausing" for audio statuses, since is_playing had
+                # already gone False on its own moments after starting.
+                if self._audio_still_active():
+                    return
                 self._on_playback_finished()
             return
         try:

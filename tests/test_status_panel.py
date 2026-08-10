@@ -83,7 +83,7 @@ class _FakeTextCtrl(_FakeWidget):
 
 
 class _FakeMainWindow:
-    def __init__(self, contact_names=None, send_text_result=True):
+    def __init__(self, contact_names=None, send_text_result=True, settings=None):
         self.i18n = _FakeI18n()
         self.outputs = []
         self._contact_names = contact_names or {}
@@ -92,6 +92,8 @@ class _FakeMainWindow:
         self.app_name = "WinZapp"
         self._send_text_result = send_text_result
         self.send_text_calls = []
+        self.settings = settings if settings is not None else {}
+        self.save_settings_calls = 0
 
     def _resolve_contact_name(self, chat):
         return self._contact_names.get(chat.get("remoteJid", ""))
@@ -102,6 +104,9 @@ class _FakeMainWindow:
     def send_text_message(self, remote_jid, text, quoted=None):
         self.send_text_calls.append((remote_jid, text, quoted))
         return self._send_text_result
+
+    def save_settings(self):
+        self.save_settings_calls += 1
 
     def output(self, text, interrupt=False):
         self.outputs.append(text)
@@ -170,9 +175,12 @@ class _Stub:
     _latest_ts                   = StatusPanel._latest_ts
     _on_next_status               = StatusPanel._on_next_status
     _on_escape                    = StatusPanel._on_escape
+    _MAX_REMEMBERED_LIKES         = StatusPanel._MAX_REMEMBERED_LIKES
 
-    def __init__(self, contact_names=None, send_text_result=True):
-        self.main_window = _FakeMainWindow(contact_names=contact_names, send_text_result=send_text_result)
+    def __init__(self, contact_names=None, send_text_result=True, settings=None):
+        self.main_window = _FakeMainWindow(
+            contact_names=contact_names, send_text_result=send_text_result, settings=settings,
+        )
         self._status_contacts      = []
         self._selected_contact_idx = -1
         self._current_status_idx   = 0
@@ -670,13 +678,18 @@ def _run_threads_synchronously(monkeypatch):
     monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
 
 
-class TestLikeStatusSendsAQuotedEmojiReply:
+class TestLikeStatusSendsAPlainEmojiMessage:
     """_on_like_status() no longer uses send_reaction() (WhatsApp Web's
     Store never indexes another person's status — see the method's own
-    docstring) — it sends the like emoji as a normal quoted-reply message
-    to the poster instead."""
+    docstring) — it sends the like emoji as a normal message to the
+    poster instead, deliberately WITHOUT quoting the status: WPPConnect's
+    send-reply endpoint can't resolve a status as a quote target any more
+    than the reaction endpoint could resolve it as a reaction target, so
+    quoting it always failed server-side and silently fell back to a
+    plain send anyway (reported live as "Não foi possível citar a
+    mensagem original")."""
 
-    def test_sends_heart_emoji_quoting_the_status_to_the_poster(self, monkeypatch):
+    def test_sends_heart_emoji_without_quoting(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
         entry = _entry("poster@s.whatsapp.net", [status])
@@ -689,10 +702,10 @@ class TestLikeStatusSendsAQuotedEmojiReply:
         stub._on_like_status(None)
 
         assert stub.main_window.send_text_calls == [
-            ("poster@s.whatsapp.net", "❤️", status)
+            ("poster@s.whatsapp.net", "❤️", None)
         ]
 
-    def test_marks_liked_and_updates_button_label_on_success(self, monkeypatch):
+    def test_marks_liked_persists_to_settings_and_updates_button_label_on_success(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
         status = _text_status("oi")
         stub = _Stub(send_text_result=True)
@@ -706,6 +719,8 @@ class TestLikeStatusSendsAQuotedEmojiReply:
         status_id = status["key"]["id"]
         assert stub._liked_statuses[status_id] is True
         assert stub._like_btn.label == "Descurtir"
+        assert status_id in stub.main_window.settings["status_panel"]["liked_status_ids"]
+        assert stub.main_window.save_settings_calls == 1
 
     def test_shows_error_on_send_failure(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
@@ -722,6 +737,7 @@ class TestLikeStatusSendsAQuotedEmojiReply:
 
         assert stub._liked_statuses.get(status["key"]["id"]) is None
         assert len(calls) == 1
+        assert stub.main_window.save_settings_calls == 0
 
     def test_clicking_like_again_shows_unlike_unsupported_message_instead_of_resending(self, monkeypatch):
         _run_threads_synchronously(monkeypatch)
@@ -744,59 +760,50 @@ class TestLikeStatusSendsAQuotedEmojiReply:
 
 class TestIsStatusLikedRemembersAcrossSessions:
     """_liked_statuses only tracks likes sent THIS session — _is_status_liked()
-    also checks whether the poster's locally-loaded chat already has an
-    outgoing message quoting this status with just the like emoji, so a
-    like sent in a previous session is still detected."""
+    also checks settings["status_panel"]["liked_status_ids"] (persisted to
+    settings.json by _on_like_sent()), so a like sent in a previous
+    session is still detected."""
 
     def test_false_when_nothing_known(self):
         stub = _Stub()
-        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is False
+        assert stub._is_status_liked("s1") is False
 
-    def test_session_cache_wins_without_touching_chats(self):
+    def test_session_cache_wins_without_touching_settings(self):
         stub = _Stub()
         stub._liked_statuses["s1"] = True
-        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is True
+        assert stub._is_status_liked("s1") is True
 
-    def test_finds_a_prior_quoted_reply_in_the_poster_chat(self):
-        stub = _Stub()
-        stub.main_window.chats["poster@s.whatsapp.net"] = {
-            "messages": {"messages": {"records": [
-                {
-                    "key": {"fromMe": True, "id": "m1"},
-                    "contextInfo": {"stanzaId": "s1"},
-                    "message": {"conversation": "❤️"},
-                },
-            ]}}
-        }
-        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is True
-        # Found once, cached for next time.
-        assert stub._liked_statuses["s1"] is True
+    def test_finds_a_status_id_remembered_from_a_prior_session(self):
+        stub = _Stub(settings={"status_panel": {"liked_status_ids": ["s1"]}})
+        assert stub._is_status_liked("s1") is True
 
-    def test_does_not_match_a_reply_to_a_different_status(self):
-        stub = _Stub()
-        stub.main_window.chats["poster@s.whatsapp.net"] = {
-            "messages": {"messages": {"records": [
-                {
-                    "key": {"fromMe": True, "id": "m1"},
-                    "contextInfo": {"stanzaId": "some-other-status"},
-                    "message": {"conversation": "❤️"},
-                },
-            ]}}
-        }
-        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is False
+    def test_does_not_match_a_different_status_id(self):
+        stub = _Stub(settings={"status_panel": {"liked_status_ids": ["some-other-status"]}})
+        assert stub._is_status_liked("s1") is False
 
-    def test_ignores_incoming_messages(self):
-        stub = _Stub()
-        stub.main_window.chats["poster@s.whatsapp.net"] = {
-            "messages": {"messages": {"records": [
-                {
-                    "key": {"fromMe": False, "id": "m1"},
-                    "contextInfo": {"stanzaId": "s1"},
-                    "message": {"conversation": "❤️"},
-                },
-            ]}}
-        }
-        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is False
+
+class TestOnLikeSentCapsHowManyIdsAreRemembered:
+    def test_old_ids_are_dropped_once_the_cap_is_exceeded(self):
+        stub = _Stub(settings={
+            "status_panel": {"liked_status_ids": [f"s{i}" for i in range(StatusPanel._MAX_REMEMBERED_LIKES)]}
+        })
+        stub._current_status = None
+
+        stub._on_like_sent("s-new")
+
+        remembered = stub.main_window.settings["status_panel"]["liked_status_ids"]
+        assert len(remembered) == StatusPanel._MAX_REMEMBERED_LIKES
+        assert "s-new" in remembered
+        assert "s0" not in remembered  # oldest one dropped
+
+    def test_liking_the_same_status_twice_does_not_duplicate_or_resave(self):
+        stub = _Stub(settings={"status_panel": {"liked_status_ids": ["s1"]}})
+        stub._current_status = None
+
+        stub._on_like_sent("s1")
+
+        assert stub.main_window.settings["status_panel"]["liked_status_ids"] == ["s1"]
+        assert stub.main_window.save_settings_calls == 0
 
 
 class TestParseStatusesFiltersReactionsAndDetectsSelfParticipant:

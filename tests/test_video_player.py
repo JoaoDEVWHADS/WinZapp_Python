@@ -176,6 +176,93 @@ class TestEofDrainsTheQueueBeforeStopping:
         assert player._eof_reached is False
 
 
+class _FakeAudioCtrl:
+    """Stands in for the BASS channel (_audio_stream/_tempo_ctrl) — only
+    the is_active() method _audio_still_active() actually calls."""
+
+    def __init__(self, active_value):
+        self._active_value = active_value
+
+    def is_active(self):
+        return self._active_value
+
+
+class TestAudioOnlyPlaybackDoesNotFinishWhileAudioIsStillPlaying:
+    """Regression: for an audio-only source (a status/message with no
+    video stream at all), ffmpeg's frame pipe has nothing to output and
+    reaches EOF almost immediately — long before BASS is actually done
+    playing. The old code treated frame-EOF alone as "playback finished",
+    flipping is_playing back to False moments after starting — reported
+    live as "pause always restarts instead of pausing" for audio
+    statuses, since is_playing had already gone False on its own by the
+    time the user clicked pause."""
+
+    def test_does_not_finish_while_bass_reports_still_active(self, wx_app):
+        from sound_lib.external.pybass import BASS_ACTIVE_PLAYING
+
+        player = _make_player(wx_app)
+        player._audio_stream = _FakeAudioCtrl(BASS_ACTIVE_PLAYING)
+        player._eof_reached = True
+        player.is_playing = True
+
+        player._on_timer(None)
+
+        assert player.is_playing is True
+
+    def test_does_not_finish_while_bass_reports_paused(self, wx_app):
+        """A channel the user just paused reports BASS_ACTIVE_PAUSED, not
+        BASS_ACTIVE_PLAYING — must still count as "not finished", or a
+        deliberate pause would get wrongly treated as the end of
+        playback."""
+        from sound_lib.external.pybass import BASS_ACTIVE_PAUSED
+
+        player = _make_player(wx_app)
+        player._audio_stream = _FakeAudioCtrl(BASS_ACTIVE_PAUSED)
+        player._eof_reached = True
+        player.is_playing = True
+
+        player._on_timer(None)
+
+        assert player.is_playing is True
+
+    def test_finishes_once_bass_reports_fully_stopped(self, wx_app):
+        from sound_lib.external.pybass import BASS_ACTIVE_STOPPED
+
+        player = _make_player(wx_app)
+        player._audio_stream = _FakeAudioCtrl(BASS_ACTIVE_STOPPED)
+        player._eof_reached = True
+        player.is_playing = True
+
+        player._on_timer(None)
+
+        assert player.is_playing is False
+
+    def test_tempo_ctrl_takes_priority_over_audio_stream_when_both_are_set(self, wx_app):
+        from sound_lib.external.pybass import BASS_ACTIVE_PLAYING, BASS_ACTIVE_STOPPED
+
+        player = _make_player(wx_app)
+        player._audio_stream = _FakeAudioCtrl(BASS_ACTIVE_STOPPED)
+        player._tempo_ctrl = _FakeAudioCtrl(BASS_ACTIVE_PLAYING)
+        player._eof_reached = True
+        player.is_playing = True
+
+        player._on_timer(None)
+
+        assert player.is_playing is True
+
+    def test_no_audio_ctrl_at_all_finishes_immediately_like_before(self, wx_app):
+        """Nothing ever started (or a genuine video whose audio already
+        tore down) — must not hang waiting for an audio channel that
+        doesn't exist."""
+        player = _make_player(wx_app)
+        player._eof_reached = True
+        player.is_playing = True
+
+        player._on_timer(None)
+
+        assert player.is_playing is False
+
+
 class TestIsPlayingReflectsStopEvent:
     """is_playing used to be a plain attribute that stop() cleared at the
     very end of its own teardown — a caller checking it mid-stop() (e.g.

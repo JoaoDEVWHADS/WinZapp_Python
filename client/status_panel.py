@@ -5,7 +5,7 @@ import tempfile
 import threading
 import wx
 import requests
-from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext
+from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText
 from core.utils import format_number, get_downloads_folder
 from core.video_player import VideoPlayer
 
@@ -473,6 +473,7 @@ class StatusPanel(wx.Panel):
         self._like_btn.Hide()
 
         self._copy_text_btn = wx.Button(self._viewer_panel, label=i18n.t("status_copy_text"))
+        self._copy_text_btn.SetAccessible(AccessibleStatusCopyText())
         self._copy_text_btn.Bind(wx.EVT_BUTTON, self._on_copy_status_text)
         viewer_sizer.Add(self._copy_text_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._copy_text_btn.Hide()
@@ -573,15 +574,18 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_LEFT  = wx.NewIdRef()
         self.ID_CTRL_RIGHT = wx.NewIdRef()
         self.ID_ESCAPE     = wx.NewIdRef()
+        self.ID_CTRL_C     = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,   wx.WXK_LEFT,   self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL,   wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
             (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESCAPE),
+            (wx.ACCEL_CTRL,   ord("C"),      self.ID_CTRL_C),
         ])
         self.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self._on_prev_status, id=self.ID_CTRL_LEFT)
-        self.Bind(wx.EVT_MENU, self._on_next_status, id=self.ID_CTRL_RIGHT)
-        self.Bind(wx.EVT_MENU, self._on_escape,      id=self.ID_ESCAPE)
+        self.Bind(wx.EVT_MENU, self._on_prev_status,       id=self.ID_CTRL_LEFT)
+        self.Bind(wx.EVT_MENU, self._on_next_status,       id=self.ID_CTRL_RIGHT)
+        self.Bind(wx.EVT_MENU, self._on_escape,            id=self.ID_ESCAPE)
+        self.Bind(wx.EVT_MENU, self._on_copy_status_text,  id=self.ID_CTRL_C)
 
     def _on_escape(self, event):
         """Esc closes the open status viewer and returns focus to the list.
@@ -933,8 +937,7 @@ class StatusPanel(wx.Panel):
         from_me     = status_key.get("fromMe", False)
         if not from_me:
             status_id = status_key.get("id", "")
-            poster_jid = status_key.get("participant", "") or entry.get("jid", "")
-            is_liked  = self._is_status_liked(status_id, poster_jid)
+            is_liked  = self._is_status_liked(status_id)
             i18n2     = self.main_window.i18n
             self._like_btn.SetLabel(
                 i18n2.t("status_unlike") if is_liked else i18n2.t("status_like")
@@ -987,43 +990,32 @@ class StatusPanel(wx.Panel):
 
     # ── Like / unlike status ─────────────────────────────────────────────────
 
-    def _is_status_liked(self, status_id: str, poster_jid: str) -> bool:
-        """Was this status already "liked" (see _on_like_status() for why a
-        like is really just a quoted-emoji reply sent to the poster)?
+    # Cap on how many liked-status ids settings.json keeps — a like is
+    # never removed from this list (there's no reliable "unlike" signal to
+    # remove it on either — see _on_unlike_status_attempted()), so without
+    # a cap it would grow forever. Keeping the most RECENT ones is what
+    # matters: an old status has long since expired, so nobody will ever
+    # ask "was this one liked?" again anyway.
+    _MAX_REMEMBERED_LIKES = 500
 
-        _liked_statuses is only ever populated for likes sent THIS
+    def _is_status_liked(self, status_id: str) -> bool:
+        """Was this status already "liked"?
+
+        _liked_statuses only ever gets populated for likes sent THIS
         session — it starts empty on every launch, so reopening a status
-        you already liked before restarting used to always show "Curtir"
-        again with no way to tell it had already been done. Best-effort
-        fix: if the poster's own conversation happens to already be
-        loaded locally (a common case — you follow their status because
-        you talk to them), look for an outgoing message quoting this
-        exact status whose body is just the like emoji, and cache a hit
-        so the next check for the same status is instant. Not a
-        guaranteed signal (the chat may not be loaded, or may need a
-        sync), just better than always starting blank.
+        liked before restarting used to always show "Curtir" again with
+        no way to tell it had already been done. Persisted in
+        settings.json (settings["status_panel"]["liked_status_ids"]) so it
+        survives a restart — a like has no message-side trace to detect
+        it from instead (see _on_like_status()'s own docstring on why it's
+        sent as a plain, unquoted message: WPPConnect can't resolve a
+        status as a quote target any more than it can resolve one as a
+        reaction target).
         """
         if status_id in self._liked_statuses:
             return self._liked_statuses[status_id]
-        if not status_id or not poster_jid:
-            return False
-        chat = self.main_window.chats.get(poster_jid)
-        if not chat:
-            return False
-        records = chat.get("messages", {}).get("messages", {}).get("records", []) or []
-        for m in records:
-            if not m.get("key", {}).get("fromMe"):
-                continue
-            msg_obj = m.get("message") or {}
-            ext = msg_obj.get("extendedTextMessage") or {}
-            ctx = m.get("contextInfo") or ext.get("contextInfo") or {}
-            if ctx.get("stanzaId") != status_id:
-                continue
-            text = (msg_obj.get("conversation") or ext.get("text") or "").strip()
-            if text:
-                self._liked_statuses[status_id] = True
-                return True
-        return False
+        remembered = self.main_window.settings.get("status_panel", {}).get("liked_status_ids", [])
+        return bool(status_id) and status_id in remembered
 
     def _on_like_status(self, event):
         """"Like" the currently displayed status.
@@ -1041,10 +1033,20 @@ class StatusPanel(wx.Panel):
         This is also how a "like" on a status genuinely behaves on the
         wire in the real WhatsApp protocol: it lands in your DM history
         with the poster, not as a public reaction — so sending it as a
-        normal quoted-reply message (the emoji as the body, quoting the
-        status) to the poster's own chat is a faithful equivalent, not
-        just a workaround, and reuses send_text_message()'s already-proven
-        send path instead of the status@broadcast reaction endpoint.
+        normal message (the emoji as the body) to the poster's own chat
+        is a faithful equivalent, not just a workaround, and reuses
+        send_text_message()'s already-proven send path instead of the
+        status@broadcast reaction endpoint.
+
+        Deliberately sent WITHOUT quoting the status: WPPConnect's
+        send-reply endpoint needs to resolve the quoted message id the
+        same way the (broken) native reaction lookup does — a status is
+        never indexed anywhere WPPConnect can find it from inside the
+        poster's own chat either, so quoting it always failed server-side
+        and silently fell back to a plain send anyway (confirmed live:
+        "Não foi possível citar a mensagem original"), just after an
+        extra round trip and a confusing notice for something that was
+        never going to work.
 
         There is no reliable way to *unsend* it afterwards (deleting it
         would need to reach into the recipient's own chat), so once liked
@@ -1078,7 +1080,7 @@ class StatusPanel(wx.Panel):
 
         def _do_like():
             try:
-                ok = bool(mw.send_text_message(sender_jid, "❤️", quoted=status))
+                ok = bool(mw.send_text_message(sender_jid, "❤️"))
             except Exception:
                 ok = False
             if ok:
@@ -1095,10 +1097,20 @@ class StatusPanel(wx.Panel):
 
     def _on_like_sent(self, status_id: str):
         self._liked_statuses[status_id] = True
+
+        mw = self.main_window
+        section = mw.settings.setdefault("status_panel", {})
+        remembered = section.setdefault("liked_status_ids", [])
+        if status_id not in remembered:
+            remembered.append(status_id)
+            if len(remembered) > self._MAX_REMEMBERED_LIKES:
+                del remembered[:len(remembered) - self._MAX_REMEMBERED_LIKES]
+            mw.save_settings()
+
         # The status shown may have changed while the send was in flight
         # (Ctrl+Left/Right) — only touch the button if it's still this one.
         if (self._current_status or {}).get("key", {}).get("id") == status_id:
-            self._like_btn.SetLabel(self.main_window.i18n.t("status_unlike"))
+            self._like_btn.SetLabel(mw.i18n.t("status_unlike"))
 
     def _on_unlike_status_attempted(self):
         wx.MessageBox(
