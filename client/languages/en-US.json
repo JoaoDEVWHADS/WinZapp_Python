@@ -592,6 +592,7 @@
     "invalid_messages_page_size": "The messages per page value must be a positive integer.",
     "invalid_page_jump_size": "The Page Up/Page Down jump size must be a positive integer.",
     "forward_search_label": "&Search",
+    "forward_multiselect_hint": "Space: select contact. Ctrl+Space: remove selection. Ctrl+Shift+Space: select/deselect all. With nothing selected, forwards to the focused contact.",
     "global_hotkey_label": "Global hotkey to open WinZapp",
     "global_hotkey_hint": "Press a shortcut (Delete or Backspace to remove)",
     "hotkey_first_run_title": "WinZapp | Global Hotkey",

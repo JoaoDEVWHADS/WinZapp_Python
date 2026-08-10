@@ -6770,6 +6770,7 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_forward(self, msg: dict):
         """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
+        import ctypes
         mw   = self.main_window
         i18n = mw.i18n
 
@@ -6801,6 +6802,87 @@ class ConversationsPanel(wx.Panel):
         lst = wx.ListBox(p, choices=all_names, style=wx.LB_EXTENDED)
         vsz.Add(lst, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
+        vsz.Add(
+            wx.StaticText(p, label=i18n.t("forward_multiselect_hint")),
+            0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6,
+        )
+
+        # ── Custom arrow/selection keyboard handling ────────────────────────
+        # Native wx.LB_EXTENDED semantics: a plain Up/Down both moves focus
+        # AND collapses selection down to just the newly-focused item — there
+        # is no way to arrow through the list while building up a multi-
+        # selection with the default behavior. Remapped here so plain arrows
+        # move focus only (selection untouched); Space/Ctrl+Space/Ctrl+Shift+
+        # Space control selection explicitly instead. Ctrl+Arrow and
+        # Shift+Arrow are left at their native behavior (move-focus-only and
+        # range-select respectively — already exactly what's wanted).
+        #
+        # Driven via the raw Win32 listbox messages rather than wx's own
+        # Select()/Deselect() for the arrow case specifically: LB_SETCARETINDEX
+        # is the exact same message the native control's own Ctrl+Arrow
+        # handling uses internally, so remapping plain Arrow onto it reuses
+        # a code path already proven to notify screen readers correctly,
+        # rather than reimplementing focus movement by hand.
+        _LB_SETSEL        = 0x0185
+        _LB_SETCARETINDEX = 0x019E
+        _LB_GETCARETINDEX = 0x019F
+        _LB_GETSEL        = 0x0187
+
+        def _lst_send(msg, wparam=0, lparam=0):
+            return ctypes.windll.user32.SendMessageW(lst.GetHandle(), msg, wparam, lparam)
+
+        def _lst_caret():
+            idx = _lst_send(_LB_GETCARETINDEX)
+            return idx if idx >= 0 else -1
+
+        def _lst_set_caret(idx):
+            _lst_send(_LB_SETCARETINDEX, idx, 0)
+
+        def _lst_is_selected(idx):
+            return _lst_send(_LB_GETSEL, idx) > 0
+
+        def _lst_set_selected(idx, select):
+            _lst_send(_LB_SETSEL, 1 if select else 0, idx)
+
+        def _on_list_key_down(event):
+            key   = event.GetKeyCode()
+            ctrl  = event.ControlDown()
+            shift = event.ShiftDown()
+            count = lst.GetCount()
+
+            if (key in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_NUMPAD_UP, wx.WXK_NUMPAD_DOWN)
+                    and not ctrl and not shift):
+                if count == 0:
+                    return
+                caret = _lst_caret()
+                if caret < 0:
+                    caret = 0
+                delta = -1 if key in (wx.WXK_UP, wx.WXK_NUMPAD_UP) else 1
+                _lst_set_caret(max(0, min(count - 1, caret + delta)))
+                return  # suppressed — no Skip(), so selection is left alone
+
+            if key == wx.WXK_SPACE and ctrl and shift:
+                all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
+                for i in range(count):
+                    _lst_set_selected(i, not all_selected)
+                return
+
+            if key == wx.WXK_SPACE and ctrl:
+                caret = _lst_caret()
+                if caret >= 0:
+                    _lst_set_selected(caret, False)
+                return
+
+            if key == wx.WXK_SPACE:
+                caret = _lst_caret()
+                if caret >= 0:
+                    _lst_set_selected(caret, True)
+                return
+
+            event.Skip()  # Ctrl+Arrow, Shift+Arrow, everything else: native behavior
+
+        lst.Bind(wx.EVT_KEY_DOWN, _on_list_key_down)
+
         btn_sizer  = wx.StdDialogButtonSizer()
         ok_btn     = wx.Button(p, wx.ID_OK,     label=i18n.t("forward_message"))
         cancel_btn = wx.Button(p, wx.ID_CANCEL, label=i18n.t("cancel"))
@@ -6831,11 +6913,16 @@ class ConversationsPanel(wx.Panel):
             _filtered_names = [n for _, n in pairs]
             lst.Set(_filtered_names)
             if _filtered_names:
-                lst.Select(0)
+                # Focus only — do not pre-select, so confirming right away
+                # without ever pressing Space falls through to the "nothing
+                # selected -> use the focused item" behavior below rather
+                # than silently forwarding to whatever the search happened
+                # to focus first.
+                _lst_set_caret(0)
 
         search_field.Bind(wx.EVT_TEXT, _on_search)
         if all_names:
-            lst.Select(0)
+            _lst_set_caret(0)
         ok_btn.SetDefault()
 
         if dlg.ShowModal() != wx.ID_OK:
@@ -6843,6 +6930,13 @@ class ConversationsPanel(wx.Panel):
             return
 
         sels = list(lst.GetSelections())
+        if not sels:
+            # No explicit multi-selection was made (Space never pressed) —
+            # forward to whichever contact is currently focused, same as
+            # this dialog's original single-target behavior.
+            caret = _lst_caret()
+            if caret >= 0:
+                sels = [caret]
         dlg.Destroy()
         if not sels:
             return
