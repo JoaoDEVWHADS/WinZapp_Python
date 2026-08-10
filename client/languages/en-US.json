@@ -647,6 +647,7 @@
     "group_notif_approval_mode": "{author} changed the approval setting for new members",
     "group_notif_linked_to_community": "{author} linked this group to a community",
     "forward_failed": "Could not forward the message",
+    "forward_failed_multiple": "Could not forward the message to: {names}",
     "tab_sound_events": "Sound Events",
     "tab_alert_tones": "Alert Tones",
     "tab_storage": "Storage",

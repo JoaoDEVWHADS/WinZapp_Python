@@ -6798,7 +6798,7 @@ class ConversationsPanel(wx.Panel):
         search_field.SetHint(i18n.t("search_conversations"))
         vsz.Add(search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        lst = wx.ListBox(p, choices=all_names, style=wx.LB_SINGLE)
+        lst = wx.ListBox(p, choices=all_names, style=wx.LB_EXTENDED)
         vsz.Add(lst, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         btn_sizer  = wx.StdDialogButtonSizer()
@@ -6831,24 +6831,32 @@ class ConversationsPanel(wx.Panel):
             _filtered_names = [n for _, n in pairs]
             lst.Set(_filtered_names)
             if _filtered_names:
-                lst.SetSelection(0)
+                lst.Select(0)
 
         search_field.Bind(wx.EVT_TEXT, _on_search)
         if all_names:
-            lst.SetSelection(0)
+            lst.Select(0)
         ok_btn.SetDefault()
 
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
 
-        sel = lst.GetSelection()
+        sels = list(lst.GetSelections())
         dlg.Destroy()
-        if sel == wx.NOT_FOUND or sel >= len(_filtered_chats):
+        if not sels:
             return
 
-        target_jid = _filtered_chats[sel].get("remoteJid", "")
-        if not target_jid:
+        target_jids = []
+        target_names = []
+        for i in sels:
+            if i >= len(_filtered_chats):
+                continue
+            jid = _filtered_chats[i].get("remoteJid", "")
+            if jid:
+                target_jids.append(jid)
+                target_names.append(_filtered_names[i])
+        if not target_jids:
             return
 
         # ── Forward via the real WPPConnect forward endpoint ────────────────────
@@ -6862,13 +6870,34 @@ class ConversationsPanel(wx.Panel):
         if not source_jid or not msg_key.get("id"):
             return
 
+        targets = list(zip(target_jids, target_names))
+
         def _do_forward():
-            ok = mw.forward_message(source_jid, msg_key, target_jid)
-            if not ok:
+            failed_names = self._forward_message_to_targets(source_jid, msg_key, targets)
+            if failed_names:
                 wx.CallAfter(mw.error_sound.play)
-                wx.CallAfter(mw.output, i18n.t("forward_failed"))
+                if len(targets) == 1:
+                    wx.CallAfter(mw.output, i18n.t("forward_failed"))
+                else:
+                    wx.CallAfter(
+                        mw.output,
+                        i18n.t("forward_failed_multiple").format(names=", ".join(failed_names)),
+                    )
 
         threading.Thread(target=_do_forward, daemon=True).start()
+
+    def _forward_message_to_targets(self, source_jid: str, msg_key: dict, targets: list) -> list:
+        """Forward one message to each (jid, name) pair in *targets*, one at
+        a time — so one failing recipient (e.g. a stale JID) doesn't abort
+        delivery to the rest, since each main_window.forward_message() call
+        already reports its own success/failure independently. Returns the
+        display names of whichever targets failed (empty if all succeeded).
+        """
+        mw = self.main_window
+        return [
+            name for jid, name in targets
+            if not mw.forward_message(source_jid, msg_key, jid)
+        ]
 
     def _on_menu_star(self, msg: dict):
         msg["starred"] = not msg.get("starred")

@@ -647,6 +647,7 @@
     "group_notif_approval_mode": "{author} alterou a aprovação de novos participantes",
     "group_notif_linked_to_community": "{author} vinculou este grupo a uma comunidade",
     "forward_failed": "Não foi possível encaminhar a mensagem",
+    "forward_failed_multiple": "Não foi possível encaminhar a mensagem para: {names}",
     "tab_sound_events": "Eventos de Som",
     "tab_alert_tones": "Toques de Alerta",
     "tab_storage": "Armazenamento",

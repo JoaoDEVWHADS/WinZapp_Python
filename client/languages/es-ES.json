@@ -647,6 +647,7 @@
     "group_notif_approval_mode": "{author} cambió la aprobación de nuevos participantes",
     "group_notif_linked_to_community": "{author} vinculó este grupo a una comunidad",
     "forward_failed": "No se pudo reenviar el mensaje",
+    "forward_failed_multiple": "No se pudo reenviar el mensaje a: {names}",
     "tab_sound_events": "Eventos de Sonido",
     "tab_alert_tones": "Tonos de Alerta",
     "tab_storage": "Almacenamiento",
