@@ -26,6 +26,7 @@ same approach as tests/test_message_bookmarks.py.
 """
 
 import pytest
+import wx
 
 from status_panel import StatusPanel, _status_content_label
 
@@ -111,9 +112,36 @@ class _FakeVideoPlayer:
         self.is_paused = not self.is_paused
 
 
+class _FakeStatusList:
+    def __init__(self, focused=-1):
+        self._focused = focused
+        self.select_calls = []
+
+    def GetFocusedItem(self):
+        return self._focused
+
+    def Select(self, idx):
+        self.select_calls.append(idx)
+
+
+class _FakeKeyEvent:
+    def __init__(self, keycode):
+        self._keycode = keycode
+        self.skip_calls = 0
+
+    def GetKeyCode(self):
+        return self._keycode
+
+    def Skip(self):
+        self.skip_calls += 1
+
+
 class _Stub:
     _show_current_status         = StatusPanel._show_current_status
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
+    _on_status_contact_activated = StatusPanel._on_status_contact_activated
+    _on_status_list_key_down     = StatusPanel._on_status_list_key_down
+    _is_current_status_playable  = StatusPanel._is_current_status_playable
     _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
     _resolve_name                = StatusPanel._resolve_name
     _status_preview              = StatusPanel._status_preview
@@ -132,6 +160,8 @@ class _Stub:
         self._video_local_path          = None
         self._video_download_status_id  = None
         self._video_player = _FakeVideoPlayer()
+        self._status_list = _FakeStatusList()
+        self.my_status_dialog_calls = 0
 
         self._status_content_label = _FakeWidget()
         self._video_bitmap         = _FakeWidget()
@@ -143,6 +173,9 @@ class _Stub:
         self._reply_field          = _FakeTextCtrl()
         self._reply_send_btn       = _FakeWidget()
         self._viewer_panel         = _FakeWidget()
+
+    def _open_my_status_dialog(self):
+        self.my_status_dialog_calls += 1
 
     def Layout(self):
         pass
@@ -315,6 +348,107 @@ class TestPlayPauseAcceptsAudioStatuses:
         stub._on_play_pause_video(None)
 
         assert stub._video_player.toggle_pause_calls == 1
+
+
+class TestEnterAndSpaceTogglePlaybackOnStatusList:
+    """Feature request: Enter/Space activating a status-list item should
+    play/pause its media, not just re-select an already-shown status
+    (which would stop() and restart the player instead of pausing it)."""
+
+    def test_enter_on_a_video_status_already_shown_toggles_pause(self):
+        stub = _Stub()
+        stub._selected_contact_idx = 0
+        stub._current_status = _video_status()
+        stub._video_player.is_playing = True
+
+        class _Evt:
+            def GetIndex(self):
+                return 1  # row 1 = contact at _status_contacts[0]
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub._video_player.toggle_pause_calls == 1
+
+    def test_enter_on_a_text_status_does_not_try_to_toggle(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._selected_contact_idx = 0
+        stub._current_status = _text_status("oi")
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub._video_player.toggle_pause_calls == 0
+
+    def test_enter_on_a_not_yet_selected_contact_selects_instead_of_toggling(self):
+        # First activation of a contact just opens/shows it — matches
+        # arrow-key navigation already having done the same via
+        # EVT_LIST_ITEM_SELECTED by the time the user deliberately presses
+        # Enter/Space, at which point _is_current_status_playable() is what
+        # makes the *next* press toggle instead.
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._selected_contact_idx = -1
+        stub._current_status = None
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub._video_player.toggle_pause_calls == 0
+        assert stub._selected_contact_idx == 0
+
+    def test_enter_on_row_zero_opens_my_status_dialog(self):
+        stub = _Stub()
+
+        class _Evt:
+            def GetIndex(self):
+                return 0
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert stub.my_status_dialog_calls == 1
+
+    def test_space_on_a_video_status_already_shown_toggles_pause_without_reselecting(self):
+        stub = _Stub()
+        stub._selected_contact_idx = 0
+        stub._current_status = _video_status()
+        stub._video_player.is_playing = True
+        stub._status_list = _FakeStatusList(focused=1)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub._video_player.toggle_pause_calls == 1
+        # Must NOT re-Select() the row — that would re-fire selection and
+        # stop() the player out from under the toggle (see
+        # _is_current_status_playable()'s docstring).
+        assert stub._status_list.select_calls == []
+
+    def test_space_on_a_non_playing_row_still_selects_normally(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._selected_contact_idx = -1
+        stub._current_status = None
+        stub._status_list = _FakeStatusList(focused=1)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub._video_player.toggle_pause_calls == 0
+        assert stub._status_list.select_calls == [1]
+        assert stub._selected_contact_idx == 0
+
+    def test_other_keys_are_skipped(self):
+        stub = _Stub()
+        evt = _FakeKeyEvent(ord("A"))
+
+        stub._on_status_list_key_down(evt)
+
+        assert evt.skip_calls == 1
 
 
 class TestCopyStatusText:

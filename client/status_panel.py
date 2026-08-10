@@ -534,6 +534,18 @@ class StatusPanel(wx.Panel):
             suffix = i18n.t("my_status_none")
         return f"{i18n.t('my_status')}: {suffix}"
 
+    def _is_current_status_playable(self, contact_idx: int) -> bool:
+        """True when *contact_idx* is the contact already being shown AND
+        its current status is a video/audio update — the case where
+        Enter/Space on the status list should toggle play/pause instead of
+        re-selecting (which would stop() and restart the player instead of
+        actually pausing it — see _show_current_status())."""
+        return (
+            contact_idx == self._selected_contact_idx
+            and self._current_status is not None
+            and self._current_status.get("messageType") in ("videoMessage", "audioMessage")
+        )
+
     def _on_status_list_key_down(self, event):
         """Make Space activate the focused status item (same as Enter).
 
@@ -546,14 +558,23 @@ class StatusPanel(wx.Panel):
         if event.GetKeyCode() == wx.WXK_SPACE:
             idx = self._status_list.GetFocusedItem()
             if idx >= 0:
-                self._status_list.Select(idx)
                 if idx == 0:
+                    self._status_list.Select(idx)
                     self._open_my_status_dialog()
-                else:
-                    contact_idx = idx - 1
-                    if 0 <= contact_idx < len(self._status_contacts):
-                        self._selected_contact_idx = contact_idx
-                        self._show_current_status()
+                    return
+                contact_idx = idx - 1
+                # Play/pause toggle deliberately checked BEFORE Select(idx)
+                # runs (below): Select() re-fires EVT_LIST_ITEM_SELECTED
+                # even for an already-selected row, which would otherwise
+                # stop() the player out from under this toggle a moment
+                # later — see _is_current_status_playable()'s docstring.
+                if self._is_current_status_playable(contact_idx):
+                    self._on_play_pause_video(None)
+                    return
+                self._status_list.Select(idx)
+                if 0 <= contact_idx < len(self._status_contacts):
+                    self._selected_contact_idx = contact_idx
+                    self._show_current_status()
         else:
             event.Skip()
 
@@ -593,8 +614,12 @@ class StatusPanel(wx.Panel):
         idx = event.GetIndex()
         if idx == 0:
             self._open_my_status_dialog()
-        else:
-            self._on_status_contact_selected(event)
+            return
+        contact_idx = idx - 1
+        if self._is_current_status_playable(contact_idx):
+            self._on_play_pause_video(None)
+            return
+        self._on_status_contact_selected(event)
 
     def _open_my_status_dialog(self):
         dlg    = MyStatusDialog(self.main_window, self._my_statuses)
