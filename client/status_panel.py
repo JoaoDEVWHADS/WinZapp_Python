@@ -643,8 +643,9 @@ class StatusPanel(wx.Panel):
         self._current_status_entry = entry
 
         is_video = msg_type == "videoMessage"
+        is_audio = msg_type == "audioMessage"
         is_image = msg_type == "imageMessage"
-        self._play_pause_btn.Show(is_video)
+        self._play_pause_btn.Show(is_video or is_audio)
         self._save_media_btn.Show(is_video or is_image)
 
         # Copy-text applies to the actual text content: the full text for a
@@ -762,9 +763,16 @@ class StatusPanel(wx.Panel):
     # JPEG frame sequence drawn into self._video_bitmap.
 
     def _on_play_pause_video(self, event):
+        """Play/pause the current status's media — video (picture + audio)
+        or audio-only. Named for video since that's what this predates, but
+        VideoPlayer already plays an audio-only file just fine on its own
+        (BASS decodes it directly; ffmpeg's frame pipe just produces nothing
+        for a file with no video stream) — the only thing missing for audio
+        statuses was ever showing this button at all (see _show_current_status())."""
         if self._current_status is None:
             return
-        if self._current_status.get("messageType") != "videoMessage":
+        msg_type = self._current_status.get("messageType")
+        if msg_type not in ("videoMessage", "audioMessage"):
             return
         if self._video_player.is_playing:
             self._video_player.toggle_pause()
@@ -774,28 +782,33 @@ class StatusPanel(wx.Panel):
         if self._video_local_path and self._video_download_status_id == status_id:
             # Already downloaded (e.g. finished playing once) — replay
             # without hitting the network again.
-            self._video_bitmap.Show()
-            self.Layout()
+            if msg_type == "videoMessage":
+                self._video_bitmap.Show()
+                self.Layout()
             self._video_player.load_and_play(self._video_local_path)
             self._update_play_pause_label()
             return
         threading.Thread(
             target=self._download_and_play_video,
-            args=(self._current_status, status_id),
+            args=(self._current_status, status_id, msg_type),
             daemon=True,
         ).start()
 
-    def _download_and_play_video(self, status, status_id: str):
+    def _download_and_play_video(self, status, status_id: str, msg_type: str = "videoMessage"):
         mw = self.main_window
+        # Audio statuses arrive as Opus/OGG (same as voice messages), never
+        # .mp4 — the suffix only matters for BASS's own format sniffing
+        # fallback and for a sensible temp filename, not correctness.
+        suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
         try:
             b64 = mw.get_base64_from_media(status)
             if not b64:
                 raise ValueError("empty media response")
             content = base64.b64decode(b64)
-            tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
             tmp.write(content)
             tmp.close()
-            wx.CallAfter(self._start_downloaded_video, tmp.name, status_id)
+            wx.CallAfter(self._start_downloaded_video, tmp.name, status_id, msg_type)
         except Exception:
             wx.CallAfter(
                 wx.MessageBox,
@@ -804,7 +817,7 @@ class StatusPanel(wx.Panel):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    def _start_downloaded_video(self, path: str, status_id: str):
+    def _start_downloaded_video(self, path: str, status_id: str, msg_type: str = "videoMessage"):
         # The user may have navigated to a different status while this was
         # downloading — don't start playback for a status that isn't the
         # one currently shown.
@@ -817,8 +830,9 @@ class StatusPanel(wx.Panel):
             return
         self._video_local_path = path
         self._video_download_status_id = status_id
-        self._video_bitmap.Show()
-        self.Layout()
+        if msg_type == "videoMessage":
+            self._video_bitmap.Show()
+            self.Layout()
         self._video_player.load_and_play(path)
         self._update_play_pause_label()
 

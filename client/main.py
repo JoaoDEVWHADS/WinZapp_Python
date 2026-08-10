@@ -1295,18 +1295,19 @@ class MainWindow(wx.Frame):
 
     def _on_about(self, event=None):
         """Show application authorship, version and license information."""
+        i18n = self.i18n
         info = "\n".join(
             textwrap.fill(line, width=100, break_long_words=False, break_on_hyphens=False)
             for line in (
-                "Desenvolvido originalmente por: Gabriel Haberkamp.",
+                i18n.t("about_developed_by"),
                 "",
-                "Agradecimentos especiais:",
-                "Wendrill Aksenow Brandão: pela tradução do programa WinZapp para Português de Portugal.",
-                "Juan Mathews Rebelo Santos, João Jorge e Gustavo Barrios: principais colaboradores."
-                "Fabiano Ferreira, Tadeu Junior, Wagner Soares da Silva, Eduardo Ferreira, Elias Junior e todos da comunidade que ajudaram, seja testando, implementando melhorias ou dando sugestões / relatórios de bugs.",
+                i18n.t("about_special_thanks"),
+                i18n.t("about_translation_thanks"),
+                i18n.t("about_main_contributors"),
+                i18n.t("about_community_thanks"),
                 "",
-                f"Versão atual: {__version__}.",
-                "Licenciado sob a licença GNU Lesser General Public License V3 (GPLV3).",
+                i18n.t("about_current_version").format(version=__version__),
+                i18n.t("about_license"),
             )
         )
 
@@ -4549,6 +4550,14 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel.restore_selection()
 
     def on_alt_5(self, event):
+        # A conversation left open (archived or not) while switching to
+        # Status kept sending typing/recording presence updates for it in
+        # the background — the user has no way to see or act on that once
+        # this tab's out of view, so close it the same way Esc would,
+        # without close_conversation()'s own focus-restoration (this panel
+        # sets its own focus right below).
+        if self.conversations_panel.conversation is not None:
+            self.conversations_panel.close_conversation_for_panel_switch()
         self.conversations_panel.Hide()
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.Hide()

@@ -935,18 +935,43 @@ export async function reactMessage(req: Request, res: Response) {
       // StatusV3Store.getMyStatus().msgs, i.e. only YOUR OWN posted
       // statuses. Liking another contact's status therefore always failed
       // to even locate the message, before a reaction was ever attempted.
-      // Resolve the MsgModel ourselves from the global Store.Msg collection
-      // (populated for every status the app has actually received, whoever
-      // posted it — the same store getMessages()'s own browser-evaluate
-      // fallback above searches) and hand the model object straight to
-      // WPP.chat.sendReactionToMessage(): passing an actual MsgModel
-      // instance instead of a string skips getMessageById() entirely.
+      //
+      // Confirmed live (via the error-detail fix above, which used to hide
+      // this): the general Store.Msg.models collection this used to search
+      // does NOT contain other people's status messages at all — WhatsApp
+      // Web keeps those in a separate per-poster StatusV3Model, reachable
+      // via WPP.status.get(posterJid).getAllMsgs(). The serialized id's
+      // trailing segment (see _serialize_msg_id() in main.py, which always
+      // appends the poster's JID as "participant" for @broadcast ids) is
+      // exactly that poster JID. Store.Msg.models is kept as a fallback in
+      // case a status is ever ALSO mirrored there on some WhatsApp Web
+      // version.
       const ok = await req.client.page.evaluate(
         async ({ msgId, reaction }) => {
           const parts = msgId.split('_');
           const rawId = parts.length > 2 ? parts[2] : msgId;
+          const posterJid = parts.length > 3 ? parts[3] : null;
           let model: any = null;
-          if ((window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
+
+          if (posterJid && (window as any).WPP && (window as any).WPP.status) {
+            const statusChat = (window as any).WPP.status.get(posterJid);
+            if (statusChat) {
+              const msgs =
+                (typeof statusChat.getAllMsgs === 'function' && statusChat.getAllMsgs()) ||
+                (statusChat.msgs && typeof statusChat.msgs.getModelsArray === 'function'
+                  ? statusChat.msgs.getModelsArray()
+                  : null) ||
+                [];
+              model = msgs.find((item: any) => {
+                if (!item || !item.id) return false;
+                const ser = item.id._serialized || '';
+                const itemId = item.id.id || '';
+                return itemId === rawId || ser === msgId || (rawId && ser.includes(rawId));
+              });
+            }
+          }
+
+          if (!model && (window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
             const models = (window as any).Store.Msg.models;
             model = models.find((item: any) => {
               if (!item || !item.id) return false;

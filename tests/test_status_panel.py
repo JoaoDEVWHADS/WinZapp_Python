@@ -97,6 +97,7 @@ class _FakeMainWindow:
 class _FakeVideoPlayer:
     def __init__(self):
         self.stop_calls = 0
+        self.toggle_pause_calls = 0
         self.is_playing = False
         self.is_paused  = False
 
@@ -105,6 +106,10 @@ class _FakeVideoPlayer:
         self.is_playing = False
         self.is_paused  = False
 
+    def toggle_pause(self):
+        self.toggle_pause_calls += 1
+        self.is_paused = not self.is_paused
+
 
 class _Stub:
     _show_current_status         = StatusPanel._show_current_status
@@ -112,6 +117,8 @@ class _Stub:
     _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
     _resolve_name                = StatusPanel._resolve_name
     _status_preview              = StatusPanel._status_preview
+    _on_play_pause_video         = StatusPanel._on_play_pause_video
+    _update_play_pause_label     = StatusPanel._update_play_pause_label
 
     def __init__(self, contact_names=None):
         self.main_window = _FakeMainWindow(contact_names=contact_names)
@@ -164,6 +171,15 @@ def _video_status(caption="", from_me=False):
         "key": {"fromMe": from_me, "id": "s3"},
         "messageType": "videoMessage",
         "message": {"videoMessage": {"caption": caption, "mimetype": "video/mp4"}},
+        "messageTimestamp": 1700000000,
+    }
+
+
+def _audio_status(from_me=False):
+    return {
+        "key": {"fromMe": from_me, "id": "s4"},
+        "messageType": "audioMessage",
+        "message": {"audioMessage": {"mimetype": "audio/ogg; codecs=opus"}},
         "messageTimestamp": 1700000000,
     }
 
@@ -247,6 +263,17 @@ class TestVideoPlayback:
 
         assert stub._play_pause_btn.shown is False
 
+    def test_audio_status_shows_the_play_pause_button(self):
+        # Regression: audio statuses had no way to trigger playback at
+        # all — the button only ever checked for "videoMessage".
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_audio_status()])]
+        stub._selected_contact_idx = 0
+
+        stub._show_current_status()
+
+        assert stub._play_pause_btn.shown is True
+
     def test_switching_status_stops_any_playing_video(self):
         """Reported live: leaving the video's status without stopping it
         first would keep its audio playing / ffmpeg decoding in the
@@ -264,6 +291,30 @@ class TestVideoPlayback:
 
         assert stub._video_player.stop_calls == 2
         assert stub._video_bitmap.shown is False
+
+
+class TestPlayPauseAcceptsAudioStatuses:
+    """_on_play_pause_video() used to bail out for anything but
+    "videoMessage" — the download/threading path itself isn't exercised
+    here (see TestVideoPlayback / _download_and_play_video), just the
+    guard that used to block audio entirely."""
+
+    def test_ignores_a_status_type_with_no_playable_media(self):
+        stub = _Stub()
+        stub._current_status = _text_status("oi")
+
+        stub._on_play_pause_video(None)
+
+        assert stub._video_player.toggle_pause_calls == 0
+
+    def test_toggles_pause_for_an_already_playing_audio_status(self):
+        stub = _Stub()
+        stub._current_status = _audio_status()
+        stub._video_player.is_playing = True
+
+        stub._on_play_pause_video(None)
+
+        assert stub._video_player.toggle_pause_calls == 1
 
 
 class TestCopyStatusText:

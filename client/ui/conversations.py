@@ -2118,11 +2118,25 @@ class ConversationsPanel(wx.Panel):
         self._voice_panel.Hide()
         self.record_voice_message_btn.Show()
 
-    def close_conversation(self, event=None):
+    def _close_conversation_core(self) -> "tuple[bool, str]":
+        """Stop typing/recording indicators and clear the open-conversation
+        state. Returns (closed, closed_jid): closed is False when the
+        mention-suggestions popup was showing (that press is handled by
+        just dismissing the popup — the conversation itself is left open).
+
+        Shared by close_conversation() (Esc — also restores focus to
+        whichever list the conversation was opened from) and
+        close_conversation_for_panel_switch() (used when the user
+        navigates to an entirely different top-level panel, e.g. Status —
+        that panel sets its own focus right after, so it must NOT queue
+        close_conversation()'s focus-restoration CallAfters, which would
+        otherwise steal focus back to the conversations list a moment
+        later).
+        """
         if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
             self._hide_mention_suggestions()
             self.message_field.SetFocus()
-            return
+            return False, ""
         self._stop_typing_for_current_conversation()
         self._cancel_active_recording()
         self._hide_audio_controls()
@@ -2145,6 +2159,12 @@ class ConversationsPanel(wx.Panel):
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
+        return True, closed_jid
+
+    def close_conversation(self, event=None):
+        closed, closed_jid = self._close_conversation_core()
+        if not closed:
+            return  # _close_conversation_core() only handled the mention popup
         mw = self.main_window
         # If the conversation being closed is archived, it was opened from the
         # archived list (ArchivedConversationsPanel), which stays hidden behind
@@ -2158,6 +2178,11 @@ class ConversationsPanel(wx.Panel):
             # fully processed — calling SetFocus() synchronously inside an EVT_MENU
             # handler can be overridden by wx's post-event focus management on Win32.
             wx.CallAfter(self._restore_conversation_selection)
+
+    def close_conversation_for_panel_switch(self):
+        """Same cleanup as close_conversation() but without its focus-
+        restoration side effects — see _close_conversation_core()."""
+        self._close_conversation_core()
 
     def _restore_conversation_selection(self):
         """Select, focus and give keyboard focus to the last-opened conversation."""
