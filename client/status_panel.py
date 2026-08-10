@@ -10,6 +10,40 @@ from core.utils import format_number, get_downloads_folder
 from core.video_player import VideoPlayer
 
 
+def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
+    """Human-readable content label for one status update.
+
+    Shared by MyStatusDialog, StatusPanel's list-row preview, and
+    StatusPanel's own open viewer — a status can be an audio/document/
+    sticker/contact update just like a regular message, not only text/
+    image/video. Each of those three call sites used to fall through to
+    the raw messageType string itself (e.g. literal "audioMessage") for
+    anything past text/image/video instead of a translated label.
+    """
+    if msg_type == "conversation":
+        return msg_obj.get("conversation", "")
+    if msg_type == "extendedTextMessage":
+        return (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+    if msg_type == "imageMessage":
+        caption = ((msg_obj.get("imageMessage") or {}).get("caption") or "").strip()
+        return f"{i18n.t('photo')}: {caption}" if caption else i18n.t("photo")
+    if msg_type == "videoMessage":
+        caption = ((msg_obj.get("videoMessage") or {}).get("caption") or "").strip()
+        return f"{i18n.t('video')}: {caption}" if caption else i18n.t("video")
+    if msg_type == "audioMessage":
+        return i18n.t("message_type_audio")
+    if msg_type == "documentMessage":
+        doc = msg_obj.get("documentMessage") or {}
+        filename = doc.get("fileName") or doc.get("title") or ""
+        return f"{i18n.t('document')}: {filename}" if filename else i18n.t("document")
+    if msg_type == "stickerMessage":
+        return i18n.t("sticker")
+    if msg_type == "contactMessage":
+        contact = msg_obj.get("contactMessage") or {}
+        return i18n.t("contact_message").format(name=contact.get("displayName") or "")
+    return i18n.t("notif_unsupported")
+
+
 # ── My Status dialog ─────────────────────────────────────────────────────────
 
 class MyStatusDialog(wx.Dialog):
@@ -98,20 +132,7 @@ class MyStatusDialog(wx.Dialog):
 
         msg_type = status.get("messageType", "")
         msg_obj  = status.get("message") or {}
-        if msg_type == "conversation":
-            content = msg_obj.get("conversation", "")
-        elif msg_type == "extendedTextMessage":
-            content = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
-        elif msg_type == "imageMessage":
-            img     = msg_obj.get("imageMessage") or {}
-            caption = (img.get("caption") or "").strip()
-            content = f"{i18n.t('photo')}: {caption}" if caption else i18n.t("photo")
-        elif msg_type == "videoMessage":
-            video   = msg_obj.get("videoMessage") or {}
-            caption = (video.get("caption") or "").strip()
-            content = f"{i18n.t('video')}: {caption}" if caption else i18n.t("video")
-        else:
-            content = msg_type or "?"
+        content  = _status_content_label(msg_type, msg_obj, i18n)
 
         nav_info = i18n.t("status_of").format(current=self._current + 1, total=total)
         label    = f"{nav_info}: {content}"
@@ -437,13 +458,15 @@ class StatusPanel(wx.Panel):
         return my_statuses, contacts
 
     def _resolve_name(self, jid: str) -> str:
-        mw      = self.main_window
-        contact = mw.contacts.get(jid)
-        if contact:
-            name = contact.get("pushName") or ""
-            if name:
-                return name
-        return ""
+        # Delegate to the same resolver chats use (address-book "name"
+        # preferred over the WhatsApp profile "pushName", @lid/@c.us
+        # variants tried, bad-name filtering) — this used to read
+        # contact.get("pushName") directly, which always showed the
+        # person's own WhatsApp display name here even when a different
+        # name was saved for them in the address book, unlike every chat
+        # list/conversation in the app.
+        mw = self.main_window
+        return mw._resolve_contact_name({"remoteJid": jid}) or ""
 
     def _set_list_loading(self):
         self._list_is_loading = True
@@ -463,17 +486,7 @@ class StatusPanel(wx.Panel):
         """Return a short human-readable preview of a single status item."""
         msg_type = status.get("messageType", "")
         msg_obj  = status.get("message") or {}
-        if msg_type == "conversation":
-            return msg_obj.get("conversation", "")
-        if msg_type == "extendedTextMessage":
-            return (msg_obj.get("extendedTextMessage") or {}).get("text", "")
-        if msg_type == "imageMessage":
-            cap = ((msg_obj.get("imageMessage") or {}).get("caption") or "").strip()
-            return f"{i18n.t('photo')}: {cap}" if cap else i18n.t("photo")
-        if msg_type == "videoMessage":
-            cap = ((msg_obj.get("videoMessage") or {}).get("caption") or "").strip()
-            return f"{i18n.t('video')}: {cap}" if cap else i18n.t("video")
-        return msg_type or ""
+        return _status_content_label(msg_type, msg_obj, i18n)
 
     def _populate_list(self, my_statuses: list, contacts: list):
         i18n = self.main_window.i18n
@@ -608,20 +621,7 @@ class StatusPanel(wx.Panel):
 
         msg_type = status.get("messageType", "")
         msg_obj  = status.get("message") or {}
-        if msg_type == "conversation":
-            content = msg_obj.get("conversation", "")
-        elif msg_type == "extendedTextMessage":
-            content = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
-        elif msg_type == "imageMessage":
-            img     = msg_obj.get("imageMessage") or {}
-            caption = (img.get("caption") or "").strip()
-            content = f"{i18n.t('photo')}: {caption}" if caption else i18n.t("photo")
-        elif msg_type == "videoMessage":
-            video   = msg_obj.get("videoMessage") or {}
-            caption = (video.get("caption") or "").strip()
-            content = f"{i18n.t('video')}: {caption}" if caption else i18n.t("video")
-        else:
-            content = msg_type or "?"
+        content  = _status_content_label(msg_type, msg_obj, i18n)
 
         nav_info = i18n.t("status_of").format(current=current + 1, total=total)
         label    = f"{entry.get('name', '')} — {nav_info}: {content}"

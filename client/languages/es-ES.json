@@ -237,7 +237,7 @@
     "edit_group_description": "Editar descripción del grupo",
     "group_name_label": "Nombre del grupo",
     "group_description_label": "Descripción del grupo",
-    "save_btn": "Guardar",
+    "save_btn": "&Guardar",
     "edit_group_name_failed": "No se pudo cambiar el nombre del grupo: {error}",
     "edit_group_description_failed": "No se pudo cambiar la descripción del grupo: {error}",
     "loading": "Cargando...",
