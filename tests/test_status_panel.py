@@ -318,6 +318,73 @@ class TestPositionPreservedOnReselect:
         assert stub._viewer_panel.shown is False
 
 
+class TestAnnouncementOnlyOnExplicitNavigation:
+    """Issue: arrow-key navigation through the contact list re-announced
+    "Nome — status X de Y: conteúdo" on every single row change — NVDA/JAWS
+    already read the newly-focused list item on their own, so this was pure
+    redundant chatter. Explicit navigation (Space, Enter/double-click
+    activation, Ctrl+Left/Right between a contact's own statuses) must keep
+    announcing, since none of those has an equivalent native readout."""
+
+    def test_plain_list_selection_does_not_announce(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_selected(_Evt())
+
+        assert stub.main_window.outputs == []
+        assert "Status 1 de 1" in stub._status_content_label.label  # viewer still updated silently
+        assert stub._selected_contact_idx == 0
+
+    def test_activation_enter_or_doubleclick_still_announces(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+
+        class _Evt:
+            def GetIndex(self):
+                return 1
+
+        stub._on_status_contact_activated(_Evt())
+
+        assert len(stub.main_window.outputs) == 1
+
+    def test_space_activation_still_announces(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_list = _FakeStatusList(focused=1)
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert len(stub.main_window.outputs) == 1
+
+    def test_explicit_next_status_still_announces(self):
+        stub = _Stub()
+        stub._status_contacts = [
+            _entry("a@s.whatsapp.net", [_text_status("um"), _text_status("dois")])
+        ]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+
+        stub._on_next_status(None)
+
+        assert len(stub.main_window.outputs) == 1
+
+    def test_show_current_status_defaults_to_announcing_when_called_directly(self):
+        """Sanity check the default parameter itself, independent of any
+        particular caller."""
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._selected_contact_idx = 0
+
+        stub._show_current_status()
+
+        assert len(stub.main_window.outputs) == 1
+
+
 class TestVideoPlayback:
     def test_video_status_shows_the_play_pause_button(self):
         stub = _Stub()

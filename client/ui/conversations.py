@@ -5208,6 +5208,9 @@ class ConversationsPanel(wx.Panel):
             parts = [i18n.t("document"), filename]
             if size_str:
                 parts.append(size_str)
+            caption = (doc.get("caption") or "").strip()
+            if caption:
+                parts.append(caption)
             return ", ".join(parts)
 
         # ── Image ────────────────────────────────────────────────────────────
@@ -5229,7 +5232,9 @@ class ConversationsPanel(wx.Panel):
                 # Animated GIF — treat identically to sticker
                 return i18n.t("sticker")
             dur = self._format_duration(video.get("seconds"))
-            return f"{i18n.t('video')}, {i18n.t('duration')}: {dur}"
+            base = f"{i18n.t('video')}, {i18n.t('duration')}: {dur}"
+            caption = (video.get("caption") or "").strip()
+            return f"{base}, {caption}" if caption else base
 
         # ── Interactive buttons ───────────────────────────────────────────────
         if msg_type == "buttonsMessage":

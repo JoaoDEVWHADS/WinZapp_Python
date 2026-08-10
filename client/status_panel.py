@@ -828,7 +828,7 @@ class StatusPanel(wx.Panel):
 
     # ── Status list selection / activation ───────────────────────────────────
 
-    def _on_status_contact_selected(self, event):
+    def _on_status_contact_selected(self, event, announce: bool = False):
         idx = event.GetIndex()
         if idx == 0:
             # My Status row selected — hide the inline viewer; dialog opens on activate
@@ -853,7 +853,12 @@ class StatusPanel(wx.Panel):
         if contact_idx != self._selected_contact_idx:
             self._current_status_idx = 0
         self._selected_contact_idx = contact_idx
-        self._show_current_status()
+        # Defaults to silent: NVDA/JAWS already read the newly-focused list
+        # item on their own on plain arrow-key navigation (EVT_LIST_ITEM_
+        # SELECTED) — see _show_current_status()'s own docstring. Callers
+        # driven by an explicit action rather than mere focus movement
+        # (Space, Enter/double-click activation) pass announce=True.
+        self._show_current_status(announce=announce)
 
     def _on_status_contact_activated(self, event):
         idx = event.GetIndex()
@@ -864,7 +869,7 @@ class StatusPanel(wx.Panel):
         if self._is_current_status_playable(contact_idx):
             self._on_play_pause_video(None)
             return
-        self._on_status_contact_selected(event)
+        self._on_status_contact_selected(event, announce=True)
 
     def _open_my_status_dialog(self):
         dlg    = MyStatusDialog(self.main_window, self._my_statuses)
@@ -876,7 +881,19 @@ class StatusPanel(wx.Panel):
 
     # ── Status viewer ────────────────────────────────────────────────────────
 
-    def _show_current_status(self):
+    def _show_current_status(self, announce: bool = True):
+        """Refresh the viewer for whatever status is currently selected.
+
+        *announce* controls whether the "Nome — status X de Y: conteúdo"
+        label is also spoken. Arrow-key navigation through the CONTACT list
+        (_on_status_contact_selected) passes False for this: NVDA/JAWS
+        already read the newly-focused list item on their own, so speaking
+        it again here was pure redundant chatter on every single arrow
+        press. Explicit status navigation — Ctrl+Left/Right between a
+        contact's own statuses, and Space to open/activate the focused
+        contact — still announces, since neither of those has an
+        equivalent native readout to fall back on.
+        """
         if self._selected_contact_idx < 0:
             return
         entry    = self._status_contacts[self._selected_contact_idx]
@@ -955,7 +972,8 @@ class StatusPanel(wx.Panel):
         self._viewer_panel.Show()
         self.Layout()
 
-        self.main_window.output(label, interrupt=True)
+        if announce:
+            self.main_window.output(label, interrupt=True)
 
     # ── Status navigation (Ctrl+Left / Ctrl+Right) ───────────────────────────
 
