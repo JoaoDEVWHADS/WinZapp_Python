@@ -6592,7 +6592,9 @@ class ConversationsPanel(wx.Panel):
         self.navigate_to_conversation(chat)
 
     def _on_menu_goto_quoted(self, msg: dict, ctx: dict):
-        """Move focus in the messages list to the quoted message."""
+        """Move focus in the messages list to the quoted message — or, if
+        the quote is actually a reply to a STATUS (never present in this
+        chat's own message list at all), open the status viewer instead."""
         quoted_id = ctx.get("stanzaId") or ""
         if not quoted_id:
             self._show_quoted_not_found_error()
@@ -6604,7 +6606,100 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
+        if ctx.get("quotedMessage") and self._goto_quoted_status(quoted_id, ctx):
+            return
         self._show_quoted_not_found_error()
+
+    def _goto_quoted_status(self, quoted_id: str, ctx: dict) -> bool:
+        """Best-effort: the id wasn't found in this chat's own messages —
+        check whether it's a status reply instead. A status still tracked
+        in main_window._status_updates opens in the real viewer; one old
+        enough to have aged out of there is rebuilt from the quoted
+        content WhatsApp still ships inline on the reply itself (same
+        shape a real status dict has) so it opens the same way rather than
+        falling back to a bare text popup. Returns True if it opened
+        something.
+        """
+        mw = self.main_window
+        if not hasattr(mw, "status_panel"):
+            return False
+        sp = mw.status_panel
+        updates = getattr(mw, "_status_updates", {})
+        items = [m for msgs in updates.values() for m in msgs]
+        my_statuses, contacts = sp._parse_statuses(items, mw.i18n)
+
+        for idx, st in enumerate(my_statuses):
+            if st.get("key", {}).get("id") == quoted_id:
+                self._open_my_status_dialog_at(my_statuses, idx)
+                return True
+
+        for entry in contacts:
+            for s_idx, st in enumerate(entry.get("statuses", [])):
+                if st.get("key", {}).get("id") == quoted_id:
+                    self._open_status_panel_at(sp, my_statuses, contacts, entry.get("jid", ""), s_idx)
+                    return True
+
+        quoted_msg = ctx.get("quotedMessage") or {}
+        if not quoted_msg:
+            return False
+        poster_jid = ctx.get("participant", "") or ""
+        msg_type = ""
+        for key in ("videoMessage", "imageMessage", "audioMessage", "documentMessage",
+                    "extendedTextMessage", "conversation"):
+            if key in quoted_msg:
+                msg_type = key
+                break
+        if not msg_type:
+            return False
+        is_mine = bool(poster_jid) and mw._is_self_jid(poster_jid)
+        dummy_status = {
+            "key": {
+                "id": quoted_id,
+                "remoteJid": "status@broadcast",
+                "fromMe": is_mine,
+                "participant": poster_jid,
+            },
+            "message": quoted_msg,
+            "messageType": msg_type,
+            "messageTimestamp": 0,
+        }
+        if is_mine:
+            self._open_my_status_dialog_at([dummy_status], 0)
+        else:
+            name = (mw._resolve_contact_name({"remoteJid": poster_jid}) or format_number(poster_jid)
+                    if poster_jid else mw.i18n.t("unknown_contact"))
+            fake_entry = {"name": name, "jid": poster_jid, "statuses": [dummy_status]}
+            self._open_status_panel_at(sp, [], [fake_entry], poster_jid, 0)
+        return True
+
+    def _open_my_status_dialog_at(self, my_statuses: list, idx: int):
+        mw = self.main_window
+        sp = getattr(mw, "status_panel", None)
+        if sp is not None and sp._video_player.is_playing:
+            sp._video_player.stop()
+        from status_panel import MyStatusDialog
+        dlg = MyStatusDialog(mw, my_statuses)
+        if idx:
+            dlg._current = idx
+            dlg._update_content()
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def _open_status_panel_at(self, sp, my_statuses: list, contacts: list, target_jid: str, s_idx: int):
+        mw = self.main_window
+        mw.on_alt_5(None)
+        sp._populate_list(my_statuses, contacts)
+        c_idx = next((i for i, e in enumerate(sp._status_contacts) if e.get("jid") == target_jid), None)
+        if c_idx is None:
+            return
+        row = c_idx + 1
+        sp._status_list.Select(row)
+        sp._status_list.Focus(row)
+        sp._status_list.EnsureVisible(row)
+        sp._selected_contact_idx = c_idx
+        total = len(sp._status_contacts[c_idx].get("statuses", []))
+        sp._current_status_idx = max(0, min(s_idx, total - 1)) if total else 0
+        sp._show_current_status()
 
     def _show_quoted_not_found_error(self):
         wx.MessageBox(

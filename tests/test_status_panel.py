@@ -83,13 +83,25 @@ class _FakeTextCtrl(_FakeWidget):
 
 
 class _FakeMainWindow:
-    def __init__(self, contact_names=None):
+    def __init__(self, contact_names=None, send_text_result=True):
         self.i18n = _FakeI18n()
         self.outputs = []
         self._contact_names = contact_names or {}
+        self.chats = {}
+        self._status_updates = {}
+        self.app_name = "WinZapp"
+        self._send_text_result = send_text_result
+        self.send_text_calls = []
 
     def _resolve_contact_name(self, chat):
         return self._contact_names.get(chat.get("remoteJid", ""))
+
+    def _is_self_jid(self, jid):
+        return False
+
+    def send_text_message(self, remote_jid, text, quoted=None):
+        self.send_text_calls.append((remote_jid, text, quoted))
+        return self._send_text_result
 
     def output(self, text, interrupt=False):
         self.outputs.append(text)
@@ -123,6 +135,9 @@ class _FakeStatusList:
     def Select(self, idx):
         self.select_calls.append(idx)
 
+    def SetFocus(self):
+        pass
+
 
 class _FakeKeyEvent:
     def __init__(self, keycode):
@@ -147,9 +162,17 @@ class _Stub:
     _status_preview              = StatusPanel._status_preview
     _on_play_pause_video         = StatusPanel._on_play_pause_video
     _update_play_pause_label     = StatusPanel._update_play_pause_label
+    _is_status_liked             = StatusPanel._is_status_liked
+    _on_like_status              = StatusPanel._on_like_status
+    _on_like_sent                = StatusPanel._on_like_sent
+    _on_unlike_status_attempted  = StatusPanel._on_unlike_status_attempted
+    _parse_statuses              = StatusPanel._parse_statuses
+    _latest_ts                   = StatusPanel._latest_ts
+    _on_next_status               = StatusPanel._on_next_status
+    _on_escape                    = StatusPanel._on_escape
 
-    def __init__(self, contact_names=None):
-        self.main_window = _FakeMainWindow(contact_names=contact_names)
+    def __init__(self, contact_names=None, send_text_result=True):
+        self.main_window = _FakeMainWindow(contact_names=contact_names, send_text_result=send_text_result)
         self._status_contacts      = []
         self._selected_contact_idx = -1
         self._current_status_idx   = 0
@@ -176,6 +199,9 @@ class _Stub:
 
     def _open_my_status_dialog(self):
         self.my_status_dialog_calls += 1
+
+    def _on_refresh(self, event):
+        self.refresh_calls = getattr(self, "refresh_calls", 0) + 1
 
     def Layout(self):
         pass
@@ -620,3 +646,246 @@ class TestResolveNamePrefersSavedContactNameOverPushName:
         }
         preview = stub._status_preview(status, stub.main_window.i18n)
         assert preview == "Foto: praia"
+
+
+def _run_threads_synchronously(monkeypatch):
+    """Make status_panel.threading.Thread(...).start() run its target
+    immediately on the calling (test) thread instead of a real background
+    thread, and wx.CallAfter() run its callback inline instead of queuing
+    it on a running wx.App's event loop (there isn't one in these tests) —
+    status-like sends are threaded for real, but tests need a synchronous,
+    deterministic result. Same pattern as test_remote_revoke.py."""
+    import status_panel as status_panel_module
+
+    class _SyncThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(status_panel_module.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+
+class TestLikeStatusSendsAQuotedEmojiReply:
+    """_on_like_status() no longer uses send_reaction() (WhatsApp Web's
+    Store never indexes another person's status — see the method's own
+    docstring) — it sends the like emoji as a normal quoted-reply message
+    to the poster instead."""
+
+    def test_sends_heart_emoji_quoting_the_status_to_the_poster(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        status = _text_status("oi")
+        entry = _entry("poster@s.whatsapp.net", [status])
+        stub = _Stub()
+        stub._status_contacts = [entry]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._current_status = status
+
+        stub._on_like_status(None)
+
+        assert stub.main_window.send_text_calls == [
+            ("poster@s.whatsapp.net", "❤️", status)
+        ]
+
+    def test_marks_liked_and_updates_button_label_on_success(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        status = _text_status("oi")
+        stub = _Stub(send_text_result=True)
+        stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._current_status = status
+
+        stub._on_like_status(None)
+
+        status_id = status["key"]["id"]
+        assert stub._liked_statuses[status_id] is True
+        assert stub._like_btn.label == "Descurtir"
+
+    def test_shows_error_on_send_failure(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        calls = []
+        monkeypatch.setattr(wx, "MessageBox", lambda *a, **kw: calls.append(a))
+        status = _text_status("oi")
+        stub = _Stub(send_text_result=False)
+        stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._current_status = status
+
+        stub._on_like_status(None)
+
+        assert stub._liked_statuses.get(status["key"]["id"]) is None
+        assert len(calls) == 1
+
+    def test_clicking_like_again_shows_unlike_unsupported_message_instead_of_resending(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        calls = []
+        monkeypatch.setattr(wx, "MessageBox", lambda *a, **kw: calls.append(a))
+        status = _text_status("oi")
+        status_id = status["key"]["id"]
+        stub = _Stub()
+        stub._status_contacts = [_entry("poster@s.whatsapp.net", [status])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._current_status = status
+        stub._liked_statuses[status_id] = True
+
+        stub._on_like_status(None)
+
+        assert stub.main_window.send_text_calls == []
+        assert len(calls) == 1
+
+
+class TestIsStatusLikedRemembersAcrossSessions:
+    """_liked_statuses only tracks likes sent THIS session — _is_status_liked()
+    also checks whether the poster's locally-loaded chat already has an
+    outgoing message quoting this status with just the like emoji, so a
+    like sent in a previous session is still detected."""
+
+    def test_false_when_nothing_known(self):
+        stub = _Stub()
+        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is False
+
+    def test_session_cache_wins_without_touching_chats(self):
+        stub = _Stub()
+        stub._liked_statuses["s1"] = True
+        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is True
+
+    def test_finds_a_prior_quoted_reply_in_the_poster_chat(self):
+        stub = _Stub()
+        stub.main_window.chats["poster@s.whatsapp.net"] = {
+            "messages": {"messages": {"records": [
+                {
+                    "key": {"fromMe": True, "id": "m1"},
+                    "contextInfo": {"stanzaId": "s1"},
+                    "message": {"conversation": "❤️"},
+                },
+            ]}}
+        }
+        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is True
+        # Found once, cached for next time.
+        assert stub._liked_statuses["s1"] is True
+
+    def test_does_not_match_a_reply_to_a_different_status(self):
+        stub = _Stub()
+        stub.main_window.chats["poster@s.whatsapp.net"] = {
+            "messages": {"messages": {"records": [
+                {
+                    "key": {"fromMe": True, "id": "m1"},
+                    "contextInfo": {"stanzaId": "some-other-status"},
+                    "message": {"conversation": "❤️"},
+                },
+            ]}}
+        }
+        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is False
+
+    def test_ignores_incoming_messages(self):
+        stub = _Stub()
+        stub.main_window.chats["poster@s.whatsapp.net"] = {
+            "messages": {"messages": {"records": [
+                {
+                    "key": {"fromMe": False, "id": "m1"},
+                    "contextInfo": {"stanzaId": "s1"},
+                    "message": {"conversation": "❤️"},
+                },
+            ]}}
+        }
+        assert stub._is_status_liked("s1", "poster@s.whatsapp.net") is False
+
+
+class TestParseStatusesFiltersReactionsAndDetectsSelfParticipant:
+    def test_reaction_to_a_status_is_not_treated_as_a_story(self):
+        stub = _Stub()
+        reaction = {
+            "key": {"fromMe": False, "id": "r1", "participant": "a@s.whatsapp.net"},
+            "messageType": "reactionMessage",
+            "message": {"reactionMessage": {"text": "❤️", "key": {"id": "s1"}}},
+            "messageTimestamp": 1700000000,
+        }
+        my_statuses, contacts = stub._parse_statuses([reaction], stub.main_window.i18n)
+        assert my_statuses == []
+        assert contacts == []
+
+    def test_participant_resolving_to_self_counts_as_my_status(self):
+        stub = _Stub()
+        stub.main_window._is_self_jid = lambda jid: jid == "me@lid"
+        status = {
+            "key": {"fromMe": False, "id": "s1", "participant": "me@lid"},
+            "messageType": "conversation",
+            "message": {"conversation": "oi"},
+            "messageTimestamp": 1700000000,
+        }
+        my_statuses, contacts = stub._parse_statuses([status], stub.main_window.i18n)
+        assert my_statuses == [status]
+        assert contacts == []
+
+    def test_a_real_status_from_someone_else_still_becomes_a_contact_entry(self):
+        stub = _Stub()
+        status = {
+            "key": {"fromMe": False, "id": "s1", "participant": "a@s.whatsapp.net"},
+            "messageType": "conversation",
+            "message": {"conversation": "oi"},
+            "messageTimestamp": 1700000000,
+        }
+        my_statuses, contacts = stub._parse_statuses([status], stub.main_window.i18n)
+        assert my_statuses == []
+        assert len(contacts) == 1
+        assert contacts[0]["jid"] == "a@s.whatsapp.net"
+
+
+class TestNextStatusNoLongerWrapsAround:
+    """Ctrl+Right past the last status of a contact used to loop back to
+    their first one — now closes the viewer and refreshes instead, like
+    moving on to the next contact rather than re-showing the one just
+    finished."""
+
+    def test_advances_to_the_next_status_normally(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("a"), _text_status("b")])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+        stub._show_current_status = lambda: None
+
+        stub._on_next_status(None)
+
+        assert stub._current_status_idx == 1
+
+    def test_closes_and_refreshes_instead_of_wrapping_at_the_last_status(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("a"), _text_status("b")])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 1  # already on the last one
+        stub._viewer_panel.Show()
+
+        stub._on_next_status(None)
+
+        assert stub._current_status_idx == 1  # unchanged — did not wrap to 0
+        assert stub._viewer_panel.shown is False
+        assert stub.refresh_calls == 1
+
+
+class TestEscapeClosesTheViewer:
+    def test_closes_when_shown(self):
+        stub = _Stub()
+        stub._viewer_panel.Show()
+        stub._selected_contact_idx = 0
+
+        stub._on_escape(None)
+
+        assert stub._viewer_panel.shown is False
+        assert stub._selected_contact_idx == -1
+        assert stub._video_player.stop_calls == 1
+
+    def test_no_op_when_already_hidden(self):
+        stub = _Stub()
+        stub._viewer_panel.Hide()
+
+        stub._on_escape(None)  # must not raise even with event=None
+
+        assert stub._video_player.stop_calls == 0

@@ -130,7 +130,7 @@ class VideoPlayer:
         bitmap_ctrl.Bind(wx.EVT_TIMER, self._on_timer, self._timer)
 
         self._video_path = None
-        self.is_playing  = False
+        self._is_active  = False
         self.is_paused   = False
         # Set by _read_frames() once ffmpeg's output ends; consumed by
         # _on_timer() to know when it's safe to actually stop (once the
@@ -142,6 +142,20 @@ class VideoPlayer:
         # _eof_reached on a NEW playback it has nothing to do with — its
         # generation number will no longer match by the time it checks.
         self._generation = 0
+
+    @property
+    def is_playing(self) -> bool:
+        """True once playback has started and stop() hasn't run since.
+        Backed by _is_active rather than a plain attribute so a caller
+        that only checked the flag (not _stop_event) couldn't observe a
+        stale "still playing" during the brief window stop() is actively
+        tearing things down in — e.g. two rapid toggle_pause() calls
+        racing a stop() from a status/conversation switch."""
+        return self._is_active and not self._stop_event.is_set()
+
+    @is_playing.setter
+    def is_playing(self, value: bool):
+        self._is_active = bool(value)
 
     # ── Public API ───────────────────────────────────────────────────────
 

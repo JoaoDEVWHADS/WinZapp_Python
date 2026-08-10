@@ -174,3 +174,30 @@ class TestEofDrainsTheQueueBeforeStopping:
             player._eof_reached = True
 
         assert player._eof_reached is False
+
+
+class TestIsPlayingReflectsStopEvent:
+    """is_playing used to be a plain attribute that stop() cleared at the
+    very end of its own teardown — a caller checking it mid-stop() (e.g.
+    two rapid toggle_pause() calls racing a stop() triggered by switching
+    statuses/conversations) could observe a stale "still playing" for that
+    window. It's now a property backed by _is_active, additionally gated
+    on _stop_event — set at the very START of stop(), before any teardown
+    happens."""
+
+    def test_true_after_being_set(self, wx_app):
+        player = _make_player(wx_app)
+        player.is_playing = True
+        assert player.is_playing is True
+
+    def test_false_once_stop_event_is_set_even_if_is_active_was_never_cleared(self, wx_app):
+        player = _make_player(wx_app)
+        player.is_playing = True
+        player._stop_event.set()  # what stop() does first, before teardown
+        assert player.is_playing is False
+
+    def test_stop_clears_it(self, wx_app):
+        player = _make_player(wx_app)
+        player.is_playing = True
+        player.stop()
+        assert player.is_playing is False

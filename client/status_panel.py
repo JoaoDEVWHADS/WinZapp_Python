@@ -44,6 +44,87 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
     return i18n.t("notif_unsupported")
 
 
+# ── Status reactions dialog ──────────────────────────────────────────────────
+
+class StatusReactionsDialog(wx.Dialog):
+    """Read-only list of who reacted to one of the user's own statuses, and
+    with what emoji. A reaction to a status arrives through the same
+    status@broadcast channel as a real status update — main.py's
+    on_new_message() routes it to _store_status_update() before it ever
+    inspects messageType — so it's already sitting in main_window's own
+    _status_updates, just filtered out of the displayed story list itself
+    (see StatusPanel._parse_statuses())."""
+
+    def __init__(self, parent, main_window, status_id: str):
+        i18n = main_window.i18n
+        super().__init__(
+            parent,
+            title=i18n.t("status_view_reactions"),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._mw = main_window
+        self._status_id = status_id
+        self._init_ui()
+        self._load_reactions()
+
+    def _init_ui(self):
+        i18n  = self._mw.i18n
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._list = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        self._list.InsertColumn(0, i18n.t("status_view_reactions"), width=300)
+        sizer.Add(self._list, 1, wx.EXPAND | wx.ALL, 8)
+
+        btn_sizer = wx.StdDialogButtonSizer()
+        close_btn = wx.Button(panel, wx.ID_CANCEL, i18n.t("close"))
+        btn_sizer.AddButton(close_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 8)
+
+        panel.SetSizer(sizer)
+        sizer.Fit(panel)
+
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(outer)
+        self.SetSize((400, 300))
+        self.CenterOnScreen()
+
+    def _load_reactions(self):
+        i18n = self._mw.i18n
+        reactions = []
+        for msgs in getattr(self._mw, "_status_updates", {}).values():
+            for msg in msgs:
+                if msg.get("messageType") != "reactionMessage":
+                    continue
+                reaction = (msg.get("message") or {}).get("reactionMessage") or {}
+                target_id = (reaction.get("key") or {}).get("id", "")
+                if target_id != self._status_id:
+                    continue
+                emoji = (reaction.get("text") or "").strip()
+                if not emoji:
+                    continue  # empty text = a reaction that was removed
+                sender = (
+                    msg.get("key", {}).get("participant")
+                    or msg.get("participant")
+                    or msg.get("key", {}).get("remoteJid", "")
+                )
+                name = self._mw._resolve_contact_name({"remoteJid": sender}) or format_number(sender)
+                reactions.append((name, emoji))
+
+        self._list.DeleteAllItems()
+        if not reactions:
+            self._list.Append((i18n.t("status_no_reactions"),))
+        else:
+            for name, emoji in reactions:
+                self._list.Append((f"{name}: {emoji}",))
+
+        if self._list.GetItemCount() > 0:
+            self._list.Focus(0)
+            self._list.Select(0)
+
+
 # ── My Status dialog ─────────────────────────────────────────────────────────
 
 class MyStatusDialog(wx.Dialog):
@@ -97,15 +178,41 @@ class MyStatusDialog(wx.Dialog):
             self._next_btn = wx.Button(panel, label=i18n.t("status_next"))
             self._next_btn.SetAccessible(AccessibleStatusNext(i18n.t("accessible_ctrl_right")))
             self._next_btn.Bind(wx.EVT_BUTTON, self._on_next)
-            nav_sizer.Add(self._next_btn, 0)
+            nav_sizer.Add(self._next_btn, 0, wx.RIGHT, 5)
+
+            self._view_reactions_btn = wx.Button(panel, label=i18n.t("status_view_reactions"))
+            self._view_reactions_btn.Bind(wx.EVT_BUTTON, self._on_view_reactions)
+            nav_sizer.Add(self._view_reactions_btn, 0)
 
             sizer.Add(nav_sizer, 0, wx.LEFT | wx.BOTTOM, 8)
+
+            # In-app video/audio playback — same VideoPlayer (BASS + ffmpeg)
+            # StatusPanel's own viewer uses; see _on_play_pause_video() below.
+            self._video_bitmap = wx.StaticBitmap(panel, size=(320, 240))
+            sizer.Add(self._video_bitmap, 0, wx.LEFT | wx.BOTTOM, 8)
+            self._video_bitmap.Hide()
+
+            self._play_pause_btn = wx.Button(panel, label=i18n.t("status_play_pause"))
+            self._play_pause_btn.Bind(wx.EVT_BUTTON, self._on_play_pause_video)
+            sizer.Add(self._play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 8)
+            self._play_pause_btn.Hide()
+
+            self._video_player = VideoPlayer(self._mw, self._video_bitmap)
+            self._video_local_path = None
+            self._video_download_status_id = None
+            self.Bind(wx.EVT_CLOSE, self._on_close)
 
             self._update_content()
 
         # Close button
         btn_sizer = wx.StdDialogButtonSizer()
         close_btn = wx.Button(panel, wx.ID_CANCEL, i18n.t("close"))
+        # wx.ID_CANCEL's built-in handling calls EndModal() directly rather
+        # than generating a wx.EVT_CLOSE — the video/audio player would
+        # otherwise keep playing in the background after this dialog closes
+        # via the Close button (only Alt+F4/the window-manager close was
+        # actually covered by the EVT_CLOSE bind above).
+        close_btn.Bind(wx.EVT_BUTTON, self._on_close)
         btn_sizer.AddButton(close_btn)
         btn_sizer.Realize()
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 8)
@@ -139,6 +246,20 @@ class MyStatusDialog(wx.Dialog):
         self._content_lbl.SetLabel(label)
         self._mw.output(label, interrupt=True)
 
+        # Switching statuses always stops whatever was playing — resuming
+        # stale audio/frames for a status navigated away from would be
+        # actively wrong (see StatusPanel._show_current_status(), same
+        # reasoning).
+        self._video_player.stop()
+        self._video_local_path = None
+        self._video_download_status_id = None
+        self._video_bitmap.Hide()
+        self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
+        is_video = msg_type == "videoMessage"
+        is_audio = msg_type == "audioMessage"
+        self._play_pause_btn.Show(is_video or is_audio)
+        self.Layout()
+
     # ── Navigation ────────────────────────────────────────────────────────
 
     def _on_prev(self, event):
@@ -153,10 +274,95 @@ class MyStatusDialog(wx.Dialog):
         self._current = (self._current + 1) % len(self._statuses)
         self._update_content()
 
+    # ── Reactions ─────────────────────────────────────────────────────────
+
+    def _on_view_reactions(self, event):
+        if not self._statuses:
+            return
+        status_id = self._statuses[self._current].get("key", {}).get("id", "")
+        if not status_id:
+            return
+        dlg = StatusReactionsDialog(self, self._mw, status_id)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    # ── Playback (in-app: audio via BASS, frames via ffmpeg) ────────────────
+    # Mirrors StatusPanel._on_play_pause_video()/_download_and_play_video()/
+    # _start_downloaded_video() — kept as separate copies rather than shared
+    # since this dialog and StatusPanel track their own current-status state
+    # independently (self._statuses/self._current here vs.
+    # self._status_contacts/self._selected_contact_idx there).
+
+    def _on_play_pause_video(self, event):
+        if not self._statuses:
+            return
+        status = self._statuses[self._current]
+        msg_type = status.get("messageType")
+        if msg_type not in ("videoMessage", "audioMessage"):
+            return
+        if self._video_player.is_playing:
+            self._video_player.toggle_pause()
+            return
+        status_id = status.get("key", {}).get("id", "")
+        if self._video_local_path and self._video_download_status_id == status_id:
+            if msg_type == "videoMessage":
+                self._video_bitmap.Show()
+                self.Layout()
+            self._video_player.load_and_play(self._video_local_path)
+            return
+        threading.Thread(
+            target=self._download_and_play_video,
+            args=(status, status_id, msg_type),
+            daemon=True,
+        ).start()
+
+    def _download_and_play_video(self, status, status_id: str, msg_type: str):
+        suffix = ".mp4" if msg_type == "videoMessage" else ".ogg"
+        try:
+            b64 = self._mw.get_base64_from_media(status)
+            if not b64:
+                raise ValueError("empty media response")
+            content = base64.b64decode(b64)
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            tmp.write(content)
+            tmp.close()
+            wx.CallAfter(self._start_downloaded_video, tmp.name, status_id, msg_type)
+        except Exception as exc:
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{self._mw.i18n.t('status_video_open_error')} ({exc})",
+                self._mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+
+    def _start_downloaded_video(self, path: str, status_id: str, msg_type: str):
+        if not self._statuses:
+            return
+        current_id = self._statuses[self._current].get("key", {}).get("id", "")
+        if current_id != status_id:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            return
+        self._video_local_path = path
+        self._video_download_status_id = status_id
+        if msg_type == "videoMessage":
+            self._video_bitmap.Show()
+            self.Layout()
+        self._video_player.load_and_play(path)
+
+    def _on_close(self, event):
+        if hasattr(self, "_video_player"):
+            self._video_player.stop()
+        event.Skip()
+
     # ── Actions ───────────────────────────────────────────────────────────
 
     def _on_add_status(self, event):
         """Close the dialog signalling that the caller should open the add-flow."""
+        if hasattr(self, "_video_player"):
+            self._video_player.stop()
         self.EndModal(MyStatusDialog.RC_ADD_STATUS)
 
 
@@ -366,13 +572,29 @@ class StatusPanel(wx.Panel):
     def _create_accelerators(self):
         self.ID_CTRL_LEFT  = wx.NewIdRef()
         self.ID_CTRL_RIGHT = wx.NewIdRef()
+        self.ID_ESCAPE     = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_CTRL, wx.WXK_LEFT,  self.ID_CTRL_LEFT),
-            (wx.ACCEL_CTRL, wx.WXK_RIGHT, self.ID_CTRL_RIGHT),
+            (wx.ACCEL_CTRL,   wx.WXK_LEFT,   self.ID_CTRL_LEFT),
+            (wx.ACCEL_CTRL,   wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
+            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESCAPE),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self._on_prev_status, id=self.ID_CTRL_LEFT)
         self.Bind(wx.EVT_MENU, self._on_next_status, id=self.ID_CTRL_RIGHT)
+        self.Bind(wx.EVT_MENU, self._on_escape,      id=self.ID_ESCAPE)
+
+    def _on_escape(self, event):
+        """Esc closes the open status viewer and returns focus to the list.
+        Also called directly (event=None) from _on_next_status() when the
+        last status of a contact is exhausted — see its own comment."""
+        if self._viewer_panel.IsShown():
+            self._selected_contact_idx = -1
+            self._viewer_panel.Hide()
+            self._video_player.stop()
+            self.Layout()
+            self._status_list.SetFocus()
+        elif event is not None:
+            event.Skip()
 
     # ── Refresh / load statuses ──────────────────────────────────────────────
 
@@ -417,7 +639,9 @@ class StatusPanel(wx.Panel):
         Returns
         -------
         (my_statuses, contacts)
-            my_statuses : list of status dicts where key.fromMe == True
+            my_statuses : list of status dicts posted by this account
+                          (key.fromMe, or participant resolving to self —
+                          see _is_self_jid() below)
             contacts    : list of {"name", "jid", "statuses"} for other people
         """
         my_statuses = []
@@ -430,16 +654,33 @@ class StatusPanel(wx.Panel):
         # status@broadcast entries, which is how WhatsApp encodes them).
         grouped: dict = {}
         for item in items:
+            # A reaction to a status (fromMe or not) arrives through the
+            # exact same status@broadcast channel as a real status update
+            # (on_new_message() in main.py routes any @broadcast message to
+            # _store_status_update() before it ever checks messageType) —
+            # without this it showed up as a bogus extra "story" entry in
+            # this list. It's still available in raw _status_updates for
+            # StatusReactionsDialog to scan; only excluded from becoming a
+            # displayed story here.
+            if item.get("messageType") == "reactionMessage":
+                continue
+
             key = item.get("key", {})
-            if key.get("fromMe", False):
+            participant = (key.get("participant") or item.get("participant") or "")
+            # A status posted from a different linked device, or synced
+            # back with a phone-number variant that differs from the one
+            # WinZapp itself is paired under (extra/missing Brazilian 9th
+            # digit, etc.), can arrive with fromMe=False even though the
+            # participant is genuinely this account — checked via
+            # _is_self_jid() (the same phone-digit-tolerant JID comparison
+            # used everywhere else) rather than trusting fromMe alone.
+            is_mine = key.get("fromMe", False) or (
+                participant and self.main_window._is_self_jid(participant)
+            )
+            if is_mine:
                 my_statuses.append(item)
                 continue
             remote_jid  = key.get("remoteJid", "")
-            # key.participant is the canonical sender field for status messages,
-            # but may be null/missing if the Baileys WAMessage had participant
-            # at the top level instead of inside the key.  Fall back to the
-            # top-level participant column that Prisma also exposes.
-            participant = (key.get("participant") or item.get("participant") or "")
             # status@broadcast is the channel; real sender is in participant
             if remote_jid == "status@broadcast" and participant:
                 jid = participant
@@ -692,7 +933,8 @@ class StatusPanel(wx.Panel):
         from_me     = status_key.get("fromMe", False)
         if not from_me:
             status_id = status_key.get("id", "")
-            is_liked  = self._liked_statuses.get(status_id, False)
+            poster_jid = status_key.get("participant", "") or entry.get("jid", "")
+            is_liked  = self._is_status_liked(status_id, poster_jid)
             i18n2     = self.main_window.i18n
             self._like_btn.SetLabel(
                 i18n2.t("status_unlike") if is_liked else i18n2.t("status_like")
@@ -731,13 +973,83 @@ class StatusPanel(wx.Panel):
         statuses = entry.get("statuses", [])
         if not statuses:
             return
-        self._current_status_idx = (self._current_status_idx + 1) % len(statuses)
+        # Ctrl+Right past the LAST status of a contact used to wrap back
+        # around to their first one — closes the viewer instead (like Esc)
+        # and refreshes the list, matching how the official client moves
+        # on to the next contact rather than re-looping the one just
+        # finished.
+        if self._current_status_idx + 1 >= len(statuses):
+            self._on_escape(None)
+            self._on_refresh(None)
+            return
+        self._current_status_idx += 1
         self._show_current_status()
 
     # ── Like / unlike status ─────────────────────────────────────────────────
 
+    def _is_status_liked(self, status_id: str, poster_jid: str) -> bool:
+        """Was this status already "liked" (see _on_like_status() for why a
+        like is really just a quoted-emoji reply sent to the poster)?
+
+        _liked_statuses is only ever populated for likes sent THIS
+        session — it starts empty on every launch, so reopening a status
+        you already liked before restarting used to always show "Curtir"
+        again with no way to tell it had already been done. Best-effort
+        fix: if the poster's own conversation happens to already be
+        loaded locally (a common case — you follow their status because
+        you talk to them), look for an outgoing message quoting this
+        exact status whose body is just the like emoji, and cache a hit
+        so the next check for the same status is instant. Not a
+        guaranteed signal (the chat may not be loaded, or may need a
+        sync), just better than always starting blank.
+        """
+        if status_id in self._liked_statuses:
+            return self._liked_statuses[status_id]
+        if not status_id or not poster_jid:
+            return False
+        chat = self.main_window.chats.get(poster_jid)
+        if not chat:
+            return False
+        records = chat.get("messages", {}).get("messages", {}).get("records", []) or []
+        for m in records:
+            if not m.get("key", {}).get("fromMe"):
+                continue
+            msg_obj = m.get("message") or {}
+            ext = msg_obj.get("extendedTextMessage") or {}
+            ctx = m.get("contextInfo") or ext.get("contextInfo") or {}
+            if ctx.get("stanzaId") != status_id:
+                continue
+            text = (msg_obj.get("conversation") or ext.get("text") or "").strip()
+            if text:
+                self._liked_statuses[status_id] = True
+                return True
+        return False
+
     def _on_like_status(self, event):
-        """Toggle like/unlike on the currently displayed status."""
+        """"Like" the currently displayed status.
+
+        WhatsApp Web's own Store never indexes another person's status
+        message (confirmed live: neither the general Store.Msg collection
+        nor StatusV3Store — the latter is only populated once the Status
+        tab is actually rendered in the page, which never happens in
+        WPPConnect's headless session), and wa-js has no purpose-built
+        "react to a status" API. WPP.chat.sendReactionToMessage() always
+        needs an existing MsgModel instance to skip its own
+        getMessageById() lookup — passing a plain id/key just gets
+        stringified back into exactly that same failing lookup.
+
+        This is also how a "like" on a status genuinely behaves on the
+        wire in the real WhatsApp protocol: it lands in your DM history
+        with the poster, not as a public reaction — so sending it as a
+        normal quoted-reply message (the emoji as the body, quoting the
+        status) to the poster's own chat is a faithful equivalent, not
+        just a workaround, and reuses send_text_message()'s already-proven
+        send path instead of the status@broadcast reaction endpoint.
+
+        There is no reliable way to *unsend* it afterwards (deleting it
+        would need to reach into the recipient's own chat), so once liked
+        the button only reports that state — see _on_unlike_status_attempted().
+        """
         if self._selected_contact_idx < 0:
             return
         entry    = self._status_contacts[self._selected_contact_idx]
@@ -751,33 +1063,49 @@ class StatusPanel(wx.Panel):
             return
 
         is_liked = self._liked_statuses.get(status_id, False)
-        emoji    = "" if is_liked else "❤️"
+        if is_liked:
+            self._on_unlike_status_attempted()
+            return
 
-        # Build the reaction key for status@broadcast
         sender_jid = (
             status_key.get("participant", "")
             or entry.get("jid", "")
         )
-        reaction_key = {
-            "remoteJid":  "status@broadcast",
-            "fromMe":     False,
-            "id":         status_id,
-            "participant": sender_jid,
-        }
+        if not sender_jid:
+            return
 
         mw = self.main_window
-        ok = mw.send_reaction("status@broadcast", reaction_key, emoji)
-        if ok:
-            self._liked_statuses[status_id] = not is_liked
-            i18n = mw.i18n
-            new_label = i18n.t("status_unlike") if not is_liked else i18n.t("status_like")
-            self._like_btn.SetLabel(new_label)
-        else:
-            wx.MessageBox(
-                mw.i18n.t("status_like_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
+
+        def _do_like():
+            try:
+                ok = bool(mw.send_text_message(sender_jid, "❤️", quoted=status))
+            except Exception:
+                ok = False
+            if ok:
+                wx.CallAfter(self._on_like_sent, status_id)
+            else:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_like_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+
+        threading.Thread(target=_do_like, daemon=True).start()
+
+    def _on_like_sent(self, status_id: str):
+        self._liked_statuses[status_id] = True
+        # The status shown may have changed while the send was in flight
+        # (Ctrl+Left/Right) — only touch the button if it's still this one.
+        if (self._current_status or {}).get("key", {}).get("id") == status_id:
+            self._like_btn.SetLabel(self.main_window.i18n.t("status_unlike"))
+
+    def _on_unlike_status_attempted(self):
+        wx.MessageBox(
+            self.main_window.i18n.t("status_unlike_unsupported"),
+            self.main_window.app_name,
+            wx.OK | wx.ICON_INFORMATION,
+        )
 
     # ── Play/pause video status (in-app: audio via BASS, frames via ffmpeg) ──
     #
