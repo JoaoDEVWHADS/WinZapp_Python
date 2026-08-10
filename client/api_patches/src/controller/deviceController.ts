@@ -916,7 +916,16 @@ export async function reactMessage(req: Request, res: Response) {
       }
      }
    */
-  const { msgId, reaction } = req.body;
+  const { msgId, reaction: rawReaction } = req.body;
+  // wa-js's sendReactionToMessage() documents `false` (not an empty
+  // string) as the "remove the existing reaction" signal — WinZapp's own
+  // status-unlike flow (status_panel.py) sends an empty string for that,
+  // which used to be passed straight through as `reaction || ''` below
+  // instead of being normalized to the value the library actually expects.
+  const reaction: string | false =
+    rawReaction === '' || rawReaction === undefined || rawReaction === null
+      ? false
+      : rawReaction;
 
   try {
     if (typeof msgId === 'string' && msgId.includes('status@broadcast')) {
@@ -947,7 +956,7 @@ export async function reactMessage(req: Request, res: Response) {
             });
           }
           if (!model) return false;
-          await (window as any).WPP.chat.sendReactionToMessage(model, reaction || '');
+          await (window as any).WPP.chat.sendReactionToMessage(model, reaction);
           return true;
         },
         { msgId, reaction },
@@ -962,12 +971,20 @@ export async function reactMessage(req: Request, res: Response) {
     res
       .status(200)
       .json({ status: 'success', response: { message: 'Reaction sended' } });
-  } catch (e) {
+  } catch (e: any) {
+    // A bare `error: e` here used to serialize to almost nothing useful:
+    // Error.message/.stack aren't enumerable, so JSON.stringify(e) drops
+    // them — and req.logger.error(e) (winston) can even mutate the object
+    // in place with only a `level` field surviving, which is exactly what
+    // showed up in WinZapp's log.log for every failed status reaction
+    // ({"level":"error"}, no actual cause). Pull message/stack out
+    // explicitly so the next failure is actually diagnosable.
     req.logger.error(e);
     res.status(500).json({
       status: 'error',
       message: 'Error on send reaction to message',
-      error: e,
+      error: e && e.message ? e.message : String(e),
+      stack: e && e.stack ? String(e.stack) : undefined,
     });
   }
 }

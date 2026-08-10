@@ -10,7 +10,14 @@ import uuid
 import wx
 import wx.adv
 import pyperclip
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    # No wheel exists for PyAudio on Python 3.14 at the time of writing —
+    # see requirements.txt's version marker. Voice recording degrades to a
+    # clear "not available" message (see _start_voice_recording()) instead
+    # of the whole app failing to import.
+    pyaudio = None
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
@@ -33,7 +40,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, parse_bool_flag as _parse_bool_flag
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -236,6 +243,10 @@ class ConversationsPanel(wx.Panel):
         # see core/video_player.py). Created after init_UI() since it needs
         # _media_bitmap to already exist.
         self._video_player = VideoPlayer(self.main_window, self._media_bitmap)
+        # id of the video message currently loaded in _video_player, or None
+        # — lets a second Enter on the SAME video toggle pause instead of
+        # restarting it, while Enter on a DIFFERENT video switches to it.
+        self._current_video_msg_id = None
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -456,17 +467,6 @@ class ConversationsPanel(wx.Panel):
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
         conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._action_download_btn.Hide()
-
-        # ── In-app video playback (audio via BASS, frames via ffmpeg — see
-        # core/video_player.py) — shown alongside Open/Save As for a
-        # selected video message, reusing _media_bitmap (the same widget
-        # the static thumbnail above renders into) to draw live frames.
-        self._video_play_pause_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("status_play_pause")
-        )
-        self._video_play_pause_btn.Bind(wx.EVT_BUTTON, self._on_play_pause_video_message)
-        conv_sizer.Add(self._video_play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-        self._video_play_pause_btn.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
@@ -723,6 +723,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_SHIFT_R    = wx.NewIdRef()  # react to message        (Ctrl+Shift+R)
         self.ID_DELETE_MSG      = wx.NewIdRef()  # delete focused message  (Delete)
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
+        self.ID_CTRL_SHIFT_C    = wx.NewIdRef()  # copy caption (photo/video/doc) (Ctrl+Shift+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         self.ID_ALT_E           = wx.NewIdRef()  # edit message            (Alt+E)
         self.ID_ALT_L           = wx.NewIdRef()  # read-more (truncated)   (Alt+L)
@@ -798,6 +799,7 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("R"),          self.ID_CTRL_SHIFT_R),
             (wx.ACCEL_NORMAL,  wx.WXK_DELETE,     self.ID_DELETE_MSG),
             (wx.ACCEL_CTRL,    ord("C"),          self.ID_CTRL_C),
+            (CS,               ord("C"),          self.ID_CTRL_SHIFT_C),
             (wx.ACCEL_ALT,     ord("C"),          self.ID_ALT_C),
             (wx.ACCEL_ALT,     ord("E"),          self.ID_ALT_E),
             (wx.ACCEL_ALT,     ord("L"),          self.ID_ALT_L),
@@ -842,6 +844,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_react,               id=self.ID_CTRL_SHIFT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_delete_message,      id=self.ID_DELETE_MSG)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_message,        id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_caption,        id=self.ID_CTRL_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup,     id=self.ID_ALT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_edit_message,        id=self.ID_ALT_E)
         self.Bind(wx.EVT_MENU, self._on_read_more,                 id=self.ID_ALT_L)
@@ -1736,6 +1739,15 @@ class ConversationsPanel(wx.Panel):
         if self.conversation is None:
             return
 
+        if pyaudio is None:
+            # No wheel exists for PyAudio on Python 3.14 at the time of
+            # writing — see requirements.txt's version marker and this
+            # file's own `import pyaudio` — so recording degrades to a
+            # clear message instead of crashing on the first pyaudio.*
+            # reference below.
+            self.main_window.output(self.main_window.i18n.t("voice_recording_unavailable"))
+            return
+
         self._recording_frames = []
         self._recording_paused = False
 
@@ -1827,6 +1839,7 @@ class ConversationsPanel(wx.Panel):
         _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
             self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+        self.message_field.Hide()
         self.send_message_btn.Hide()
         self.record_voice_message_btn.Hide()
         self._add_attachment_btn.Hide()
@@ -1866,8 +1879,10 @@ class ConversationsPanel(wx.Panel):
         event.Skip()
 
     def _hide_voice_panel(self):
-        """Hide the voice panel and restore the record / send button visibility."""
+        """Hide the voice panel and restore the message field / record /
+        send button visibility (sent or discarded — both call this)."""
         self._voice_panel.Hide()
+        self.message_field.Show()
         if self.message_field.GetValue().strip():
             self.send_message_btn.Show()
         else:
@@ -2358,11 +2373,6 @@ class ConversationsPanel(wx.Panel):
                     self._action_save_as_btn.Show()
                 else:
                     self._action_download_btn.Show()
-                # Play/Pause downloads (if needed) and plays in-app — see
-                # core/video_player.py. Shown regardless of is_downloaded:
-                # the handler downloads first when the .wzmedia cache is
-                # still missing, same as Open/Save As already do.
-                self._video_play_pause_btn.Show()
             self.conversation_panel.Layout()
 
         elif msg_type == "buttonsMessage":
@@ -2451,16 +2461,7 @@ class ConversationsPanel(wx.Panel):
             video = msg_obj.get("videoMessage") or {}
             if video.get("gifPlayback"):
                 return  # GIFs have no audio track to play
-            duration = video.get("seconds", 0) or 0
-            clean_msg_id = msg_id
-            if "_" in msg_id:
-                parts = msg_id.split("_")
-                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-            self._toggle_playback(
-                msg_id, duration, msg,
-                file_path=data_path("media", f"{clean_msg_id}.wzmedia"),
-                audio_ext=".mp4",
-            )
+            self._play_toggle_video_message(msg)
 
         elif msg_type in ("imageMessage", "documentMessage"):
             # Enter on an image or document → open in default app
@@ -2542,6 +2543,18 @@ class ConversationsPanel(wx.Panel):
                 copy_file_item,
             )
 
+        # Copy caption (photo/video/document messages that have one) — a
+        # separate shortcut from Ctrl+C, which for these types already
+        # copies the file itself (see _on_accel_copy_message).
+        _has_caption = bool(self._get_message_caption(msg))
+        if _has_caption:
+            copy_caption_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_caption')}\tCtrl+Shift+C")
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_copy_caption(m),
+                copy_caption_item,
+            )
+
         # Reply (Alt+R)
         reply_item = menu.Append(wx.ID_ANY, f"{i18n.t('reply_message')}\tAlt+R")
         self.Bind(
@@ -2588,8 +2601,8 @@ class ConversationsPanel(wx.Panel):
             react_item,
         )
 
-        # Show text popup (only for text messages)
-        if msg_type in _TEXT_TYPES:
+        # Show text popup (text messages, or a photo/video/document that has a caption)
+        if msg_type in _TEXT_TYPES or _has_caption:
             show_text_item = menu.Append(wx.ID_ANY, f"{i18n.t('show_msg_text')}\tAlt+C")
             self.Bind(
                 wx.EVT_MENU,
@@ -2698,7 +2711,7 @@ class ConversationsPanel(wx.Panel):
         # behaviour.
         if getattr(self, "_video_player", None) is not None:
             self._video_player.stop()
-        self._video_play_pause_btn.Hide()
+        self._current_video_msg_id = None
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -4085,18 +4098,20 @@ class ConversationsPanel(wx.Panel):
     # ffmpeg — see core/video_player.py and _hide_all_media_controls(),
     # which stops this whenever selection/conversation moves away) ────────
 
-    def _on_play_pause_video_message(self, event):
-        index = self.messages_list.GetFirstSelected()
-        if index < 0 or index >= len(self._sorted_messages):
-            return
-        msg = self._sorted_messages[index]
+    def _play_toggle_video_message(self, msg: dict):
+        """Enter on a video message: play it in-app (audio via BASS, frames
+        via ffmpeg — see core/video_player.py), applying the conversation's
+        configured playback speed (see on_audio_speed_btn/Alt+,/Alt+.) the
+        same way voice messages already do. A second Enter on the SAME
+        video toggles pause; Enter on a DIFFERENT video while one is
+        playing stops it and switches to the new one."""
         if msg.get("messageType") != "videoMessage":
             return
-        if self._video_player.is_playing:
+        msg_id = msg.get("key", {}).get("id", "")
+        if self._video_player.is_playing and self._current_video_msg_id == msg_id:
             self._video_player.toggle_pause()
             return
 
-        msg_id = msg.get("key", {}).get("id", "")
         clean_msg_id = msg_id
         if "_" in msg_id:
             parts = msg_id.split("_")
@@ -4118,7 +4133,9 @@ class ConversationsPanel(wx.Panel):
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
                 tmp.write(content)
                 tmp.close()
-                wx.CallAfter(self._video_player.load_and_play, tmp.name)
+                speed = self._audio_speed_steps[self._audio_speed_index]
+                self._current_video_msg_id = msg_id
+                wx.CallAfter(self._video_player.load_and_play, tmp.name, speed)
             except Exception as exc:
                 wx.CallAfter(
                     wx.MessageBox,
@@ -4274,6 +4291,7 @@ class ConversationsPanel(wx.Panel):
         with wx.FileDialog(
             self,
             dlg_title,
+            defaultDir=get_downloads_folder(),
             defaultFile=default_file,
             wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
@@ -5331,6 +5349,13 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("group_notif_generic")
 
         # ── Fallback ─────────────────────────────────────────────────────────
+        # Logged so a future report of a raw, untranslated messageType
+        # showing up in the message list (e.g. a view-once/ephemeral audio
+        # wrapper, which arrives under a DIFFERENT outer messageType than
+        # "audioMessage" itself and isn't unwrapped by any branch above)
+        # can be traced to the exact type instead of only reproducing "some
+        # message looks wrong".
+        logging.info("[_get_message_content] unhandled messageType=%r", msg_type)
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
         )
@@ -6256,6 +6281,21 @@ class ConversationsPanel(wx.Panel):
         dlg.ShowModal()
         dlg.Destroy()
 
+    # Media types WhatsApp allows a caption on (audio/sticker never do).
+    _CAPTIONABLE_TYPES = ("imageMessage", "videoMessage", "documentMessage")
+
+    def _get_message_caption(self, msg: dict) -> str:
+        """Caption text for a photo/video/document message, or "" if none
+        (either the type doesn't support captions, or this one has none)."""
+        msg_type = msg.get("messageType", "")
+        if msg_type not in self._CAPTIONABLE_TYPES:
+            return ""
+        msg_obj = msg.get("message") or {}
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            return ""
+        return (inner.get("caption") or "").strip()
+
     def _on_menu_copy_message(self, msg: dict):
         msg_obj  = msg.get("message") or {}
         msg_type = msg.get("messageType", "")
@@ -6264,6 +6304,20 @@ class ConversationsPanel(wx.Panel):
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        if text:
+            try:
+                pyperclip.copy(text)
+                self.main_window.output(self.main_window.i18n.t("msg_copied"))
+            except Exception:
+                self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+        else:
+            self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+
+    def _on_menu_copy_caption(self, msg: dict):
+        """Copy a photo/video/document message's caption text — kept
+        separate from _on_menu_copy_message()/Ctrl+C, which for these
+        types already copies the actual file to the clipboard."""
+        text = self._get_message_caption(msg)
         if text:
             try:
                 pyperclip.copy(text)
@@ -7154,6 +7208,18 @@ class ConversationsPanel(wx.Panel):
         else:
             self._on_menu_copy_message(msg)
 
+    def _on_accel_copy_caption(self, event):
+        """Ctrl+Shift+C: copy the caption of the focused photo/video/document
+        message. Kept on a separate shortcut from Ctrl+C, which already
+        copies the file itself for these message types."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._on_menu_copy_caption(msg)
+
     def _on_accel_show_text_popup(self, event):
         """Alt+C: show focused message text in a popup dialog."""
         index = self.messages_list.GetFirstSelected()
@@ -7316,10 +7382,20 @@ class ConversationsPanel(wx.Panel):
         while last >= 0 and self._is_separator(self._sorted_messages[last]):
             last -= 1
         if last >= 0:
-            if not self.messages_list.HasFocus():
-                self.messages_list.SetFocus()
+            # Focus() (not just Select()) is what actually moves the
+            # keyboard-focus/screen-reader cursor to the row — every other
+            # "jump to a specific row" handler in this file calls both
+            # together (see _on_accel_jump_unread() just below, and
+            # populate_messages()'s own default-tail-selection block).
+            # This one only ever called Select(), which on its own can
+            # leave the previous row's focus rectangle in place or just
+            # clear the old selection without moving anything — reported
+            # live as Alt+2 "either staying put or just deselecting the
+            # current message without really moving focus".
+            self.messages_list.Focus(last)
             self.messages_list.Select(last, True)
             self.messages_list.EnsureVisible(last)
+            self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
 
@@ -7529,7 +7605,8 @@ class ConversationsPanel(wx.Panel):
         self.main_window.output(ann, interrupt=True)
 
     def _show_message_text_popup(self, msg: dict):
-        """Open a read-only dialog showing the full message text."""
+        """Open a read-only dialog showing the full message text (or, for a
+        photo/video/document message, its caption)."""
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         text = ""
@@ -7537,6 +7614,8 @@ class ConversationsPanel(wx.Panel):
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        else:
+            text = self._get_message_caption(msg)
         if not text:
             return
 

@@ -35,11 +35,18 @@ export default async function statusConnection(
         req.body.isLid
       );
       let index = 0;
+      // Same multipart-string-truthiness pitfall as contactToArray()
+      // (util/functions.ts) — req.body.isGroup arrives as the literal
+      // string "false" for any multipart/form-data call, which is truthy
+      // in a bare `||` check.
+      const wantsGroup = req.body.isGroup === true || req.body.isGroup === 'true';
+      const wantsNewsletter = req.body.isNewsletter === true || req.body.isNewsletter === 'true';
+      const wantsLid = req.body.isLid === true || req.body.isLid === 'true';
       for (const contact of localArr) {
         if (
-          req.body.isGroup ||
-          req.body.isNewsletter ||
-          req.body.isLid ||
+          wantsGroup ||
+          wantsNewsletter ||
+          wantsLid ||
           (typeof contact === 'string' && contact.endsWith('@lid')) ||
           req.path.endsWith('/typing') ||
           req.path.endsWith('/recording') ||

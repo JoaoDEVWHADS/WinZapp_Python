@@ -50,30 +50,50 @@ export function contactToArray(
   isLid?: boolean
 ) {
   const localArr: any = [];
+  // WinZapp calls every endpoint that flows through this function as
+  // multipart/form-data (see main.py's send_media_attachment) — a wire
+  // format with no native boolean type, so isGroup/isNewsletter/isLid
+  // routinely arrive as the literal STRING "false", not the boolean
+  // `false`. `isGroup || isNewsletter` treats ANY non-empty string
+  // (including "false") as truthy, so this silently misrouted every
+  // multipart contact — e.g. a plain 1:1 send got its digits treated as a
+  // group id and suffixed "@g.us" instead of "@c.us". Coercing explicitly
+  // (matching either the real boolean or its string form) fixes this
+  // without touching genuine JSON callers, which already send real
+  // booleans and still compare equal here.
+  const wantsGroup = isGroup === true || (isGroup as any) === 'true';
+  const wantsNewsletter = isNewsletter === true || (isNewsletter as any) === 'true';
+  const wantsLid = isLid === true || (isLid as any) === 'true';
   if (Array.isArray(number)) {
     for (let contact of number) {
       const isLidContact = typeof contact === 'string' && contact.endsWith('@lid');
-      isGroup || isNewsletter
+      wantsGroup || wantsNewsletter
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
       if (contact !== '')
-        if (isGroup) (localArr as any).push(`${contact}@g.us`);
-        else if (isNewsletter) (localArr as any).push(`${contact}@newsletter`);
-        else if (isLid || isLidContact)
+        if (wantsGroup) (localArr as any).push(`${contact}@g.us`);
+        else if (wantsNewsletter) (localArr as any).push(`${contact}@newsletter`);
+        else if (wantsLid || isLidContact)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
     }
   } else {
-    const arrContacts = number.split(/\s*[,;]\s*/g);
+    // number can arrive as a non-string (e.g. a bare number) via
+    // multipart/form-data field coercion — String(...) guards .split()
+    // from throwing on it instead of only ever expecting a real string.
+    const arrContacts =
+      typeof number === 'string'
+        ? number.split(/\s*[,;]\s*/g)
+        : [String(number ?? '')];
     for (let contact of arrContacts) {
       const isLidContact = typeof contact === 'string' && contact.endsWith('@lid');
-      isGroup || isNewsletter
+      wantsGroup || wantsNewsletter
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
       if (contact !== '')
-        if (isGroup) (localArr as any).push(`${contact}@g.us`);
-        else if (isNewsletter) (localArr as any).push(`${contact}@newsletter`);
-        else if (isLid || isLidContact)
+        if (wantsGroup) (localArr as any).push(`${contact}@g.us`);
+        else if (wantsNewsletter) (localArr as any).push(`${contact}@newsletter`);
+        else if (wantsLid || isLidContact)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
     }

@@ -27,7 +27,7 @@ same approach as tests/test_message_bookmarks.py.
 
 import pytest
 
-from status_panel import StatusPanel
+from status_panel import StatusPanel, _status_content_label
 
 
 class _FakeI18n:
@@ -37,6 +37,11 @@ class _FakeI18n:
         "video": "Vídeo",
         "status_like": "Curtir",
         "status_unlike": "Descurtir",
+        "message_type_audio": "Áudio",
+        "document": "Documento",
+        "sticker": "Figurinha",
+        "contact_message": "Contato: {name}",
+        "notif_unsupported": "Mensagem não suportada",
     }
 
     def t(self, key):
@@ -61,10 +66,29 @@ class _FakeWidget:
         self.label = text
 
 
+class _FakeTextCtrl(_FakeWidget):
+    """Stands in for _reply_field: a wx.TextCtrl, which _show_current_status()
+    and _on_reply_field_text_changed() read via GetValue()."""
+
+    def __init__(self, value=""):
+        super().__init__()
+        self._value = value
+
+    def GetValue(self):
+        return self._value
+
+    def SetValue(self, value):
+        self._value = value
+
+
 class _FakeMainWindow:
-    def __init__(self):
+    def __init__(self, contact_names=None):
         self.i18n = _FakeI18n()
         self.outputs = []
+        self._contact_names = contact_names or {}
+
+    def _resolve_contact_name(self, chat):
+        return self._contact_names.get(chat.get("remoteJid", ""))
 
     def output(self, text, interrupt=False):
         self.outputs.append(text)
@@ -85,9 +109,12 @@ class _FakeVideoPlayer:
 class _Stub:
     _show_current_status         = StatusPanel._show_current_status
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
+    _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
+    _resolve_name                = StatusPanel._resolve_name
+    _status_preview              = StatusPanel._status_preview
 
-    def __init__(self):
-        self.main_window = _FakeMainWindow()
+    def __init__(self, contact_names=None):
+        self.main_window = _FakeMainWindow(contact_names=contact_names)
         self._status_contacts      = []
         self._selected_contact_idx = -1
         self._current_status_idx   = 0
@@ -106,7 +133,7 @@ class _Stub:
         self._copy_text_btn        = _FakeWidget()
         self._like_btn              = _FakeWidget()
         self._reply_label          = _FakeWidget()
-        self._reply_field          = _FakeWidget()
+        self._reply_field          = _FakeTextCtrl()
         self._reply_send_btn       = _FakeWidget()
         self._viewer_panel         = _FakeWidget()
 
@@ -273,7 +300,10 @@ class TestCopyStatusText:
 
 
 class TestReplyAndLikeOnlyForOthersStatuses:
-    def test_others_status_shows_reply_and_like(self):
+    def test_others_status_shows_reply_field_but_not_the_empty_send_button(self):
+        # The reply field itself always shows for someone else's status —
+        # only the send button waits for actual text (see
+        # TestReplySendButtonFollowsFieldContent below).
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
         stub._selected_contact_idx = 0
@@ -281,8 +311,18 @@ class TestReplyAndLikeOnlyForOthersStatuses:
         stub._show_current_status()
 
         assert stub._reply_field.shown is True
-        assert stub._reply_send_btn.shown is True
+        assert stub._reply_send_btn.shown is False
         assert stub._like_btn.shown is True
+
+    def test_others_status_with_pending_reply_text_shows_the_send_button(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
+        stub._selected_contact_idx = 0
+        stub._reply_field.SetValue("valeu!")
+
+        stub._show_current_status()
+
+        assert stub._reply_send_btn.shown is True
 
     def test_own_status_hides_reply_and_like(self):
         stub = _Stub()
@@ -294,3 +334,104 @@ class TestReplyAndLikeOnlyForOthersStatuses:
         assert stub._reply_field.shown is False
         assert stub._reply_send_btn.shown is False
         assert stub._like_btn.shown is False
+
+
+class TestReplySendButtonFollowsFieldContent:
+    """The send button only makes sense once there's something to send —
+    _on_reply_field_text_changed() (bound to EVT_TEXT) keeps it in sync as
+    the user types/clears the reply field."""
+
+    def test_typing_text_shows_the_button(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("oi")
+
+        stub._on_reply_field_text_changed(None)
+
+        assert stub._reply_send_btn.shown is True
+
+    def test_clearing_the_field_hides_the_button(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("oi")
+        stub._on_reply_field_text_changed(None)
+        assert stub._reply_send_btn.shown is True
+
+        stub._reply_field.SetValue("")
+        stub._on_reply_field_text_changed(None)
+
+        assert stub._reply_send_btn.shown is False
+
+    def test_whitespace_only_text_does_not_show_the_button(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("   ")
+
+        stub._on_reply_field_text_changed(None)
+
+        assert stub._reply_send_btn.shown is False
+
+
+class TestStatusContentLabelHandlesEveryMessageType:
+    """Regression: audio/document/sticker/contact statuses used to fall
+    through to the raw messageType string itself (literally "audioMessage")
+    instead of a translated label — reported live as "Fulano: audioMessage"
+    in the Alt+5 status list."""
+
+    i18n = _FakeI18n()
+
+    def test_audio_status_is_translated(self):
+        label = _status_content_label("audioMessage", {"audioMessage": {}}, self.i18n)
+        assert label == "Áudio"
+
+    def test_document_status_includes_filename(self):
+        msg_obj = {"documentMessage": {"fileName": "relatorio.pdf"}}
+        label = _status_content_label("documentMessage", msg_obj, self.i18n)
+        assert label == "Documento: relatorio.pdf"
+
+    def test_document_status_without_filename(self):
+        label = _status_content_label("documentMessage", {"documentMessage": {}}, self.i18n)
+        assert label == "Documento"
+
+    def test_sticker_status_is_translated(self):
+        label = _status_content_label("stickerMessage", {}, self.i18n)
+        assert label == "Figurinha"
+
+    def test_contact_status_is_translated(self):
+        msg_obj = {"contactMessage": {"displayName": "Ana"}}
+        label = _status_content_label("contactMessage", msg_obj, self.i18n)
+        assert label == "Contato: Ana"
+
+    def test_unknown_type_falls_back_to_translated_generic_label(self):
+        # Never the raw type string itself.
+        label = _status_content_label("someBrandNewWhatsAppType", {}, self.i18n)
+        assert label == "Mensagem não suportada"
+
+
+class TestResolveNamePrefersSavedContactNameOverPushName:
+    """Regression: the status list always showed the sender's WhatsApp
+    profile name (pushName) even when a different name was saved for them
+    in the address book — unlike every chat list/conversation in the app,
+    which prefers the saved contact name."""
+
+    def test_prefers_saved_contact_name(self):
+        stub = _Stub(contact_names={"5511999999999@s.whatsapp.net": "Apelido Salvo"})
+
+        name = stub._resolve_name("5511999999999@s.whatsapp.net")
+
+        assert name == "Apelido Salvo"
+
+    def test_returns_empty_string_when_unresolved(self):
+        # _parse_statuses() does `self._resolve_name(jid) or format_number(jid)`
+        # — an empty string (not None) is what lets that fallback kick in.
+        stub = _Stub(contact_names={})
+
+        name = stub._resolve_name("5511999999999@s.whatsapp.net")
+
+        assert name == ""
+
+    def test_status_preview_uses_resolved_name_for_a_captioned_photo(self):
+        stub = _Stub()
+        status = {
+            "messageType": "imageMessage",
+            "message": {"imageMessage": {"caption": "praia"}},
+        }
+        preview = stub._status_preview(status, stub.main_window.i18n)
+        assert preview == "Foto: praia"

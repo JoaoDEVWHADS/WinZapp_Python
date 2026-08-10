@@ -1,9 +1,54 @@
 import os
 import re
+import sys
 import json
 import base64
 import requests
 from cryptography.fernet import Fernet
+
+
+def get_downloads_folder() -> str:
+    """Return the current user's Downloads folder.
+
+    Resolves Windows' FOLDERID_Downloads shell API (SHGetKnownFolderPath)
+    rather than assuming ``~/Downloads`` — that plain join is wrong for any
+    user who has redirected their Downloads folder elsewhere (e.g. to a
+    OneDrive-synced location, or a different drive), which the shell API
+    correctly follows. Falls back to ``~/Downloads`` if the API call fails
+    for any reason, or on a non-Windows platform.
+    """
+    fallback = os.path.join(os.path.expanduser("~"), "Downloads")
+    if sys.platform != "win32":
+        return fallback
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_byte * 8),
+            ]
+
+        # FOLDERID_Downloads = {374DE290-123F-4565-9164-39C4925E467B}
+        folder_id = _GUID(
+            0x374DE290, 0x123F, 0x4565,
+            (ctypes.c_byte * 8)(0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B),
+        )
+        path_ptr = ctypes.c_wchar_p()
+        result = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(folder_id), 0, None, ctypes.byref(path_ptr)
+        )
+        if result == 0 and path_ptr.value:
+            path = path_ptr.value
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            if os.path.isdir(path):
+                return path
+    except Exception:
+        pass
+    return fallback
 
 # Single source of truth for settings.json's shape, used both to bootstrap a
 # missing/corrupt settings.json (MainWindow.load_settings()) and to backfill

@@ -191,6 +191,49 @@ class TestMessages:
         count = await in_memory_db.get_message_count("jid@w")
         assert count == 7
 
+    def test_jid_variants_expands_s_whatsapp_net_to_c_us(self, in_memory_db):
+        variants = in_memory_db._jid_variants("5511999999999@s.whatsapp.net")
+        assert variants == [
+            "5511999999999@s.whatsapp.net",
+            "5511999999999@c.us",
+        ]
+
+    def test_jid_variants_expands_c_us_to_s_whatsapp_net(self, in_memory_db):
+        variants = in_memory_db._jid_variants("5511999999999@c.us")
+        assert variants == [
+            "5511999999999@c.us",
+            "5511999999999@s.whatsapp.net",
+        ]
+
+    def test_jid_variants_leaves_other_suffixes_untouched(self, in_memory_db):
+        assert in_memory_db._jid_variants("120363@g.us") == ["120363@g.us"]
+
+    async def test_get_messages_finds_message_stored_under_c_us_variant(
+        self, in_memory_db
+    ):
+        # A message inserted under the legacy @c.us form must still be found
+        # by a @s.whatsapp.net lookup (and vice versa) — see _jid_variants().
+        await in_memory_db.insert_message(
+            "5511999999999@c.us",
+            {
+                "key": {"remoteJid": "5511999999999@c.us", "id": "m1"},
+                "messageTimestamp": 1,
+            },
+        )
+        msgs = await in_memory_db.get_messages("5511999999999@s.whatsapp.net")
+        assert len(msgs) == 1
+        assert msgs[0]["key"]["id"] == "m1"
+
+        msgs_asc = await in_memory_db.get_messages_asc(
+            "5511999999999@s.whatsapp.net"
+        )
+        assert len(msgs_asc) == 1
+
+        count = await in_memory_db.get_message_count(
+            "5511999999999@s.whatsapp.net"
+        )
+        assert count == 1
+
     async def test_insert_updates_existing_message(self, in_memory_db):
         msg1 = {
             "key": {"remoteJid": "jid@w", "id": "m1"},

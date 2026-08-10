@@ -16,6 +16,7 @@ Usage:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -89,6 +90,20 @@ def _load_env() -> dict:
 
 
 def _run(cmd: list, cwd: str = None):
+    # subprocess.run() with a bare command name (no shell=True, no
+    # explicit .cmd/.exe suffix) can fail on Windows with
+    # "[WinError 2] The system cannot find the file specified" for
+    # commands installed as a .cmd/.bat shim — npm is the common case,
+    # since Windows npm installs as npm.cmd, not npm.exe, and Windows'
+    # CreateProcess (which subprocess.run ultimately uses) doesn't apply
+    # PATHEXT resolution the way cmd.exe itself does. Resolving through
+    # shutil.which() first finds the real .cmd/.exe path PATH would give
+    # you, sidestepping the issue without needing shell=True (which has
+    # its own quoting/injection concerns).
+    if cmd and isinstance(cmd[0], str) and not os.path.isabs(cmd[0]):
+        resolved = shutil.which(cmd[0])
+        if resolved:
+            cmd = [resolved] + cmd[1:]
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:

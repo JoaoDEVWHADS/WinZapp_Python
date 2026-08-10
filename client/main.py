@@ -4444,16 +4444,45 @@ class MainWindow(wx.Frame):
         if hasattr(self, "navigation_panel"):
             self.navigation_panel.nav_list.SetFocus()
 
+    def _ensure_conversations_panel_visible(self):
+        """Bring conversations_panel to the front if some other top-level
+        panel (archived/status/settings) is currently showing instead.
+
+        _on_global_alt2/_on_global_alt3 act on whichever conversation is
+        open regardless of which panel currently has focus — but a
+        conversation staying "open" (self.conversations_panel.conversation
+        still set) after the user switched to, say, the Status tab used to
+        mean Alt+2/Alt+3 jumped focus inside a conversations_panel that
+        stayed hidden: nothing visibly happened, reported live as "doesn't
+        switch to the right panel" when called from anywhere but the
+        conversations/archived panels.
+        """
+        if self.conversations_panel.IsShown():
+            return
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.Hide()
+        if hasattr(self, "status_panel"):
+            self.status_panel.Hide()
+        # Deliberately does NOT touch conversations_label/conversations_list
+        # visibility (unlike on_alt_1(), which always returns to the LIST
+        # view) — a conversation being open here means the detail pane, not
+        # the list, is what should already be showing; whichever of the two
+        # was visible before the user switched away stays as-is.
+        self.conversations_panel.Show()
+        self.content_panel.Layout()
+
     def _on_global_alt2(self, event):
         """Alt+2: jump to last message regardless of which panel has focus."""
         cp = getattr(self, "conversations_panel", None)
         if cp is not None and cp.conversation is not None:
+            self._ensure_conversations_panel_visible()
             cp._on_accel_jump_last(event)
 
     def _on_global_alt3(self, event):
         """Alt+3: jump to unread separator regardless of which panel has focus."""
         cp = getattr(self, "conversations_panel", None)
         if cp is not None and cp.conversation is not None:
+            self._ensure_conversations_panel_visible()
             cp._on_accel_jump_unread(event)
 
     def on_f1(self, event):
@@ -11561,8 +11590,13 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
+                # 1500 chars (not 500) — deviceController.ts's reactMessage
+                # now includes a real error message + stack trace in the
+                # body (see its own comment on why a bare `error: e` used
+                # to serialize down to almost nothing), which can run
+                # longer than the old truncation allowed.
                 logging.error("[send_reaction] HTTP %s: %s",
-                              response.status_code, response.text[:500])
+                              response.status_code, response.text[:1500])
                 return False
             return True
         except Exception as exc:
@@ -14884,6 +14918,14 @@ class MainWindow(wx.Frame):
             else:
                 content = "⚙️ Mensagem do sistema"
         else:
+            # Logged so a future report of a raw, untranslated messageType
+            # showing up in the chat-list preview (e.g. "audioMessage" wraps
+            # such as view-once/ephemeral audio, which arrive under a
+            # DIFFERENT outer messageType than "audioMessage" itself and
+            # aren't unwrapped here) can be traced straight to the exact
+            # type instead of only reproducing "some preview looks wrong".
+            logging.info("[_last_msg_preview] unhandled messageType=%r for chat=%r",
+                         msg_type, chat.get("remoteJid", ""))
             content = i18n.t("notif_unsupported")
 
         # Build time string
