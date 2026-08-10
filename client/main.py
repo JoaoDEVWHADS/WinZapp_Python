@@ -11415,8 +11415,13 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
+                # 1500 chars (not 500) — deviceController.ts's reactMessage
+                # now includes a real error message + stack trace in the
+                # body (see its own comment on why a bare `error: e` used
+                # to serialize down to almost nothing), which can run
+                # longer than the old truncation allowed.
                 logging.error("[send_reaction] HTTP %s: %s",
-                              response.status_code, response.text[:500])
+                              response.status_code, response.text[:1500])
                 return False
             return True
         except Exception as exc:
@@ -14739,6 +14744,14 @@ class MainWindow(wx.Frame):
             else:
                 content = "⚙️ Mensagem do sistema"
         else:
+            # Logged so a future report of a raw, untranslated messageType
+            # showing up in the chat-list preview (e.g. "audioMessage" wraps
+            # such as view-once/ephemeral audio, which arrive under a
+            # DIFFERENT outer messageType than "audioMessage" itself and
+            # aren't unwrapped here) can be traced straight to the exact
+            # type instead of only reproducing "some preview looks wrong".
+            logging.info("[_last_msg_preview] unhandled messageType=%r for chat=%r",
+                         msg_type, chat.get("remoteJid", ""))
             content = i18n.t("notif_unsupported")
 
         # Build time string

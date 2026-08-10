@@ -243,6 +243,10 @@ class ConversationsPanel(wx.Panel):
         # see core/video_player.py). Created after init_UI() since it needs
         # _media_bitmap to already exist.
         self._video_player = VideoPlayer(self.main_window, self._media_bitmap)
+        # id of the video message currently loaded in _video_player, or None
+        # — lets a second Enter on the SAME video toggle pause instead of
+        # restarting it, while Enter on a DIFFERENT video switches to it.
+        self._current_video_msg_id = None
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -463,17 +467,6 @@ class ConversationsPanel(wx.Panel):
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
         conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._action_download_btn.Hide()
-
-        # ── In-app video playback (audio via BASS, frames via ffmpeg — see
-        # core/video_player.py) — shown alongside Open/Save As for a
-        # selected video message, reusing _media_bitmap (the same widget
-        # the static thumbnail above renders into) to draw live frames.
-        self._video_play_pause_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("status_play_pause")
-        )
-        self._video_play_pause_btn.Bind(wx.EVT_BUTTON, self._on_play_pause_video_message)
-        conv_sizer.Add(self._video_play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-        self._video_play_pause_btn.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
@@ -1846,6 +1839,7 @@ class ConversationsPanel(wx.Panel):
         _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
             self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+        self.message_field.Hide()
         self.send_message_btn.Hide()
         self.record_voice_message_btn.Hide()
         self._add_attachment_btn.Hide()
@@ -1885,8 +1879,10 @@ class ConversationsPanel(wx.Panel):
         event.Skip()
 
     def _hide_voice_panel(self):
-        """Hide the voice panel and restore the record / send button visibility."""
+        """Hide the voice panel and restore the message field / record /
+        send button visibility (sent or discarded — both call this)."""
         self._voice_panel.Hide()
+        self.message_field.Show()
         if self.message_field.GetValue().strip():
             self.send_message_btn.Show()
         else:
@@ -2377,11 +2373,6 @@ class ConversationsPanel(wx.Panel):
                     self._action_save_as_btn.Show()
                 else:
                     self._action_download_btn.Show()
-                # Play/Pause downloads (if needed) and plays in-app — see
-                # core/video_player.py. Shown regardless of is_downloaded:
-                # the handler downloads first when the .wzmedia cache is
-                # still missing, same as Open/Save As already do.
-                self._video_play_pause_btn.Show()
             self.conversation_panel.Layout()
 
         elif msg_type == "buttonsMessage":
@@ -2470,16 +2461,7 @@ class ConversationsPanel(wx.Panel):
             video = msg_obj.get("videoMessage") or {}
             if video.get("gifPlayback"):
                 return  # GIFs have no audio track to play
-            duration = video.get("seconds", 0) or 0
-            clean_msg_id = msg_id
-            if "_" in msg_id:
-                parts = msg_id.split("_")
-                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-            self._toggle_playback(
-                msg_id, duration, msg,
-                file_path=data_path("media", f"{clean_msg_id}.wzmedia"),
-                audio_ext=".mp4",
-            )
+            self._play_toggle_video_message(msg)
 
         elif msg_type in ("imageMessage", "documentMessage"):
             # Enter on an image or document → open in default app
@@ -2729,7 +2711,7 @@ class ConversationsPanel(wx.Panel):
         # behaviour.
         if getattr(self, "_video_player", None) is not None:
             self._video_player.stop()
-        self._video_play_pause_btn.Hide()
+        self._current_video_msg_id = None
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -4116,18 +4098,20 @@ class ConversationsPanel(wx.Panel):
     # ffmpeg — see core/video_player.py and _hide_all_media_controls(),
     # which stops this whenever selection/conversation moves away) ────────
 
-    def _on_play_pause_video_message(self, event):
-        index = self.messages_list.GetFirstSelected()
-        if index < 0 or index >= len(self._sorted_messages):
-            return
-        msg = self._sorted_messages[index]
+    def _play_toggle_video_message(self, msg: dict):
+        """Enter on a video message: play it in-app (audio via BASS, frames
+        via ffmpeg — see core/video_player.py), applying the conversation's
+        configured playback speed (see on_audio_speed_btn/Alt+,/Alt+.) the
+        same way voice messages already do. A second Enter on the SAME
+        video toggles pause; Enter on a DIFFERENT video while one is
+        playing stops it and switches to the new one."""
         if msg.get("messageType") != "videoMessage":
             return
-        if self._video_player.is_playing:
+        msg_id = msg.get("key", {}).get("id", "")
+        if self._video_player.is_playing and self._current_video_msg_id == msg_id:
             self._video_player.toggle_pause()
             return
 
-        msg_id = msg.get("key", {}).get("id", "")
         clean_msg_id = msg_id
         if "_" in msg_id:
             parts = msg_id.split("_")
@@ -4149,7 +4133,9 @@ class ConversationsPanel(wx.Panel):
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
                 tmp.write(content)
                 tmp.close()
-                wx.CallAfter(self._video_player.load_and_play, tmp.name)
+                speed = self._audio_speed_steps[self._audio_speed_index]
+                self._current_video_msg_id = msg_id
+                wx.CallAfter(self._video_player.load_and_play, tmp.name, speed)
             except Exception as exc:
                 wx.CallAfter(
                     wx.MessageBox,
@@ -5363,6 +5349,13 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("group_notif_generic")
 
         # ── Fallback ─────────────────────────────────────────────────────────
+        # Logged so a future report of a raw, untranslated messageType
+        # showing up in the message list (e.g. a view-once/ephemeral audio
+        # wrapper, which arrives under a DIFFERENT outer messageType than
+        # "audioMessage" itself and isn't unwrapped by any branch above)
+        # can be traced to the exact type instead of only reproducing "some
+        # message looks wrong".
+        logging.info("[_get_message_content] unhandled messageType=%r", msg_type)
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
         )

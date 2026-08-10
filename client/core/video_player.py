@@ -46,8 +46,18 @@ import threading
 
 import wx
 import sound_lib.stream as sl_stream
+from sound_lib.effects import Tempo
 
 _CREATE_NO_WINDOW = 0x08000000
+
+# Mirrors ConversationsPanel._audio_tempo_map / StatusPanel's own copy — the
+# same 3 speed steps exposed everywhere else audio plays in this app.
+# Note: only the AUDIO track is sped up via BASS's Tempo FX; the video
+# picture keeps decoding at its own real-time pace (ffmpeg's -re flag), so
+# at 1.5x/2x the frames will visibly lag behind — acceptable for what the
+# module docstring already calls a "see what's happening" affordance, not
+# full-fidelity playback.
+_TEMPO_MAP = {1.0: 0, 1.5: 50, 2.0: 100}
 
 # Frames are capped small and slow on purpose: this runs on the same machine
 # as the rest of a screen-reader-focused desktop app, and the goal is "see
@@ -110,6 +120,7 @@ class VideoPlayer:
         self.bitmap_ctrl  = bitmap_ctrl
 
         self._audio_stream = None
+        self._tempo_ctrl   = None
         self._ffmpeg_proc  = None
         self._frame_thread = None
         self._frame_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=_FRAME_MAX_QUEUE)
@@ -134,9 +145,11 @@ class VideoPlayer:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    def load_and_play(self, video_path: str):
+    def load_and_play(self, video_path: str, speed: float = 1.0):
         """Start playback from the beginning. Safe to call while something
-        else is already playing — stops it first."""
+        else is already playing — stops it first. *speed* is one of the
+        app's standard playback-speed steps (1.0/1.5/2.0, see _TEMPO_MAP) —
+        applied to the audio track only, see the module-level note above."""
         self.stop()
         self._stop_event.clear()
         self._eof_reached = False
@@ -147,7 +160,7 @@ class VideoPlayer:
         # cheap enough to do on the calling thread. Video frames still need
         # a background ffmpeg process, started right after so both begin at
         # (approximately) the same moment.
-        self._start_audio(video_path)
+        self._start_audio(video_path, speed)
         threading.Thread(target=self._start_video_pipe, daemon=True).start()
 
     def toggle_pause(self):
@@ -164,6 +177,15 @@ class VideoPlayer:
         self._stop_event.set()
         self._eof_reached = False
         self._timer.Stop()
+        # Tempo FX (when active) owns the audio output channel — stop it
+        # before the decode stream it wraps, mirroring ConversationsPanel's
+        # own _stop_audio().
+        if self._tempo_ctrl is not None:
+            try:
+                self._tempo_ctrl.stop()
+            except Exception:
+                pass
+            self._tempo_ctrl = None
         if self._audio_stream is not None:
             try:
                 self._audio_stream.stop()
@@ -183,10 +205,25 @@ class VideoPlayer:
 
     # ── Internals: audio (BASS, directly on the video file) ─────────────
 
-    def _start_audio(self, video_path: str):
+    def _start_audio(self, video_path: str, speed: float = 1.0):
+        # At the default 1x speed, keep the original plain-stream path
+        # (decode=False, played directly) — unchanged from before speed
+        # support existed. Any other speed needs a decoded stream wrapped
+        # by Tempo FX (a decoded/BASS_STREAM_DECODE stream has no audio
+        # output of its own and can't be played directly), exactly like
+        # ConversationsPanel._play_audio()'s _open_stream() helper.
+        def _open():
+            if speed == 1.0:
+                return sl_stream.FileStream(file=video_path, decode=False), None
+            s = sl_stream.FileStream(file=video_path, decode=True)
+            tempo = Tempo(s)
+            tempo.tempo = _TEMPO_MAP.get(speed, 0)
+            return s, tempo
+
         try:
-            self._audio_stream = sl_stream.FileStream(file=video_path, decode=False)
-            self._audio_stream.play()
+            self._audio_stream, self._tempo_ctrl = _open()
+            ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+            ctrl.play()
         except Exception:
             # Same device-switch recovery pattern used throughout the app
             # (see ConversationsPanel/StatusPanel's own audio playback) — a
@@ -195,13 +232,16 @@ class VideoPlayer:
             # recovers it.
             try:
                 if self.main_window.sound_system.handle_playback_failure():
-                    self._audio_stream = sl_stream.FileStream(file=video_path, decode=False)
-                    self._audio_stream.play()
+                    self._audio_stream, self._tempo_ctrl = _open()
+                    ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+                    ctrl.play()
                 else:
                     self._audio_stream = None
+                    self._tempo_ctrl = None
             except Exception as exc:
                 logging.warning("[video_player] audio playback failed: %s", exc)
                 self._audio_stream = None
+                self._tempo_ctrl = None
 
     # ── Internals: video (ffmpeg frame pipe, background thread) ─────────
 
@@ -309,18 +349,20 @@ class VideoPlayer:
     # ── Internals: pause/resume ──────────────────────────────────────────
 
     def _pause(self):
-        if self._audio_stream is not None:
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is not None:
             try:
-                self._audio_stream.pause()
+                ctrl.pause()
             except Exception:
                 pass
         self._timer.Stop()
         self.is_paused = True
 
     def _resume(self):
-        if self._audio_stream is not None:
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is not None:
             try:
-                self._audio_stream.play()
+                ctrl.play()
             except Exception:
                 pass
         self._timer.Start(int(1000 / _FRAME_FPS))

@@ -61,6 +61,21 @@ class _FakeWidget:
         self.label = text
 
 
+class _FakeTextCtrl(_FakeWidget):
+    """Stands in for _reply_field: a wx.TextCtrl, which _show_current_status()
+    and _on_reply_field_text_changed() read via GetValue()."""
+
+    def __init__(self, value=""):
+        super().__init__()
+        self._value = value
+
+    def GetValue(self):
+        return self._value
+
+    def SetValue(self, value):
+        self._value = value
+
+
 class _FakeMainWindow:
     def __init__(self):
         self.i18n = _FakeI18n()
@@ -85,6 +100,7 @@ class _FakeVideoPlayer:
 class _Stub:
     _show_current_status         = StatusPanel._show_current_status
     _on_status_contact_selected  = StatusPanel._on_status_contact_selected
+    _on_reply_field_text_changed = StatusPanel._on_reply_field_text_changed
 
     def __init__(self):
         self.main_window = _FakeMainWindow()
@@ -106,7 +122,7 @@ class _Stub:
         self._copy_text_btn        = _FakeWidget()
         self._like_btn              = _FakeWidget()
         self._reply_label          = _FakeWidget()
-        self._reply_field          = _FakeWidget()
+        self._reply_field          = _FakeTextCtrl()
         self._reply_send_btn       = _FakeWidget()
         self._viewer_panel         = _FakeWidget()
 
@@ -273,7 +289,10 @@ class TestCopyStatusText:
 
 
 class TestReplyAndLikeOnlyForOthersStatuses:
-    def test_others_status_shows_reply_and_like(self):
+    def test_others_status_shows_reply_field_but_not_the_empty_send_button(self):
+        # The reply field itself always shows for someone else's status —
+        # only the send button waits for actual text (see
+        # TestReplySendButtonFollowsFieldContent below).
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
         stub._selected_contact_idx = 0
@@ -281,8 +300,18 @@ class TestReplyAndLikeOnlyForOthersStatuses:
         stub._show_current_status()
 
         assert stub._reply_field.shown is True
-        assert stub._reply_send_btn.shown is True
+        assert stub._reply_send_btn.shown is False
         assert stub._like_btn.shown is True
+
+    def test_others_status_with_pending_reply_text_shows_the_send_button(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
+        stub._selected_contact_idx = 0
+        stub._reply_field.SetValue("valeu!")
+
+        stub._show_current_status()
+
+        assert stub._reply_send_btn.shown is True
 
     def test_own_status_hides_reply_and_like(self):
         stub = _Stub()
@@ -294,3 +323,36 @@ class TestReplyAndLikeOnlyForOthersStatuses:
         assert stub._reply_field.shown is False
         assert stub._reply_send_btn.shown is False
         assert stub._like_btn.shown is False
+
+
+class TestReplySendButtonFollowsFieldContent:
+    """The send button only makes sense once there's something to send —
+    _on_reply_field_text_changed() (bound to EVT_TEXT) keeps it in sync as
+    the user types/clears the reply field."""
+
+    def test_typing_text_shows_the_button(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("oi")
+
+        stub._on_reply_field_text_changed(None)
+
+        assert stub._reply_send_btn.shown is True
+
+    def test_clearing_the_field_hides_the_button(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("oi")
+        stub._on_reply_field_text_changed(None)
+        assert stub._reply_send_btn.shown is True
+
+        stub._reply_field.SetValue("")
+        stub._on_reply_field_text_changed(None)
+
+        assert stub._reply_send_btn.shown is False
+
+    def test_whitespace_only_text_does_not_show_the_button(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("   ")
+
+        stub._on_reply_field_text_changed(None)
+
+        assert stub._reply_send_btn.shown is False

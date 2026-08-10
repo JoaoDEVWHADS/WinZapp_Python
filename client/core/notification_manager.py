@@ -26,6 +26,7 @@ Design decisions:
     toaster is created in one thread and show_toast() called in another.
 """
 
+import logging
 import os
 import queue
 import re as _re
@@ -298,6 +299,12 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         return i18n.t("notif_reaction").format(emoji=emoji)
 
     # ── Fallback ──────────────────────────────────────────────────────────────
+    # Logged so a future report of a raw, untranslated messageType showing
+    # up in a notification (e.g. a view-once/ephemeral audio wrapper, which
+    # arrives under a DIFFERENT outer messageType than "audioMessage"
+    # itself and isn't unwrapped by any branch above) can be traced to the
+    # exact type instead of only reproducing "some notification looks wrong".
+    logging.info("[format_notification_body] unhandled messageType=%r", msg_type)
     return i18n.t("notif_unsupported")
 
 

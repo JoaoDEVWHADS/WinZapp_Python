@@ -260,6 +260,7 @@ class StatusPanel(wx.Panel):
         viewer_sizer.Add(self._reply_label, 0, wx.LEFT | wx.TOP, 5)
         self._reply_field = wx.TextCtrl(self._viewer_panel, style=wx.TE_PROCESS_ENTER)
         self._reply_field.Bind(wx.EVT_TEXT_ENTER, self._on_send_status_reply)
+        self._reply_field.Bind(wx.EVT_TEXT, self._on_reply_field_text_changed)
         viewer_sizer.Add(self._reply_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
         self._reply_send_btn = wx.Button(self._viewer_panel, label=i18n.t("status_reply_send"))
         self._reply_send_btn.Bind(wx.EVT_BUTTON, self._on_send_status_reply)
@@ -673,7 +674,7 @@ class StatusPanel(wx.Panel):
             self._like_btn.Show()
             self._reply_label.Show()
             self._reply_field.Show()
-            self._reply_send_btn.Show()
+            self._reply_send_btn.Show(bool(self._reply_field.GetValue().strip()))
         else:
             self._like_btn.Hide()
             self._reply_label.Hide()
@@ -902,6 +903,14 @@ class StatusPanel(wx.Panel):
             )
 
     # ── Reply to the currently viewed status ─────────────────────────────────
+
+    def _on_reply_field_text_changed(self, event):
+        """Send button only makes sense once there's something to send —
+        hide it while the reply field is empty."""
+        self._reply_send_btn.Show(bool(self._reply_field.GetValue().strip()))
+        self.Layout()
+        if event is not None:
+            event.Skip()
 
     def _on_send_status_reply(self, event):
         status = self._current_status
