@@ -2824,11 +2824,26 @@ export async function getAllContacts(req: Request, res: Response) {
     let response = await req.client.getAllContacts();
 
     if (Array.isArray(response)) {
-      const chats = await req.client.getAllChats().catch(() => []);
+      // Was req.client.getAllChats() — the deprecated, heavier WAPI call
+      // (no ignoreGroupMetadata option, does its own per-group metadata
+      // prefetch). On an account with hundreds of chats it competes for
+      // WhatsApp Web's single JS thread with the real chat sync's own
+      // list-chats (WPP.chat.list) calls running around the same time —
+      // and get_remote_contacts() (WinZapp's Python caller) retries THIS
+      // endpoint up to 5 times on its own whenever it gets 0 contacts back,
+      // so one call here could become five. Confirmed live: a sync that
+      // never finished syncing more than a few dozen of several hundred
+      // chats logged 54 "getAllChats deprecated" warnings in ~15 minutes,
+      // vs. 1 for the same account's next, successful sync — this endpoint
+      // was starving the chat-list fetch of the page's JS thread it needed
+      // to actually finish. listChats() wraps the same modern, non-
+      // deprecated WPP.chat.list() the list-chats route already uses, with
+      // the same ignoreGroupMetadata skip.
+      const chats = await req.client.listChats({ ignoreGroupMetadata: true } as any).catch(() => []);
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
-      
+
       response = response.filter((c: any) => {
         if (!c) return false;
         const jid = c.id?._serialized || c.id;
