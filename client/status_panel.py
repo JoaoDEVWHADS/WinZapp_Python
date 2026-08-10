@@ -1313,7 +1313,15 @@ class StatusPanel(wx.Panel):
     def _send_status_reply_bg(self, poster_jid: str, text: str, status: dict):
         mw = self.main_window
         try:
-            result = mw.send_text_message(poster_jid, text, quoted=status)
+            # Deliberately NOT quoted — same reasoning as _on_like_status():
+            # WPPConnect's send-reply endpoint can't resolve a status as a
+            # quote target (it's never indexed anywhere reachable from the
+            # poster's own chat), so quoting it always failed server-side
+            # and silently fell back to a plain send anyway, just after an
+            # extra round trip and a confusing "Não foi possível citar a
+            # mensagem original" notice for something that was never going
+            # to work.
+            result = mw.send_text_message(poster_jid, text)
         except Exception:
             result = None
         # send_text_message() returns a message-id string or True on success,
@@ -1331,6 +1339,11 @@ class StatusPanel(wx.Panel):
 
     def _on_status_reply_sent(self):
         self._reply_field.SetValue("")
+        # SetValue("") above fires EVT_TEXT -> _on_reply_field_text_changed(),
+        # which hides _reply_send_btn now that the field is empty again —
+        # without refocusing the field itself here, keyboard focus was left
+        # on that now-hidden button with nothing to land on.
+        self._reply_field.SetFocus()
         self.main_window.output(self.main_window.i18n.t("status_reply_sent"))
 
     # ── Add status (PopupMenu) ───────────────────────────────────────────────

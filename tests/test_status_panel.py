@@ -74,12 +74,16 @@ class _FakeTextCtrl(_FakeWidget):
     def __init__(self, value=""):
         super().__init__()
         self._value = value
+        self.set_focus_calls = 0
 
     def GetValue(self):
         return self._value
 
     def SetValue(self, value):
         self._value = value
+
+    def SetFocus(self):
+        self.set_focus_calls += 1
 
 
 class _FakeMainWindow:
@@ -176,6 +180,9 @@ class _Stub:
     _on_next_status               = StatusPanel._on_next_status
     _on_escape                    = StatusPanel._on_escape
     _MAX_REMEMBERED_LIKES         = StatusPanel._MAX_REMEMBERED_LIKES
+    _on_send_status_reply         = StatusPanel._on_send_status_reply
+    _send_status_reply_bg         = StatusPanel._send_status_reply_bg
+    _on_status_reply_sent         = StatusPanel._on_status_reply_sent
 
     def __init__(self, contact_names=None, send_text_result=True, settings=None):
         self.main_window = _FakeMainWindow(
@@ -896,3 +903,41 @@ class TestEscapeClosesTheViewer:
         stub._on_escape(None)  # must not raise even with event=None
 
         assert stub._video_player.stop_calls == 0
+
+
+class TestStatusReplySendsWithoutQuoting:
+    """Same reasoning as TestLikeStatusSendsAPlainEmojiMessage: WPPConnect
+    can't resolve a status as a quote target from the poster's own chat,
+    so send-reply always failed server-side and silently fell back to a
+    plain send anyway — reported live as "Não foi possível citar a
+    mensagem original"."""
+
+    def test_reply_is_sent_without_the_quoted_kwarg(self, monkeypatch):
+        _run_threads_synchronously(monkeypatch)
+        status = _text_status("oi")
+        stub = _Stub()
+        stub._current_status = status
+        stub._current_status_entry = _entry("poster@s.whatsapp.net", [status])
+        stub._reply_field.SetValue("valeu!")
+
+        stub._on_send_status_reply(None)
+
+        assert stub.main_window.send_text_calls == [
+            ("poster@s.whatsapp.net", "valeu!", None)
+        ]
+
+
+class TestStatusReplySentRefocusesTheField:
+    """Reported live: after a successful reply, _reply_send_btn hides
+    again (the field is cleared, and _on_reply_field_text_changed() hides
+    the button once it's empty) but keyboard focus was left on that now-
+    hidden button with nothing to land on."""
+
+    def test_clears_and_refocuses_the_reply_field(self):
+        stub = _Stub()
+        stub._reply_field.SetValue("valeu!")
+
+        stub._on_status_reply_sent()
+
+        assert stub._reply_field.GetValue() == ""
+        assert stub._reply_field.set_focus_calls == 1
