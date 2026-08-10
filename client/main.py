@@ -1157,6 +1157,7 @@ class MainWindow(wx.Frame):
         else:
             logging.error("[init_UI] _post_ui_init_fn is MISSING — connection/sync will NOT start! This is a bug.")
 
+        self.start_ui_watchdog()
         logging.info("[init_UI] Entering app.MainLoop() — main thread will block here until app exits")
         app.MainLoop()
 
@@ -3257,8 +3258,13 @@ class MainWindow(wx.Frame):
             # History backfill delivers messages one at a time, most of them
             # already on screen. refresh_messages_if_changed() collapses the
             # no-op ones into nothing instead of rebuilding (and re-placing
-            # focus in) the whole list once per backfilled message.
-            wx.CallAfter(cp.refresh_messages_if_changed)
+            # focus in) the whole list once per backfilled message — but only
+            # the no-op ones: a message that genuinely changes the conversation
+            # rebuilds in full, and during a backfill that is most of them.
+            # Debounced for the same reason _schedule_set_chats() below is; see
+            # _schedule_refresh_messages() for the cost that made this freeze
+            # the UI outright on a large group.
+            self._schedule_refresh_messages()
 
     def _reacted_message_preview(self, remote_jid: str, orig_id: str) -> str:
         """Return a short text preview of the original message a reaction targets."""
@@ -8650,6 +8656,148 @@ class MainWindow(wx.Frame):
                 logging.exception("[set_chats] Unhandled error during bg set_chats")
         threading.Thread(target=_bg, daemon=True).start()
 
+    # How often the watchdog pings the wx main loop, and how long a ping may
+    # go unanswered before the UI counts as stalled. One second between pings
+    # costs a single no-op CallAfter per second while everything is healthy.
+    _UI_WATCHDOG_INTERVAL = 1.0
+    _UI_WATCHDOG_STALL_SECONDS = 2.0
+
+    def start_ui_watchdog(self):
+        """Detect a frozen wx main loop and log *where* it is frozen.
+
+        Every UI-freeze report so far has been diagnosed by inference, because
+        the main thread writes nothing to the log while it is blocked — the
+        freeze window simply contains worker-thread lines and a hole. Two
+        successive theories built that way (a refresh storm, then an oversized
+        pagination window) each explained the symptom and each turned out not
+        to be the cause, which is a good sign the guessing should stop.
+
+        This pings the main loop once a second with a no-op CallAfter. When a
+        ping goes unanswered past _UI_WATCHDOG_STALL_SECONDS the main thread is
+        by definition not draining its event queue, and sys._current_frames()
+        gives its stack from *outside* it — so the log gets the exact call the
+        UI is stuck in, repeated every couple of seconds for as long as the
+        stall lasts, followed by how long it took to recover.
+
+        Costs nothing while the UI is healthy and never touches UI state, so it
+        stays on permanently rather than being a debug-only switch.
+        """
+        main_id = threading.main_thread().ident
+
+        def _loop():
+            import sys as _sys
+            import traceback as _traceback
+            while not getattr(self, "_shutting_down", False):
+                pong = threading.Event()
+                t0 = time.monotonic()
+                try:
+                    wx.CallAfter(pong.set)
+                except Exception:
+                    return          # app is going away
+                stalled = False
+                while not pong.wait(self._UI_WATCHDOG_STALL_SECONDS):
+                    if getattr(self, "_shutting_down", False):
+                        return
+                    stalled = True
+                    frame = _sys._current_frames().get(main_id)
+                    stack = ("".join(_traceback.format_stack(frame)) if frame
+                             else "<main thread frame unavailable>")
+                    logging.warning(
+                        "[ui-watchdog] UI thread unresponsive for %.1fs — main thread stack:\n%s",
+                        time.monotonic() - t0, stack)
+                if stalled:
+                    logging.warning(
+                        "[ui-watchdog] UI thread responsive again after %.1fs.",
+                        time.monotonic() - t0)
+                time.sleep(self._UI_WATCHDOG_INTERVAL)
+
+        threading.Thread(target=_loop, daemon=True, name="ui-watchdog").start()
+        logging.info("[ui-watchdog] started (ping every %.0fs, stall threshold %.0fs).",
+                     self._UI_WATCHDOG_INTERVAL, self._UI_WATCHDOG_STALL_SECONDS)
+
+    # Longer than the 300 ms used for content refreshes: this one only ever
+    # repaints *names* that background resolution has just filled in, and a
+    # name settling a second later is invisible to the user — while the
+    # resolution loops that trigger it run in batches for minutes on end.
+    _ACTIVE_REFRESH_DEBOUNCE_MS = 1000
+
+    def _schedule_refresh_active_messages(self):
+        """Debounce refresh_active_conversation_messages().
+
+        That method re-renders every row of the open conversation
+        (SetItemText + _render_message_line per message), and three separate
+        background loops — [Contact Resolution], [Mentions Scan] and
+        [LID Resolution] — used to wx.CallAfter it once per resolved batch.
+        On an account with thousands of unresolved @lid senders those batches
+        arrive continuously for minutes, so the wx event queue filled with
+        full re-renders faster than the main loop could drain them.
+
+        Confirmed, not inferred: the UI watchdog caught three stalls of 9.4 s,
+        19.8 s and 40.1 s, and all 33 stack samples taken during them landed on
+        the same line — conversations.py's `SetItemText(i,
+        self._render_message_line(msg))`. Two earlier theories about this
+        freeze (a refresh storm on the history path, then an oversized
+        pagination window) were wrong; this is what the stacks actually show.
+        """
+        if getattr(self, "_refresh_active_pending", False):
+            return
+        self._refresh_active_pending = True
+        wx.CallLater(self._ACTIVE_REFRESH_DEBOUNCE_MS,
+                     self._do_scheduled_refresh_active_messages)
+
+    def _do_scheduled_refresh_active_messages(self):
+        """Run the coalesced name repaint. Flag is cleared first so a failure
+        cannot wedge every later batch."""
+        self._refresh_active_pending = False
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None:
+            return
+        try:
+            cp.refresh_active_conversation_messages()
+        except Exception:
+            logging.exception("[_do_scheduled_refresh_active_messages] repaint failed")
+
+    def _schedule_refresh_messages(self):
+        """Debounce the open conversation's message-list rebuild.
+
+        on_historical_message() fires once per backfilled message, and for the
+        conversation currently on screen every one of them used to schedule its
+        own refresh_messages_if_changed() on the wx main thread. That call is
+        not cheap: _messages_signature() walks *every stored record* of the chat
+        — ~1400 on the group this was reported against, not just the 200 on
+        screen — calling _get_message_content() on each, and whenever the
+        signature differs, which it does on every genuinely new message,
+        populate_messages() rebuilds the native list with DeleteAllItems() plus
+        one Append() per visible row.
+
+        During a history backfill that is hundreds of full rebuilds queued
+        back-to-back on the UI thread, and wx does not coalesce CallAfter — so
+        opening a large, actively-backfilling group locked the interface up for
+        as long as its history kept landing. Reported live against a group
+        the logs could not show it directly because
+        nothing on the UI thread writes to them, but the freeze window held 95
+        worker-thread lines and not one from the UI module.
+
+        Same shape as _schedule_set_chats() below, and called from the same
+        place, so a burst of N messages costs one rebuild instead of N.
+        """
+        if getattr(self, "_refresh_messages_pending", False):
+            return
+        self._refresh_messages_pending = True
+        wx.CallLater(300, self._do_scheduled_refresh_messages)
+
+    def _do_scheduled_refresh_messages(self):
+        """Run the coalesced rebuild. Re-checks the panel still has a
+        conversation open — the user may have closed it during the window."""
+        self._refresh_messages_pending = False
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or getattr(cp, "conversation", None) is None:
+            return
+        try:
+            cp.refresh_messages_if_changed()
+        except Exception:
+            logging.exception("[_do_scheduled_refresh_messages] refresh failed")
+
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
@@ -8909,8 +9057,7 @@ class MainWindow(wx.Frame):
                         logging.error(f"[Contact Resolution] Error saving contacts incrementally: {e}")
                         self.save_data(self.chats, self.contacts)
                     wx.CallAfter(self._schedule_set_chats)
-                    if hasattr(self, "conversations_panel"):
-                        wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+                    wx.CallAfter(self._schedule_refresh_active_messages)
             threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
 
     def scan_all_cached_messages_for_mentions(self):
@@ -9033,8 +9180,7 @@ class MainWindow(wx.Frame):
                          logging.error(f"[Mentions Scan] Error saving contacts incrementally: {e}")
                          self.save_data(self.chats, self.contacts)
                      wx.CallAfter(self._schedule_set_chats)
-                     if hasattr(self, "conversations_panel"):
-                         wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+                     wx.CallAfter(self._schedule_refresh_active_messages)
             
             logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
 
@@ -13041,8 +13187,7 @@ class MainWindow(wx.Frame):
                 logging.error(f"[LID Resolution] Error saving contacts incrementally: {e}")
                 self.save_data(self.chats, self.contacts)
         wx.CallAfter(self._schedule_set_chats)
-        if hasattr(self, "conversations_panel"):
-            wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+        wx.CallAfter(self._schedule_refresh_active_messages)
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from WPPConnect (runs on background thread)."""
