@@ -35,8 +35,43 @@ from core.video_player import extract_jpeg_frames, VideoPlayer
 def _jpeg(payload: bytes) -> bytes:
     """A minimal fake JPEG: SOI + payload + EOI. Not a real decodable
     image, but the framing logic under test only ever looks at the marker
-    bytes, never the payload."""
+    bytes, never the payload. Only safe for extract_jpeg_frames() tests
+    below, which never actually decode it — see _real_jpeg_bytes() for why
+    _on_timer()'s tests (which DO decode, via wx.Image) can't use this."""
     return b"\xff\xd8" + payload + b"\xff\xd9"
+
+
+def _real_jpeg_bytes(wx_app) -> bytes:
+    """A genuinely valid, decodable 2x2 JPEG — unlike _jpeg() above, needed
+    anywhere a test feeds a frame through VideoPlayer._on_timer(), which
+    decodes it for real via wx.Image(..., wx.BITMAP_TYPE_JPEG). Feeding
+    that decoder deliberately-malformed bytes (_jpeg()'s SOI+garbage+EOI)
+    is exactly what test_video_player.py used to do here — caught as a
+    normal Python exception (and silently ignored) most of the time, but
+    crashed the whole pytest *process* on GitHub Actions' headless Windows
+    runner: pytest's own "N passed" summary printed successfully, then the
+    process died with a non-zero exit code moments later with no
+    traceback — reproduced live via two failed release builds in a row,
+    bisected down to specifically the tests that fed garbage into
+    _on_timer(). A real (if trivial) JPEG removes the malformed-input path
+    entirely instead of trying to make the crash itself survivable.
+    """
+    import os
+    import tempfile
+    import wx
+    img = wx.Image(2, 2)
+    img.SetRGB(0, 0, 255, 0, 0)
+    img.SetRGB(1, 0, 0, 255, 0)
+    img.SetRGB(0, 1, 0, 0, 255)
+    img.SetRGB(1, 1, 255, 255, 0)
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    tmp.close()
+    try:
+        img.SaveFile(tmp.name, wx.BITMAP_TYPE_JPEG)
+        with open(tmp.name, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(tmp.name)
 
 
 class TestExtractJpegFrames:
@@ -96,12 +131,6 @@ class TestExtractJpegFrames:
         assert remainder == junk
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    import wx
-    return wx.App()
-
-
 class _FakeMainWindow:
     """Never actually reached by these tests (no real ffmpeg/BASS calls
     happen), but VideoPlayer.__init__ doesn't touch it either — only kept
@@ -109,12 +138,48 @@ class _FakeMainWindow:
     pass
 
 
+_created_players = []
+
+
 def _make_player(wx_app):
     import wx
     frame = wx.Frame(None)
     bitmap = wx.StaticBitmap(frame)
     player = VideoPlayer(_FakeMainWindow(), bitmap)
+    _created_players.append(player)
     return player
+
+
+@pytest.fixture(autouse=True)
+def _destroy_leftover_frames():
+    """Every test here builds its own throwaway wx.Frame via _make_player()
+    and none of them ever call player.stop()/frame.Destroy() — each one
+    left its wx.Timer armed and its wx.Frame/wx.StaticBitmap alive for the
+    rest of the process. That went unnoticed locally, but wx.App tearing
+    down with a still-running wx.Timer bound to a window that's about to
+    be destroyed crashed the whole pytest process on GitHub Actions'
+    headless Windows runner: pytest's own "N passed" summary printed
+    successfully, then the process died with a non-zero exit code ~2
+    seconds later with no traceback at all — reproduced live via two
+    failed release builds in a row, bisected down to this file
+    specifically. stop() first (so no armed Timer survives to fire against
+    a window that's mid-destruction), then Destroy() every top-level
+    window (not just the one this test happened to create — a prior
+    test's leak would otherwise still be sitting there).
+    """
+    yield
+    import wx
+    for player in _created_players:
+        try:
+            player.stop()
+        except Exception:
+            pass
+    _created_players.clear()
+    for win in list(wx.GetTopLevelWindows()):
+        try:
+            win.Destroy()
+        except Exception:
+            pass
 
 
 class TestEofDrainsTheQueueBeforeStopping:
@@ -123,8 +188,9 @@ class TestEofDrainsTheQueueBeforeStopping:
 
     def test_queued_frames_still_render_after_eof_is_signalled(self, wx_app):
         player = _make_player(wx_app)
-        player._frame_queue.put(b"\xff\xd8fake-frame-1\xff\xd9")
-        player._frame_queue.put(b"\xff\xd8fake-frame-2\xff\xd9")
+        real_jpeg = _real_jpeg_bytes(wx_app)
+        player._frame_queue.put(real_jpeg)
+        player._frame_queue.put(real_jpeg)
         player._eof_reached = True
         player.is_playing = True
 

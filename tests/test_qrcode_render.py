@@ -113,12 +113,6 @@ def _synthetic_qr(side=264, module=8, seed=7):
     return img
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    import wx
-    return wx.App()
-
-
 class TestScalingPreservesTheCode:
     def test_the_old_path_destroyed_the_module_edges(self, wx_app):
         import wx
