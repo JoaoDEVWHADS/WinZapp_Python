@@ -4185,7 +4185,18 @@ class ConversationsPanel(wx.Panel):
         the player and — same as _play_audio() already does for voice
         messages — shows the shared speed button/progress slider so the
         video gets the same seek/speed controls audio already has, instead
-        of only Enter-to-pause with no other way to scrub or change speed."""
+        of only Enter-to-pause with no other way to scrub or change speed.
+
+        _media_bitmap is otherwise only shown by _try_show_thumbnail() (the
+        static preview, from the message's own jpegThumbnail) — a video
+        with no embedded thumbnail left it Hide()-den for the player's own
+        SetBitmap() calls to render into, so no frame was ever visible even
+        though decoding/playback was working fine underneath. StatusPanel's
+        own video viewer already does this same Show()+Layout() right
+        before load_and_play() (see _on_play_pause_video/
+        _start_downloaded_video in status_panel.py) — mirrored here."""
+        self._media_bitmap.Show()
+        self.conversation_panel.Layout()
         self._video_player.load_and_play(path, speed)
         if self._focused_msg_id() == msg_id:
             self._show_audio_controls()

@@ -192,6 +192,9 @@ class _ControlsStub:
         self.audio_speed_btn.SetLabel = lambda label: setattr(self.audio_speed_btn, "label", label)
         self.audio_slider = _FakeSlider()
         self._audio_timer = _FakeTimer()
+        self._media_bitmap = _FakeWidget()
+        self.conversation_panel = _FakeWidget()
+        self.conversation_panel.Layout = lambda: None
         self.hide_audio_controls_calls = 0
         self.show_audio_controls_calls = 0
 
@@ -237,6 +240,18 @@ class TestStartVideoPlaybackShowsSharedControls:
         assert stub._video_player.load_and_play_calls == [("/tmp/v1.mp4", 1.5)]
         assert stub.show_audio_controls_calls == 1
         assert stub.audio_speed_btn.label == "1.5×"
+
+    def test_shows_the_bitmap_control_even_without_a_thumbnail_ever_shown(self):
+        """_media_bitmap is otherwise only shown by _try_show_thumbnail()
+        (gated on the message having an embedded jpegThumbnail) — a video
+        with none left the player rendering frames into a hidden control.
+        Regression test for that: must always show it, thumbnail or not."""
+        stub = _ControlsStub([_video_msg("v1")], focused=0)
+        assert stub._media_bitmap.shown is False
+
+        stub._start_video_playback("/tmp/v1.mp4", 1.0, "v1")
+
+        assert stub._media_bitmap.shown is True
 
     def test_does_not_show_controls_when_a_different_row_is_focused(self):
         stub = _ControlsStub([_video_msg("v1"), _video_msg("v2")], focused=1)

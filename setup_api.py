@@ -213,6 +213,7 @@ from core.wppconnect_host_layer_patch import (
     PATCHED_CHECK_QR_CODE as _HOST_LAYER_PATCHED_CHECK_QR_CODE,
 )
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
+from core.wppconnect_sender_layer_patch import ALL_PATCHES as _SENDER_LAYER_PATCHES
 
 
 def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
@@ -322,6 +323,57 @@ def _patch_wppconnect_status_layer(client_api_dir: str = None) -> bool:
     if missing:
         print(
             f"[WARNING] status.layer.js: {missing} status-posting method(s) did not match "
+            "the expected upstream source — skipping those (the installed "
+            "@wppconnect-team/wppconnect version may have changed this file)."
+        )
+    return missing == 0
+
+
+def _patch_wppconnect_sender_layer(client_api_dir: str = None) -> bool:
+    """Patch @wppconnect-team/wppconnect's compiled sender.layer.js so a
+    failed sendFile() (e.g. every video-message send, currently) reports
+    the real browser-side error instead of the opaque, minified
+    {"name":"t","message":"t"} that crossing the CDP exception boundary
+    raw currently produces — see
+    client/core/wppconnect_sender_layer_patch.py's module docstring.
+
+    Idempotent and best-effort, same pattern as the host/status layer
+    patches right above.
+    """
+    if client_api_dir is None:
+        client_api_dir = CLIENT_API_DIR
+    sender_layer_path = os.path.join(
+        client_api_dir, "node_modules", "@wppconnect-team", "wppconnect",
+        "dist", "api", "layers", "sender.layer.js",
+    )
+    if not os.path.isfile(sender_layer_path):
+        print("[WARNING] sender.layer.js not found — skipping sendFile error-detail patch.")
+        return False
+
+    with open(sender_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    applied = 0
+    already = 0
+    missing = 0
+    for original, patched in _SENDER_LAYER_PATCHES:
+        if patched in content:
+            already += 1
+        elif original in content:
+            content = content.replace(original, patched, 1)
+            applied += 1
+        else:
+            missing += 1
+
+    if applied:
+        with open(sender_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[OK] Patched sender.layer.js — {applied} sendFile error(s) now report real detail instead of minified junk.")
+    elif already == len(_SENDER_LAYER_PATCHES):
+        print("[INFO] sender.layer.js sendFile error-detail patch already applied.")
+    if missing:
+        print(
+            f"[WARNING] sender.layer.js: {missing} method(s) did not match "
             "the expected upstream source — skipping those (the installed "
             "@wppconnect-team/wppconnect version may have changed this file)."
         )
@@ -505,6 +557,13 @@ def main():
             _patch_wppconnect_status_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch status.layer.js posting-result reporting: {e}")
+
+        # Failed video sends only ever logged opaque minified junk — see
+        # _patch_wppconnect_sender_layer()'s docstring.
+        try:
+            _patch_wppconnect_sender_layer()
+        except Exception as e:
+            print(f"[WARNING] Failed to patch sender.layer.js sendFile error detail: {e}")
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")

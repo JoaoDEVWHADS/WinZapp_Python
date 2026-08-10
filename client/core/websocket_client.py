@@ -5,7 +5,7 @@ import socketio
 import wx
 import requests
 from core.i18n import I18n
-from core.utils import looks_like_binary_blob, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
+from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 # ── Message delivery status ──────────────────────────────────────────────────
 # The app's own scale (Baileys-shaped, what messages.status stores and what
@@ -1522,8 +1522,18 @@ class WebSocketClient:
                 }
             }
 
-        # Fallback to plain text if the message type is unsupported/unmapped but contains body text
-        if not message_content and conversation:
+        # Fallback to plain text if the message type is unsupported/unmapped but contains body text.
+        # Excludes a bare JID: WPPConnect's raw payload for internal
+        # notification-only events (observed for a contact's security-code/
+        # E2E-identity-change notice, "type" unmapped above and no real
+        # message content at all) stuffs the JID of whoever triggered it
+        # into this same "body" field — treating that as chat text leaked
+        # the contact's raw @lid into the conversation as if they had sent
+        # it as a message. Leaving message_content empty here instead falls
+        # through to the unmapped-type handling below, which is already
+        # correctly excluded from display/unread/notifications elsewhere
+        # (see is_countable_message()'s docstring in main.py).
+        if not message_content and conversation and not looks_like_jid(conversation):
             msg_type = "chat"
             message_content = {"conversation": conversation}
 

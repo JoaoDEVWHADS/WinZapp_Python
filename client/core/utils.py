@@ -199,6 +199,24 @@ def looks_like_binary_blob(value) -> bool:
         return True
     return False
 
+_JID_RE = re.compile(
+    r"^\d+(?::\d+)?@(s\.whatsapp\.net|c\.us|g\.us|lid|broadcast|newsletter)$"
+)
+
+def looks_like_jid(value) -> bool:
+    """Return True if value is nothing but a bare WhatsApp JID.
+
+    Real chat text is never just a phone-number/lid digit string plus a
+    '@...' suffix — this is only ever seen when WPPConnect's raw
+    notification-type payload (internal WhatsApp events with no real text
+    content, e.g. a security-code/E2E-identity-change notice) stuffs the
+    JID of whoever triggered it into the same "body"/"text" field normal
+    messages use, and generic text-fallback code mistakes it for one.
+    """
+    if not value or not isinstance(value, str):
+        return False
+    return bool(_JID_RE.match(value.strip()))
+
 def _clean_mentioned_jid(jid_val):
     """Normalize one mentionedJid entry to a plain '...@s.whatsapp.net'/'@lid'
     string. Mirrors WebSocketClient._clean_jid() without needing an instance —

@@ -484,6 +484,12 @@ class ApiSetupDialog(wx.Dialog):
         except Exception as exc:
             logging.warning("[api_setup] Failed to patch status.layer.js: %s", exc)
 
+        # sender.layer.js — failed video sends only logged opaque minified junk.
+        try:
+            ApiSetupDialog._patch_wppconnect_sender_layer(node_modules_wppconnect)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to patch sender.layer.js: %s", exc)
+
     @staticmethod
     def _patch_wppconnect_status_layer(wppconnect_api_dir: str) -> bool:
         """Patch @wppconnect-team/wppconnect's compiled status.layer.js so
@@ -525,6 +531,53 @@ class ApiSetupDialog(wx.Dialog):
         if missing:
             logging.warning(
                 "[api_setup] status.layer.js: %d status-posting method(s) did not match the "
+                "expected upstream source — skipping those.", missing,
+            )
+        return missing == 0
+
+    @staticmethod
+    def _patch_wppconnect_sender_layer(wppconnect_api_dir: str) -> bool:
+        """Patch @wppconnect-team/wppconnect's compiled sender.layer.js so a
+        failed sendFile() (every video-message send, currently) reports the
+        real browser-side error instead of the opaque, minified
+        {"name":"t","message":"t"} that crossing the CDP exception boundary
+        raw currently produces. Port of setup_api.py's function of the same
+        name — see client/core/wppconnect_sender_layer_patch.py's module
+        docstring for the root cause.
+
+        Idempotent and best-effort, same pattern as
+        _patch_wppconnect_status_layer just above.
+        """
+        from core.wppconnect_sender_layer_patch import ALL_PATCHES
+        sender_layer_path = os.path.join(wppconnect_api_dir, "layers", "sender.layer.js")
+        if not os.path.isfile(sender_layer_path):
+            logging.warning("[api_setup] sender.layer.js not found — skipping sendFile error-detail patch.")
+            return False
+
+        with open(sender_layer_path, encoding="utf-8") as f:
+            content = f.read()
+
+        applied = 0
+        already = 0
+        missing = 0
+        for original, patched in ALL_PATCHES:
+            if patched in content:
+                already += 1
+            elif original in content:
+                content = content.replace(original, patched, 1)
+                applied += 1
+            else:
+                missing += 1
+
+        if applied:
+            with open(sender_layer_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logging.info("[api_setup] Patched sender.layer.js — %d sendFile error(s) now report real detail.", applied)
+        elif already == len(ALL_PATCHES):
+            logging.info("[api_setup] sender.layer.js sendFile error-detail patch already applied.")
+        if missing:
+            logging.warning(
+                "[api_setup] sender.layer.js: %d method(s) did not match the "
                 "expected upstream source — skipping those.", missing,
             )
         return missing == 0
