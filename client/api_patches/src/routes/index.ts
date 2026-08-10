@@ -138,6 +138,12 @@ routes.post(
   MessageController.pinMessage
 );
 routes.post(
+  '/api/:session/mark-played',
+  verifyToken,
+  statusConnection,
+  MessageController.markPlayed
+);
+routes.post(
   '/api/:session/send-image',
   upload.single('file'),
   verifyToken,

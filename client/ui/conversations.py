@@ -4754,14 +4754,26 @@ class ConversationsPanel(wx.Panel):
             total = _ctrl.get_length()
             if total > 0:
                 if pos >= total:
-                    # Save the ID before _stop_audio() clears it
-                    finished_id = self._current_audio_id
+                    # Save the ID/message before _stop_audio() clears it
+                    finished_id  = self._current_audio_id
+                    finished_msg = next(
+                        (m for m in self._sorted_messages
+                         if m.get("key", {}).get("id") == finished_id),
+                        None,
+                    )
                     self._in_auto_timer_stop = True
                     try:
                         self._stop_audio()
                     finally:
                         self._in_auto_timer_stop = False
                     self._hide_audio_controls()
+                    # Reaching the end of playback — right where the controls
+                    # get hidden — is "played" for a received voice message:
+                    # mark it locally and tell WhatsApp so the sender sees it
+                    # too. See MainWindow.mark_audio_message_played()'s own
+                    # docstring for why this never applies to our own sends.
+                    if finished_msg is not None:
+                        self.main_window.mark_audio_message_played(finished_msg)
                     # Try to auto-play the next consecutive audio message
                     if finished_id:
                         self._auto_chain_next_audio(finished_id)

@@ -1268,3 +1268,90 @@ export async function pinMessage(req: Request, res: Response) {
     });
   }
 }
+
+export async function markPlayed(req: Request, res: Response) {
+  /**
+     #swagger.tags = ["Messages"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.requestBody = {
+      required: true,
+      "@content": {
+        "application/json": {
+          schema: {
+            type: "object",
+            properties: {
+              messageId: { type: "string" },
+            }
+          },
+          examples: {
+            "Default": {
+              value: {
+                messageId: "false_5521999999999@c.us_3EB0...",
+              }
+            },
+          }
+        }
+      }
+     }
+   */
+  // WinZapp-added: mark a received voice message as actually played, so
+  // the sender's own client shows the played indicator — the same
+  // WPP.chat.markPlayed() WhatsApp Web's own UI calls when a voice note is
+  // listened to there. No equivalent route existed anywhere in WPPConnect
+  // Server; client.markPlayed() (sender.layer.js) is a thin, unguarded
+  // page.evaluate() with no try/catch of its own, so this wraps the call
+  // itself here — same pattern as pinMessage() above — instead of calling
+  // it through that wrapper directly.
+  const { messageId } = req.body;
+  const page = (req.client as any)?.page;
+
+  if (!messageId) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'messageId is required',
+    });
+  }
+  if (!page || page.isClosed()) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'The WhatsApp session is not active.',
+    });
+  }
+
+  try {
+    const result = await page.evaluate(
+      async ({ messageId }: { messageId: string }) => {
+        try {
+          const wpp = (window as any).WPP;
+          await wpp.chat.markPlayed(messageId);
+          return { ok: true };
+        } catch (err: any) {
+          return { ok: false, error: err?.message || String(err) };
+        }
+      },
+      { messageId }
+    );
+
+    if (!result || !result.ok) {
+      return res.status(500).json({
+        status: 'error',
+        message: (result && result.error) || 'Error on mark played',
+      });
+    }
+
+    res.status(200).json({ status: 'success', response: { messageId } });
+  } catch (error) {
+    req.logger.error(error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Error on mark played',
+      error,
+    });
+  }
+}

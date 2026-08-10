@@ -14602,6 +14602,61 @@ class MainWindow(wx.Frame):
             logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
             return False
 
+    def mark_audio_message_played(self, msg: dict):
+        """Mark a received voice message as played, both locally (the
+        status icon in the message list, same as a "played" receipt
+        arriving over the WebSocket) and for real, via a played receipt
+        sent to WhatsApp so the sender's own client shows it too.
+
+        Called once, right when in-app playback of a received audioMessage
+        reaches the end (ConversationsPanel.on_audio_timer(), the same
+        moment the playback controls get hidden) — never for a message we
+        sent ourselves: "played" only ever legitimately reflects the
+        RECIPIENT's own playback, which for our own sends already arrives
+        the normal way via on_message_status_update()/messages.update.
+        """
+        key = msg.get("key", {}) or {}
+        if key.get("fromMe", False):
+            return
+        msg_id = key.get("id", "")
+        remote_jid = key.get("remoteJid", "")
+        if not remote_jid and hasattr(self, "conversations_panel"):
+            conv = self.conversations_panel.conversation
+            remote_jid = conv.get("remoteJid", "") if conv else ""
+        if not msg_id or not remote_jid:
+            return
+        # Local status icon — reuses the exact same path a real
+        # messages.update WebSocket event drives (find the cached record,
+        # append MessageUpdate, persist to DB, refresh the visible row).
+        self.on_message_status_update({
+            "key": {"id": msg_id, "remoteJid": remote_jid},
+            "status": "5",
+        })
+        threading.Thread(
+            target=self._send_mark_played_request,
+            args=(remote_jid, dict(key)),
+            daemon=True,
+        ).start()
+
+    def _send_mark_played_request(self, remote_jid: str, msg_key: dict):
+        """Background: POST the played receipt to WPPConnect's mark-played
+        endpoint (client/api_patches/src/controller/messageController.ts —
+        no equivalent route existed anywhere in WPPConnect Server)."""
+        full_id = self._serialize_msg_id(remote_jid, msg_key)
+        if not full_id:
+            return
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/mark-played"
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        try:
+            r = requests.post(url, json={"messageId": full_id}, headers=headers, timeout=15)
+            if r.status_code not in (200, 201):
+                logging.warning(
+                    "[mark_audio_played] HTTP %s for %s: %s",
+                    r.status_code, full_id, r.text[:200],
+                )
+        except Exception as exc:
+            logging.warning("[mark_audio_played] request failed for %s: %s", full_id, exc)
+
     def _preview_sender_from_jid(self, jid: str) -> str:
         """
         Resolve a participant JID to a display name for chat list previews.
