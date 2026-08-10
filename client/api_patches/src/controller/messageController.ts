@@ -20,10 +20,24 @@ import { unlinkAsync } from '../util/functions';
 
 function returnError(req: Request, res: Response, error: any) {
   req.logger.error(error);
+  // JSON.stringify(new Error(...)) serializes to `{}` — Error's own message/
+  // stack properties aren't enumerable — so passing the raw Error object
+  // here silently dropped the actual failure text. Own enumerable props a
+  // custom Error subclass sets itself (e.g. wa-js's own error classes,
+  // which explicitly assign `this.name`/`this.level`) still came through,
+  // which is why every video-send 500 only ever showed
+  // {"name":"t","level":"error"} in the response/log — the one property
+  // that would have said *why* (message, inherited from Error.prototype)
+  // was the one being dropped. Same fix already applied in this file's
+  // deviceController.ts counterpart.
+  const detail =
+    error instanceof Error
+      ? { ...error, name: error.name, message: error.message, stack: error.stack }
+      : error;
   res.status(500).json({
     status: 'Error',
     message: 'Erro ao enviar a mensagem.',
-    error: error,
+    error: detail,
   });
 }
 

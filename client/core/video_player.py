@@ -185,6 +185,50 @@ class VideoPlayer:
         else:
             self._pause()
 
+    def get_position(self) -> int:
+        """Current audio-track position (BASS bytes), 0 if nothing is open."""
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is None:
+            return 0
+        try:
+            return ctrl.get_position()
+        except Exception:
+            return 0
+
+    def get_length(self) -> int:
+        """Total audio-track length (BASS bytes), 0 if nothing is open."""
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is None:
+            return 0
+        try:
+            return ctrl.get_length()
+        except Exception:
+            return 0
+
+    def set_position(self, pos: int):
+        """Seek the audio track — see the module docstring for why the
+        picture itself isn't reseeked to match (ffmpeg's frame pipe has no
+        seek support here; the slider only moves the audio, same
+        "approximate sync" tradeoff already documented above)."""
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is None:
+            return
+        try:
+            ctrl.set_position(pos)
+        except Exception:
+            pass
+
+    def set_speed(self, speed: float):
+        """Change playback speed live, same steps as ConversationsPanel's
+        own audio speed button. Requires the Tempo FX wrapper _start_audio()
+        always opens now — a no-op if that failed to open (FX unavailable)."""
+        if self._tempo_ctrl is None:
+            return
+        try:
+            self._tempo_ctrl.tempo = _TEMPO_MAP.get(speed, 0)
+        except Exception:
+            pass
+
     def stop(self):
         """Stop playback and release everything. Always safe to call even
         if nothing is playing."""
@@ -220,19 +264,21 @@ class VideoPlayer:
     # ── Internals: audio (BASS, directly on the video file) ─────────────
 
     def _start_audio(self, video_path: str, speed: float = 1.0):
-        # At the default 1x speed, keep the original plain-stream path
-        # (decode=False, played directly) — unchanged from before speed
-        # support existed. Any other speed needs a decoded stream wrapped
-        # by Tempo FX (a decoded/BASS_STREAM_DECODE stream has no audio
-        # output of its own and can't be played directly), exactly like
-        # ConversationsPanel._play_audio()'s _open_stream() helper.
+        # Always open a decoded stream wrapped in Tempo FX, exactly like
+        # ConversationsPanel._play_audio()'s _open_stream() helper — a plain
+        # (decode=False) stream has no way to change tempo after opening, so
+        # keeping that shortcut at 1x would make set_speed() a no-op for any
+        # video started at the default speed (the common case). The fallback
+        # to a plain stream below only fires if Tempo FX itself is
+        # unavailable or the format can't be opened decoded.
         def _open():
-            if speed == 1.0:
+            try:
+                s = sl_stream.FileStream(file=video_path, decode=True)
+                tempo = Tempo(s)
+                tempo.tempo = _TEMPO_MAP.get(speed, 0)
+                return s, tempo
+            except Exception:
                 return sl_stream.FileStream(file=video_path, decode=False), None
-            s = sl_stream.FileStream(file=video_path, decode=True)
-            tempo = Tempo(s)
-            tempo.tempo = _TEMPO_MAP.get(speed, 0)
-            return s, tempo
 
         try:
             self._audio_stream, self._tempo_ctrl = _open()

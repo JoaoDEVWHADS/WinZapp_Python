@@ -2734,9 +2734,16 @@ class ConversationsPanel(wx.Panel):
         # live ffmpeg subprocess; leaving it running unattended is worth
         # avoiding outright rather than matching audio's more permissive
         # behaviour.
+        was_playing_video = self._current_video_msg_id is not None
         if getattr(self, "_video_player", None) is not None:
             self._video_player.stop()
         self._current_video_msg_id = None
+        if was_playing_video:
+            # Video never keeps its shared speed/slider controls visible
+            # once stopped here (unlike audio, which can keep playing in
+            # the background and re-show them on refocus) — nothing else
+            # will hide them since video always stops on defocus.
+            self._hide_audio_controls()
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -4160,7 +4167,7 @@ class ConversationsPanel(wx.Panel):
                 tmp.close()
                 speed = self._audio_speed_steps[self._audio_speed_index]
                 self._current_video_msg_id = msg_id
-                wx.CallAfter(self._video_player.load_and_play, tmp.name, speed)
+                wx.CallAfter(self._start_video_playback, tmp.name, speed, msg_id)
             except Exception as exc:
                 wx.CallAfter(
                     wx.MessageBox,
@@ -4172,6 +4179,19 @@ class ConversationsPanel(wx.Panel):
                 )
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _start_video_playback(self, path: str, speed: float, msg_id: str):
+        """Runs on the UI thread (via wx.CallAfter from _run() above). Starts
+        the player and — same as _play_audio() already does for voice
+        messages — shows the shared speed button/progress slider so the
+        video gets the same seek/speed controls audio already has, instead
+        of only Enter-to-pause with no other way to scrub or change speed."""
+        self._video_player.load_and_play(path, speed)
+        if self._focused_msg_id() == msg_id:
+            self._show_audio_controls()
+            self.audio_speed_btn.SetLabel(self._format_speed(speed))
+        if not self._audio_timer.IsRunning():
+            self._audio_timer.Start(30)
 
     def _resolve_media_filename(self, msg: dict) -> str:
         """Resolve original filename and extension for any media message (document, audio, image, video)."""
@@ -4698,6 +4718,23 @@ class ConversationsPanel(wx.Panel):
         self.refresh_active_conversation_messages()
 
     def on_audio_timer(self, event):
+        if self._current_video_msg_id is not None:
+            if not self._video_player.is_playing:
+                # Reached EOF or was stopped elsewhere (e.g. _hide_all_media_
+                # controls() already cleared this — belt and suspenders for
+                # any path that stops the player without going through it).
+                self._current_video_msg_id = None
+                self._hide_audio_controls()
+                return
+            try:
+                pos   = self._video_player.get_position()
+                total = self._video_player.get_length()
+                if total > 0:
+                    self.audio_slider.SetValue(int(pos / total * 1000))
+                    self.audio_slider.Refresh()
+            except Exception:
+                pass
+            return
         if self._audio_stream is None:
             return
         try:
@@ -4876,7 +4913,9 @@ class ConversationsPanel(wx.Panel):
         """Apply the current speed index to the active stream and persist it."""
         speed = self._audio_speed_steps[self._audio_speed_index]
         self.audio_speed_btn.SetLabel(self._format_speed(speed))
-        if self._audio_tempo_ctrl is not None:
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            self._video_player.set_speed(speed)
+        elif self._audio_tempo_ctrl is not None:
             try:
                 self._audio_tempo_ctrl.tempo = self._audio_tempo_map[speed]
             except Exception:
@@ -4885,6 +4924,15 @@ class ConversationsPanel(wx.Panel):
         self.main_window.save_settings()
 
     def on_audio_slider(self, event):
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            try:
+                val   = self.audio_slider.GetValue()
+                total = self._video_player.get_length()
+                if total > 0:
+                    self._video_player.set_position(int(val / 1000 * total))
+            except Exception:
+                pass
+            return
         if self._audio_stream is None:
             return
         try:
@@ -6606,7 +6654,7 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
-        if ctx.get("quotedMessage") and self._goto_quoted_status(quoted_id, ctx):
+        if self._goto_quoted_status(quoted_id, ctx):
             return
         self._show_quoted_not_found_error()
 
