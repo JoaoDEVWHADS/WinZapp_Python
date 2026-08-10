@@ -152,6 +152,26 @@ if (process.env.AUTHENTICATION_API_KEY) {
 // to its own default (auto-scaled off available system memory, normally
 // well over 1GB) — a real, if higher, ceiling instead of an artificial low
 // one that trades a memory-usage improvement for occasional hard crashes.
+//
+// NOTE on '--disable-software-rasterizer'/'--disable-3d-apis'/
+// '--disable-webgl' (also removed, same reasoning): every video send
+// (message attachment AND status) failed with "MediaUnsupportedError:
+// video loaded with duration but no dims" — WhatsApp Web's own upload flow
+// reads a video's container metadata fine (duration needs no decode) but
+// never got past that, because reading videoWidth/videoHeight off an
+// HTMLVideoElement needs at least one frame actually decoded and
+// composited. '--disable-gpu' alone is a normal, well-supported way to run
+// headless Chrome (it falls back to SwiftShare/SwiftShader, a bundled
+// software rasterizer) — but stacking '--disable-software-rasterizer' on
+// TOP of '--disable-gpu' removes that fallback too, leaving no
+// rasterization backend at all; '--disable-3d-apis'/'--disable-webgl'
+// block the same GPU/compositor surface from a different angle. Images
+// were never affected (a static image decode/thumbnail doesn't go through
+// this compositor pipeline the same way), which is exactly the "photos
+// work, videos don't, even tiny ones" split that was reported.
+// '--disable-gpu' itself is kept — it's the one that actually saves
+// CPU/memory in a windowless session, and on its own still leaves the
+// software rasterizer fallback available.
 const optimizedBrowserArgs = [
   '--disable-renderer-accessibility',
   '--disable-web-security',
@@ -172,15 +192,12 @@ const optimizedBrowserArgs = [
   '--ignore-ssl-errors',
   '--ignore-certificate-errors-spki-list',
   '--no-zygote',
-  '--disable-3d-apis',
-  '--disable-webgl',
   '--disable-component-update',
   '--disable-speech-api',
   '--disable-voice-input',
   '--disable-renderer-backgrounding',
   '--disable-backgrounding-occluded-windows',
   '--disable-features=OptimizationGuideOnDeviceModel,PromptAPIForGeminiNano,AISummarization,HelpMeWrite,OptimizationGuide,OptimizationHints,OptimizationTargetPrediction',
-  '--disable-software-rasterizer',
   '--disable-ipc-flooding-protection',
   '--disable-breakpad',
   '--password-store=basic',
