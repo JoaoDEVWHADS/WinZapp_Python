@@ -729,6 +729,27 @@ export default class CreateSessionUtil {
         callWebHook(client, req, 'onselfmessage', message);
     });
 
+    // WhatsApp re-delivers an edited message under its ORIGINAL key.id, but
+    // that re-delivery only ever arrives through this dedicated
+    // chat.msg_edited/onMessageEdit event — never through onAnyMessage
+    // above, whose chat.new_message hook simply never fires for an edit.
+    // Without this, an edit made by anyone else than the WinZapp user was
+    // silently dropped server-side: nothing at all reached the Python
+    // client until the next full resync re-fetched the chat from scratch
+    // and picked up the current text that way. Re-emitting through the
+    // SAME 'received-message' event onAnyMessage already uses is
+    // deliberate: WAPI.processMessageObj() serializes an edit's `msg`
+    // identically to a normal message (same key.id as the original), so
+    // it flows straight into the existing same-id dedup check in
+    // MainWindow.on_new_message() (client/main.py's _apply_possible_edit())
+    // that was already built for exactly this — it just never received a
+    // live edit event to actually detect until now.
+    await client.onMessageEdit(async (chat: any, id: string, message: any) => {
+      message.session = client.session;
+      req.io.emit('received-message', { response: message });
+      callWebHook(client, req, 'onmessageedit', message);
+    });
+
     await client.onIncomingCall(async (call) => {
       req.io.emit('incomingcall', call);
       callWebHook(client, req, 'incomingcall', call);
