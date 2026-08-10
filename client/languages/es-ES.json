@@ -54,6 +54,7 @@
     "tray_connecting": "conectando...",
     "media_send_failed": "No se pudo enviar el archivo. Error: {error}",
     "media_too_large": "El archivo supera el tamaño máximo permitido de {max_mb} MB y no puede enviarse.",
+    "media_unsupported_error": "el archivo parece estar dañado o en un formato que WhatsApp no puede procesar",
     "remove_mention": "Eliminar mención a @{name}",
     "no_pairing_code_received": "No se pudo conectar a {app_name}. No se recibió ningún código de emparejamiento.",
     "no_QRcode_received": "No se pudo conectar a {app_name}. No se recibió ningún código QR.",

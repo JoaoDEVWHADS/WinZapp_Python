@@ -54,6 +54,7 @@
     "tray_connecting": "a ligar...",
     "media_send_failed": "Não foi possível enviar o ficheiro. Erro: {error}",
     "media_too_large": "O ficheiro excede o tamanho máximo permitido de {max_mb} MB e não pode ser enviado.",
+    "media_unsupported_error": "o ficheiro parece estar corrompido ou num formato que o WhatsApp não consegue processar",
     "remove_mention": "Remover menção a @{name}",
     "no_pairing_code_received": "Não foi possível estabelecer ligação com o {app_name}. Não foi recebido nenhum código de emparelhamento.",
     "no_QRcode_received": "Não foi possível estabelecer ligação com o {app_name}. Não foi recebido nenhum código QR.",

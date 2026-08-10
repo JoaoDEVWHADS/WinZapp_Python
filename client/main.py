@@ -14318,9 +14318,17 @@ class MainWindow(wx.Frame):
                     return msg_id
                 return {"ok": True, "error": "ID not found in response"}
             err = f"HTTP {r.status_code}"
+            inner_error_name = ""
             try:
                 body = r.json()
-                detail = (body.get("message") or body.get("error") or "")
+                inner_error = body.get("error")
+                inner_message = ""
+                if isinstance(inner_error, dict):
+                    inner_error_name = inner_error.get("name") or ""
+                    inner_message = inner_error.get("message") or ""
+                elif isinstance(inner_error, str):
+                    inner_message = inner_error
+                detail = inner_message or (body.get("message") or "")
                 if detail:
                     err = f"{err}: {detail}"
             except Exception:
@@ -14333,6 +14341,19 @@ class MainWindow(wx.Frame):
             # uploads under load. Retry those; treat 4xx as permanent.
             if self._check_wa_connection_closed(r):
                 return {"ok": False, "error": err, "retry": False, "disconnected": True}
+            # MediaUnsupportedError (observed as "video loaded with duration
+            # but no dims") means WhatsApp Web's own upload pipeline rejected
+            # THIS specific file as malformed/unprocessable — retrying sends
+            # the exact same bytes again and fails identically every time, so
+            # unlike a generic 5xx this is never transient. Skip the retry
+            # loop and surface a clear reason immediately instead of the
+            # generic "Erro ao enviar a mensagem" after 4 wasted attempts.
+            if inner_error_name == "MediaUnsupportedError":
+                return {
+                    "ok": False,
+                    "error": self.i18n.t("media_unsupported_error"),
+                    "retry": False,
+                }
             retryable = r.status_code >= 500
             return {"ok": False, "error": err, "retry": retryable}
         except Exception as exc:
