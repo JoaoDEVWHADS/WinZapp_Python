@@ -7317,10 +7317,20 @@ class ConversationsPanel(wx.Panel):
         while last >= 0 and self._is_separator(self._sorted_messages[last]):
             last -= 1
         if last >= 0:
-            if not self.messages_list.HasFocus():
-                self.messages_list.SetFocus()
+            # Focus() (not just Select()) is what actually moves the
+            # keyboard-focus/screen-reader cursor to the row — every other
+            # "jump to a specific row" handler in this file calls both
+            # together (see _on_accel_jump_unread() just below, and
+            # populate_messages()'s own default-tail-selection block).
+            # This one only ever called Select(), which on its own can
+            # leave the previous row's focus rectangle in place or just
+            # clear the old selection without moving anything — reported
+            # live as Alt+2 "either staying put or just deselecting the
+            # current message without really moving focus".
+            self.messages_list.Focus(last)
             self.messages_list.Select(last, True)
             self.messages_list.EnsureVisible(last)
+            self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
 

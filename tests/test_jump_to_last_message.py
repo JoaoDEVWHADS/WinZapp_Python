@@ -1,15 +1,28 @@
 """Test for ConversationsPanel._on_accel_jump_last() (Alt+2).
 
-Reported live after this session's unread-separator-reuse fix: sending a
-message and pressing Alt+2 no longer focused the user's own just-sent
-message — it landed on the wrong row, or on the last message from someone
-else. Root cause (fixed alongside this in the same change): the unread
-separator row could end up placed at the very bottom of the list even when
-the true last message was the user's own — _on_accel_jump_last() blindly
-trusted `messages_list.GetItemCount() - 1` as "the last message" without
-checking whether that row was actually a sentinel (separator/placeholder)
-rather than a real message. Fixed to walk backwards over any trailing
-sentinel rows.
+Two bugs, fixed in two passes:
+
+1. (Session fix #1) Sending a message and pressing Alt+2 no longer focused
+   the user's own just-sent message — the unread separator row could end
+   up placed at the very bottom of the list even when the true last
+   message was the user's own, and _on_accel_jump_last() blindly trusted
+   `messages_list.GetItemCount() - 1` as "the last message" without
+   checking whether that row was actually a sentinel (separator/
+   placeholder). Fixed to walk backwards over any trailing sentinel rows.
+
+2. (Session fix #2, found testing a compiled build after fix #1 shipped)
+   Alt+2 "either stays where it is, or just deselects the current message
+   without really moving focus" MOST of the time. Root cause, pre-existing
+   and NOT introduced by fix #1: this handler only ever called Select(),
+   never Focus() — every other "jump to a row" handler in this file calls
+   BOTH together (_on_accel_jump_unread() right below it, and
+   populate_messages()'s own default-tail-selection block) because
+   Select() alone does not reliably move the keyboard-focus/screen-reader
+   cursor; Focus() is what actually does that. The original _FakeMessagesList
+   test double below didn't even have a Focus() method, so this test suite
+   could not have caught fix #1 leaving that gap in place — it's been
+   added now specifically so a future regression here fails loudly instead
+   of silently passing again.
 
 ConversationsPanel is a wx.Panel and cannot be instantiated without a
 running wx.App — exercised against a small stub, same approach as
@@ -23,6 +36,7 @@ class _FakeMessagesList:
     def __init__(self, focused=-1):
         self._focused = focused
         self.selected = None
+        self.focused_item = None
         self.ensured_visible = None
         self.focus_set = False
 
@@ -31,6 +45,9 @@ class _FakeMessagesList:
 
     def SetFocus(self):
         self.focus_set = True
+
+    def Focus(self, idx):
+        self.focused_item = idx
 
     def Select(self, idx, on=True):
         self.selected = idx
@@ -61,6 +78,7 @@ class TestJumpToLastMessage:
         stub = _Stub([_msg("a"), _msg("b"), _msg("c")])
         stub._on_accel_jump_last(None)
         assert stub.messages_list.selected == 2
+        assert stub.messages_list.focused_item == 2
 
     def test_skips_a_trailing_unread_separator(self):
         """The exact reported bug: a separator ends up sitting at the very
@@ -70,24 +88,42 @@ class TestJumpToLastMessage:
         stub = _Stub([_msg("a"), _msg("b"), _sep()])
         stub._on_accel_jump_last(None)
         assert stub.messages_list.selected == 1
+        assert stub.messages_list.focused_item == 1
 
     def test_skips_multiple_trailing_sentinel_rows(self):
         stub = _Stub([_msg("a"), _sep(), {"_type": "empty_placeholder"}])
         stub._on_accel_jump_last(None)
         assert stub.messages_list.selected == 0
+        assert stub.messages_list.focused_item == 0
 
     def test_empty_list_selects_nothing(self):
         stub = _Stub([])
         stub._on_accel_jump_last(None)
         assert stub.messages_list.selected is None
+        assert stub.messages_list.focused_item is None
 
     def test_a_list_of_only_sentinels_selects_nothing(self):
         stub = _Stub([_sep()])
         stub._on_accel_jump_last(None)
         assert stub.messages_list.selected is None
+        assert stub.messages_list.focused_item is None
 
     def test_ensures_the_selected_row_is_visible_and_focuses_the_list(self):
         stub = _Stub([_msg("a"), _msg("b")])
         stub._on_accel_jump_last(None)
         assert stub.messages_list.ensured_visible == 1
         assert stub.messages_list.focus_set is True
+
+    def test_calls_focus_before_select_matching_the_rest_of_the_codebase(self):
+        """Regression test for bug #2 above: Focus() must actually be
+        called (not just Select()) — every working "jump to row" handler
+        in this file does both."""
+        calls = []
+        stub = _Stub([_msg("a"), _msg("b")])
+        stub.messages_list.Focus = lambda idx: calls.append(("Focus", idx))
+        stub.messages_list.Select = lambda idx, on=True: calls.append(("Select", idx))
+
+        stub._on_accel_jump_last(None)
+
+        assert ("Focus", 1) in calls
+        assert ("Select", 1) in calls
