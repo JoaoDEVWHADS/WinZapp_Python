@@ -6826,7 +6826,6 @@ class ConversationsPanel(wx.Panel):
         _LB_SETSEL        = 0x0185
         _LB_SETCARETINDEX = 0x019E
         _LB_GETCARETINDEX = 0x019F
-        _LB_GETSEL        = 0x0187
 
         def _lst_send(msg, wparam=0, lparam=0):
             return ctypes.windll.user32.SendMessageW(lst.GetHandle(), msg, wparam, lparam)
@@ -6837,9 +6836,6 @@ class ConversationsPanel(wx.Panel):
 
         def _lst_set_caret(idx):
             _lst_send(_LB_SETCARETINDEX, idx, 0)
-
-        def _lst_is_selected(idx):
-            return _lst_send(_LB_GETSEL, idx) > 0
 
         def _lst_set_selected(idx, select):
             _lst_send(_LB_SETSEL, 1 if select else 0, idx)
@@ -6862,9 +6858,13 @@ class ConversationsPanel(wx.Panel):
                 return  # suppressed — no Skip(), so selection is left alone
 
             if key == wx.WXK_SPACE and ctrl and shift:
-                all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
                 for i in range(count):
-                    _lst_set_selected(i, not all_selected)
+                    _lst_set_selected(i, False)
+                return
+
+            if key == wx.WXK_SPACE and shift:
+                for i in range(count):
+                    _lst_set_selected(i, True)
                 return
 
             if key == wx.WXK_SPACE and ctrl:
@@ -6877,6 +6877,12 @@ class ConversationsPanel(wx.Panel):
                 caret = _lst_caret()
                 if caret >= 0:
                     _lst_set_selected(caret, True)
+                    # LB_SETSEL doesn't move the caret, so no fresh
+                    # "item name, selected" announcement gets triggered the
+                    # way arrowing onto an already-selected item does —
+                    # NVDA/JAWS stay silent on the state change unless told
+                    # explicitly.
+                    wx.CallAfter(mw.output, i18n.t("selected"))
                 return
 
             event.Skip()  # Ctrl+Arrow, Shift+Arrow, everything else: native behavior
