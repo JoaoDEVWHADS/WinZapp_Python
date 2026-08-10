@@ -1,6 +1,11 @@
 # ── WinZapp: project-specific ignores ────────────────────────────────────────
 
 # User data / secrets (generated at runtime, never committed)
+# Bare data/ (repo root, not client/data/) covers dev-mode runs launched
+# from the repo root instead of client/ — app_paths.data_path() resolves
+# against the current working directory in dev mode, so which one gets
+# used depends on where the process was actually started from.
+data/
 client/data/media_failed.json
 client/data/messages.db
 client/data/messages.db-shm

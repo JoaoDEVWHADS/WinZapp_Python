@@ -10,7 +10,14 @@ import uuid
 import wx
 import wx.adv
 import pyperclip
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    # No wheel exists for PyAudio on Python 3.14 at the time of writing —
+    # see requirements.txt's version marker. Voice recording degrades to a
+    # clear "not available" message (see _start_voice_recording()) instead
+    # of the whole app failing to import.
+    pyaudio = None
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
@@ -1734,6 +1741,15 @@ class ConversationsPanel(wx.Panel):
         naturalness and quality.
         """
         if self.conversation is None:
+            return
+
+        if pyaudio is None:
+            # No wheel exists for PyAudio on Python 3.14 at the time of
+            # writing — see requirements.txt's version marker and this
+            # file's own `import pyaudio` — so recording degrades to a
+            # clear message instead of crashing on the first pyaudio.*
+            # reference below.
+            self.main_window.output(self.main_window.i18n.t("voice_recording_unavailable"))
             return
 
         self._recording_frames = []

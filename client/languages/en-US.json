@@ -138,6 +138,7 @@
     "audio_convert_failed": "Failed to convert audio. FFmpeg is missing or unavailable on this system.",
     "downloading_progress": "downloading, {pct}% done",
     "discard_voice_message": "Discard voice message",
+    "voice_recording_unavailable": "Voice recording is unavailable on this Python install (audio library not found).",
     "pause_recording": "Pause recording",
     "resume_recording": "Resume recording",
     "send_voice_message": "Send voice message",
