@@ -990,6 +990,21 @@ class WebSocketClient:
             if not isinstance(data, dict):
                 return
             # WPPConnect emits: {"data": "data:image/png;base64,...", "session": "..."}
+            # Ignore events for other sessions (multi-session server scenario,
+            # same guard already used in on_wpp_session_logged/on_wpp_status_
+            # find below) — observed live: /close-session answered 200 for a
+            # stale token, but the old session's Puppeteer browser/QR-polling
+            # loop kept running for many more minutes regardless, still
+            # emitting fresh qrCode events the whole time. Without this check
+            # those reached the SAME on_qrcode_update() the real,
+            # already-paired session's own events do, re-triggering the QR
+            # dialog (and, once its widgets were destroyed when the user
+            # actually finished pairing, an unhandled "wrapped C/C++ object
+            # ... has been deleted" RuntimeError on every single stale event
+            # after that) long after pairing had genuinely succeeded.
+            session = data.get("session", "")
+            if session and session != self.instance_name:
+                return
             qrcode_base64 = data.get("data")
             if qrcode_base64:
                 self.on_qrcode_update({
@@ -1115,6 +1130,13 @@ class WebSocketClient:
         """
         try:
             if not isinstance(data, dict):
+                return
+            # Same stale-session guard as on_wpp_qrcode — a closed-but-still-
+            # running session could otherwise keep feeding a rotated pairing
+            # code into a dialog for an account that already finished
+            # pairing through a different, current session.
+            session = data.get("session", "")
+            if session and session != self.instance_name:
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
