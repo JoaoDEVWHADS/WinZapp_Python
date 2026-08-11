@@ -101,17 +101,26 @@ export async function sendTextStorie(req: Request, res: Response) {
       },
     }
    */
-  const { text, options } = req.body;
+  const { text, options = {} } = req.body;
 
-  if (!text)
+  if (!text) {
     res.status(401).send({
       message: 'Text was not informed',
     });
+    return;
+  }
+
+  // Ensure default options required by WhatsApp Web protocol for text status
+  const statusOptions = {
+    backgroundColor: '#0275d8',
+    font: 1,
+    ...options,
+  };
 
   try {
     await ensureStatusChat(req.client);
     const results: any = [];
-    const posted = await req.client.sendTextStatus(text, options);
+    const posted = await req.client.sendTextStatus(text, statusOptions);
     req.logger.info(
       `[sendTextStorie] result for text=${JSON.stringify(text).slice(0, 80)}: ` +
         JSON.stringify(posted)?.slice(0, 300)
