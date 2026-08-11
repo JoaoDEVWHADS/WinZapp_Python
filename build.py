@@ -210,6 +210,54 @@ def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None, exclude_sub_di
             rel_path = os.path.relpath(abs_path, root).replace("\\", "/")
             yield abs_path, rel_path
 
+def _api_patches_out_of_sync():
+    """Return the client/api_patches/ relative paths that differ from (or
+    are missing in) client/api/ — the same drift tests/test_api_patches_in_sync.py
+    checks for CI. Patched files a dev edited only in client/api_patches/
+    (the tracked source of truth) without re-running setup_api.py would
+    otherwise silently ship whatever client/api/dist/server.js was already
+    built from — a stale/reverted patch baked into the release with no
+    warning, since check_tools() below only ever verified dist/server.js
+    *exists*, never that it matches the current patches.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "setup_api", os.path.join(ROOT_DIR, "setup_api.py")
+    )
+    setup_api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup_api)
+
+    out_of_sync = []
+    for rel_path in setup_api.CUSTOM_ROOT_FILES + setup_api.CUSTOM_SRC_FILES:
+        patch_path = os.path.join(setup_api.API_PATCHES_DIR, rel_path)
+        live_path  = os.path.join(setup_api.CLIENT_API_DIR, rel_path)
+        if not os.path.isfile(patch_path):
+            continue  # nothing tracked to compare against for this one
+        if not os.path.isfile(live_path):
+            out_of_sync.append(rel_path)
+            continue
+        with open(patch_path, "rb") as f:
+            patch_bytes = f.read()
+        with open(live_path, "rb") as f:
+            live_bytes = f.read()
+        if patch_bytes != live_bytes:
+            out_of_sync.append(rel_path)
+    return out_of_sync
+
+
+def _resync_api_patches(out_of_sync):
+    """Re-run setup_api.py so it restores the drifted files from
+    client/api_patches/ and rebuilds client/api/dist/server.js from them —
+    a plain file copy alone would leave dist/server.js stale (it's
+    precompiled JS; only `npm run build` regenerates it from the patched
+    .ts sources), exactly the gap that made this drift shippable at all.
+    """
+    print("  [WARN] client/api/ has drifted from client/api_patches/ — re-running setup_api.py:")
+    for rel_path in out_of_sync:
+        print(f"           {rel_path}")
+    run([PYTHON_CMD, os.path.join(ROOT_DIR, "setup_api.py")])
+
+
 # -- Step 1: Check tools and pre-built assets --------------------------------
 
 def check_tools():
@@ -235,6 +283,16 @@ def check_tools():
             f"client/node/node.exe  (download portable Node.js for Windows x64 and "
             f"extract to {NODE_DIR})"
         )
+
+    # If client/api/ already exists, catch it having drifted from
+    # client/api_patches/ (a patch edited but setup_api.py never re-run)
+    # before checking dist/server.js below — re-running setup_api.py here
+    # both restores the patches AND rebuilds dist/server.js from them,
+    # closing the gap that let a stale/reverted patch ship silently.
+    if os.path.isdir(API_DIR):
+        out_of_sync = _api_patches_out_of_sync()
+        if out_of_sync:
+            _resync_api_patches(out_of_sync)
 
     api_main = os.path.join(API_DIR, "dist", "server.js")
     if not os.path.isfile(api_main):
