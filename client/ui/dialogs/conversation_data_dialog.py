@@ -327,7 +327,15 @@ class ConversationDataDialog(wx.Dialog):
         ov_sizer.Add(self._edit_desc_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         self._add_members_btn_overview = wx.Button(overview_page, label=self._i18n.t("add_member"))
-        self._add_members_btn_overview.Disable()   # enabled after we confirm user is admin
+        # Unlike the Participants tab's own Add button (and the admin-only
+        # edit/remove/promote actions below), this one is NOT admin-gated:
+        # adding members is a normal-member action in WhatsApp by default,
+        # only actually admin-restricted when the group's own settings say
+        # so — which the API enforces on its own if it applies, same as the
+        # existing "can't determine my_jid" fallback below already does for
+        # everything else. Gating it here on _user_is_admin made it
+        # unusable for every non-admin member regardless of the group's
+        # real settings.
         self._add_members_btn_overview.Bind(wx.EVT_BUTTON, self._on_add_members)
         ov_sizer.Add(self._add_members_btn_overview, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self._build_sound_picker(overview_page, ov_sizer)
@@ -587,14 +595,15 @@ class ConversationDataDialog(wx.Dialog):
             self._participant_names.append(p_name)
             self._participant_is_admin.append(is_admin_bool)
 
-        # Enable "Add members" buttons, and show the admin-only group-editing
-        # buttons, only if the current user is a group admin. If we cannot
-        # determine my_jid, enable them anyway (the API will reject the
-        # request if the user turns out not to be an admin).
+        # Enable the Participants tab's "Add members" button, and show the
+        # admin-only group-editing buttons, only if the current user is a
+        # group admin. If we cannot determine my_jid, enable them anyway
+        # (the API will reject the request if the user turns out not to be
+        # an admin). The Overview tab's own Add button is intentionally
+        # NOT part of this gate — see its construction above.
         self._user_is_admin = bool(user_is_admin or not (my_phone_digits or my_lid_digits))
         if self._user_is_admin:
             self._add_members_btn.Enable()
-            self._add_members_btn_overview.Enable()
             self._edit_name_btn.Show()
             self._edit_desc_btn.Show()
         else:

@@ -19,6 +19,7 @@ from main import MainWindow
 
 class _Stub:
     _group_participant_action = MainWindow._group_participant_action
+    add_group_members     = MainWindow.add_group_members
     remove_group_members  = MainWindow.remove_group_members
     promote_group_members = MainWindow.promote_group_members
     demote_group_members  = MainWindow.demote_group_members
@@ -98,6 +99,51 @@ class TestParticipantActions:
 
         assert ok is False
         assert "boom" in err
+
+
+class TestAddGroupMembers:
+    """Regression: every add-member attempt failed with a server-side 500.
+    groupController.ts's addParticipant() (upstream, unpatched) reads
+    req.body.phone — add_group_members() used to send "participantId"
+    instead, a field the controller never reads at all, so phone came
+    through as undefined and contactToArray(undefined) blew up server-side.
+    remove/promote/demote_group_members() already used "phone" correctly
+    (see TestParticipantActions above), which is why only adding was ever
+    reported broken."""
+
+    def test_posts_phone_not_participantid(self, monkeypatch):
+        _fake_post_ok.calls = []
+        monkeypatch.setattr("main.requests.post", _fake_post_ok)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is True
+        assert err == ""
+        url, payload = _fake_post_ok.calls[0]
+        assert url == "http://127.0.0.1:6300/api/test-token/add-participant-group"
+        assert payload["groupId"] == "123-456@g.us"
+        assert payload["phone"] == ["5511999999999@c.us"]
+        assert "participantId" not in payload
+
+    def test_jid_already_qualified_is_not_double_suffixed(self, monkeypatch):
+        _fake_post_ok.calls = []
+        monkeypatch.setattr("main.requests.post", _fake_post_ok)
+        stub = _Stub()
+
+        stub.add_group_members("123-456@g.us", ["5511999999999@lid"])
+
+        _, payload = _fake_post_ok.calls[0]
+        assert payload["phone"] == ["5511999999999@lid"]
+
+    def test_failure_returns_false_and_error_text(self, monkeypatch):
+        monkeypatch.setattr("main.requests.post", _fake_post_fail)
+        stub = _Stub()
+
+        ok, err = stub.add_group_members("123-456@g.us", ["5511999999999"])
+
+        assert ok is False
+        assert "403" in err
 
 
 class TestGroupSubjectAndDescription:

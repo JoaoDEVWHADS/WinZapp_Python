@@ -14134,9 +14134,15 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+        # groupController.ts's addParticipant() (upstream, unpatched) reads
+        # req.body.phone — same field name remove/promote/demote already use
+        # below via _group_participant_action(). This used to send
+        # "participantId" instead, a field the controller never reads at
+        # all, so phone came through as undefined and every add attempt
+        # failed with a 500 inside contactToArray(undefined).
         payload = {
-            "groupId":      group_jid,
-            "participantId": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
+            "groupId": group_jid,
+            "phone":   [j if "@" in j else f"{j}@c.us" for j in participant_jids],
         }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)

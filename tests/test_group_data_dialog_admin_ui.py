@@ -73,6 +73,39 @@ class TestParticipantContextMenu:
             assert "group_action_no_permission" in src, f"{fn.__name__} has no permission-error path"
 
 
+class TestAddMembersButtonOnOverviewTabIsNotAdminGated:
+    """Reported live: the Overview tab's own "Add member" button was
+    disabled at construction and only re-enabled inside the
+    `if self._user_is_admin:` block, right alongside the genuinely
+    admin-only edit-name/edit-description buttons — making it unusable for
+    every non-admin member, even though adding members is a normal-member
+    action in WhatsApp by default (the server enforces the real
+    restriction if the group's own settings actually require admin)."""
+
+    def test_overview_button_is_not_disabled_at_construction(self):
+        src = inspect.getsource(ConversationDataDialog._build_group_ui)
+        assert "self._add_members_btn_overview.Disable()" not in src
+
+    def test_overview_button_is_not_inside_the_admin_gate(self):
+        populate_src = inspect.getsource(ConversationDataDialog._populate_group_unsafe)
+        gate_start = populate_src.index("if self._user_is_admin:")
+        gate_end = populate_src.index("else:", gate_start)
+        gated_block = populate_src[gate_start:gate_end]
+        assert "_add_members_btn_overview" not in gated_block
+
+    def test_participants_tab_button_is_still_admin_gated(self):
+        """Sanity check the other Add button's existing admin gating was
+        left untouched by this fix."""
+        build_src = inspect.getsource(ConversationDataDialog._build_group_ui)
+        assert "self._add_members_btn.Disable()" in build_src
+
+        populate_src = inspect.getsource(ConversationDataDialog._populate_group_unsafe)
+        gate_start = populate_src.index("if self._user_is_admin:")
+        gate_end = populate_src.index("else:", gate_start)
+        gated_block = populate_src[gate_start:gate_end]
+        assert "self._add_members_btn.Enable()" in gated_block
+
+
 class TestAdminOnlyEditButtons:
     def test_buttons_start_hidden_and_are_shown_only_for_admins(self):
         build_src = inspect.getsource(ConversationDataDialog._build_group_ui)
