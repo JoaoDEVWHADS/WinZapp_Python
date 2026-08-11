@@ -14,6 +14,7 @@ Usage:
   venv\\Scripts\\python.exe setup_api.py
 """
 
+import json
 import os
 import shutil
 import subprocess
