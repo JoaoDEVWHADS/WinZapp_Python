@@ -1406,6 +1406,21 @@ class WebSocketClient:
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
+            # Preserve the PTT/voice-note flag: WPPConnect reports voice notes
+            # with type="ptt", but that raw type is later mapped to
+            # "audioMessage" (see type_mapping below) and the flag would be
+            # silently dropped. ConversationsPanel._is_voice_message() decides
+            # whether an audio chains into the sequential PTT playback (and
+            # how it is labelled/saved) from this very flag — without it,
+            # received voice notes never chained, while own recordings (whose
+            # virtual message always carries ptt=True) did.
+            is_ptt = (
+                msg_type == "ptt"
+                or bool(wpp_msg.get("isPtt"))
+                or bool((wpp_msg.get("mediaData") or {}).get("ptt"))
+            )
+            if is_ptt:
+                message_content["audioMessage"]["ptt"] = True
         elif msg_type == "image":
             # NOTE: do NOT fall back to wpp_msg["body"] for the caption — for
             # media messages WPPConnect puts the base64 JPEG thumbnail in `body`,
