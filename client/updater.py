@@ -24,9 +24,64 @@ import subprocess
 import requests
 import wx
 
-from app_paths import _outer_exe_dir, _is_frozen, resource_path
+from app_paths import _outer_exe_dir, _is_frozen, resource_path, log_path
 from config import GITHUB_API_LATEST_RELEASE
 from version import __version__
+
+
+# ── Dedicated persistent updater log ─────────────────────────────────────────
+# The main log.log is truncated on every launch (see setup_logging in
+# main.py), so an updater that "shows it updated" but then fails mid-install
+# would leave no trace by the time the new build boots. This module-level
+# logger appends to a separate updater.log in the SAME logs/ folder (next to
+# wppconnect.log etc.), does NOT rotate/truncate, and records every step of
+# the update flow with full context so the failure point is always findable.
+_UPDATER_LOGGER = None
+_UPDATER_LOG_PATH = None
+
+
+def _ensure_updater_logger():
+    """Create (once) the dedicated updater file logger in the logs folder."""
+    global _UPDATER_LOGGER, _UPDATER_LOG_PATH
+    if _UPDATER_LOGGER is not None:
+        return _UPDATER_LOGGER
+    _logger = logging.getLogger("updater.dedicated")
+    _logger.setLevel(logging.DEBUG)
+    _logger.propagate = False  # keep it self-contained; main logging already knows
+    try:
+        log_dir = log_path()
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = log_path("updater.log")
+        _UPDATER_LOG_PATH = log_file
+        fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s"
+        ))
+        _logger.addHandler(fh)
+        _logger.debug("=" * 70)
+        _logger.debug("UPDATER DEDICATED LOG SESSION START — local version=%s", __version__)
+        _logger.debug("=" * 70)
+    except Exception:
+        # Never let logging setup break the updater itself.
+        _logger = logging.getLogger("updater.dedicated")
+        _logger.setLevel(logging.DEBUG)
+        _logger.propagate = True
+    _UPDATER_LOGGER = _logger
+    return _logger
+
+
+def log_updater(level: int, msg: str, *args, **kwargs):
+    """Log to BOTH the normal app log and the dedicated updater.log.
+
+    Use this everywhere inside the updater flow so the failure point is
+    always visible in updater.log regardless of main logging rotation.
+    """
+    logging.log(level, "Auto-updater: " + msg, *args, **kwargs)  # normal log
+    try:
+        _ensure_updater_logger().log(level, msg, *args, **kwargs)  # dedicated
+    except Exception:
+        pass
 
 
 def _find_sha256sums_asset(assets: list) -> str:
@@ -53,9 +108,10 @@ def _verify_sha256sums(file_path: str, filename: str, sha256sums_url: str) -> "t
     mismatch all fail CLOSED and abort the install.
     """
     if not sha256sums_url:
-        logging.warning(
-            "Auto-updater: Release has no SHA256SUMS.txt asset (older release) — "
-            "skipping checksum verification for %s.", filename,
+        log_updater(
+            logging.WARNING,
+            "Release has no SHA256SUMS.txt asset (older release) — skipping checksum verification for %s.",
+            filename,
         )
         return True, ""
     try:
@@ -86,7 +142,7 @@ def _verify_sha256sums(file_path: str, filename: str, sha256sums_url: str) -> "t
     if actual != expected:
         return False, f"Checksum mismatch for {filename}: expected {expected}, got {actual}"
 
-    logging.info("Auto-updater: Checksum verified for %s (%s).", filename, actual)
+    log_updater(logging.INFO, "Checksum verified for %s (%s).", filename, actual)
     return True, ""
 
 
@@ -196,7 +252,7 @@ def _read_changelog_file(lang_code: str) -> str:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception:
-        logging.warning("Auto-updater: Failed to read changelog file %s", path, exc_info=True)
+        log_updater(logging.WARNING, "Failed to read changelog file %s", path, exc_info=True)
         return ""
 
 
@@ -348,10 +404,12 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
 
     with open(bat_path, "w", encoding="utf-8") as f:
         f.write(bat)
-    logging.info("Auto-updater: Wrote batch installer script to %s", bat_path)
+    log_updater(logging.INFO, "Wrote batch installer script to %s", bat_path)
+    log_updater(logging.INFO, "Batch script will write step-by-step output to %s", log_file)
 
     if sys.platform == "win32":
         needs_admin = _needs_admin()
+        log_updater(logging.INFO, "needs_admin=%s for install dir %s", needs_admin, install_dir)
         if needs_admin:
             # ShellExecuteW returns an HINSTANCE-shaped value that is > 32 on
             # success and an SE_ERR_* code <= 32 on failure — notably
@@ -363,22 +421,24 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
             result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0
             )
+            log_updater(logging.INFO, "ShellExecuteW('runas', ...) result=%s", result)
             if result <= 32:
-                logging.warning(
-                    "Auto-updater: ShellExecuteW('runas', ...) failed or was "
-                    "declined by the user (result=%s); batch installer was "
-                    "not launched.", result,
+                log_updater(
+                    logging.WARNING,
+                    "ShellExecuteW('runas', ...) failed or was declined by the user (result=%s); batch installer was not launched.",
+                    result,
                 )
                 return False
         else:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACH_PROCESS", 0)
+            log_updater(logging.INFO, "Launching batch via subprocess.Popen (CREATE_NO_WINDOW|DETACH_PROCESS)…")
             subprocess.Popen(
                 ["cmd.exe", "/c", bat_path],
                 creationflags=flags,
             )
         return True
     else:
-        logging.warning("Auto-updater: Platform %s is not supported for batch installer execution.", sys.platform)
+        log_updater(logging.WARNING, "Platform %s is not supported for batch installer execution.", sys.platform)
         return False
 
 
@@ -480,7 +540,7 @@ class UpdateProgressDialog(wx.Dialog):
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="winzapp_upd_")
             os.close(zip_fd)
 
-            logging.info("Auto-updater: Downloading ZIP from %s to %s", self._zip_url, zip_path)
+            log_updater(logging.INFO, "Downloading ZIP from %s to %s", self._zip_url, zip_path)
             resp = requests.get(self._zip_url, stream=True, timeout=60)
             resp.raise_for_status()
 
@@ -489,7 +549,7 @@ class UpdateProgressDialog(wx.Dialog):
             with open(zip_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
                     if self._cancelled:
-                        logging.info("Auto-updater: Download cancelled by user.")
+                        log_updater(logging.INFO, "Download cancelled by user.")
                         return
                     f.write(chunk)
                     downloaded += len(chunk)
@@ -498,10 +558,10 @@ class UpdateProgressDialog(wx.Dialog):
                         wx.CallAfter(self._gauge.SetValue, pct)
 
             if self._cancelled:
-                logging.info("Auto-updater: Download cancelled by user.")
+                log_updater(logging.INFO, "Download cancelled by user.")
                 return
 
-            logging.info("Auto-updater: Download completed successfully.")
+            log_updater(logging.INFO, "Download completed successfully.")
 
             # ── Verify integrity ─────────────────────────────────────────────────
             # Before this ZIP is trusted with elevated write access to the
@@ -510,9 +570,11 @@ class UpdateProgressDialog(wx.Dialog):
             # release edit. See _verify_sha256sums()'s docstring for the
             # fail-open/fail-closed policy.
             filename = os.path.basename(self._zip_url.split("?")[0])
+            log_updater(logging.INFO, "Downloaded %d bytes to %s (filename=%s)", downloaded, zip_path, filename)
             ok, detail = _verify_sha256sums(zip_path, filename, self._sha256sums_url)
+            log_updater(logging.INFO, "Checksum verification result: ok=%s detail=%r", ok, detail)
             if not ok:
-                logging.error("Auto-updater: Checksum verification failed for %s: %s", filename, detail)
+                log_updater(logging.ERROR, "Checksum verification failed for %s: %s", filename, detail)
                 try:
                     os.remove(zip_path)
                 except OSError:
@@ -523,21 +585,25 @@ class UpdateProgressDialog(wx.Dialog):
 
             # ── Extract ───────────────────────────────────────────────────────
             extract_dir = tempfile.mkdtemp(prefix="winzapp_ext_")
-            logging.info("Auto-updater: Extracting update to %s", extract_dir)
+            log_updater(logging.INFO, "Extracting update to %s", extract_dir)
             with zipfile.ZipFile(zip_path, "r") as zf:
+                _n_members = len(zf.namelist())
                 _safe_extract_zip(zf, extract_dir)
             os.remove(zip_path)
+            log_updater(logging.INFO, "Extraction done: %d entries in ZIP.", _n_members)
 
             # If the ZIP placed all files inside a single top-level folder,
             # point extract_dir at that folder so xcopy copies the contents.
             _entries = [e for e in os.listdir(extract_dir) if not e.startswith(".")]
+            log_updater(logging.INFO, "Extract top-level entries: %r", _entries)
             if len(_entries) == 1 and os.path.isdir(
                 os.path.join(extract_dir, _entries[0])
             ):
                 extract_dir = os.path.join(extract_dir, _entries[0])
+                log_updater(logging.INFO, "ZIP had single top-level folder; extract_dir now = %s", extract_dir)
 
             if self._cancelled:
-                logging.info("Auto-updater: Extraction cancelled by user.")
+                log_updater(logging.INFO, "Extraction cancelled by user.")
                 return
 
             # ── Install ───────────────────────────────────────────────────────
@@ -548,7 +614,7 @@ class UpdateProgressDialog(wx.Dialog):
             wx.CallAfter(self._gauge.SetValue, 100)
 
             if not _is_frozen():
-                logging.info("Auto-updater: Dev mode detected. Skipping real installation.")
+                log_updater(logging.INFO, "Dev mode detected. Skipping real installation.")
                 time.sleep(1)
                 self._install_ok = True
                 wx.CallAfter(self.EndModal, wx.ID_OK)
@@ -558,17 +624,26 @@ class UpdateProgressDialog(wx.Dialog):
             exe_name    = os.path.basename(sys.argv[0]) if sys.argv else "WinZapp.exe"
             pid         = os.getpid()
 
-            logging.info("Auto-updater: Launching batch installer from %s (PID %d)", install_dir, pid)
+            log_updater(logging.INFO, "Launching batch installer from %s (PID %d)", install_dir, pid)
             launched = _run_batch_installer(extract_dir, install_dir, exe_name, pid, api_port=getattr(self._main_window, "wpp_port", 6300))
             if not launched:
+                log_updater(logging.ERROR, "Batch installer was NOT launched (launched=False) — update reported as FAILED.")
                 self._error_msg = self._main_window.i18n.t("update_uac_declined")
                 wx.CallAfter(self.EndModal, wx.ID_ABORT)
                 return
+            log_updater(
+                logging.INFO,
+                "Batch installer launched OK — install_dir=%s exe=%s pid=%d. "
+                "install_ok set True; batch will write updater_installer.log "
+                "in the install dir while the app closes and copies files.",
+                install_dir, exe_name, pid,
+            )
             self._install_ok = True
             wx.CallAfter(self.EndModal, wx.ID_OK)
+            log_updater(logging.INFO, "EndModal(wx.ID_OK) queued — dialog will now close and app will exit for the batch to finish.")
 
         except Exception as exc:
-            logging.exception("Auto-updater: Exception during update installation")
+            log_updater(logging.ERROR, "Exception during update installation", exc_info=True)
             self._error_msg = str(exc)
             wx.CallAfter(self.EndModal, wx.ID_ABORT)
 
@@ -686,7 +761,7 @@ class UpdateChecker:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _check_once(self):
-        logging.info("Auto-updater: Checking GitHub Releases for updates...")
+        log_updater(logging.INFO, "Checking GitHub Releases for updates...")
         try:
             resp = requests.get(
                 GITHUB_API_LATEST_RELEASE,
@@ -696,16 +771,16 @@ class UpdateChecker:
             resp.raise_for_status()
             data = resp.json()
         except Exception:
-            logging.exception("Auto-updater: Exception checking for updates")
+            log_updater(logging.ERROR, "Exception checking for updates", exc_info=True)
             self._schedule_retry()
             return
 
         tag_name       = data.get("tag_name", "")
         remote_version = tag_name.lstrip("vV")
-        logging.info("Auto-updater: Latest release tag=%s version=%s", tag_name, remote_version)
+        log_updater(logging.INFO, "Latest release tag=%s version=%s", tag_name, remote_version)
 
         if not remote_version:
-            logging.warning("Auto-updater: Could not parse version from tag_name=%r", tag_name)
+            log_updater(logging.WARNING, "Could not parse version from tag_name=%r", tag_name)
             self._schedule_retry()
             return
 
@@ -721,17 +796,17 @@ class UpdateChecker:
                 zip_url = url
 
         if not zip_url:
-            logging.warning("Auto-updater: No ZIP asset found in release %s", tag_name)
+            log_updater(logging.WARNING, "No ZIP asset found in release %s", tag_name)
             self._schedule_retry()
             return
 
         sha256sums_url = _find_sha256sums_asset(data.get("assets", []))
 
         local_version = __version__
-        logging.info("Auto-updater: Local version is %s", local_version)
+        log_updater(logging.INFO, "Local version is %s", local_version)
 
         if not is_newer(remote_version, local_version):
-            logging.info("Auto-updater: WinZapp is already up-to-date.")
+            log_updater(logging.INFO, "WinZapp is already up-to-date.")
             if self._force:
                 self._force = False
                 wx.CallAfter(self._show_no_update)
@@ -739,7 +814,7 @@ class UpdateChecker:
                 self._schedule_retry()
             return
 
-        logging.info("Auto-updater: Newer version %s is available!", remote_version)
+        log_updater(logging.INFO, "Newer version %s is available!", remote_version)
         self._force = False
 
         # Prefer a local, per-version changelog file (see resolve_changelog())
@@ -759,7 +834,7 @@ class UpdateChecker:
         )
 
     def _fetch_latest_release_for_reinstall(self):
-        logging.info("Auto-updater: Fetching latest GitHub release for forced ZIP reinstall...")
+        log_updater(logging.INFO, "Fetching latest GitHub release for forced ZIP reinstall...")
         try:
             resp = requests.get(
                 GITHUB_API_LATEST_RELEASE,
@@ -769,7 +844,7 @@ class UpdateChecker:
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logging.exception("Auto-updater: Exception fetching latest release for forced reinstall")
+            log_updater(logging.ERROR, "Exception fetching latest release for forced reinstall", exc_info=True)
             wx.CallAfter(self._show_reinstall_error, str(exc))
             return
 
@@ -787,7 +862,7 @@ class UpdateChecker:
                 zip_url = url
 
         if not zip_url:
-            logging.warning("Auto-updater: No ZIP asset found in latest release %s", tag_name)
+            log_updater(logging.WARNING, "No ZIP asset found in latest release %s", tag_name)
             wx.CallAfter(self._show_reinstall_error, self._mw.i18n.t("update_no_zip_asset"))
             return
 
