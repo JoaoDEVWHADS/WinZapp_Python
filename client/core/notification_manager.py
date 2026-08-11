@@ -488,9 +488,11 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
     # Multi-account: a toast is an ASYNC alert whose source (which account) is
     # otherwise ambiguous, so lead with the account name (plan Zad 4.4 / GPT r4
     # #10 — prefix async alerts, NOT every message). Single/legacy account has
-    # account_name == "WinZapp" (or unset) → no prefix.
+    # account_name == "WinZapp" (or unset) → no prefix. With a single connected
+    # account the name is redundant → no prefix either.
     acc_name = getattr(main_window, "account_name", None)
-    if acc_name and acc_name != "WinZapp":
+    if (acc_name and acc_name != "WinZapp"
+            and getattr(main_window, "_is_multi_account", lambda: False)()):
         title = f"[{acc_name}] {title}"
     return title
 
