@@ -13442,6 +13442,11 @@ class MainWindow(wx.Frame):
                     or ""
                 )
             participant = _resolve_to_lid_if_available(raw)
+            if ":" in participant and "@" in participant:
+                # Strip device port suffix (e.g. 62655318482954:94@lid -> 62655318482954@lid)
+                u, s = participant.split("@", 1)
+                if ":" in u:
+                    participant = f"{u.split(':', 1)[0]}@{s}"
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
