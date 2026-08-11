@@ -10,6 +10,29 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 
+# ── Fixtures: wx ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def wx_app():
+    """A single wx.App shared by every test in the run that needs a real
+    wx.Timer/wx.StaticBitmap/etc. (test_video_player.py, test_qrcode_render.py).
+
+    wxWidgets only ever supports one App instance per process — each of
+    those two files used to construct its own module-scoped wx.App()
+    independently, which happened to run fine locally but crashed the
+    whole test process (no traceback, no output at all — just the process
+    dying with a non-zero exit code a couple seconds after pytest's own
+    "N passed" summary line already printed) on GitHub Actions' headless
+    Windows runner as soon as both test files were collected in the same
+    session — reproduced live via two failed release builds in a row.
+    session scope (not module) is what actually guarantees only one
+    instance ever gets created, regardless of how many files ask for it.
+    """
+    import wx
+    return wx.App()
+
+
 # ── Fixtures: Keys / Encryption ───────────────────────────────────────────────
 
 
