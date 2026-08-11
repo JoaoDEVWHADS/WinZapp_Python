@@ -544,6 +544,10 @@ class WebSocketClient:
 
     def on_qrcode_update(self, info):
         logging.debug(f"[WebSocketClient] event payload: {info}")
+        # Ignore QR code events if WhatsApp is already connected or paired
+        if getattr(self.main_window, "_wa_connected", False) or self.main_window.settings.get("privateinfo", {}).get("paired", False):
+            logging.info("[on_qrcode_update] Session already connected/paired — ignoring qrCode event.")
+            return
         base64_img, pairing_code = self._extract_qr_payload(info)
         if not base64_img and not pairing_code:
             logging.warning("[on_qrcode_update] qrCode event carried nothing usable: %r",
@@ -737,6 +741,8 @@ class WebSocketClient:
                      "update": {"status": 4}}]}
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -760,6 +766,8 @@ class WebSocketClient:
           {"data": [{"remoteJid": ..., "unreadCount": 0, ...}]}
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -820,6 +828,8 @@ class WebSocketClient:
                         "lastSeen": <unix_ts>|null}}}}
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data      = info.get("data", {})
             jid       = data.get("id", "")
             presences = data.get("presences", {})
@@ -837,6 +847,9 @@ class WebSocketClient:
         if not info or not isinstance(info, dict):
             return
         try:
+            # Ignore presence events for other sessions (multi-session server).
+            if not self._belongs_to_this_session(info):
+                return
             # The id can be a string or a dict/object (Wid)
             raw_id = info.get("id")
             if isinstance(raw_id, dict):
@@ -921,6 +934,8 @@ class WebSocketClient:
         New messages (1:1 and group) arrive via messages.upsert.
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             data = info.get("data", [])
             if isinstance(data, dict):
                 data = [data]
@@ -987,7 +1002,7 @@ class WebSocketClient:
 
     def on_wpp_qrcode(self, data):
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             # WPPConnect emits: {"data": "data:image/png;base64,...", "session": "..."}
             qrcode_base64 = data.get("data")
@@ -1114,7 +1129,7 @@ class WebSocketClient:
         can unblock its wait loop and immediately show the pairing dialog.
         """
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
@@ -1144,9 +1159,32 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_phone_code error")
 
 
+    def _belongs_to_this_session(self, info) -> bool:
+        if not isinstance(info, dict):
+            return True
+        sess = info.get("session") or info.get("sessionName") or info.get("instanceName")
+        # received-message shape: {response: message} where the server sets
+        # message.session = client.session *inside* the response object. Look
+        # there too so the guard works even if the top level ever lacks it.
+        if not sess:
+            resp = info.get("response")
+            if isinstance(resp, dict):
+                sess = resp.get("session")
+        if not sess:
+            return True
+        sess_clean = str(sess).split(":")[0]
+        if not self.instance_name:
+            # No identity yet (first pairing): accept everything rather than
+            # deadlocking the flow on events whose session we cannot know.
+            return True
+        if sess_clean != self.instance_name:
+            logging.info("[WebSocketClient] Ignored event for session '%s' (this client is '%s')", sess_clean, self.instance_name)
+            return False
+        return True
+
     def on_wpp_message_received(self, data):
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             wpp_msg = data.get("response")
             if not wpp_msg:
@@ -1161,23 +1199,8 @@ class WebSocketClient:
             logging.exception("[WebSocketClient] on_wpp_message_received error")
 
     def on_wpp_reaction(self, data):
-        """Handle the 'onreactionmessage' Socket.IO event.
-
-        WPPConnect emits reactions on a dedicated channel (NOT received-message),
-        with the shape: {id, msgId, reactionText, timestamp, ...}.
-          - `msgId` is the serialized id of the *reacted-to* message
-            (`<fromMe>_<chatId>_<id>[_<participant>]`) — a `true_` prefix means
-            the reaction targets one of YOUR messages.
-          - `id` is the serialized id of the reaction itself; its `<fromMe>`
-            prefix tells whether YOU are the one reacting, and its trailing
-            participant (in groups) identifies the reactor.
-
-        We rebuild the Baileys-style reactionMessage structure the rest of the
-        app expects and route it through on_new_message, which updates the live
-        display and fires a notification when someone reacts to your message.
-        """
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             payload = data.get("response") if isinstance(data.get("response"), dict) else data
             emoji = (payload.get("reactionText") or payload.get("text") or "").strip()
@@ -1235,7 +1258,7 @@ class WebSocketClient:
 
     def on_wpp_ack(self, data):
         try:
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             wpp_ack = data.get("ack")
             status = ack_to_status(wpp_ack)
@@ -1354,30 +1377,24 @@ class WebSocketClient:
                 seconds_val = int(float(dur)) if dur else 0
             except Exception:
                 seconds_val = 0
-            file_name = wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or ""
-            is_ptt = bool(wpp_msg.get("isPtt", False) or wpp_msg.get("ptt", False) or msg_type == "ptt")
             message_content = {
                 "audioMessage": {
                     "url": wpp_msg.get("clientUrl", ""),
-                    "directPath": wpp_msg.get("directPath", ""),
                     "seconds": seconds_val,
-                    "mimetype": wpp_msg.get("mimetype", "audio/ogg"),
-                    "ptt": is_ptt,
-                    "fileName": file_name,
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
         elif msg_type == "image":
+            # NOTE: do NOT fall back to wpp_msg["body"] for the caption — for
+            # media messages WPPConnect puts the base64 JPEG thumbnail in `body`,
+            # which then showed up as raw base64 instead of the caption.
             img_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(img_caption):
                 img_caption = ""
-            file_name = wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or ""
             message_content = {
                 "imageMessage": {
                     "caption": img_caption,
-                    "fileName": file_name,
                     "url": wpp_msg.get("clientUrl", ""),
-                    "directPath": wpp_msg.get("directPath", ""),
                     "mimetype": wpp_msg.get("mimetype", "image/jpeg"),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
@@ -1393,15 +1410,12 @@ class WebSocketClient:
             vid_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(vid_caption):
                 vid_caption = ""
-            file_name = wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or ""
             message_content = {
                 "videoMessage": {
                     "caption": vid_caption,
-                    "fileName": file_name,
                     "seconds": seconds_val,
                     "gifPlayback": wpp_msg.get("isGif", False) or wpp_msg.get("gifPlayback", False),
                     "url": wpp_msg.get("clientUrl", ""),
-                    "directPath": wpp_msg.get("directPath", ""),
                     "mimetype": wpp_msg.get("mimetype", "video/mp4"),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }

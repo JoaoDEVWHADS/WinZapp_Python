@@ -241,10 +241,13 @@ export async function sendFile(req: Request, res: Response) {
     }
 
     if (results.length === 0) res.status(400).json('Error sending message');
-    if (req.file) await unlinkAsync(pathFile);
     returnSucess(res, results);
   } catch (error) {
     returnError(req, res, error);
+  } finally {
+    if (req.file) {
+      await unlinkAsync(pathFile).catch(() => {});
+    }
   }
 }
 

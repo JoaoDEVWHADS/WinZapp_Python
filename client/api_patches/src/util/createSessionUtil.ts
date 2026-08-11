@@ -600,20 +600,60 @@ export default class CreateSessionUtil {
   }
 
   async start(req: Request, client: WhatsAppServer) {
-    try {
-      await client.isConnected();
-      Object.assign(client, { status: 'CONNECTED', qrcode: null });
-
-      req.logger.info(`Started Session: ${client.session}`);
-      //callWebHook(client, req, 'session-logged', { status: 'CONNECTED'});
-      req.io.emit('session-logged', { status: true, session: client.session });
-      startHelper(client, req);
-    } catch (error) {
-      req.logger.error(error);
-      req.io.emit('session-error', client.session);
-    }
-
+    // Register the state listener FIRST so a CONNECTED event that arrives while
+    // we retry isConnected() below is never lost (GPT r1 #1). The event is the
+    // authority; the isConnected() retry is only a fallback for the case where
+    // the page was already connected before the listener was attached.
     await this.checkStateSession(client, req);
+    // Wire message/ack/presence listeners now, before the retry loop's early
+    // returns, so they're attached no matter how finalization resolves.
+    await this.wireListeners(req, client);
+
+    // isConnected() runs a WAPI (wa-js) function inside the page. Right after a
+    // WhatsApp Web (re)load wa-js may not be injected yet, so the call throws
+    // "WAPI is not defined". The old code (a) treated ANY non-throw as CONNECTED
+    // (ignoring the boolean) and (b) let that transient error fall into catch
+    // and skip status=CONNECTED entirely, leaving the session stuck reporting
+    // INITIALIZING forever even though it connected seconds later. Bounded retry
+    // until wa-js answers, and only accept an explicit `true`.
+    const maxAttempts = 20;      // ~10s total; a warning, never a disconnect proof
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const connected = await client.isConnected();
+        if (connected === true) {
+          // Only promote if the state listener hasn't already moved us to a
+          // newer terminal state (UNPAIRED/TIMEOUT/etc). The event wins.
+          if (client.status === 'INITIALIZING') {
+            this.markConnected(client, req);
+          }
+          return;
+        }
+        // isConnected() returned false: page reachable but not logged in yet.
+        // Keep polling; a real login will flip it or the state event will fire.
+      } catch (error) {
+        // "WAPI is not defined" is an initialization race, NOT a session error.
+        // Do not emit session-error for it; just wait for wa-js to load.
+        req.logger.info(
+          `[${client.session}] isConnected() not ready yet (attempt ${attempt}/${maxAttempts})`
+        );
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // Retry window elapsed without a positive isConnected(). This is only a
+    // warning: the onStateChange listener stays armed and will still promote to
+    // CONNECTED (or a terminal state) whenever WhatsApp Web reports it.
+    req.logger.info(
+      `[${client.session}] isConnected() did not confirm within retry window — ` +
+      `relying on onStateChange (session may still come up).`
+    );
+  }
+
+  /**
+   * Register message/ack/presence listeners. Split out of start() so the
+   * isConnected() retry loop cannot delay or skip them — they must be wired
+   * regardless of how connection finalization resolves.
+   */
+  async wireListeners(req: Request, client: WhatsAppServer) {
     await this.listenMessages(client, req);
 
     if (req.serverOptions.webhook.listenAcks) {
@@ -655,6 +695,7 @@ export default class CreateSessionUtil {
         (chatId: string, unreadCount: number) => {
           req.io.emit('chats-update', {
             data: [{ remoteJid: chatId, unreadCount }],
+            session: client.session,
           });
         }
       );
@@ -689,6 +730,24 @@ export default class CreateSessionUtil {
     installListener();
   }
 
+  /**
+   * Idempotent connection finalization. Runs at most once whether triggered by
+   * the onStateChange CONNECTED event or by a successful isConnected() retry, so
+   * we never skip startHelper()/session-logged (GPT r1 #5) nor run them twice.
+   */
+  markConnected(client: WhatsAppServer, req: Request) {
+    if ((client as any)._markedConnected) return;
+    (client as any)._markedConnected = true;
+    Object.assign(client, { status: 'CONNECTED', qrcode: null });
+    req.logger.info(`Started Session: ${client.session}`);
+    req.io.emit('session-logged', { status: true, session: client.session });
+    try {
+      startHelper(client, req);
+    } catch (error) {
+      req.logger.error(error);
+    }
+  }
+
   async checkStateSession(client: WhatsAppServer, req: Request) {
     await client.onStateChange((state) => {
       req.logger.info(`State Change ${state}: ${client.session}`);
@@ -696,6 +755,30 @@ export default class CreateSessionUtil {
 
       if (conflits.includes(state)) {
         client.useHere();
+        return;
+      }
+
+      // The state event is the authority for status (GPT r1 #2). CONNECTED
+      // promotes (idempotently); disconnect/unpaired states clear a stale
+      // CONNECTED so the client stops believing it's online. CONFLICT is left
+      // to useHere() above and is NOT treated as terminal.
+      if (state === SocketState.CONNECTED) {
+        this.markConnected(client, req);
+      } else if (
+        state === SocketState.UNPAIRED ||
+        state === SocketState.UNPAIRED_IDLE ||
+        state === SocketState.TIMEOUT ||
+        state === SocketState.DEPRECATED_VERSION ||
+        state === SocketState.PROXYBLOCK ||
+        state === SocketState.TOS_BLOCK ||
+        state === SocketState.SMB_TOS_BLOCK
+      ) {
+        // Allow a later CONNECTED to re-finalize (e.g. re-pair) by clearing the
+        // once-guard, and drop the CONNECTED status so REST reports the truth.
+        (client as any)._markedConnected = false;
+        if (client.status === 'CONNECTED') {
+          client.status = state;
+        }
       }
     });
   }
@@ -724,27 +807,33 @@ export default class CreateSessionUtil {
         await autoDownload(client, req, message);
       }
 
-      req.io.emit('received-message', { response: message });
+      req.io.emit('received-message', {
+        response: message,
+        session: client.session,
+      });
       if (req.serverOptions.webhook.onSelfMessage && message.fromMe)
         callWebHook(client, req, 'onselfmessage', message);
     });
 
     await client.onIncomingCall(async (call) => {
-      req.io.emit('incomingcall', call);
+      req.io.emit('incomingcall', { ...call, session: client.session });
       callWebHook(client, req, 'incomingcall', call);
     });
   }
 
   async listenAcks(client: WhatsAppServer, req: Request) {
     await client.onAck(async (ack) => {
-      req.io.emit('onack', ack);
+      req.io.emit('onack', { ...ack, session: client.session });
       callWebHook(client, req, 'onack', ack);
     });
   }
 
   async onPresenceChanged(client: WhatsAppServer, req: Request) {
     await client.onPresenceChanged(async (presenceChangedEvent) => {
-      req.io.emit('onpresencechanged', presenceChangedEvent);
+      req.io.emit('onpresencechanged', {
+        ...presenceChangedEvent,
+        session: client.session,
+      });
       callWebHook(client, req, 'onpresencechanged', presenceChangedEvent);
     });
   }
@@ -752,7 +841,10 @@ export default class CreateSessionUtil {
   async onReactionMessage(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onReactionMessage(async (reaction: any) => {
-      req.io.emit('onreactionmessage', reaction);
+      req.io.emit('onreactionmessage', {
+        ...reaction,
+        session: client.session,
+      });
       callWebHook(client, req, 'onreactionmessage', reaction);
     });
   }
@@ -760,21 +852,30 @@ export default class CreateSessionUtil {
   async onRevokedMessage(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onRevokedMessage(async (response: any) => {
-      req.io.emit('onrevokedmessage', response);
+      req.io.emit('onrevokedmessage', {
+        ...response,
+        session: client.session,
+      });
       callWebHook(client, req, 'onrevokedmessage', response);
     });
   }
   async onPollResponse(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onPollResponse(async (response: any) => {
-      req.io.emit('onpollresponse', response);
+      req.io.emit('onpollresponse', {
+        ...response,
+        session: client.session,
+      });
       callWebHook(client, req, 'onpollresponse', response);
     });
   }
   async onLabelUpdated(client: WhatsAppServer, req: Request) {
     await client.isConnected();
     await client.onUpdateLabel(async (response: any) => {
-      req.io.emit('onupdatelabel', response);
+      req.io.emit('onupdatelabel', {
+        ...response,
+        session: client.session,
+      });
       callWebHook(client, req, 'onupdatelabel', response);
     });
   }

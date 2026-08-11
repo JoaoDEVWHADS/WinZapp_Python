@@ -6,13 +6,15 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
+import zipfile
 import wx
 import sound_lib, sound_lib.output
 from sound_lib import stream
 from sound_lib.main import bass_call
 import sound_lib.main as _bass_main
 
-from core.audio_devices import find_output_device_index
+from core.audio_devices import find_output_device_index, find_default_output_device_index
 
 
 # ── Import plugin modules (early, so their symbols are available) ─────────────
@@ -38,6 +40,15 @@ class SoundSystem:
         # apply_output_device(), read by handle_playback_failure().
         self._configured_output_device = ""
         self._warned_output_failure = False
+        # Optional SEPARATE output device for one-shot UI effect sounds (the
+        # Sound class), so alerts can play on a different device than voice/
+        # conversation audio. None = route effects to the main output device
+        # like everything else (the maintainer's original single-device model).
+        # A concrete BASS device index means every effect channel is explicitly
+        # routed there on play via BASS_ChannelSetDevice. Set by
+        # apply_effects_device(); an empty configured name leaves it None.
+        self._effects_device = None
+        self._configured_effects_device = ""
         logging.info("[sound_system] sound_dir = %s (exists=%s)", sound_dir, os.path.isdir(sound_dir))
 
     def _load_bass_plugin(self, dll_name: str) -> bool:
@@ -219,6 +230,78 @@ class SoundSystem:
             if warn_on_failure:
                 self._warn_device_failure("output", device_name)
         return ok
+
+    def _ensure_device_inited(self, device: int) -> bool:
+        """BASS_Init an extra output device on demand so an effect channel can
+        be routed to it (the main Output() device is always ready). Returns True
+        if the device is usable. Idempotent: 'already initialised' (BASS error
+        14) counts as success.
+
+        CRITICAL: BASS_Init(device) also makes `device` BASS's *current* device,
+        which every stream created afterwards inherits — so initialising the
+        effects device would silently send voice/conversation streams to it too
+        (bug: everything ended up on the effects device). Save the current
+        device before BASS_Init and restore it after, so this only ADDS a device
+        without moving where new streams land.
+        """
+        try:
+            from sound_lib.external.pybass import BASS_Init, BASS_GetDevice, BASS_SetDevice
+            try:
+                prev = BASS_GetDevice()
+            except Exception:
+                prev = None
+            try:
+                bass_call(BASS_Init, device, 44100, 0, 0, None)
+            except Exception as exc:
+                if not ("14" in str(exc) or "already" in str(exc).lower()):
+                    raise
+            finally:
+                # Restore the current device so we didn't hijack new streams.
+                if prev is not None and prev != device:
+                    try:
+                        BASS_SetDevice(prev)
+                    except Exception:
+                        pass
+            return True
+        except Exception as exc:
+            logging.warning("[sound_system] BASS_Init failed for effects device %s: %s", device, exc)
+            return False
+
+    def apply_effects_device(self, device_name: str, warn_on_failure: bool = False) -> bool:
+        """Choose the output device for UI effect sounds and PIN effect channels
+        to it so they don't follow the voice output when it's switched.
+
+        An empty name means "system default device" — but resolved to the
+        CONCRETE default-device index, not left as None. That distinction is the
+        whole fix: with the maintainer's single-process-Output model, switching
+        the voice output frees + re-inits that one BASS device, and effects that
+        weren't pinned to a specific device rode along with it (bug: picking a
+        non-default voice output dragged the effect sounds off the default
+        device too, even though effects were set to "default"). Pinning effects
+        to the resolved default index keeps them there regardless.
+
+        A named device is resolved to its BASS index instead. Either way the
+        device is BASS_Init'd and stored so Sound.play() routes effect channels
+        to it. Returns whether a concrete device was resolved.
+
+        This never switches the process-wide Output; it only sets up a device
+        that effect channels are individually routed to, so voice/conversation
+        audio keeps playing on the main output.
+        """
+        self._configured_effects_device = device_name or ""
+        if device_name:
+            idx = find_output_device_index(device_name)
+        else:
+            idx = find_default_output_device_index()
+        if idx is not None and self._ensure_device_inited(idx):
+            self._effects_device = idx
+            return True
+        # Couldn't resolve/init a concrete device — fall back to None (effects
+        # play on the current process device, i.e. the old shared behaviour).
+        self._effects_device = None
+        if warn_on_failure and device_name:
+            self._warn_device_failure("output", device_name)
+        return False
 
     def _warn_device_failure(self, kind: str, device_name: str):
         """Show the "device failed to open" message box, unless running in
@@ -459,12 +542,10 @@ def validate_soundpack_folder(folder: str):
     return True, "", {"name": str(data["name"]), "events": events, "alerts": alerts}
 
 
-import tempfile
-import zipfile
-
-def import_soundpack(source_path: str, sounds_root: str):
+def import_soundpack(source_path, sounds_root: str):
     """Validate `source_path` (folder or .zip archive) as a soundpack, then
-    copy/extract it into `sounds_root` as a new subfolder.
+    copy/extract it into `sounds_root` as a new subfolder (named after the
+    source folder, de-duplicated if one with that name already exists).
 
     Returns (ok: bool, error_i18n_key: str, new_pack_id: str|None).
     """
@@ -481,39 +562,54 @@ def import_soundpack(source_path: str, sounds_root: str):
             with zipfile.ZipFile(source_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir_obj.name)
             source_folder = temp_dir_obj.name
-            # If the zip extracted a single root folder containing the pack, use that subfolder
+            # If the zip extracted a single root folder containing the pack,
+            # use that subfolder.
             entries = [os.path.join(source_folder, e) for e in os.listdir(source_folder)]
             dirs = [e for e in entries if os.path.isdir(e)]
-            if len(dirs) == 1 and not _find_pack_manifest(source_folder):
+            if len(dirs) == 1 and not validate_soundpack_folder(source_folder)[0]:
                 source_folder = dirs[0]
         except Exception:
-            if temp_dir_obj:
+            if temp_dir_obj is not None:
+                try:
+                    temp_dir_obj.cleanup()
+                except Exception:
+                    pass
+            return False, "soundpack_import_error_invalid_zip", None
+
+    ok, err_key, _data = validate_soundpack_folder(source_folder)
+    if not ok:
+        if temp_dir_obj is not None:
+            try:
                 temp_dir_obj.cleanup()
-            return False, "soundpack_import_error_bad_manifest", None
+            except Exception:
+                pass
+        return False, err_key, None
 
+    base_name = os.path.basename(os.path.normpath(source_folder)) or "soundpack"
+    safe_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")) or "soundpack"
+    dest_id = safe_name
+    suffix = 2
+    while os.path.exists(os.path.join(sounds_root, dest_id)):
+        dest_id = f"{safe_name}_{suffix}"
+        suffix += 1
+
+    dest_folder = os.path.join(sounds_root, dest_id)
     try:
-        ok, err_key, _data = validate_soundpack_folder(source_folder)
-        if not ok:
-            return False, err_key, None
+        shutil.copytree(source_folder, dest_folder)
+    except OSError:
+        if temp_dir_obj is not None:
+            try:
+                temp_dir_obj.cleanup()
+            except Exception:
+                pass
+        return False, "soundpack_import_error_copy_failed", None
 
-        base_name = os.path.splitext(os.path.basename(os.path.normpath(source_path)))[0] or "soundpack"
-        safe_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")) or "soundpack"
-        dest_id = safe_name
-        suffix = 2
-        while os.path.exists(os.path.join(sounds_root, dest_id)):
-            dest_id = f"{safe_name}_{suffix}"
-            suffix += 1
-
-        dest_folder = os.path.join(sounds_root, dest_id)
+    if temp_dir_obj is not None:
         try:
-            shutil.copytree(source_folder, dest_folder)
-        except OSError:
-            return False, "soundpack_import_error_copy_failed", None
-
-        return True, "", dest_id
-    finally:
-        if temp_dir_obj:
             temp_dir_obj.cleanup()
+        except Exception:
+            pass
+    return True, "", dest_id
 
 
 class NullSound:
@@ -548,6 +644,18 @@ class Sound(stream.FileStream):
             if not pack_events.get(self.event_key, {}).get("enabled", True):
                 return
         try:
+            # Route this effect channel to the pinned effects output device
+            # (None = play on the current process device, legacy behaviour).
+            # Switching the voice output frees + re-inits BASS devices, so
+            # re-ensure ours is initialised before routing to it; best-effort —
+            # a routing failure must never silence the sound.
+            dev = self.sound_system._effects_device
+            if dev is not None:
+                try:
+                    self.sound_system._ensure_device_inited(dev)
+                    self.set_device(dev)
+                except Exception as exc:
+                    logging.debug("[sound_system] effect set_device(%s) failed: %s", dev, exc)
             super().play()
         except Exception:
             # The configured output device may have gone away mid-session

@@ -1,0 +1,359 @@
+"""
+Account-scoped IPC for WinZapp multi-account (client/ipc.py)
+============================================================
+
+Lets one WinZapp process ask another (identified by account_id) to come to the
+foreground (``activate``) or shut down (``quit``). Chosen for correctness over
+the WM_COPYDATA idea (plan Zad. 2.0, GPT r5 #3):
+
+  * Transport = a NAMED PIPE with a DACL restricted to the current user on
+    Windows; an AF_UNIX socket (0600) on other platforms (dev / CI / tests).
+    Both speak the SAME line protocol, so the logic layer is unit-tested on
+    Linux and the Windows transport only swaps the wire.
+  * Channel name keyed by ``hash(canonical global_dir) + account_id`` — never a
+    window title, so "Praca" can't be confused with "Praca 2".
+  * ``activate`` carries a ``startup_source`` (user vs autostart) so a technical
+    activation is never mistaken for a conscious switch that would move
+    last_foreground.
+  * ``quit`` distinguishes ACK ("received") from real termination: the requester
+    waits until the target actually releases (released_predicate) — not merely
+    the ACK — with a timeout.
+  * Readiness handshake: the requester connects with retries; a listener that
+    hasn't bound yet simply isn't connectable → request returns False.
+  * A request that arrives before the wx window exists is queued and flushed
+    once ``window_ready_predicate`` turns true; delivery to wx must be marshalled
+    by the caller's callback via wx.CallAfter.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import sys
+import threading
+import time
+from typing import Callable, Optional
+
+from coord_locks import canonical_dir
+
+_IS_WINDOWS = sys.platform == "win32"
+
+
+# ── channel identity ─────────────────────────────────────────────────────────
+def _channel_key(global_dir: str, account_id: str) -> str:
+    h = hashlib.md5(canonical_dir(global_dir).encode("utf-8")).hexdigest()[:16]
+    return f"WinZapp_{h}_{account_id}"
+
+
+def _pipe_name(global_dir: str, account_id: str) -> str:
+    return r"\\.\pipe\%s" % _channel_key(global_dir, account_id)
+
+
+def _unix_path(global_dir: str, account_id: str) -> str:
+    # Keep well under the ~108-char sun_path limit: hash the key.
+    key = _channel_key(global_dir, account_id)
+    digest = hashlib.md5(key.encode()).hexdigest()[:16]
+    return os.path.join(_ipc_dir(global_dir), f"ipc_{digest}.sock")
+
+
+def _ipc_dir(global_dir: str) -> str:
+    d = os.path.join(global_dir, "ipc")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# ── protocol ─────────────────────────────────────────────────────────────────
+# One JSON object per line each way. Request: {cmd, request_id, source?}.
+# Reply(s): {request_id, ack: True} then, for quit, {request_id, released: True}.
+
+def _make_request(cmd: str, source: Optional[str] = None) -> dict:
+    req = {"cmd": cmd, "request_id": os.urandom(8).hex()}
+    if source is not None:
+        req["source"] = source
+    return req
+
+
+class IpcListener:
+    """Serves one account's IPC channel on a background thread."""
+
+    def __init__(
+        self,
+        global_dir: str,
+        account_id: str,
+        on_activate: Callable[[str], None],
+        on_quit: Callable[[], None],
+        released_predicate: Optional[Callable[[], bool]] = None,
+        window_ready_predicate: Optional[Callable[[], bool]] = None,
+    ):
+        self.global_dir = global_dir
+        self.account_id = account_id
+        self.on_activate = on_activate
+        self.on_quit = on_quit
+        self.released_predicate = released_predicate or (lambda: True)
+        self.window_ready_predicate = window_ready_predicate or (lambda: True)
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._srv_sock: Optional[socket.socket] = None
+        self._queue: list = []
+        self._queue_lock = threading.Lock()
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def wait_ready(self, timeout: float = 5.0) -> bool:
+        return self._ready.wait(timeout)
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            if self._srv_sock is not None:
+                self._srv_sock.close()
+        except OSError:
+            pass
+        # Nudge a blocking accept() by self-connecting.
+        try:
+            if not _IS_WINDOWS:
+                path = _unix_path(self.global_dir, self.account_id)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.2)
+                    s.connect(path)
+        except OSError:
+            pass
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    # ── queue-before-window ──────────────────────────────────────────────
+    def flush_queue(self) -> None:
+        with self._queue_lock:
+            pending, self._queue = self._queue, []
+        for source in pending:
+            self.on_activate(source)
+
+    def _dispatch_activate(self, source: str) -> None:
+        if self.window_ready_predicate():
+            self.on_activate(source)
+        else:
+            with self._queue_lock:
+                self._queue.append(source)
+
+    # ── server loop (AF_UNIX fallback; Windows uses a pipe variant) ───────
+    def _serve(self) -> None:
+        if _IS_WINDOWS:
+            self._serve_windows()
+        else:
+            self._serve_unix()
+
+    def _serve_unix(self) -> None:
+        path = _unix_path(self.global_dir, self.account_id)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        os.chmod(path, 0o600)  # current user only
+        srv.listen(8)
+        srv.settimeout(0.5)
+        self._srv_sock = srv
+        self._ready.set()
+        while not self._stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                self._handle_conn(conn)
+        try:
+            srv.close()
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def _serve_windows(self) -> None:  # pragma: no cover (Windows-only)
+        # Uses pywin32 named pipes with a current-user DACL. Protocol identical
+        # to the AF_UNIX path. Imported lazily so non-Windows never needs it.
+        import win32pipe
+        import win32file
+        import pywintypes
+        import win32security
+
+        name = _pipe_name(self.global_dir, self.account_id)
+        sa = win32security.SECURITY_ATTRIBUTES()  # default = current user token
+        self._ready.set()
+        while not self._stop.is_set():
+            try:
+                handle = win32pipe.CreateNamedPipe(
+                    name,
+                    win32pipe.PIPE_ACCESS_DUPLEX,
+                    win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+                    win32pipe.PIPE_UNLIMITED_INSTANCES,
+                    65536, 65536, 0, sa,
+                )
+                win32pipe.ConnectNamedPipe(handle, None)
+                data = win32file.ReadFile(handle, 65536)[1]
+                reply_lines = self._handle_message(data.decode("utf-8"))
+                for line in reply_lines:
+                    win32file.WriteFile(handle, (line + "\n").encode("utf-8"))
+                win32file.FlushFileBuffers(handle)
+                win32pipe.DisconnectNamedPipe(handle)
+                win32file.CloseHandle(handle)
+            except pywintypes.error:
+                if self._stop.is_set():
+                    break
+                time.sleep(0.05)
+
+    # ── per-connection handling (shared logic) ───────────────────────────
+    def _handle_conn(self, conn: socket.socket) -> None:
+        conn.settimeout(5.0)
+        buf = b""
+        try:
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            line = buf.split(b"\n", 1)[0].decode("utf-8")
+            for reply in self._handle_message(line):
+                conn.sendall((reply + "\n").encode("utf-8"))
+        except (OSError, ValueError):
+            pass
+
+    def _handle_message(self, line: str) -> list[str]:
+        try:
+            req = json.loads(line)
+        except ValueError:
+            return []
+        cmd = req.get("cmd")
+        rid = req.get("request_id")
+        replies = []
+        if cmd == "activate":
+            replies.append(json.dumps({"request_id": rid, "ack": True}))
+            self._dispatch_activate(req.get("source", "user"))
+        elif cmd == "quit":
+            replies.append(json.dumps({"request_id": rid, "ack": True}))
+            # Trigger shutdown, then wait until the process actually releases.
+            self.on_quit()
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if self.released_predicate():
+                    break
+                time.sleep(0.05)
+            replies.append(json.dumps(
+                {"request_id": rid, "released": bool(self.released_predicate())}
+            ))
+        return replies
+
+
+# ── client requests ──────────────────────────────────────────────────────────
+def _send(global_dir: str, account_id: str, req: dict, timeout: float) -> Optional[list[dict]]:
+    """Send one request, return the list of JSON replies, or None if no listener."""
+    if _IS_WINDOWS:
+        return _send_windows(global_dir, account_id, req, timeout)
+    return _send_unix(global_dir, account_id, req, timeout)
+
+
+def _send_unix(global_dir: str, account_id: str, req: dict, timeout: float) -> Optional[list[dict]]:
+    path = _unix_path(global_dir, account_id)
+    deadline = time.monotonic() + timeout
+    # readiness: retry connect until listener is up or we time out
+    while time.monotonic() < deadline:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(max(0.1, deadline - time.monotonic()))
+            s.connect(path)
+        except OSError:
+            time.sleep(0.05)
+            continue
+        try:
+            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+            return _read_replies(s, deadline)
+        finally:
+            s.close()
+    return None
+
+
+def _send_windows(global_dir: str, account_id: str, req: dict, timeout: float):  # pragma: no cover
+    import win32file
+    import pywintypes
+
+    name = _pipe_name(global_dir, account_id)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            handle = win32file.CreateFile(
+                name, win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0, None, win32file.OPEN_EXISTING, 0, None,
+            )
+        except pywintypes.error:
+            time.sleep(0.05)
+            continue
+        try:
+            win32file.WriteFile(handle, (json.dumps(req) + "\n").encode("utf-8"))
+            win32file.FlushFileBuffers(handle)
+            data = b""
+            while time.monotonic() < deadline:
+                try:
+                    data += win32file.ReadFile(handle, 65536)[1]
+                except pywintypes.error:
+                    break
+                if data.count(b"\n") >= (2 if req.get("cmd") == "quit" else 1):
+                    break
+            return [json.loads(x) for x in data.decode("utf-8").splitlines() if x]
+        finally:
+            win32file.CloseHandle(handle)
+    return None
+
+
+def _read_replies(s: socket.socket, deadline: float) -> list[dict]:
+    buf = b""
+    replies: list[dict] = []
+    while time.monotonic() < deadline:
+        try:
+            s.settimeout(max(0.05, deadline - time.monotonic()))
+            chunk = s.recv(4096)
+        except socket.timeout:
+            break
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if line:
+                try:
+                    replies.append(json.loads(line.decode("utf-8")))
+                except ValueError:
+                    pass
+    return replies
+
+
+def request_activate(global_dir: str, account_id: str, source: str = "user",
+                     timeout: float = 3.0) -> bool:
+    """Ask the process owning account_id to come to the foreground.
+
+    Returns True if a listener acknowledged; False if none is running.
+    """
+    replies = _send(global_dir, account_id, _make_request("activate", source), timeout)
+    if not replies:
+        return False
+    return any(r.get("ack") for r in replies)
+
+
+def request_quit(global_dir: str, account_id: str, timeout: float = 10.0) -> bool:
+    """Ask the process owning account_id to quit.
+
+    Returns True only once the target confirms it has RELEASED (terminated /
+    dropped its mutex+lease), not merely acknowledged the request.
+    """
+    replies = _send(global_dir, account_id, _make_request("quit"), timeout)
+    if not replies:
+        return False
+    return any(r.get("released") for r in replies)

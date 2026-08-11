@@ -36,10 +36,13 @@ export default async function statusConnection(
       );
       let index = 0;
       for (const contact of localArr) {
+        const isGrp = req.body.isGroup === true || req.body.isGroup === 'true';
+        const isNsl = req.body.isNewsletter === true || req.body.isNewsletter === 'true';
+        const isLd = req.body.isLid === true || req.body.isLid === 'true';
         if (
-          req.body.isGroup ||
-          req.body.isNewsletter ||
-          req.body.isLid ||
+          isGrp ||
+          isNsl ||
+          isLd ||
           (typeof contact === 'string' && contact.endsWith('@lid')) ||
           req.path.endsWith('/typing') ||
           req.path.endsWith('/recording') ||
