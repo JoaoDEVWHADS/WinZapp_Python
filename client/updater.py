@@ -41,7 +41,14 @@ _UPDATER_LOG_PATH = None
 
 
 def _ensure_updater_logger():
-    """Create (once) the dedicated updater file logger in the logs folder."""
+    """Create (once) the dedicated updater file logger.
+
+    The log goes in the APP ROOT's logs/ folder — the same place the batch
+    installer writes updater_installer.log (next to api/, lib/, WinZapp.exe),
+    NOT the per-account data dir that log_path() resolves to. A user who must
+    diagnose a failed update looks in the install folder, so both updater
+    logs must live side by side there.
+    """
     global _UPDATER_LOGGER, _UPDATER_LOG_PATH
     if _UPDATER_LOGGER is not None:
         return _UPDATER_LOGGER
@@ -49,9 +56,13 @@ def _ensure_updater_logger():
     _logger.setLevel(logging.DEBUG)
     _logger.propagate = False  # keep it self-contained; main logging already knows
     try:
-        log_dir = log_path()
+        # Primary: app root logs/ dir (same folder as updater_installer.log).
+        log_dir = os.path.join(_outer_exe_dir(), "logs")
+        log_file = os.path.join(log_dir, "updater.log")
         os.makedirs(log_dir, exist_ok=True)
-        log_file = log_path("updater.log")
+        # If the app root is not writable (rare), fall back to log_path().
+        if not os.access(log_dir, os.W_OK):
+            raise OSError(f"app-root logs dir not writable: {log_dir}")
         _UPDATER_LOG_PATH = log_file
         fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
         fh.setLevel(logging.DEBUG)
@@ -63,10 +74,26 @@ def _ensure_updater_logger():
         _logger.debug("UPDATER DEDICATED LOG SESSION START — local version=%s", __version__)
         _logger.debug("=" * 70)
     except Exception:
-        # Never let logging setup break the updater itself.
-        _logger = logging.getLogger("updater.dedicated")
-        _logger.setLevel(logging.DEBUG)
-        _logger.propagate = True
+        try:
+            # Fallback: per-account logs dir (log_path()) if app root unusable.
+            log_dir = log_path()
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = log_path("updater.log")
+            _UPDATER_LOG_PATH = log_file
+            fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s"
+            ))
+            _logger.addHandler(fh)
+            _logger.debug("=" * 70)
+            _logger.debug("UPDATER DEDICATED LOG SESSION START (fallback path) — local version=%s", __version__)
+            _logger.debug("=" * 70)
+        except Exception:
+            # Never let logging setup break the updater itself.
+            _logger = logging.getLogger("updater.dedicated")
+            _logger.setLevel(logging.DEBUG)
+            _logger.propagate = True
     _UPDATER_LOGGER = _logger
     return _logger
 
