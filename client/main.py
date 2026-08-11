@@ -1131,34 +1131,41 @@ class MainWindow(wx.Frame):
                     return
 
                 logging.info("[post_ui_init] STEP 6 — connecting WebSocket...")
-                try:
-                    self.connect_websocket()
-                    logging.info("[post_ui_init] STEP 6 — WebSocket connected successfully.")
-                except Exception as e:
-                    logging.exception("[post_ui_init] STEP 6 — Exception during websocket connection")
+                ws_connected = False
+                for attempt in range(1, 7):
+                    try:
+                        self.connect_websocket()
+                        ws_connected = True
+                        logging.info("[post_ui_init] STEP 6 — WebSocket connected successfully on attempt %d.", attempt)
+                        break
+                    except Exception as e:
+                        error_str = str(e)
+                        if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                            logging.info("[post_ui_init] STEP 6 — WebSocket namespace invalid (instance not on server). Triggering logout.")
+                            def _gui_logout():
+                                wx.MessageBox(
+                                    self.i18n.t("device_logged_out"),
+                                    self.i18n.t("error").format(self.app_name),
+                                    wx.OK | wx.ICON_ERROR,
+                                )
+                                self._on_disconnect()
+                            wx.CallAfter(_gui_logout)
+                            ws_connected = False
+                            break
+                        else:
+                            logging.warning("[post_ui_init] STEP 6 — WebSocket connect attempt %d/6 failed (%s). Retrying in 3s...", attempt, e)
+                            time.sleep(3.0)
+
+                if not ws_connected and not ("Invalid namespace" in locals().get("error_str", "") or "namespaces failed to connect" in locals().get("error_str", "")):
                     self.error_sound.play()
-                    error_str = str(e)
-                    if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                        logging.info("[post_ui_init] STEP 6 — WebSocket namespace invalid (instance not on server). Triggering logout.")
-                        def _gui_logout():
-                            wx.MessageBox(
-                                self.i18n.t("device_logged_out"),
-                                self.i18n.t("error").format(self.app_name),
-                                wx.OK | wx.ICON_ERROR,
-                            )
-                            self._on_disconnect()
-                        wx.CallAfter(_gui_logout)
-                    else:
-                        def _gui_failed():
-                            wx.MessageBox(
-                                self.i18n.t("websocket_failed_reconnect"),
-                                self.i18n.t("connection_error"),
-                                wx.OK | wx.ICON_WARNING,
-                            )
-                            self.connect.show_connection_dial()
-                        wx.CallAfter(_gui_failed)
-                    # On websocket failure, clear the "connecting" status so the
-                    # UI is never left frozen on that label.
+                    def _gui_failed():
+                        wx.MessageBox(
+                            self.i18n.t("websocket_failed_reconnect"),
+                            self.i18n.t("connection_error"),
+                            wx.OK | wx.ICON_WARNING,
+                        )
+                        self.connect.show_connection_dial()
+                    wx.CallAfter(_gui_failed)
                     wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
                     self._just_paired = True
 
