@@ -705,13 +705,23 @@ class StatusPanel(wx.Panel):
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
         my_statuses, contacts = self._fetch_statuses_from_api()
-        if not my_statuses and not contacts:
+        # Fall back PER FIELD: the API can return my own statuses (StatusV3
+        # getMyStatus) while the contacts' StatusV3Store is still empty
+        # (browser never opened the Status view) — a single combined
+        # "if not both" gate would discard the locally-cached stories for
+        # the people too. The in-memory/_status_updates (seeded from the DB
+        # at startup) fills whichever side the API did not deliver.
+        if not my_statuses or not contacts:
             status_updates = getattr(mw, "_status_updates", {})
             records = []
             for participant, msgs in list(status_updates.items()):
                 for msg in msgs:
                     records.append(msg)
-            my_statuses, contacts = self._parse_statuses(records, i18n)
+            fb_my, fb_contacts = self._parse_statuses(records, i18n)
+            if not my_statuses:
+                my_statuses = fb_my
+            if not contacts:
+                contacts = fb_contacts
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 
     def _fetch_statuses_from_api(self) -> tuple:
@@ -1871,6 +1881,10 @@ class StatusPanel(wx.Panel):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
             ok   = resp.status_code in (200, 201)
+            logging.info(
+                "[status_post] POST %s -> HTTP %s, body=%.300s",
+                url, resp.status_code, (resp.text or "")[:300],
+            )
             if ok:
                 # Guard against the false-success path: with the status.layer.js
                 # async patch the server now surfaces the real post result, and
@@ -1883,8 +1897,9 @@ class StatusPanel(wx.Panel):
                         ok = False
                 except Exception:
                     pass
-        except Exception:
+        except Exception as exc:
             ok = False
+            logging.warning("[status_post] POST failed for %s: %s", url, exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
         else:
