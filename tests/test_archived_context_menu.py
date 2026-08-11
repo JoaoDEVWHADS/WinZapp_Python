@@ -75,6 +75,23 @@ class TestMenuParity:
         archived_src = self._source(ArchivedConversationsPanel.on_context_menu)
         assert not self._has_key(archived_src, "close_conversation")
 
+    def test_close_conversation_on_the_normal_menu_is_gated_on_the_open_chat(self):
+        """Reported live: "Fechar conversa" showed up for every row in the
+        normal list, not just the one currently open — right-clicking a
+        DIFFERENT chat than the open one and picking it silently closed
+        whatever conversation actually was open (on_context_menu_close() has
+        no idea which jid the menu was opened on). The item must only be
+        built when the row's own jid matches self.conversation."""
+        normal_src = self._source(ConversationsPanel.on_conversations_context_menu)
+        close_call = normal_src.index("i18n.t('close_conversation')")
+        preceding = normal_src[:close_call]
+        # The nearest un-closed "if" before the close_conversation Append()
+        # call must be the jid-matches-open-conversation guard.
+        guard_idx = preceding.rindex("if (self.conversation")
+        guard_to_call = normal_src[guard_idx:close_call]
+        assert 'self.conversation.get("remoteJid") == jid' in guard_to_call
+        assert "self.conversation_panel.IsShown()" in guard_to_call
+
     def test_archive_is_never_offered_only_unarchive(self):
         """Every row in this list is already archived — there is nothing to
         toggle, unlike the normal list which shows either Archive or

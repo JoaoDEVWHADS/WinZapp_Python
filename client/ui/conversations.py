@@ -2332,10 +2332,17 @@ class ConversationsPanel(wx.Panel):
                 add_member_item,
             )
 
-        menu.AppendSeparator()
-
-        close_item = menu.Append(wx.ID_ANY, f"{i18n.t('close_conversation')}\tCtrl+W")
-        self.Bind(wx.EVT_MENU, self.on_context_menu_close, close_item)
+        # "Fechar conversa" only makes sense for the conversation this menu
+        # was actually opened on — showing it for every row regardless let
+        # the user right-click chat B, pick "Fechar conversa", and have it
+        # silently close chat A instead (on_context_menu_close() has no idea
+        # which jid the menu was for; it just closes whatever's currently
+        # open).
+        if (self.conversation and self.conversation.get("remoteJid") == jid
+                and self.conversation_panel.IsShown()):
+            menu.AppendSeparator()
+            close_item = menu.Append(wx.ID_ANY, f"{i18n.t('close_conversation')}\tCtrl+W")
+            self.Bind(wx.EVT_MENU, self.on_context_menu_close, close_item)
 
         self.PopupMenu(menu)
         menu.Destroy()
