@@ -1359,7 +1359,24 @@ class MainWindow(wx.Frame):
         Kept as a pure helper so it's unit-testable and reused by tray/refresh.
         """
         return format_window_title("WinZapp", self.account_name, unread,
-                                   is_multi=bool(self.account_id))
+                                   is_multi=self._is_multi_account())
+
+    def _is_multi_account(self) -> bool:
+        """True only when MORE than one account is paired.
+
+        The account name is only meaningful to distinguish windows/alerts when
+        there is more than one connected account; with a single paired account
+        it is redundant and only adds noise to NVDA announcements, the tray
+        tooltip and toast titles — so it is suppressed everywhere (window
+        title, tray, notifications) while len(list_paired()) <= 1.
+        """
+        reg = getattr(self, "registry", None)
+        if reg is None:
+            return False
+        try:
+            return len(reg.list_paired()) > 1
+        except Exception:
+            return False
 
     def _build_menubar(self):
         """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
