@@ -871,6 +871,98 @@ export async function sendStatusText(req: Request, res: Response) {
   }
 }
 
+export async function sendStatusVoice64(req: Request, res: Response) {
+  /**
+     #swagger.tags = ["Messages"]
+     #swagger.autoBody=false
+     #swagger.security = [{
+            "bearerAuth": []
+     }]
+     #swagger.parameters["session"] = {
+      schema: 'NERDWHATS_AMERICA'
+     }
+     #swagger.requestBody = {
+      required: true,
+      "@content": {
+        "application/json": {
+          schema: {
+            type: "object",
+            properties: {
+              base64Ptt: { type: "string" },
+            }
+          },
+          examples: {
+            "Default": {
+              value: {
+                base64Ptt: "<base64_string>",
+              }
+            },
+          }
+        }
+      }
+     }
+   */
+  // WinZapp-added: post a voice-note status. There is no dedicated
+  // WPP.status.sendVoiceStatus()/sendAudioStatus() in wa-js/wppconnect
+  // (status.layer.js only wraps sendTextStatus/sendImageStatus/
+  // sendVideoStatus) and sendPtt()/sendPttFromBase64() (used for a normal
+  // 1-on-1 voice message, see sendVoice64() above) both target an arbitrary
+  // chat id via the same generic WPP.chat.sendFileMessage(to, base64, {
+  // type: 'audio', isPtt: true, ...}) call — this reuses that exact
+  // primitive, targeting 'status@broadcast' the same way sendStatusText()
+  // above targets it via req.client.sendText(). Mirrors sendVoice64()'s own
+  // page-context-injection technique (avoids serialising the full base64
+  // payload through the CDP IPC channel as a plain JSON argument).
+  const { base64Ptt } = req.body;
+
+  if (!base64Ptt)
+    return res.status(401).send({
+      message: 'base64Ptt is mandatory',
+    });
+
+  try {
+    const page = (req.client as any).page;
+    const tempVar = `__wz_status_ptt_${Date.now()}`;
+    await page.evaluate(
+      ({ varName, base64 }: { varName: string; base64: string }) => {
+        (window as any)[varName] = base64;
+      },
+      { varName: tempVar, base64: base64Ptt }
+    );
+
+    const result = await page.evaluate(
+      ({ varName }: { varName: string }) => {
+        try {
+          const base64 = (window as any)[varName] as string;
+          return (window as any).WPP.chat.sendFileMessage('status@broadcast', base64, {
+            type: 'audio',
+            isPtt: true,
+            filename: 'Voice Status',
+            waitForAck: true,
+          }).then((r: any) => ({ ok: true, id: r?.id?.toString?.() ?? null, ack: r?.ack ?? 0 }))
+            .catch((err: any) => ({ ok: false, error: err?.message || String(err) }));
+        } catch (err: any) {
+          return Promise.resolve({ ok: false, error: err?.message || String(err) });
+        }
+      },
+      { varName: tempVar }
+    );
+
+    await page.evaluate(({ varName }: { varName: string }) => { delete (window as any)[varName]; }, { varName: tempVar });
+
+    if (!result || !result.ok) {
+      return res.status(500).json({
+        status: 'error',
+        message: (result && result.error) || 'Error posting voice status',
+      });
+    }
+
+    returnSucess(res, result);
+  } catch (error) {
+    returnError(req, res, error);
+  }
+}
+
 export async function replyMessage(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]

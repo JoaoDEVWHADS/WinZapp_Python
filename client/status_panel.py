@@ -1,4 +1,5 @@
 import base64
+import logging
 import mimetypes
 import os
 import tempfile
@@ -8,6 +9,12 @@ import requests
 from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText
 from core.utils import format_number, get_downloads_folder
 from core.video_player import VideoPlayer
+from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
+
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
 
 
 def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
@@ -399,6 +406,14 @@ class StatusPanel(wx.Panel):
         self._video_local_path = None
         self._video_download_status_id = None
 
+        # Maps a _status_list row index to its index into _status_contacts,
+        # or -1 for a row that isn't a selectable contact at all (row 0,
+        # "My Status", and the "Recentes"/"Vistos" section-header rows —
+        # see _populate_list()). Every place that used to compute this via
+        # a hardcoded `idx - 1` must go through this map instead now that
+        # the header rows shift the offset.
+        self._status_row_contact: dict = {}
+
         self.init_UI()
         self._create_accelerators()
 
@@ -568,6 +583,35 @@ class StatusPanel(wx.Panel):
 
         self._selected_media_paths: list = []
 
+        # ── Post voice status panel (hidden until recording starts) ────────
+        self._voice_post_panel = wx.Panel(self)
+        voice_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("recording_in_progress"))
+        voice_sizer.Add(self._voice_status_lbl, 0, wx.ALL, 5)
+
+        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("status_send"))
+        self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
+        voice_sizer.Add(self._voice_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("cancel"))
+        self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
+        voice_sizer.Add(self._voice_close_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        self._voice_post_panel.SetSizer(voice_sizer)
+        self._voice_post_panel.Hide()
+        sizer.Add(self._voice_post_panel, 0, wx.EXPAND | wx.ALL, 5)
+
+        # Recording state — same shape as ConversationsPanel's own voice-
+        # message recording (client/ui/conversations.py's
+        # _start_voice_recording()/_recording_pa etc.), just scoped to
+        # posting a status instead of sending a chat message.
+        self._recording_pa      = None
+        self._recording_stream  = None
+        self._recording_frames: list = []
+        self._recording_rate    = 48000
+        self._recording_channels = 1
+
         self.SetSizer(sizer)
 
     def _create_accelerators(self):
@@ -697,7 +741,19 @@ class StatusPanel(wx.Panel):
                 grouped[jid] = {"name": name, "jid": jid, "statuses": []}
             grouped[jid]["statuses"].append(item)
 
+        # A contact only counts as fully "viewed" once every one of their
+        # current statuses has been opened at least once — matches the
+        # official client's own "seen"/"unseen" ring distinction. See
+        # _mark_status_viewed()/_populate_list() for where this list is
+        # written and read.
+        viewed_ids = set(
+            self.main_window.settings.get("status_panel", {}).get("viewed_status_ids", [])
+        )
         for entry in grouped.values():
+            statuses = entry.get("statuses", [])
+            entry["viewed_all"] = bool(statuses) and all(
+                s.get("key", {}).get("id") in viewed_ids for s in statuses
+            )
             contacts.append(entry)
 
         return my_statuses, contacts
@@ -746,26 +802,56 @@ class StatusPanel(wx.Panel):
                 reverse=True,
             )
 
+        # Split into "Recentes" (at least one status not yet opened) and
+        # "Vistos" (every current status already opened) sections, each
+        # still newest-first internally — matches the official client's own
+        # unseen/seen ring distinction. _status_contacts keeps the flat,
+        # concatenated order (recent section first) so every OTHER index
+        # into it (_selected_contact_idx, _is_current_status_playable(), …)
+        # keeps working unchanged; only the list widget itself gets the
+        # extra header rows, tracked via _status_row_contact.
+        recent_contacts = [e for e in contacts if not e.get("viewed_all", False)]
+        viewed_contacts = [e for e in contacts if e.get("viewed_all", False)]
+        contacts = recent_contacts + viewed_contacts
+
         self._my_statuses          = my_statuses
         self._status_contacts      = contacts
         self._selected_contact_idx = -1
         self._list_is_loading      = False
         self._viewer_panel.Hide()
         self._status_list.DeleteAllItems()
+        self._status_row_contact = {}
 
         # ── Row 0: always "My Status" ─────────────────────────────────────
         self._status_list.Append((self._my_status_label(i18n),))
+        self._status_row_contact[0] = -1
 
-        # ── Rows 1+: one row per contact showing their latest status ──────
-        for entry in contacts:
-            name     = entry.get("name", "")
-            statuses = entry.get("statuses", [])
-            if statuses:
-                preview  = self._status_preview(statuses[0], i18n)
-                row_text = f"{name}: {preview}" if preview else name
-            else:
-                row_text = name
-            self._status_list.Append((row_text,))
+        def _add_section(section_contacts: list, header: str, start_contact_idx: int):
+            """Appends one "--- header ---" row followed by one row per
+            contact in *section_contacts*. Returns the next free contact
+            index (for the following section to continue numbering from)."""
+            if not section_contacts:
+                return start_contact_idx
+            row = self._status_list.GetItemCount()
+            self._status_list.Append((f"— {header} —",))
+            self._status_row_contact[row] = -1
+            contact_idx = start_contact_idx
+            for entry in section_contacts:
+                name     = entry.get("name", "")
+                statuses = entry.get("statuses", [])
+                if statuses:
+                    preview  = self._status_preview(statuses[0], i18n)
+                    row_text = f"{name}: {preview}" if preview else name
+                else:
+                    row_text = name
+                row = self._status_list.GetItemCount()
+                self._status_list.Append((row_text,))
+                self._status_row_contact[row] = contact_idx
+                contact_idx += 1
+            return contact_idx
+
+        next_idx = _add_section(recent_contacts, i18n.t("status_recent_updates"), 0)
+        _add_section(viewed_contacts, i18n.t("status_viewed_updates"), next_idx)
 
         if self._status_list.GetItemCount() > 0:
             self._status_list.Focus(0)
@@ -807,7 +893,9 @@ class StatusPanel(wx.Panel):
                     self._status_list.Select(idx)
                     self._open_my_status_dialog()
                     return
-                contact_idx = idx - 1
+                contact_idx = self._status_row_contact.get(idx, -1)
+                if contact_idx < 0:
+                    return  # a "--- Recentes/Vistos ---" header row — not selectable
                 # Play/pause toggle deliberately checked BEFORE Select(idx)
                 # runs (below): Select() re-fires EVT_LIST_ITEM_SELECTED
                 # even for an already-selected row, which would otherwise
@@ -837,7 +925,7 @@ class StatusPanel(wx.Panel):
             self.Layout()
             return
 
-        contact_idx = idx - 1          # offset: row 0 is My Status
+        contact_idx = self._status_row_contact.get(idx, -1)
         if contact_idx < 0 or contact_idx >= len(self._status_contacts):
             self._viewer_panel.Hide()
             self.Layout()
@@ -865,7 +953,9 @@ class StatusPanel(wx.Panel):
         if idx == 0:
             self._open_my_status_dialog()
             return
-        contact_idx = idx - 1
+        contact_idx = self._status_row_contact.get(idx, -1)
+        if contact_idx < 0:
+            return  # a "--- Recentes/Vistos ---" header row — not selectable
         if self._is_current_status_playable(contact_idx):
             self._on_play_pause_video(None)
             return
@@ -954,6 +1044,8 @@ class StatusPanel(wx.Panel):
         from_me     = status_key.get("fromMe", False)
         if not from_me:
             status_id = status_key.get("id", "")
+            if status_id:
+                self._mark_status_viewed(status_id)
             is_liked  = self._is_status_liked(status_id)
             i18n2     = self.main_window.i18n
             self._like_btn.SetLabel(
@@ -1005,6 +1097,31 @@ class StatusPanel(wx.Panel):
             return
         self._current_status_idx += 1
         self._show_current_status()
+
+    # ── Viewed status tracking (drives the "Vistos" section) ────────────────
+
+    # Same rationale/shape as _MAX_REMEMBERED_LIKES right below: WPPConnect
+    # exposes no server-side "mark status as seen" API to call (see this
+    # module's own docstring — the whole status list is built from live
+    # status@broadcast events, nothing is ever queried on demand), so
+    # "viewed" is tracked purely locally and never shrinks on its own.
+    _MAX_REMEMBERED_VIEWED = 2000
+
+    def _mark_status_viewed(self, status_id: str):
+        """Remember that this status has been opened, persisted the same
+        way _on_like_sent() remembers a like — read back by _parse_statuses()
+        to decide whether a contact's whole set of current statuses counts
+        as fully "viewed" (see its own "viewed_all" comment) for the
+        Recentes/Vistos split in _populate_list().
+        """
+        mw = self.main_window
+        section = mw.settings.setdefault("status_panel", {})
+        remembered = section.setdefault("viewed_status_ids", [])
+        if status_id not in remembered:
+            remembered.append(status_id)
+            if len(remembered) > self._MAX_REMEMBERED_VIEWED:
+                del remembered[:len(remembered) - self._MAX_REMEMBERED_VIEWED]
+            mw.save_settings()
 
     # ── Like / unlike status ─────────────────────────────────────────────────
 
@@ -1371,10 +1488,13 @@ class StatusPanel(wx.Panel):
         menu     = wx.Menu()
         id_text  = wx.NewIdRef()
         id_media = wx.NewIdRef()
+        id_voice = wx.NewIdRef()
         menu.Append(id_text,  i18n.t("status_text"))
         menu.Append(id_media, i18n.t("status_photos_videos"))
+        menu.Append(id_voice, i18n.t("status_audio"))
         menu.Bind(wx.EVT_MENU, self._on_choose_text_status,  id=id_text)
         menu.Bind(wx.EVT_MENU, self._on_choose_media_status, id=id_media)
+        menu.Bind(wx.EVT_MENU, self._on_choose_voice_status, id=id_voice)
         self.PopupMenu(menu)
         menu.Destroy()
 
@@ -1389,14 +1509,16 @@ class StatusPanel(wx.Panel):
     def _on_choose_media_status(self, event):
         i18n = self.main_window.i18n
         wildcard = (
-            f"{i18n.t('status_photos_videos')} "
-            "(*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv)"
-            "|*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv"
+            f"{i18n.t('status_photos_videos_audio')} "
+            "(*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv;"
+            "*.mp3;*.ogg;*.wav;*.m4a;*.aac)"
+            "|*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv;"
+            "*.mp3;*.ogg;*.wav;*.m4a;*.aac"
             f"|{i18n.t('attachment_document')} (*.*)|*.*"
         )
         dlg = wx.FileDialog(
             self,
-            message=i18n.t("status_photos_videos"),
+            message=i18n.t("status_photos_videos_audio"),
             wildcard=wildcard,
             style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST,
         )
@@ -1426,6 +1548,190 @@ class StatusPanel(wx.Panel):
     def _hide_post_panels(self):
         self._post_panel.Hide()
         self._media_post_panel.Hide()
+        self._voice_post_panel.Hide()
+
+    # ── Record & post voice status ───────────────────────────────────────────
+
+    def _on_choose_voice_status(self, event):
+        """Start recording a voice status. Same PyAudio open/fallback
+        strategy as ConversationsPanel._start_voice_recording() (client/
+        ui/conversations.py), scoped here since posting a status is not
+        tied to any open conversation."""
+        self._hide_post_panels()
+
+        if pyaudio is None:
+            self.main_window.output(self.main_window.i18n.t("voice_recording_unavailable"))
+            return
+
+        self._recording_frames = []
+
+        def _callback(in_data, frame_count, time_info, status):
+            self._recording_frames.append(in_data)
+            return (None, pyaudio.paContinue)
+
+        if self._recording_pa is None:
+            try:
+                self._recording_pa = pyaudio.PyAudio()
+            except Exception as exc:
+                logging.error("[status audio] Failed to initialize PyAudio: %s", exc)
+                return
+        pa = self._recording_pa
+
+        def _try_open(device_index):
+            for rate, ch in RECORDING_SAMPLE_CONFIGS:
+                try:
+                    s = pa.open(
+                        rate=rate, channels=ch, format=pyaudio.paInt16,
+                        input=True, input_device_index=device_index,
+                        frames_per_buffer=4096, stream_callback=_callback,
+                    )
+                    s.start_stream()
+                    return s, rate, ch
+                except Exception:
+                    continue
+            return None, None, None
+
+        configured_name = getattr(self.main_window, "effective_input_device_name", "") or ""
+        input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
+
+        stream, rate, ch = _try_open(input_device_index)
+        if stream is None and input_device_index is not None:
+            # Configured device failed to open (e.g. unplugged) — fall back
+            # to the system default for this recording, same as
+            # ConversationsPanel's own recording start.
+            stream, rate, ch = _try_open(None)
+
+        if stream is None:
+            wx.MessageBox(
+                self.main_window.i18n.t("voice_recording_unavailable"),
+                self.main_window.app_name,
+                wx.OK | wx.ICON_WARNING, self,
+            )
+            return
+
+        self._recording_stream   = stream
+        self._recording_rate     = rate
+        self._recording_channels = ch
+
+        if hasattr(self.main_window, "voicemsg_startrecording_sound"):
+            self.main_window.voicemsg_startrecording_sound.play()
+        self._voice_post_panel.Show()
+        self.Layout()
+        self._voice_send_btn.SetFocus()
+
+    def _stop_recording_stream(self):
+        if self._recording_stream is not None:
+            try:
+                self._recording_stream.stop_stream()
+                self._recording_stream.close()
+            except Exception:
+                pass
+            self._recording_stream = None
+
+    def _on_close_voice_panel(self, event):
+        self._stop_recording_stream()
+        self._recording_frames = []
+        self._voice_post_panel.Hide()
+        self.Layout()
+        self._status_list.SetFocus()
+
+    def _on_send_voice_status(self, event):
+        self._stop_recording_stream()
+        self._voice_post_panel.Hide()
+        self.Layout()
+        self._status_list.SetFocus()
+
+        if not self._recording_frames:
+            return
+
+        pcm_data = b"".join(self._recording_frames)
+        self._recording_frames = []
+
+        fd, temp_wav = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            import wave
+            with wave.open(temp_wav, "wb") as wf:
+                wf.setnchannels(self._recording_channels)
+                wf.setsampwidth(self._recording_pa.get_sample_size(pyaudio.paInt16))
+                wf.setframerate(self._recording_rate)
+                wf.writeframes(pcm_data)
+        except Exception as exc:
+            logging.error("[status audio] Failed to write recorded WAV: %s", exc)
+            try:
+                os.unlink(temp_wav)
+            except Exception:
+                pass
+            return
+
+        threading.Thread(
+            target=self._send_status_voice_bg,
+            args=(temp_wav,),
+            kwargs={"is_temp_file": True},
+            daemon=True,
+        ).start()
+
+    def _send_status_voice_bg(self, path: str, is_temp_file: bool = False):
+        """Background: convert *path* to OGG/Opus (WhatsApp's own voice-
+        message codec — main_window._convert_wav_to_ogg() despite the name
+        just runs it through ffmpeg, which reads the real container/codec
+        rather than trusting the extension, so this also works for a
+        picked .mp3/.m4a/.aac file from _on_choose_media_status(), not just
+        a WAV recorded here) and post it as a voice status via
+        /send-status-voice-base64 (see messageController.ts's
+        sendStatusVoice64() — mirrors send_audio_message()'s own
+        send-voice-base64 call in main.py).
+
+        *is_temp_file* must only be True for a file WE created (the
+        recorded WAV) — deleting *path* unconditionally used to also
+        delete the user's own picked file (e.g. an .mp3 chosen from the
+        media picker) right out from under them.
+        """
+        mw = self.main_window
+        ogg_path = mw._convert_wav_to_ogg(path)
+        if is_temp_file:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        if not ogg_path or not os.path.isfile(ogg_path):
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("audio_convert_failed"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
+        try:
+            with open(ogg_path, "rb") as fh:
+                audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
+        finally:
+            try:
+                os.unlink(ogg_path)
+            except Exception:
+                pass
+
+        url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/send-status-voice-base64"
+        headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
+        payload = {"base64Ptt": f"data:audio/ogg;codecs=opus;base64,{audio_b64}"}
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            ok   = resp.status_code in (200, 201)
+            err_msg = "" if ok else f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as exc:
+            ok = False
+            err_msg = str(exc)
+
+        if ok:
+            wx.CallAfter(self._on_status_sent)
+        else:
+            logging.error("[status audio] send-status-voice-base64 failed: %s", err_msg)
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("status_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
 
     # ── Send text status ─────────────────────────────────────────────────────
 
@@ -1545,21 +1851,20 @@ class StatusPanel(wx.Panel):
 
     def _send_all_media_statuses_bg(self, paths: list, caption: str):
         for path in paths:
-            self._send_media_status_bg(path, caption)
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".mp3", ".ogg", ".wav", ".m4a", ".aac"):
+                # A picked audio file goes through the real voice-status
+                # path (transcodes to OGG/Opus via ffmpeg first) — same
+                # endpoint a recorded voice status uses, not the image/
+                # video one below, which has no audio branch at all. Voice
+                # notes don't carry a caption in the official client either,
+                # so it's intentionally dropped here.
+                self._send_status_voice_bg(path)
+            else:
+                self._send_media_status_bg(path, caption)
 
     def _send_media_status_bg(self, path: str, caption: str):
         mw = self.main_window
-        try:
-            with open(path, "rb") as fh:
-                data_b64 = base64.b64encode(fh.read()).decode("utf-8")
-        except Exception:
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
         ext      = os.path.splitext(path)[1].lower()
         mimetype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         if ext in (".mp4", ".mov", ".avi", ".mkv"):
@@ -1575,11 +1880,31 @@ class StatusPanel(wx.Panel):
             )
             return
 
+        try:
+            with open(path, "rb") as fh:
+                data_b64 = base64.b64encode(fh.read()).decode("utf-8")
+        except Exception:
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("status_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
+
         endpoint = "send-image-storie" if media_type == "image" else "send-video-storie"
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/{endpoint}"
         headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
+        # statusController.ts's sendImageStorie()/sendVideoStorie() (real,
+        # unmodified upstream — `const { path } = req.body`) only ever read
+        # a "path" field — it accepts either a real filesystem path or,
+        # per sender.layer.js's sendImageStatus()/sendVideoStatus(), a full
+        # `data:...;base64,...` URI interchangeably. This used to send the
+        # payload under a "base64" key instead, which that handler never
+        # reads at all — every status image/video post from the media
+        # picker silently failed with pathFile undefined.
         payload = {
-            "base64": f"data:{mimetype};base64,{data_b64}",
+            "path": f"data:{mimetype};base64,{data_b64}",
             "caption": caption,
         }
         try:

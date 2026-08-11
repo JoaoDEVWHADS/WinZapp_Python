@@ -207,6 +207,12 @@ routes.post(
   MessageController.sendStatusText
 );
 routes.post(
+  '/api/:session/send-status-voice-base64',
+  verifyToken,
+  statusConnection,
+  MessageController.sendStatusVoice64
+);
+routes.post(
   '/api/:session/send-link-preview',
   verifyToken,
   statusConnection,

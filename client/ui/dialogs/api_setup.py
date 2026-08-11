@@ -490,6 +490,12 @@ class ApiSetupDialog(wx.Dialog):
         except Exception as exc:
             logging.warning("[api_setup] Failed to patch sender.layer.js: %s", exc)
 
+        # welcome.js — latest-version ESM require crashes startup on Node 20+.
+        try:
+            ApiSetupDialog._patch_wppconnect_welcome_layer(node_modules_wppconnect)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to patch welcome.js: %s", exc)
+
     @staticmethod
     def _patch_wppconnect_status_layer(wppconnect_api_dir: str) -> bool:
         """Patch @wppconnect-team/wppconnect's compiled status.layer.js so
@@ -578,6 +584,55 @@ class ApiSetupDialog(wx.Dialog):
         if missing:
             logging.warning(
                 "[api_setup] sender.layer.js: %d method(s) did not match the "
+                "expected upstream source — skipping those.", missing,
+            )
+        return missing == 0
+
+    @staticmethod
+    def _patch_wppconnect_welcome_layer(wppconnect_api_dir: str) -> bool:
+        """Patch @wppconnect-team/wppconnect's compiled controllers/
+        welcome.js so a plain CommonJS require() of the ESM-only
+        `latest-version` package doesn't crash the whole server on startup
+        (Node 20+). Port of setup_api.py's function of the same name — see
+        client/core/wppconnect_welcome_layer_patch.py's module docstring.
+
+        *wppconnect_api_dir* is .../node_modules/@wppconnect-team/wppconnect/dist/api
+        (same as every other patch method here); welcome.js lives one level
+        up, under dist/controllers/ instead of dist/api/layers/.
+
+        Idempotent and best-effort, same pattern as the other layer patches
+        above.
+        """
+        from core.wppconnect_welcome_layer_patch import ALL_PATCHES
+        welcome_layer_path = os.path.join(wppconnect_api_dir, "..", "controllers", "welcome.js")
+        if not os.path.isfile(welcome_layer_path):
+            logging.warning("[api_setup] welcome.js not found — skipping latest-version ESM patch.")
+            return False
+
+        with open(welcome_layer_path, encoding="utf-8") as f:
+            content = f.read()
+
+        applied = 0
+        already = 0
+        missing = 0
+        for original, patched in ALL_PATCHES:
+            if patched in content:
+                already += 1
+            elif original in content:
+                content = content.replace(original, patched, 1)
+                applied += 1
+            else:
+                missing += 1
+
+        if applied:
+            with open(welcome_layer_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logging.info("[api_setup] Patched welcome.js — latest-version ESM require no longer crashes startup on Node 20+.")
+        elif already == len(ALL_PATCHES):
+            logging.info("[api_setup] welcome.js latest-version ESM patch already applied.")
+        if missing:
+            logging.warning(
+                "[api_setup] welcome.js: %d pattern(s) did not match the "
                 "expected upstream source — skipping those.", missing,
             )
         return missing == 0

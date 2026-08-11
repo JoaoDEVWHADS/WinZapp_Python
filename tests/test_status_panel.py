@@ -43,6 +43,11 @@ class _FakeI18n:
         "sticker": "Figurinha",
         "contact_message": "Contato: {name}",
         "notif_unsupported": "Mensagem não suportada",
+        "status_recent_updates": "Recentes",
+        "status_viewed_updates": "Vistos",
+        "my_status": "Meu status",
+        "my_status_update": "toque para ver",
+        "my_status_none": "toque para adicionar",
     }
 
     def t(self, key):
@@ -137,6 +142,8 @@ class _FakeStatusList:
     def __init__(self, focused=-1):
         self._focused = focused
         self.select_calls = []
+        self.items = []
+        self.focus_calls = []
 
     def GetFocusedItem(self):
         return self._focused
@@ -146,6 +153,19 @@ class _FakeStatusList:
 
     def SetFocus(self):
         pass
+
+    def Append(self, row):
+        self.items.append(row[0])
+
+    def DeleteAllItems(self):
+        self.items = []
+
+    def GetItemCount(self):
+        return len(self.items)
+
+    def Focus(self, idx):
+        self.focus_calls.append(idx)
+        self._focused = idx
 
 
 class _FakeKeyEvent:
@@ -176,19 +196,25 @@ class _Stub:
     _on_like_sent                = StatusPanel._on_like_sent
     _on_unlike_status_attempted  = StatusPanel._on_unlike_status_attempted
     _parse_statuses              = StatusPanel._parse_statuses
-    _latest_ts                   = StatusPanel._latest_ts
+    _latest_ts                   = staticmethod(StatusPanel._latest_ts)
     _on_next_status               = StatusPanel._on_next_status
     _on_escape                    = StatusPanel._on_escape
     _MAX_REMEMBERED_LIKES         = StatusPanel._MAX_REMEMBERED_LIKES
     _on_send_status_reply         = StatusPanel._on_send_status_reply
     _send_status_reply_bg         = StatusPanel._send_status_reply_bg
     _on_status_reply_sent         = StatusPanel._on_status_reply_sent
+    _mark_status_viewed           = StatusPanel._mark_status_viewed
+    _MAX_REMEMBERED_VIEWED        = StatusPanel._MAX_REMEMBERED_VIEWED
+    _populate_list                = StatusPanel._populate_list
+    _my_status_label              = StatusPanel._my_status_label
+    _set_list_loading             = StatusPanel._set_list_loading
 
     def __init__(self, contact_names=None, send_text_result=True, settings=None):
         self.main_window = _FakeMainWindow(
             contact_names=contact_names, send_text_result=send_text_result, settings=settings,
         )
         self._status_contacts      = []
+        self._status_row_contact   = {}
         self._selected_contact_idx = -1
         self._current_status_idx   = 0
         self._current_status       = None
@@ -270,6 +296,7 @@ class TestPositionPreservedOnReselect:
         statuses = [_text_status("a"), _text_status("b"), _text_status("c"),
                     _text_status("d"), _text_status("e")]
         stub._status_contacts = [_entry("j@s.whatsapp.net", statuses)]
+        stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status_idx   = 2  # "status 3 de 5"
 
@@ -290,6 +317,7 @@ class TestPositionPreservedOnReselect:
             _entry("a@s.whatsapp.net", statuses_a),
             _entry("b@s.whatsapp.net", statuses_b),
         ]
+        stub._status_row_contact = {1: 0, 2: 1}
         stub._selected_contact_idx = 0
         stub._current_status_idx   = 1  # viewing "2 de 2" of contact A
 
@@ -329,6 +357,7 @@ class TestAnnouncementOnlyOnExplicitNavigation:
     def test_plain_list_selection_does_not_announce(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
 
         class _Evt:
             def GetIndex(self):
@@ -343,6 +372,7 @@ class TestAnnouncementOnlyOnExplicitNavigation:
     def test_activation_enter_or_doubleclick_still_announces(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
 
         class _Evt:
             def GetIndex(self):
@@ -355,6 +385,7 @@ class TestAnnouncementOnlyOnExplicitNavigation:
     def test_space_activation_still_announces(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
         stub._status_list = _FakeStatusList(focused=1)
 
         stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
@@ -465,6 +496,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
     def test_enter_on_a_video_status_already_shown_toggles_pause(self):
         stub = _Stub()
+        stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _video_status()
         stub._video_player.is_playing = True
@@ -480,6 +512,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
     def test_enter_on_a_text_status_does_not_try_to_toggle(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+        stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _text_status("oi")
 
@@ -499,6 +532,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
         # makes the *next* press toggle instead.
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = -1
         stub._current_status = None
 
@@ -524,6 +558,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
 
     def test_space_on_a_video_status_already_shown_toggles_pause_without_reselecting(self):
         stub = _Stub()
+        stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = 0
         stub._current_status = _video_status()
         stub._video_player.is_playing = True
@@ -540,6 +575,7 @@ class TestEnterAndSpaceTogglePlaybackOnStatusList:
     def test_space_on_a_non_playing_row_still_selects_normally(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_video_status()])]
+        stub._status_row_contact = {1: 0}
         stub._selected_contact_idx = -1
         stub._current_status = None
         stub._status_list = _FakeStatusList(focused=1)
@@ -918,6 +954,174 @@ class TestParseStatusesFiltersReactionsAndDetectsSelfParticipant:
         assert my_statuses == []
         assert len(contacts) == 1
         assert contacts[0]["jid"] == "a@s.whatsapp.net"
+
+    def test_viewed_all_is_false_when_no_status_has_been_opened(self):
+        stub = _Stub()
+        status = {
+            "key": {"fromMe": False, "id": "s1", "participant": "a@s.whatsapp.net"},
+            "messageType": "conversation", "message": {"conversation": "oi"},
+            "messageTimestamp": 1700000000,
+        }
+        _, contacts = stub._parse_statuses([status], stub.main_window.i18n)
+        assert contacts[0]["viewed_all"] is False
+
+    def test_viewed_all_is_true_only_once_every_status_was_opened(self):
+        stub = _Stub(settings={"status_panel": {"viewed_status_ids": ["s1"]}})
+        s1 = {"key": {"fromMe": False, "id": "s1", "participant": "a@s.whatsapp.net"},
+              "messageType": "conversation", "message": {"conversation": "a"},
+              "messageTimestamp": 1700000000}
+        s2 = {"key": {"fromMe": False, "id": "s2", "participant": "a@s.whatsapp.net"},
+              "messageType": "conversation", "message": {"conversation": "b"},
+              "messageTimestamp": 1700000001}
+
+        _, contacts = stub._parse_statuses([s1], stub.main_window.i18n)
+        assert contacts[0]["viewed_all"] is True, "the only status was opened"
+
+        _, contacts = stub._parse_statuses([s1, s2], stub.main_window.i18n)
+        assert contacts[0]["viewed_all"] is False, "s2 was never opened"
+
+
+class TestMarkStatusViewed:
+    """_mark_status_viewed() — same persistence shape as _on_like_sent()
+    (tests/test_status_panel.py::TestOnLikeSentCapsHowManyIdsAreRemembered),
+    just for the Recentes/Vistos split instead of the like button."""
+
+    def test_first_view_is_remembered_and_persisted(self):
+        stub = _Stub()
+
+        stub._mark_status_viewed("s1")
+
+        assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
+        assert stub.main_window.save_settings_calls == 1
+
+    def test_viewing_the_same_status_again_does_not_re_save(self):
+        stub = _Stub()
+        stub._mark_status_viewed("s1")
+
+        stub._mark_status_viewed("s1")
+
+        assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
+        assert stub.main_window.save_settings_calls == 1
+
+    def test_list_is_capped_to_the_most_recent_ids(self):
+        stub = _Stub()
+        stub._MAX_REMEMBERED_VIEWED = 3
+
+        for sid in ("s1", "s2", "s3", "s4"):
+            stub._mark_status_viewed(sid)
+
+        assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s2", "s3", "s4"]
+
+    def test_opening_a_status_in_the_viewer_marks_it_viewed(self):
+        """End-to-end: _show_current_status() for someone else's status
+        calls through to _mark_status_viewed()."""
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=False)])]
+        stub._selected_contact_idx = 0
+
+        stub._show_current_status(announce=False)
+
+        assert stub.main_window.settings["status_panel"]["viewed_status_ids"] == ["s1"]
+
+    def test_opening_my_own_status_does_not_mark_it_viewed(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("oi", from_me=True)])]
+        stub._selected_contact_idx = 0
+
+        stub._show_current_status(announce=False)
+
+        assert stub.main_window.settings.get("status_panel", {}).get("viewed_status_ids", []) == []
+
+
+class TestPopulateListRecentViewedSections:
+    """_populate_list() splits contacts into "Recentes" (something unseen)
+    and "Vistos" (everything already opened) sections, each with its own
+    "--- header ---" row inserted directly into the list — and every row
+    index shifts because of it, tracked via _status_row_contact. Reported
+    as a real regression risk in an earlier attempt at this feature: the
+    Space-key handler (_on_status_list_key_down) computed its own row->
+    contact mapping via a hardcoded `idx - 1` instead of reusing the same
+    map the selection/activation handlers use, so Space silently opened
+    the WRONG contact once header rows existed — covered here by going
+    through the real row map _populate_list() builds instead of a
+    hand-written one, unlike the tests above."""
+
+    def test_recent_and_viewed_contacts_land_in_separate_sections(self):
+        stub = _Stub(settings={"status_panel": {"viewed_status_ids": ["seen1"]}})
+        seen = _entry("seen@s.whatsapp.net", [
+            {"key": {"id": "seen1", "fromMe": False}, "messageType": "conversation",
+             "message": {"conversation": "x"}, "messageTimestamp": 1},
+        ])
+        seen["viewed_all"] = True
+        unseen = _entry("unseen@s.whatsapp.net", [
+            {"key": {"id": "unseen1", "fromMe": False}, "messageType": "conversation",
+             "message": {"conversation": "y"}, "messageTimestamp": 2},
+        ])
+        unseen["viewed_all"] = False
+
+        stub._populate_list([], [seen, unseen])
+
+        # Row 0 = My Status, row 1 = "Recentes" header, row 2 = unseen
+        # contact, row 3 = "Vistos" header, row 4 = seen contact.
+        assert stub._status_list.items[1] == "— Recentes —"
+        assert "unseen@s.whatsapp.net" in stub._status_contacts[stub._status_row_contact[2]]["jid"]
+        assert stub._status_list.items[3] == "— Vistos —"
+        assert "seen@s.whatsapp.net" in stub._status_contacts[stub._status_row_contact[4]]["jid"]
+
+    def test_header_rows_are_not_selectable_contacts(self):
+        stub = _Stub(settings={"status_panel": {"viewed_status_ids": ["seen1"]}})
+        seen = _entry("seen@s.whatsapp.net", [
+            {"key": {"id": "seen1", "fromMe": False}, "messageType": "conversation",
+             "message": {"conversation": "x"}, "messageTimestamp": 1},
+        ])
+        seen["viewed_all"] = True
+        unseen = _entry("unseen@s.whatsapp.net", [
+            {"key": {"id": "unseen1", "fromMe": False}, "messageType": "conversation",
+             "message": {"conversation": "y"}, "messageTimestamp": 2},
+        ])
+        unseen["viewed_all"] = False
+        stub._populate_list([], [seen, unseen])
+
+        assert stub._status_row_contact[0] == -1   # My Status
+        assert stub._status_row_contact[1] == -1   # "--- Recentes ---"
+        assert stub._status_row_contact[3] == -1   # "--- Vistos ---"
+
+    def test_only_a_recent_section_is_shown_when_nothing_has_been_viewed(self):
+        stub = _Stub()
+        entry = _entry("a@s.whatsapp.net", [_text_status("oi")])
+        entry["viewed_all"] = False
+
+        stub._populate_list([], [entry])
+
+        assert "— Vistos —" not in stub._status_list.items
+
+    def test_space_key_uses_the_same_row_map_after_populate_list(self):
+        """Regression coverage for the exact bug described in this class's
+        own docstring: Space must resolve the row it's actually focused on
+        via _status_row_contact, not a hardcoded idx - 1, once header rows
+        exist ahead of a contact's row."""
+        stub = _Stub(settings={"status_panel": {"viewed_status_ids": ["seen1"]}})
+        seen = _entry("seen@s.whatsapp.net", [
+            {"key": {"id": "seen1", "fromMe": False}, "messageType": "conversation",
+             "message": {"conversation": "x"}, "messageTimestamp": 1},
+        ])
+        seen["viewed_all"] = True
+        unseen = _entry("unseen@s.whatsapp.net", [
+            {"key": {"id": "unseen1", "fromMe": False}, "messageType": "conversation",
+             "message": {"conversation": "y"}, "messageTimestamp": 2},
+        ])
+        unseen["viewed_all"] = False
+        stub._populate_list([], [seen, unseen])
+        # Row 4 is the "Vistos" section's contact (seen@s.whatsapp.net) —
+        # a hardcoded `idx - 1` would wrongly resolve to _status_contacts[3],
+        # which doesn't exist (only indices 0/1 are real contacts here).
+        stub._status_list = _FakeStatusList(focused=4)
+        stub._status_list.items = ["My Status", "— Recentes —", "unseen", "— Vistos —", "seen"]
+
+        stub._on_status_list_key_down(_FakeKeyEvent(wx.WXK_SPACE))
+
+        assert stub._selected_contact_idx == stub._status_row_contact[4]
+        assert stub._status_contacts[stub._selected_contact_idx]["jid"] == "seen@s.whatsapp.net"
 
 
 class TestNextStatusNoLongerWrapsAround:

@@ -6783,7 +6783,14 @@ class ConversationsPanel(wx.Panel):
         c_idx = next((i for i, e in enumerate(sp._status_contacts) if e.get("jid") == target_jid), None)
         if c_idx is None:
             return
-        row = c_idx + 1
+        # _populate_list() now interleaves "--- Recentes/Vistos ---" header
+        # rows, so a contact's row in the list is no longer just c_idx + 1
+        # — look it up via the same row->contact-index map the list's own
+        # selection handlers use.
+        row = next(
+            (r for r, ci in sp._status_row_contact.items() if ci == c_idx),
+            c_idx + 1,
+        )
         sp._status_list.Select(row)
         sp._status_list.Focus(row)
         sp._status_list.EnsureVisible(row)

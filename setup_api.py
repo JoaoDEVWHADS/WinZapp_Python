@@ -214,6 +214,7 @@ from core.wppconnect_host_layer_patch import (
 )
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
 from core.wppconnect_sender_layer_patch import ALL_PATCHES as _SENDER_LAYER_PATCHES
+from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
 
 
 def _patch_wppconnect_host_layer(client_api_dir: str = None) -> bool:
@@ -374,6 +375,56 @@ def _patch_wppconnect_sender_layer(client_api_dir: str = None) -> bool:
     if missing:
         print(
             f"[WARNING] sender.layer.js: {missing} method(s) did not match "
+            "the expected upstream source — skipping those (the installed "
+            "@wppconnect-team/wppconnect version may have changed this file)."
+        )
+    return missing == 0
+
+
+def _patch_wppconnect_welcome_layer(client_api_dir: str = None) -> bool:
+    """Patch @wppconnect-team/wppconnect's compiled controllers/welcome.js
+    so a plain CommonJS require() of the ESM-only `latest-version` package
+    doesn't crash the whole server on startup (Node 20+) — see
+    client/core/wppconnect_welcome_layer_patch.py's module docstring for
+    why the replacement must be a bare function, not `{ default: fn }`.
+
+    Idempotent and best-effort, same pattern as the other layer patches
+    above.
+    """
+    if client_api_dir is None:
+        client_api_dir = CLIENT_API_DIR
+    welcome_layer_path = os.path.join(
+        client_api_dir, "node_modules", "@wppconnect-team", "wppconnect",
+        "dist", "controllers", "welcome.js",
+    )
+    if not os.path.isfile(welcome_layer_path):
+        print("[WARNING] welcome.js not found — skipping latest-version ESM patch.")
+        return False
+
+    with open(welcome_layer_path, encoding="utf-8") as f:
+        content = f.read()
+
+    applied = 0
+    already = 0
+    missing = 0
+    for original, patched in _WELCOME_LAYER_PATCHES:
+        if patched in content:
+            already += 1
+        elif original in content:
+            content = content.replace(original, patched, 1)
+            applied += 1
+        else:
+            missing += 1
+
+    if applied:
+        with open(welcome_layer_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("[OK] Patched welcome.js — latest-version ESM require no longer crashes startup on Node 20+.")
+    elif already == len(_WELCOME_LAYER_PATCHES):
+        print("[INFO] welcome.js latest-version ESM patch already applied.")
+    if missing:
+        print(
+            f"[WARNING] welcome.js: {missing} pattern(s) did not match "
             "the expected upstream source — skipping those (the installed "
             "@wppconnect-team/wppconnect version may have changed this file)."
         )
@@ -564,6 +615,14 @@ def main():
             _patch_wppconnect_sender_layer()
         except Exception as e:
             print(f"[WARNING] Failed to patch sender.layer.js sendFile error detail: {e}")
+
+        # A CommonJS require() of the ESM-only `latest-version` package
+        # crashes the whole server at startup on Node 20+ — see
+        # _patch_wppconnect_welcome_layer()'s docstring.
+        try:
+            _patch_wppconnect_welcome_layer()
+        except Exception as e:
+            print(f"[WARNING] Failed to patch welcome.js latest-version ESM require: {e}")
 
         # Download Chromium (Puppeteer postinstall)
         print("[INFO] Downloading Chromium (Puppeteer)...")
