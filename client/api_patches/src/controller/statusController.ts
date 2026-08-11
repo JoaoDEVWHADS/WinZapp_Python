@@ -111,12 +111,18 @@ export async function sendTextStorie(req: Request, res: Response) {
   try {
     await ensureStatusChat(req.client);
     const results: any = [];
-    results.push(await req.client.sendTextStatus(text, options));
+    const posted = await req.client.sendTextStatus(text, options);
+    req.logger.info(
+      `[sendTextStorie] result for text=${JSON.stringify(text).slice(0, 80)}: ` +
+        JSON.stringify(posted)?.slice(0, 300)
+    );
+    results.push(posted);
 
     if (results.length === 0)
       res.status(400).json('Error sending the text of stories');
     returnSucess(res, results);
   } catch (error) {
+    req.logger.error(`[sendTextStorie] FAILED: ${JSON.stringify(error)}`);
     returnError(req, res, error);
   }
 }
