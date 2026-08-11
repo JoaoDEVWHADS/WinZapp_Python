@@ -8595,6 +8595,31 @@ class MainWindow(wx.Frame):
             if cpush:
                 chat["pushName"] = cpush
 
+    @staticmethod
+    def _last_received_jid(chat: dict) -> str:
+        """Extract the JID a chat's `lastReceivedKey` belongs to, or ''.
+
+        list-chats serialises every chat with msgs:null (no lastMessage), but
+        the raw ChatModel still carries lastReceivedKey — the key of the last
+        message received in that chat. Its `remote` (or the serialized
+        '<fromMe>_<chatId>_<id>' string) tells us which chat that message
+        actually belongs to, which is how a non-group chat that is really a
+        phantom group-participant entry can be told apart from a genuine 1:1.
+        """
+        if not isinstance(chat, dict):
+            return ""
+        lrc = chat.get("lastReceivedKey")
+        if not isinstance(lrc, dict):
+            return ""
+        lrc_remote = lrc.get("remote")
+        if isinstance(lrc_remote, dict):
+            jid = lrc_remote.get("_serialized") or ""
+            if jid:
+                return jid
+        ser = lrc.get("_serialized") or ""
+        parts = ser.split("_") if ser else []
+        return parts[1] if len(parts) > 1 else ""
+
     def get_remote_chats(self, chats, persist_full: bool = True, notify_errors: bool = True):
         """Fetch/merge the remote chat list into `chats`.
 
@@ -8876,6 +8901,23 @@ class MainWindow(wx.Frame):
                             if not g_name or g_name.strip() in ("", "Grupo sem nome", "Grupo"):
                                 logging.info(f"[get_remote_chats] Skipping ghost/inactive group without name: {jid}")
                                 continue
+                    # A non-group chat whose last received message actually
+                    # belongs to a GROUP is a phantom entry WhatsApp Web creates
+                    # in its store for a group participant: the participant's
+                    # @lid/@c.us surfaces as a "chat" because of messages they
+                    # wrote in groups we are in — never a real 1:1
+                    # conversation. list-chats carries that last message under
+                    # `lastReceivedKey` (it serialises msgs:null, so
+                    # lastMessage is always empty here); real 1:1 chats always
+                    # have a lastReceivedKey whose remote is the chat's own
+                    # @lid/@s.whatsapp.net.
+                    if not jid.endswith("@g.us"):
+                        _lrc_jid = self._last_received_jid(chat)
+                        if _lrc_jid.endswith("@g.us"):
+                            logging.info(
+                                f"[get_remote_chats] Skipping phantom group-participant chat: {jid} "
+                                f"(lastReceivedKey from {_lrc_jid})")
+                            continue
                     if jid not in chats:
                         if "messages" not in chat:
                             chat["messages"] = {"messages": {"records": []}}
@@ -12198,6 +12240,22 @@ class MainWindow(wx.Frame):
         if all_messages:
             all_messages = [m for m in all_messages
                             if not self._is_cleared_message(remote_jid, m)]
+
+        # Keep only messages that actually belong to THIS chat. WPPConnect's
+        # get-messages can answer a group-participant @lid/@c.us chat with
+        # messages from the GROUPS where that participant wrote (the browser
+        # store indexes those messages under the participant's id too) —
+        # storing them as 1:1 history "confirms" the phantom conversation and
+        # pushes its preview into the chat list. Real 1:1 messages normalize
+        # to the chat's own remote_jid; group messages normalize to @g.us and
+        # are dropped here. (Defense in depth behind the get_remote_chats
+        # lastReceivedKey filter — a phantom chat that somehow slipped in must
+        # not be able to accumulate history.)
+        if all_messages:
+            all_messages = [
+                m for m in all_messages
+                if self._normalize_jid((m.get("key") or {}).get("remoteJid", "")) == remote_jid
+            ]
 
         # After fetching, update chat messages
         for msg in all_messages:
