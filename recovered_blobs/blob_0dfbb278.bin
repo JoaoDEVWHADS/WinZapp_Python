@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.11.2151"
+=======
+__version__ = "0.23.1.0beta"
+>>>>>>> upstream/main
