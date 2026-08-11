@@ -8135,6 +8135,76 @@ class ConversationsPanel(wx.Panel):
             # suppressed in on_messages_upsert to avoid double-counting.
             wx.CallAfter(self._on_own_reaction_sent, jid, msg_key, emoji)
 
+    def _persist_reaction_record(self, jid: str, orig_id: str, msg_key: dict,
+                                  sender_key: str, from_me: bool, emoji: str,
+                                  participant: str = "") -> "dict | None":
+        """Persist a reaction (ours or someone else's) into the chat's own
+        records, so populate_messages()/refresh_active_conversation_messages()
+        — which rebuild _reaction_map purely by scanning `records` — can
+        recover it after anything repopulates the message list: a
+        conversation close/reopen, an app restart, or any background
+        full-list refresh in between (e.g. a history backfill delivering an
+        already-seen message). A reaction from someone else used to update
+        only the in-memory _reaction_map and nothing else, so it silently
+        vanished — both the inline marker on the message row and the
+        Reactions button — the next time anything rebuilt the list, with no
+        real relation to focus movement despite how it was reported
+        ("reação some ao voltar o foco pra mensagem"). Own reactions already
+        persisted this way; this is the same thing for the received case.
+
+        The synthetic record id is namespaced per (message, sender) — not
+        just per message — since more than one person can react to the same
+        message with different emojis at once; only the mover's own key
+        keeps the original bare `_rxn_{orig_id}` form used before per-sender
+        namespacing existed, so an already-persisted self-reaction record on
+        an existing install is found and updated in place rather than
+        duplicated under a new id.
+
+        Returns the record dict (the caller may still need it, e.g. for
+        _track_last_reaction()), or None if there was nothing to persist.
+        """
+        chat = self.main_window.get_chat(jid)
+        if not chat or not orig_id:
+            return None
+        rxn_id = (
+            f"_rxn_{orig_id}" if sender_key == self._SELF_REACTOR_KEY
+            else f"_rxn_{orig_id}_{sender_key}"
+        )
+        key = {"remoteJid": jid, "fromMe": from_me, "id": rxn_id}
+        if participant:
+            key["participant"] = participant
+        reaction_record = {
+            "messageType": "reactionMessage",
+            "message": {
+                "reactionMessage": {
+                    "key":  msg_key,
+                    "text": emoji,
+                }
+            },
+            "key": key,
+            "messageTimestamp": int(time.time()),
+        }
+        records = (
+            chat.setdefault("messages", {})
+                .setdefault("messages", {})
+                .setdefault("records", [])
+        )
+        # Update the existing reaction record for this (message, sender)
+        # pair in place (changing the emoji) instead of silently no-op'ing —
+        # previously a changed reaction only updated the in-memory map, so
+        # the old emoji came back after reopening the conversation.
+        existing = next((r for r in records if r.get("key", {}).get("id") == rxn_id), None)
+        if existing:
+            existing["message"] = reaction_record["message"]
+            existing["messageTimestamp"] = reaction_record["messageTimestamp"]
+        else:
+            records.append(reaction_record)
+        try:
+            self.main_window.db.insert_message(jid, reaction_record)
+        except Exception:
+            logging.exception("[conversations] insert reaction failed")
+        return reaction_record
+
     def _on_own_reaction_sent(self, jid: str, msg_key: dict, emoji: str):
         """Update reaction_map, re-render the original message, and refresh the list."""
         orig_id = msg_key.get("id", "")
@@ -8154,44 +8224,10 @@ class ConversationsPanel(wx.Panel):
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
         # can reflect it after a conversation close/reopen.
-        chat = self.main_window.get_chat(jid)
-        if chat:
-            reaction_record = {
-                "messageType": "reactionMessage",
-                "message": {
-                    "reactionMessage": {
-                        "key":  msg_key,
-                        "text": emoji,
-                    }
-                },
-                "key": {
-                    "remoteJid": jid,
-                    "fromMe":    True,
-                    "id":        f"_rxn_{orig_id}",
-                },
-                "messageTimestamp": int(time.time()),
-            }
-            records = (
-                chat.setdefault("messages", {})
-                    .setdefault("messages", {})
-                    .setdefault("records", [])
-            )
-            # Update our existing reaction record for this message in place
-            # (changing the emoji) instead of silently no-op'ing — previously
-            # a changed reaction only updated the in-memory map, so the old
-            # emoji came back after reopening the conversation.
-            rxn_key  = f"_rxn_{orig_id}"
-            existing = next((r for r in records if r.get("key", {}).get("id") == rxn_key), None)
-            if existing:
-                existing["message"] = reaction_record["message"]
-                existing["messageTimestamp"] = reaction_record["messageTimestamp"]
-            else:
-                records.append(reaction_record)
-            try:
-                self.main_window.db.insert_message(jid, reaction_record)
-            except Exception:
-                logging.exception("[conversations] insert reaction failed")
-
+        reaction_record = self._persist_reaction_record(
+            jid, orig_id, msg_key, self._SELF_REACTOR_KEY, True, emoji,
+        )
+        if reaction_record is not None:
             # reaction_record stays in `records` only so populate_messages()
             # can rebuild the reaction map (and thus redraw the reacted-to
             # message's inline reaction marker) after a conversation
@@ -8642,6 +8678,22 @@ class ConversationsPanel(wx.Panel):
                     if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
                         self.messages_list.SetItemText(i, self._render_message_line(m))
                         break
+                # Persist so populate_messages()/refresh_active_conversation_
+                # messages() (which rebuild _reaction_map purely from
+                # `records`) can recover this reaction after anything
+                # repopulates the message list — see
+                # _persist_reaction_record()'s own docstring for the bug
+                # this fixes (a reaction from someone else used to vanish
+                # the next time anything rebuilt the list, since it only
+                # ever touched the in-memory map). Not _track_last_reaction()
+                # or _schedule_set_chats() here — main.py's on_new_message()
+                # already calls both for every reaction from someone else.
+                own_key = msg.get("key", {}) or {}
+                self._persist_reaction_record(
+                    remote_jid, orig_id, reaction.get("key") or {}, sender_key,
+                    bool(own_key.get("fromMe")), emoji,
+                    participant=own_key.get("participant", ""),
+                )
             return  # Don't add reaction as a separate row
         # Avoid duplicates
         msg_id = msg.get("key", {}).get("id", "")
