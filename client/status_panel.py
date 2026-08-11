@@ -17,6 +17,28 @@ except ImportError:
     pyaudio = None
 
 
+def _post_was_rejected(body) -> bool:
+    """True when a send-text-storie response actually means FAILURE.
+
+    With the status.layer.js async patch, WPPConnect answers HTTP 201 even
+    when WhatsApp Web rejected the status at protocol level — the rejection
+    is carried inside the payload as ``sendMsgResult.messageSendResult``
+    (e.g. ``"ERROR_UNKNOWN"``, with ``ack`` staying 0). A null/empty response
+    is also a failure.
+    """
+    if not isinstance(body, dict):
+        return True
+    resp_data = body.get("response")
+    if isinstance(resp_data, list) and resp_data:
+        for item in resp_data:
+            if isinstance(item, dict):
+                s = (item.get("sendMsgResult") or {}).get("messageSendResult")
+                if s and s not in ("SUCCESS", "OK"):
+                    return True
+        return False
+    return resp_data is None
+
+
 def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
     """Human-readable content label for one status update.
 
@@ -1888,12 +1910,12 @@ class StatusPanel(wx.Panel):
             if ok:
                 # Guard against the false-success path: with the status.layer.js
                 # async patch the server now surfaces the real post result, and
-                # a null/empty response means WhatsApp Web did not actually
-                # accept the status (e.g. the status@broadcast chat was still
-                # missing) — report it as an error instead of "posted".
+                # a rejected status arrives as HTTP 201 wrapping
+                # sendMsgResult.messageSendResult = "ERROR_UNKNOWN" (ack stays
+                # 0 — WhatsApp never accepted it). Any of those must be
+                # reported as an error instead of "posted".
                 try:
-                    body = resp.json() or {}
-                    if body.get("response") is None:
+                    if _post_was_rejected(resp.json()):
                         ok = False
                 except Exception:
                     pass

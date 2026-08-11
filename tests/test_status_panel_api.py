@@ -133,3 +133,34 @@ def test_fetch_from_api_exception_falls_back_empty(monkeypatch):
     my_statuses, contacts = panel._fetch_statuses_from_api()
     assert my_statuses == []
     assert contacts == []
+
+
+def test_post_was_rejected_detects_error_unknown():
+    from status_panel import _post_was_rejected
+    body = {
+        "status": "success",
+        "response": [
+            {"id": "true_status@broadcast_X", "ack": 0,
+             "sendMsgResult": {"messageSendResult": "ERROR_UNKNOWN"}}
+        ],
+    }
+    assert _post_was_rejected(body) is True
+
+
+def test_post_was_rejected_accepts_success():
+    from status_panel import _post_was_rejected
+    body = {
+        "status": "success",
+        "response": [
+            {"id": "true_status@broadcast_X", "ack": 3,
+             "sendMsgResult": {"messageSendResult": "SUCCESS"}}
+        ],
+    }
+    assert _post_was_rejected(body) is False
+
+
+def test_post_was_rejected_null_response():
+    from status_panel import _post_was_rejected
+    assert _post_was_rejected({"response": None}) is True
+    assert _post_was_rejected({"response": []}) is False
+    assert _post_was_rejected({}) is True
