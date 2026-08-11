@@ -780,6 +780,12 @@ routes.post(
   statusConnection,
   StatusController.sendVideoStorie
 );
+routes.get(
+  '/api/:session/statuses',
+  verifyToken,
+  statusConnection,
+  StatusController.getStatuses
+);
 
 // Labels
 routes.post(
