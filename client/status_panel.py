@@ -476,9 +476,16 @@ class StatusPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # ── Header buttons ────────────────────────────────────────────────
+        header_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self._add_status_btn = wx.Button(self, label=i18n.t("status_add"))
         self._add_status_btn.Bind(wx.EVT_BUTTON, self._on_add_status)
-        sizer.Add(self._add_status_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+        header_sizer.Add(self._add_status_btn, 0, wx.RIGHT, 5)
+
+        self._refresh_status_btn = wx.Button(self, label=i18n.t("refresh") if i18n.has_key("refresh") else "Atualizar")
+        self._refresh_status_btn.Bind(wx.EVT_BUTTON, self._on_refresh_status_btn)
+        header_sizer.Add(self._refresh_status_btn, 0, wx.RIGHT, 5)
+
+        sizer.Add(header_sizer, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         # ── Status contacts list ──────────────────────────────────────────
         self._list_label = wx.StaticText(self, label=i18n.t("status"))
@@ -682,10 +689,12 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_C        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
         self.ID_CTRL_R        = wx.NewIdRef()
+        self.ID_F5            = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL,                    wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
             (wx.ACCEL_NORMAL,                  wx.WXK_ESCAPE, self.ID_ESCAPE),
+            (wx.ACCEL_NORMAL,                  wx.WXK_F5,     self.ID_F5),
             (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
             (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
             # Same combo ConversationsPanel already uses for "save as"
@@ -700,6 +709,11 @@ class StatusPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_copy_status_text,  id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_save_status_media, id=self.ID_CTRL_SHIFT_S)
         self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,   id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self._on_refresh_status_btn, id=self.ID_F5)
+
+    def _on_refresh_status_btn(self, event):
+        """Manually reload statuses from WPPConnect API."""
+        self.on_show()
 
     def _on_escape(self, event):
         """Esc closes the open status viewer and returns focus to the list.
@@ -2226,6 +2240,7 @@ class StatusPanel(wx.Panel):
         self._status_list.SetColumn(0, col)
 
         self._add_status_btn.SetLabel(i18n.t("status_add"))
+        self._refresh_status_btn.SetLabel(i18n.t("refresh") if i18n.has_key("refresh") else "Atualizar")
         self._prev_status_btn.SetLabel(i18n.t("status_prev"))
         self._next_status_btn.SetLabel(i18n.t("status_next"))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
