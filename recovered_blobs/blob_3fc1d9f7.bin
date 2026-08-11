@@ -1,0 +1,107 @@
+<<<<<<< HEAD
+"""Tests for the pure format_window_title() helper (client/window_title.py)
+and for MainWindow._is_multi_account() (the gate that decides whether the
+account name is shown at all in the window title, tray tooltip and toasts).
+"""
+
+from main import MainWindow
+=======
+"""Tests for the pure format_window_title() helper (client/window_title.py)."""
+
+>>>>>>> upstream/main
+from window_title import format_window_title
+
+
+def test_single_account_plain():
+    assert format_window_title("WinZapp", "WinZapp", 0, is_multi=False) == "WinZapp"
+
+
+def test_multi_account_appends_name():
+    assert format_window_title("WinZapp", "Praca", 0, is_multi=True) == "WinZapp — Praca"
+
+
+def test_unread_count_shown():
+    assert format_window_title("WinZapp", "Praca", 5, is_multi=True) == "WinZapp — Praca (5)"
+
+
+def test_multi_but_name_equals_app():
+    # A name equal to the app name shouldn't double up.
+    assert format_window_title("WinZapp", "WinZapp", 0, is_multi=True) == "WinZapp"
+
+
+def test_single_account_ignores_name():
+    assert format_window_title("WinZapp", "Praca", 0, is_multi=False) == "WinZapp"
+
+
+def test_multi_account_keeps_name_with_unread():
+    # Regression guard: _update_title() builds its base title via this helper,
+    # so a positive unread count must NOT drop the account name (the earlier
+    # bug: the window title lost the profile name on every unread refresh).
+    assert format_window_title("WinZapp", "Midzi", 3, is_multi=True) == "WinZapp — Midzi (3)"
+<<<<<<< HEAD
+
+
+class _RegistryStub:
+    """Stand-in for AccountRegistry exposing only list_paired()."""
+
+    def __init__(self, paired):
+        self._paired = list(paired)
+
+    def list_paired(self):
+        return list(self._paired)
+
+
+class _MainWindowStub:
+    """Carries just the attributes MainWindow._is_multi_account() touches."""
+
+    def __init__(self, registry, account_name="Praca"):
+        self.registry = registry
+        self.account_name = account_name
+
+
+def test_is_multi_false_with_no_registry():
+    # Legacy/single-account fallback: registry is None → never "multi".
+    mw = _MainWindowStub(None)
+    assert MainWindow._is_multi_account(mw) is False
+
+
+def test_is_multi_false_with_zero_paired_accounts():
+    mw = _MainWindowStub(_RegistryStub([]))
+    assert MainWindow._is_multi_account(mw) is False
+
+
+def test_is_multi_false_with_one_paired_account():
+    # The reported bug: with a single connected account the name must NOT be
+    # shown anywhere (title/tray/notifications) — it is redundant.
+    mw = _MainWindowStub(_RegistryStub([{"id": "a"}]))
+    assert MainWindow._is_multi_account(mw) is False
+
+
+def test_is_multi_true_with_two_paired_accounts():
+    mw = _MainWindowStub(_RegistryStub([{"id": "a"}, {"id": "b"}]))
+    assert MainWindow._is_multi_account(mw) is True
+
+
+def test_is_multi_false_when_registry_raises():
+    class _Boom:
+        def list_paired(self):
+            raise OSError("registry unreadable")
+
+    mw = _MainWindowStub(_Boom())
+    assert MainWindow._is_multi_account(mw) is False
+
+
+def test_title_gate_suppresses_name_with_single_account():
+    # End-to-end: with one paired account the title stays plain even though
+    # the window is running in account mode (account_id set).
+    mw = _MainWindowStub(_RegistryStub([{"id": "a"}]))
+    is_multi = MainWindow._is_multi_account(mw)
+    assert format_window_title("WinZapp", mw.account_name, 0, is_multi=is_multi) == "WinZapp"
+
+
+def test_title_gate_shows_name_with_two_accounts():
+    mw = _MainWindowStub(_RegistryStub([{"id": "a"}, {"id": "b"}]))
+    is_multi = MainWindow._is_multi_account(mw)
+    assert format_window_title("WinZapp", mw.account_name, 0, is_multi=is_multi) == "WinZapp — Praca"
+=======
+>>>>>>> upstream/main
