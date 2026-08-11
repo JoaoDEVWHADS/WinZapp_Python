@@ -648,17 +648,17 @@ class StatusPanel(wx.Panel):
         self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
         voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
 
-        self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording"))
+        self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording") + " (Ctrl+Shift+P)")
         self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
         self._voice_pause_btn.Hide()
         voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.RIGHT, 5)
 
-        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("status_send"))
+        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("send_voice_message") + " (Ctrl+R)")
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
         self._voice_send_btn.Hide()
         voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
 
-        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("cancel"))
+        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
         voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
 
@@ -689,6 +689,8 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_C        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
         self.ID_CTRL_R        = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_P  = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_D  = wx.NewIdRef()
         self.ID_F5            = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
@@ -697,19 +699,23 @@ class StatusPanel(wx.Panel):
             (wx.ACCEL_NORMAL,                  wx.WXK_F5,     self.ID_F5),
             (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
             (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("P"),      self.ID_CTRL_SHIFT_P),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("D"),      self.ID_CTRL_SHIFT_D),
             # Same combo ConversationsPanel already uses for "save as"
             # (client/ui/conversations.py's ID_CTRL_SHIFT_S) — consistent
             # muscle memory across both places media can be saved from.
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("S"),      self.ID_CTRL_SHIFT_S),
         ])
         self.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self._on_prev_status,       id=self.ID_CTRL_LEFT)
-        self.Bind(wx.EVT_MENU, self._on_next_status,       id=self.ID_CTRL_RIGHT)
-        self.Bind(wx.EVT_MENU, self._on_escape,            id=self.ID_ESCAPE)
-        self.Bind(wx.EVT_MENU, self._on_copy_status_text,  id=self.ID_CTRL_C)
-        self.Bind(wx.EVT_MENU, self._on_save_status_media, id=self.ID_CTRL_SHIFT_S)
-        self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,   id=self.ID_CTRL_R)
-        self.Bind(wx.EVT_MENU, self._on_refresh_status_btn, id=self.ID_F5)
+        self.Bind(wx.EVT_MENU, self._on_prev_status,          id=self.ID_CTRL_LEFT)
+        self.Bind(wx.EVT_MENU, self._on_next_status,          id=self.ID_CTRL_RIGHT)
+        self.Bind(wx.EVT_MENU, self._on_escape,               id=self.ID_ESCAPE)
+        self.Bind(wx.EVT_MENU, self._on_copy_status_text,     id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_save_status_media,    id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,      id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p_shortcut,id=self.ID_CTRL_SHIFT_P)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d_shortcut,id=self.ID_CTRL_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self._on_refresh_status_btn,   id=self.ID_F5)
 
     def _on_refresh_status_btn(self, event):
         """Manually reload statuses from WPPConnect API."""
@@ -1788,7 +1794,7 @@ class StatusPanel(wx.Panel):
         self._voice_start_btn.Show()
         self._voice_pause_btn.Hide()
         self._voice_send_btn.Hide()
-        self._voice_close_btn.SetLabel(i18n.t("cancel"))
+        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
 
         self._voice_post_panel.Show()
         self.Layout()
@@ -1804,6 +1810,16 @@ class StatusPanel(wx.Panel):
                 self._on_send_voice_status(None)
         else:
             self._on_choose_voice_status(None)
+
+    def _on_ctrl_shift_p_shortcut(self, event):
+        """Ctrl+Shift+P shortcut handler to pause/resume voice recording."""
+        if self._voice_post_panel.IsShown() and self._is_recording:
+            self._toggle_pause_voice_recording(event)
+
+    def _on_ctrl_shift_d_shortcut(self, event):
+        """Ctrl+Shift+D shortcut handler to discard voice recording/panel."""
+        if self._voice_post_panel.IsShown():
+            self._on_close_voice_panel(event)
 
     def _on_record_voice_button(self, event):
         if not self._is_recording:
@@ -1872,11 +1888,12 @@ class StatusPanel(wx.Panel):
 
         i18n = self.main_window.i18n
         self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
-        self._voice_start_btn.SetLabel(i18n.t("status_send") + " (Ctrl+R)")
-        self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+        self._voice_start_btn.Hide()
+        self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
         self._voice_pause_btn.Show()
+        self._voice_send_btn.SetLabel(i18n.t("send_voice_message") + " (Ctrl+R)")
         self._voice_send_btn.Show()
-        self._voice_close_btn.SetLabel(i18n.t("cancel"))
+        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
         self.Layout()
         self._voice_send_btn.SetFocus()
 
@@ -1891,10 +1908,10 @@ class StatusPanel(wx.Panel):
                 pass
         i18n = self.main_window.i18n
         if self._recording_paused:
-            self._voice_pause_btn.SetLabel(i18n.t("resume_recording"))
+            self._voice_pause_btn.SetLabel(i18n.t("resume_recording") + " (Ctrl+Shift+P)")
             self._voice_status_lbl.SetLabel(i18n.t("recording_paused"))
         else:
-            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
             self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
 
     def _stop_recording_stream(self):
