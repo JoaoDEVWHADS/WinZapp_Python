@@ -727,24 +727,68 @@ class StatusPanel(wx.Panel):
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
         my_statuses, contacts = self._fetch_statuses_from_api()
-        # Fall back PER FIELD: the API can return my own statuses (StatusV3
-        # getMyStatus) while the contacts' StatusV3Store is still empty
-        # (browser never opened the Status view) — a single combined
-        # "if not both" gate would discard the locally-cached stories for
-        # the people too. The in-memory/_status_updates (seeded from the DB
-        # at startup) fills whichever side the API did not deliver.
-        if not my_statuses or not contacts:
-            status_updates = getattr(mw, "_status_updates", {})
-            records = []
-            for participant, msgs in list(status_updates.items()):
-                for msg in msgs:
-                    records.append(msg)
+        # Merge, never replace: the API's StatusV3Store may only hold the
+        # pages loaded so far, while _status_updates (seeded from the DB at
+        # startup) keeps the stories that arrived via status@broadcast
+        # earlier. Showing both (deduped by message id) covers the whole
+        # picture instead of dropping whichever source has less.
+        status_updates = getattr(mw, "_status_updates", {})
+        records = []
+        for participant, msgs in list(status_updates.items()):
+            for msg in msgs:
+                records.append(msg)
+        if records:
             fb_my, fb_contacts = self._parse_statuses(records, i18n)
-            if not my_statuses:
-                my_statuses = fb_my
-            if not contacts:
-                contacts = fb_contacts
+            my_statuses = self._merge_status_lists(my_statuses, fb_my)
+            contacts = self._merge_status_contacts(contacts, fb_contacts)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
+
+    @staticmethod
+    def _merge_status_lists(a: list, b: list) -> list:
+        """Union of two status-dict lists, deduped by key.id (order: a first)."""
+        seen = set()
+        out = []
+        for s in list(a) + list(b):
+            if not isinstance(s, dict):
+                continue
+            mid = (s.get("key") or {}).get("id")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            out.append(s)
+        return out
+
+    @staticmethod
+    def _merge_status_contacts(a: list, b: list) -> list:
+        """Union of two contact-status lists, grouped by jid, deduped by id."""
+        by_jid = {}
+        for entry in list(a) + list(b):
+            if not isinstance(entry, dict):
+                continue
+            jid = entry.get("jid")
+            if not jid:
+                continue
+            merged = by_jid.get(jid)
+            if merged is None:
+                merged = {
+                    "name": entry.get("name", ""),
+                    "jid": jid,
+                    "statuses": [],
+                    "viewed_all": entry.get("viewed_all", False),
+                }
+                by_jid[jid] = merged
+            seen = {(s.get("key") or {}).get("id") for s in merged["statuses"]}
+            for s in entry.get("statuses") or []:
+                if not isinstance(s, dict):
+                    continue
+                mid = (s.get("key") or {}).get("id")
+                if mid and mid in seen:
+                    continue
+                if mid:
+                    seen.add(mid)
+                merged["statuses"].append(s)
+        return list(by_jid.values())
 
     def _fetch_statuses_from_api(self) -> tuple:
         """Query WPPConnect's GET /api/{session}/statuses (StatusV3Store).
