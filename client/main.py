@@ -14001,28 +14001,54 @@ class MainWindow(wx.Frame):
         # existed on MainWindow and so always fell back to "", silently
         # disabling this guard entirely.
         cp = getattr(self, "conversations_panel", None)
-        if normalized == getattr(cp, "_last_open_jid", ""):
-            unread_count = 0
-        else:
-            read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
-            if read_at_t is not None:
-                incoming_t = int(chat.get("t", 0) or 0)
-                if incoming_t <= read_at_t:
-                    unread_count = 0
-                else:
-                    # A genuinely new message arrived after the local
-                    # read-ack, so the guard above no longer applies. But the
-                    # server-reported total can still be stale/inflated —
-                    # e.g. it may still include messages we already read
-                    # locally that WhatsApp's own servers haven't caught up
-                    # with yet. Clamp to what we actually know arrived since
-                    # the read-ack instead of trusting the raw server count.
-                    local_new = getattr(self, "_new_since_read", {}).get(normalized)
-                    if local_new:
-                        unread_count = min(unread_count, local_new)
-                    self._locally_read_at.pop(normalized, None)
-                    if hasattr(self, "_new_since_read"):
-                        self._new_since_read.pop(normalized, None)
+        # Use the *real* open state (the conversation panel actually showing
+        # this jid) instead of _last_open_jid: that field is never cleared on
+        # close, so a chat the user already left kept being treated as "open"
+        # forever and any chats-update for it was force-zeroed.
+        _open_now = (
+            cp is not None
+            and cp.conversation is not None
+            and cp.conversation.get("remoteJid") == normalized
+        )
+        read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
+        if _open_now:
+            # Chat is genuinely open. Keep a nonzero count only for messages
+            # that arrived while the window was hidden/minimized (tracked in
+            # _new_since_read); otherwise the open conversation is read.
+            local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
+            unread_count = min(unread_count, local_new) if local_new else 0
+        elif read_at_t is None and unread_count < old_count:
+            # WA-JS fires chat.unread_count_changed (forwarded to us as
+            # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
+            # into the browser Store — often with unreadCount=0 BEFORE the real
+            # value is populated — and those events keep arriving for a while
+            # AFTER the initial sync finished, so the _initial_sync_running
+            # guard above has already been passed. A chat never read locally
+            # this session and not currently open must never have its locally
+            # counted unread reduced by such a server event; the local counter
+            # (incremented by on_new_message or set by get_remote_chats) is the
+            # authoritative source. Groups never hit this: the WA-JS event is
+            # 1:1 only, which is exactly why this bug only showed on private
+            # chats.
+            return
+        elif read_at_t is not None:
+            incoming_t = int(chat.get("t", 0) or 0)
+            if incoming_t <= read_at_t:
+                unread_count = 0
+            else:
+                # A genuinely new message arrived after the local
+                # read-ack, so the guard above no longer applies. But the
+                # server-reported total can still be stale/inflated —
+                # e.g. it may still include messages we already read
+                # locally that WhatsApp's own servers haven't caught up
+                # with yet. Clamp to what we actually know arrived since
+                # the read-ack instead of trusting the raw server count.
+                local_new = getattr(self, "_new_since_read", {}).get(normalized)
+                if local_new:
+                    unread_count = min(unread_count, local_new)
+                self._locally_read_at.pop(normalized, None)
+                if hasattr(self, "_new_since_read"):
+                    self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
