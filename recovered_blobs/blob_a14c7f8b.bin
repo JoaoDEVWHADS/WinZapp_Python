@@ -1,0 +1,5 @@
+<<<<<<< HEAD
+__version__ = "2026.08.11.0811"
+=======
+__version__ = "2026.08.09.2007-pre"
+>>>>>>> 0c8a6311 (chore(build): porta patch do middleware auth.ts e melhorias de build da joaopr4)
