@@ -5,7 +5,7 @@ import socketio
 import wx
 import requests
 from core.i18n import I18n
-from core.utils import looks_like_binary_blob, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
+from core.utils import looks_like_binary_blob, looks_like_jid, _slim_quoted_message, parse_bool_flag as _parse_bool_flag
 
 # ── Message delivery status ──────────────────────────────────────────────────
 # The app's own scale (Baileys-shaped, what messages.status stores and what
@@ -1005,6 +1005,21 @@ class WebSocketClient:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             # WPPConnect emits: {"data": "data:image/png;base64,...", "session": "..."}
+            # Ignore events for other sessions (multi-session server scenario,
+            # same guard already used in on_wpp_session_logged/on_wpp_status_
+            # find below) — observed live: /close-session answered 200 for a
+            # stale token, but the old session's Puppeteer browser/QR-polling
+            # loop kept running for many more minutes regardless, still
+            # emitting fresh qrCode events the whole time. Without this check
+            # those reached the SAME on_qrcode_update() the real,
+            # already-paired session's own events do, re-triggering the QR
+            # dialog (and, once its widgets were destroyed when the user
+            # actually finished pairing, an unhandled "wrapped C/C++ object
+            # ... has been deleted" RuntimeError on every single stale event
+            # after that) long after pairing had genuinely succeeded.
+            session = data.get("session", "")
+            if session and session != self.instance_name:
+                return
             qrcode_base64 = data.get("data")
             if qrcode_base64:
                 self.on_qrcode_update({
@@ -1130,6 +1145,13 @@ class WebSocketClient:
         """
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            # Same stale-session guard as on_wpp_qrcode — a closed-but-still-
+            # running session could otherwise keep feeding a rotated pairing
+            # code into a dialog for an account that already finished
+            # pairing through a different, current session.
+            session = data.get("session", "")
+            if session and session != self.instance_name:
                 return
             code = data.get("data") or data.get("phoneCode") or ""
             if code:
@@ -1421,12 +1443,32 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "document":
+            # A normal send/receive populates the top-level convenience
+            # fields (filename/size) WPPConnect's wa-js model sets on the
+            # raw message object. A FORWARDED document doesn't get those
+            # top-level fields populated the same way — only the nested
+            # mediaData carries the real name/size — so without this
+            # fallback (mirroring the audio/video branches above, which
+            # already fall back into mediaData for duration) every forwarded
+            # document rendered as the generic "Document" placeholder with a
+            # 0-byte size.
+            media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
+            doc_file_name = (
+                wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title")
+                or media_data.get("filename") or media_data.get("fileName") or media_data.get("title")
+                or "Document"
+            )
+            doc_file_length = (
+                wpp_msg.get("size") or wpp_msg.get("fileLength")
+                or media_data.get("size") or media_data.get("fileLength")
+                or 0
+            )
             message_content = {
                 "documentMessage": {
-                    "fileName": wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title") or "Document",
-                    "fileLength": wpp_msg.get("size") or wpp_msg.get("fileLength") or 0,
+                    "fileName": doc_file_name,
+                    "fileLength": doc_file_length,
                     "url": wpp_msg.get("clientUrl", ""),
-                    "mimetype": wpp_msg.get("mimetype", ""),
+                    "mimetype": wpp_msg.get("mimetype") or media_data.get("mimetype", ""),
                     "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
                 }
             }
@@ -1516,8 +1558,18 @@ class WebSocketClient:
                 }
             }
 
-        # Fallback to plain text if the message type is unsupported/unmapped but contains body text
-        if not message_content and conversation:
+        # Fallback to plain text if the message type is unsupported/unmapped but contains body text.
+        # Excludes a bare JID: WPPConnect's raw payload for internal
+        # notification-only events (observed for a contact's security-code/
+        # E2E-identity-change notice, "type" unmapped above and no real
+        # message content at all) stuffs the JID of whoever triggered it
+        # into this same "body" field — treating that as chat text leaked
+        # the contact's raw @lid into the conversation as if they had sent
+        # it as a message. Leaving message_content empty here instead falls
+        # through to the unmapped-type handling below, which is already
+        # correctly excluded from display/unread/notifications elsewhere
+        # (see is_countable_message()'s docstring in main.py).
+        if not message_content and conversation and not looks_like_jid(conversation):
             msg_type = "chat"
             message_content = {"conversation": conversation}
 

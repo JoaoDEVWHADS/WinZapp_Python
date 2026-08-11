@@ -13,7 +13,12 @@ import ctypes
 
 import core.audio_devices as audio_devices_module
 import core.sound_system as sound_system_module
-from core.audio_devices import _match_device, enumerate_output_devices
+from core.audio_devices import (
+    _match_device,
+    enumerate_input_devices,
+    enumerate_output_devices,
+    test_input_device as _test_input_device,
+)
 from core.sound_system import SoundSystem
 
 
@@ -297,3 +302,19 @@ class TestApplyEffectsDevice:
         assert ss._effects_device == 3
         assert ss.apply_effects_device("") is True
         assert ss._effects_device == 1  # pinned to default, NOT None
+
+
+class TestPyAudioUnavailable:
+    """No wheel exists for PyAudio on Python 3.14 at the time of writing
+    (see requirements.txt's version marker), so audio_devices.py imports
+    pyaudio inside a try/except and leaves the module-level name None
+    rather than failing outright. These paths must degrade gracefully
+    instead of raising AttributeError on `pyaudio.PyAudio`."""
+
+    def test_enumerate_input_devices_returns_empty_list(self, monkeypatch):
+        monkeypatch.setattr(audio_devices_module, "pyaudio", None)
+        assert enumerate_input_devices() == []
+
+    def test_test_input_device_returns_false(self, monkeypatch):
+        monkeypatch.setattr(audio_devices_module, "pyaudio", None)
+        assert _test_input_device(5) is False
