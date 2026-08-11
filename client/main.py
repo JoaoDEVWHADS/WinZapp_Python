@@ -6099,10 +6099,16 @@ class MainWindow(wx.Frame):
         if not os.path.isfile(settings_file):
             os.makedirs(os.path.dirname(settings_file), exist_ok=True)
             if os.path.isfile(default_file):
-                shutil.copy2(default_file, settings_file)
-            else:
-                with open(settings_file, "w", encoding="utf-8") as f:
-                    json.dump(fallback_dict, f, indent=4)
+                try:
+                    shutil.copy2(default_file, settings_file)
+                except Exception:
+                    pass
+            if not os.path.isfile(settings_file):
+                try:
+                    with open(settings_file, "w", encoding="utf-8") as f:
+                        json.dump(fallback_dict, f, indent=4)
+                except Exception:
+                    pass
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
                 self.settings = json.load(f)
@@ -7918,7 +7924,7 @@ class MainWindow(wx.Frame):
             #      locally, which on a reconnection means it is fully warmed up, or
             #  (c) we've exhausted retries.
             settled = server_count > 0 and server_count == prev_server_count
-            covers_cache = has_local_chats and server_count >= local_chat_count
+            covers_cache = has_local_chats and local_chat_count > 0 and server_count >= local_chat_count
             if settled or covers_cache:
                 chat_list_settled = True
                 break
@@ -12310,6 +12316,19 @@ class MainWindow(wx.Frame):
         if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
             return False
         message_type = msg.get("messageType", "")
+        if not message_type and msg.get("type"):
+            t = str(msg.get("type"))
+            if t in ("audio", "ptt"):
+                message_type = "audioMessage"
+            elif t == "image":
+                message_type = "imageMessage"
+            elif t == "video":
+                message_type = "videoMessage"
+            elif t in ("document", "doc"):
+                message_type = "documentMessage"
+            elif t == "sticker":
+                message_type = "stickerMessage"
+
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
         if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
             return False
@@ -12443,6 +12462,11 @@ class MainWindow(wx.Frame):
             if response.status_code == 404 and isinstance(body, dict):
                 if str(body.get("status", "")).lower() == "disconnected":
                     disconnected = True
+            if response.status_code in (500, 502, 503) and isinstance(body, dict):
+                err_obj = body.get("error", {})
+                err_name = str(err_obj.get("name", "")) if isinstance(err_obj, dict) else ""
+                if "TargetCloseError" in err_name or "ProtocolError" in err_name or "TargetCloseError" in str(body):
+                    disconnected = True
             if isinstance(body, dict):
                 messages = body.get("response", {})
                 messages = messages.get("message", []) if isinstance(messages, dict) else []
@@ -12451,8 +12475,8 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
         if disconnected:
-            logging.warning("[send] WhatsApp reported Disconnected — pausing queue and triggering session recovery")
-            self._set_wa_connected(False, "API answered Disconnected")
+            logging.warning("[send] WhatsApp reported Disconnected or TargetCloseError — pausing queue and triggering session recovery")
+            self._set_wa_connected(False, "API answered Disconnected or TargetCloseError")
             # Proactively schedule connection check to auto-recover session via HTTP
             wx.CallAfter(self.check_wa_connection_http)
         return disconnected
@@ -13774,6 +13798,15 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
+        remote_jid = _key.get("remoteJid", "") or media.get("from", "")
+        # If remote_jid is phone@c.us and we have an LID mapping for it, prefer LID JID
+        if remote_jid and not remote_jid.endswith("@lid"):
+            norm_phone = self._normalize_jid(remote_jid)
+            alt_lid = getattr(self, "_phone_to_lid", {}).get(norm_phone, "")
+            if alt_lid:
+                _key = dict(_key)
+                _key["remoteJid"] = alt_lid
+
         msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
@@ -13802,21 +13835,39 @@ class MainWindow(wx.Frame):
             elif t in ("document", "doc"):
                 msg_type = "documentMessage"
 
-        if msg_type and isinstance(msg_inner_obj, dict):
-            inner = msg_inner_obj.get(msg_type)
-            if isinstance(inner, dict):
-                if "mediaKey" in inner and inner["mediaKey"]:
-                    body_data["mediaKey"] = inner["mediaKey"]
-                if "url" in inner and inner["url"]:
-                    body_data["clientUrl"] = inner["url"]
-                if "directPath" in inner and inner["directPath"]:
-                    body_data["directPath"] = inner["directPath"]
-                if "mimetype" in inner and inner["mimetype"]:
-                    body_data["mimetype"] = inner["mimetype"]
-                body_data["type"] = msg_type.replace("Message", "")
+        # Check nested structures as well as top-level keys
+        candidate_objs = []
+        if isinstance(msg_inner_obj, dict):
+            candidate_objs.append(msg_inner_obj)
+            if msg_type and isinstance(msg_inner_obj.get(msg_type), dict):
+                candidate_objs.append(msg_inner_obj.get(msg_type))
+            for k in ("audioMessage", "imageMessage", "videoMessage", "documentMessage", "stickerMessage"):
+                if isinstance(msg_inner_obj.get(k), dict):
+                    candidate_objs.append(msg_inner_obj.get(k))
+        candidate_objs.append(media)
+
+        for obj in candidate_objs:
+            if not body_data.get("mediaKey") and obj.get("mediaKey"):
+                mk = obj.get("mediaKey")
+                if isinstance(mk, bytes):
+                    body_data["mediaKey"] = base64.b64encode(mk).decode("utf-8")
+                elif isinstance(mk, dict) and "data" in mk:
+                    body_data["mediaKey"] = base64.b64encode(bytes(mk["data"])).decode("utf-8")
+                else:
+                    body_data["mediaKey"] = str(mk)
+            if not body_data.get("clientUrl") and (obj.get("url") or obj.get("clientUrl")):
+                body_data["clientUrl"] = obj.get("url") or obj.get("clientUrl")
+            if not body_data.get("directPath") and obj.get("directPath"):
+                body_data["directPath"] = obj.get("directPath")
+            if not body_data.get("mimetype") and obj.get("mimetype"):
+                body_data["mimetype"] = obj.get("mimetype")
+
+        if msg_type:
+            body_data["type"] = msg_type.replace("Message", "")
 
         has_media_key = bool(body_data.get("mediaKey"))
         has_client_url = bool(body_data.get("clientUrl"))
+        has_direct_path = bool(body_data.get("directPath"))
         media_type = body_data.get("type", "")
         logging.info(
             "[get_base64_from_media] Requesting media for msg_id=%s, url=%s, has_mediaKey=%s, has_clientUrl=%s, type=%s",
