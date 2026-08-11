@@ -4671,8 +4671,8 @@ class ConversationsPanel(wx.Panel):
                 _speed = self._audio_speed_steps[self._audio_speed_index]
                 tempo.tempo = self._audio_tempo_map.get(_speed, 0)
                 return s, tempo
-            except Exception:
-                # BASS FX not available or format not supported with decode=True.
+            except Exception as e:
+                logging.info(f"[UI Audio Playback] Decode/Tempo stream failed ({e}), falling back to direct stream: {self._audio_temp_file}")
                 return sl_stream.FileStream(file=self._audio_temp_file), None
 
         try:
