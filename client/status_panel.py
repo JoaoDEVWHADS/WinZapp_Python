@@ -1145,16 +1145,9 @@ class StatusPanel(wx.Panel):
         statuses = entry.get("statuses", [])
         if not statuses:
             return
-        # Ctrl+Right past the LAST status of a contact used to wrap back
-        # around to their first one — closes the viewer instead (like Esc)
-        # and refreshes the list, matching how the official client moves
-        # on to the next contact rather than re-looping the one just
-        # finished.
-        if self._current_status_idx + 1 >= len(statuses):
-            self._on_escape(None)
-            self._on_refresh(None)
-            return
-        self._current_status_idx += 1
+        # Wraps back around to the first status, mirroring _on_prev_status()
+        # wrapping back to the last one.
+        self._current_status_idx = (self._current_status_idx + 1) % len(statuses)
         self._show_current_status()
 
     # ── Viewed status tracking (drives the "Vistos" section) ────────────────

@@ -1248,11 +1248,11 @@ class TestPopulateListRecentViewedSections:
         assert stub._status_contacts[stub._selected_contact_idx]["jid"] == "seen@s.whatsapp.net"
 
 
-class TestNextStatusNoLongerWrapsAround:
-    """Ctrl+Right past the last status of a contact used to loop back to
-    their first one — now closes the viewer and refreshes instead, like
-    moving on to the next contact rather than re-showing the one just
-    finished."""
+class TestStatusNavigationWrapsAround:
+    """Ctrl+Right past the last status of a contact wraps back to their
+    first one, and Ctrl+Left before the first wraps to their last — an
+    earlier version closed the viewer instead of wrapping on Ctrl+Right;
+    the user explicitly asked for wrap-around on both directions."""
 
     def test_advances_to_the_next_status_normally(self):
         stub = _Stub()
@@ -1265,18 +1265,27 @@ class TestNextStatusNoLongerWrapsAround:
 
         assert stub._current_status_idx == 1
 
-    def test_closes_and_refreshes_instead_of_wrapping_at_the_last_status(self):
+    def test_next_wraps_from_the_last_status_back_to_the_first(self):
         stub = _Stub()
         stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("a"), _text_status("b")])]
         stub._selected_contact_idx = 0
         stub._current_status_idx = 1  # already on the last one
-        stub._viewer_panel.Show()
+        stub._show_current_status = lambda: None
 
         stub._on_next_status(None)
 
-        assert stub._current_status_idx == 1  # unchanged — did not wrap to 0
-        assert stub._viewer_panel.shown is False
-        assert stub.refresh_calls == 1
+        assert stub._current_status_idx == 0
+
+    def test_prev_wraps_from_the_first_status_back_to_the_last(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_text_status("a"), _text_status("b")])]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0  # already on the first one
+        stub._show_current_status = lambda: None
+
+        stub._on_prev_status(None)
+
+        assert stub._current_status_idx == 1
 
 
 class TestEscapeClosesTheViewer:
