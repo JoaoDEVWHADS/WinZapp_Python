@@ -1,0 +1,12 @@
+# .gitignore EXCLUSIVO DA BRANCH DE AUDITORIA
+# 10 arquivos protegidos — rigidamente ignorados (nunca comparar/portar)
+build.py
+updater.py
+config.py
+version.py
+setup_api.py
+package.json
+api_setup.py
+README
+CHANGELOG
+release.imo
