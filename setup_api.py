@@ -43,6 +43,7 @@ CUSTOM_SRC_FILES = [
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
+    "src/middleware/auth.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
@@ -70,6 +71,11 @@ def _load_env() -> dict:
 
 def _run(cmd: list, cwd: str = None, check: bool = True, env: dict = None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
+    executable = cmd[0]
+    if isinstance(executable, str) and not os.path.isabs(executable):
+        resolved = shutil.which(executable)
+        if resolved:
+            cmd = [resolved] + cmd[1:]
     result = subprocess.run(cmd, cwd=cwd, shell=(sys.platform == "win32"), env=env)
     if check and result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
