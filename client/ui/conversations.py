@@ -4639,7 +4639,16 @@ class ConversationsPanel(wx.Panel):
                 f"Header hex: {content[:16].hex()} "
                 f"(OGG magic = 4f676753, Opus head = 4f707573)"
             )
-            actual_ext = ".wav" if content.startswith(b"RIFF") else audio_ext
+            if content.startswith(b"RIFF"):
+                actual_ext = ".wav"
+            elif content.startswith(b"ID3") or (len(content) > 2 and content[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")):
+                actual_ext = ".mp3"
+            elif b"ftyp" in content[:32]:
+                actual_ext = ".m4a"
+            elif content.startswith(b"OggS"):
+                actual_ext = ".ogg"
+            else:
+                actual_ext = audio_ext
             tmp = tempfile.NamedTemporaryFile(suffix=actual_ext, delete=False)
             tmp.write(content)
             tmp.close()
