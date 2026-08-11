@@ -14,19 +14,38 @@ async function returnSucess(res: Response, data: any) {
 }
 
 /**
- * WinZapp patch: ensure the status@broadcast chat exists in the browser Store
- * before posting. `WPP.status.sendTextStatus` -> sendRawStatus ->
- * assertFindChat('status@broadcast') throws "Chat not found" when the Status
- * view was never opened in this Chrome session — the Store has no entry for
- * the virtual status chat yet — and every text-status post silently failed
- * (before the status.layer.js async fix, the failure was swallowed inside
- * page.evaluate and reported as success; now it surfaces as HTTP 500).
- * `WPP.chat.find` uses findOrCreateLatestChat, which registers the chat.
+ * WinZapp patch: ensure the status subsystem is "awake" in the browser
+ * before posting or listing statuses.
+ *
+ * Posting: `WPP.status.sendTextStatus` -> sendRawStatus ->
+ * assertFindChat('status@broadcast') throws "Chat not found" when the
+ * Status view was never opened in this Chrome session — the Store has no
+ * entry for the virtual status chat yet — and every text-status post
+ * silently failed (before the status.layer.js async fix, the failure was
+ * swallowed inside page.evaluate and reported as success; now it surfaces
+ * as HTTP 500).
+ *
+ * Listing: the StatusV3Store (other contacts' statuses) stays empty until
+ * the browser actually syncs it; StatusV3Collection.sync() is the call
+ * WhatsApp Web itself uses when the Status view is opened, so invoking it
+ * here populates both the status chat and the contacts' statuses.
  */
 async function ensureStatusChat(client: any) {
   try {
     await client.page.evaluate(async () => {
       const WPP = (window as any).WPP;
+      // Wake the StatusV3 store: this is what WhatsApp Web runs when the
+      // Status tab is opened, and it registers the status@broadcast chat in
+      // the ChatStore as a side effect — the precondition assertFindChat()
+      // inside sendRawStatus() needs.
+      const store = WPP?.whatsapp?.StatusV3Store;
+      if (store?.sync) {
+        try {
+          await store.sync();
+        } catch (e) {
+          // sync can reject while not fully ready — the find below still runs
+        }
+      }
       if (WPP?.chat?.find) {
         try {
           await WPP.chat.find('status@broadcast');
@@ -253,10 +272,21 @@ export async function getStatuses(req: Request, res: Response) {
         // not paired/ready yet — leave myStatus empty
       }
 
-      // Other contacts' statuses from the StatusV3 collection.
+      // Other contacts' statuses from the StatusV3 collection. The browser
+      // keeps this store empty until the Status view is opened (or sync() is
+      // called), so wake it first — that is the call WhatsApp Web itself
+      // makes when the user opens the Status tab.
       try {
         const store = WPP?.whatsapp?.StatusV3Store;
-        const models = store?.models || [];
+        if (store?.sync) {
+          try {
+            await store.sync();
+          } catch (e) {
+            // ignore — read whatever is already in the store
+          }
+        }
+        const models =
+          store?.getUnexpired ? store.getUnexpired() : store?.models || [];
         const me = WPP.conn?.getMyUserWid?.()?.toString?.() ?? '';
         for (const model of models) {
           try {

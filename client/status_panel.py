@@ -1871,6 +1871,18 @@ class StatusPanel(wx.Panel):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
             ok   = resp.status_code in (200, 201)
+            if ok:
+                # Guard against the false-success path: with the status.layer.js
+                # async patch the server now surfaces the real post result, and
+                # a null/empty response means WhatsApp Web did not actually
+                # accept the status (e.g. the status@broadcast chat was still
+                # missing) — report it as an error instead of "posted".
+                try:
+                    body = resp.json() or {}
+                    if body.get("response") is None:
+                        ok = False
+                except Exception:
+                    pass
         except Exception:
             ok = False
         if ok:
