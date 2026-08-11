@@ -4797,29 +4797,20 @@ class MainWindow(wx.Frame):
                 logging.error("[ensure_api_modules_installed] Failed to remove legacy node_modules: %s", e)
 
         # ── Check for new required packages in an existing node_modules ──────
-        # When we add a new npm dependency (e.g. @ffmpeg-installer/ffmpeg) the
+        # When we add a new npm dependency (e.g. @babel/runtime) the
         # user's node_modules is already installed from a previous run, so the
         # normal "node_modules absent" gate never fires. We compare a list of
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
-        # Resolved rather than just probed for a directory: @ffmpeg-installer
-        # unpacks its binary under a platform-specific subfolder, and WinZapp
-        # also accepts a bundled lib/ copy or one on PATH — so "is the package
-        # folder there?" is the wrong question, "can we actually find an
-        # ffmpeg to run?" is the right one.
-        ffmpeg_bin = self._find_api_ffmpeg()
+        # NOTE: ffmpeg is deliberately NOT auto-installed here anymore. If the
+        # binary is missing, _find_api_ffmpeg() returns None, _convert_wav_to_ogg()
+        # falls back to raw WAV and the video player plays audio-only — ffmpeg
+        # must be provided by the bundle, bundled lib/ or the system PATH.
         _REQUIRED_MARKERS = [
             os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
-            # Without ffmpeg, _convert_wav_to_ogg() returns None and voice
-            # messages go out as raw WAV, which WhatsApp often rejects — a core
-            # accessibility feature degrading silently, with only a warning in
-            # the log. node_modules existing is not evidence this specific
-            # package inside it does, so it gets its own check.
-            if not ffmpeg_bin:
-                missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
