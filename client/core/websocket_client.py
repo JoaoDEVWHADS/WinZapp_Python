@@ -64,6 +64,7 @@ class WebSocketClient:
             reconnection_delay_max=60,
             logger=False,
             engineio_logger=False,
+            handle_sigint=False,
         )
         # WPPConnect Server emits all events on root "/" namespace via req.io.emit().
         # Registering handlers without namespace defaults them to "/" (root).
