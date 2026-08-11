@@ -691,23 +691,74 @@ class StatusPanel(wx.Panel):
 
     def _load_statuses(self):
         """
-        Build the status list from status updates received via WebSocket.
+        Build the status list.
 
-        WPPConnect does not expose a REST endpoint to query other users' statuses,
-        so we rely on the in-memory _status_updates dict that is populated by
-        MainWindow._store_status_update() whenever a status@broadcast message
-        arrives over the Socket.IO connection.
+        Primary source: the account's StatusV3Store via
+        GET /api/{session}/statuses — the user's own posted statuses come
+        straight from the account (not from the local DB/in-memory cache),
+        and contacts' statuses are pulled from the browser store. Falls back
+        to the live status@broadcast messages collected in
+        MainWindow._status_updates when the API is unreachable or returns
+        nothing (e.g. the Status view was never opened in the browser yet).
         """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
-        status_updates = getattr(mw, "_status_updates", {})
-        records = []
-        for participant, msgs in list(status_updates.items()):
-            for msg in msgs:
-                records.append(msg)
-        my_statuses, contacts = self._parse_statuses(records, i18n)
+        my_statuses, contacts = self._fetch_statuses_from_api()
+        if not my_statuses and not contacts:
+            status_updates = getattr(mw, "_status_updates", {})
+            records = []
+            for participant, msgs in list(status_updates.items()):
+                for msg in msgs:
+                    records.append(msg)
+            my_statuses, contacts = self._parse_statuses(records, i18n)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
+
+    def _fetch_statuses_from_api(self) -> tuple:
+        """Query WPPConnect's GET /api/{session}/statuses (StatusV3Store).
+
+        Returns ``(my_statuses, contacts)`` in the same shape as
+        _parse_statuses() — raw store messages are normalized through
+        WebSocketClient._normalize_wpp_message() (the same converter the
+        message sync uses), so both the API and the WebSocket paths feed the
+        panel identical dicts.
+        """
+        mw   = self.main_window
+        i18n = mw.i18n
+        try:
+            url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/statuses"
+            headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code not in (200, 201):
+                return [], []
+            body = resp.json() or {}
+            data = body.get("response") if isinstance(body, dict) else None
+        except Exception as exc:
+            logging.warning("[status_panel] statuses API failed, falling back to WebSocket cache: %s", exc)
+            return [], []
+        if not isinstance(data, dict):
+            return [], []
+
+        ws  = getattr(mw, "ws", None)
+        raw = []
+        for msgs in (data.get("myStatus") or []):
+            raw.append(msgs)
+        for entry in (data.get("contacts") or []):
+            for msgs in (entry.get("msgs") or []):
+                raw.append(msgs)
+
+        records = []
+        for wm in raw:
+            if not isinstance(wm, dict):
+                continue
+            if ws is not None:
+                try:
+                    records.append(ws._normalize_wpp_message(wm))
+                    continue
+                except Exception as exc:
+                    logging.warning("[status_panel] failed to normalize API status: %s", exc)
+            records.append(wm)
+        return self._parse_statuses(records, i18n)
 
     def _parse_statuses(self, items, i18n) -> tuple:
         """
