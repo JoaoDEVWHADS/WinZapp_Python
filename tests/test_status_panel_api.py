@@ -164,3 +164,27 @@ def test_post_was_rejected_null_response():
     assert _post_was_rejected({"response": None}) is True
     assert _post_was_rejected({"response": []}) is False
     assert _post_was_rejected({}) is True
+
+
+def test_merge_status_contacts_dedup_by_jid_and_id():
+    from status_panel import StatusPanel
+    a = [{"name": "X", "jid": "a@lid", "statuses": [
+        {"key": {"id": "S1", "participant": "a@lid"}},
+        {"key": {"id": "S2", "participant": "a@lid"}},
+    ]}]
+    b = [{"name": "X", "jid": "a@lid", "statuses": [
+        {"key": {"id": "S2", "participant": "a@lid"}},
+        {"key": {"id": "S3", "participant": "a@lid"}},
+    ]}]
+    merged = StatusPanel._merge_status_contacts(a, b)
+    assert len(merged) == 1
+    ids = [s["key"]["id"] for s in merged[0]["statuses"]]
+    assert ids == ["S1", "S2", "S3"]
+
+
+def test_merge_status_lists_dedup():
+    from status_panel import StatusPanel
+    a = [{"key": {"id": "M1"}}, {"key": {"id": "M2"}}]
+    b = [{"key": {"id": "M2"}}, {"key": {"id": "M3"}}]
+    merged = StatusPanel._merge_status_lists(a, b)
+    assert [m["key"]["id"] for m in merged] == ["M1", "M2", "M3"]

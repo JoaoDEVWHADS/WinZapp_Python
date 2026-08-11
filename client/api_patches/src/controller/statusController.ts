@@ -310,6 +310,19 @@ export async function getStatuses(req: Request, res: Response) {
             // ignore — read whatever is already in the store
           }
         }
+        // WhatsApp Web pages the status list (infinite scroll): sync() only
+        // fetches the first batch, and the rest arrive via loadMore() as the
+        // user scrolls. Pull several pages so the whole list shows, not just
+        // the first few contacts.
+        if (store?.loadMore) {
+          for (let i = 0; i < 6; i++) {
+            try {
+              await store.loadMore();
+            } catch (e) {
+              break;
+            }
+          }
+        }
         const models =
           store?.getUnexpired ? store.getUnexpired() : store?.models || [];
         const me = WPP.conn?.getMyUserWid?.()?.toString?.() ?? '';
