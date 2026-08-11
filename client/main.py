@@ -13391,6 +13391,10 @@ class MainWindow(wx.Frame):
             return ""
         # A serialized id may already have been stored as the key id.
         if msg_id.startswith(("true_", "false_")):
+            # If it's a 1-on-1 message (not @g.us or @broadcast), truncate any 4th trailing participant segment
+            parts = msg_id.split("_")
+            if len(parts) > 3 and not ("@g.us" in parts[1] or "@broadcast" in parts[1]):
+                return "_".join(parts[:3])
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
