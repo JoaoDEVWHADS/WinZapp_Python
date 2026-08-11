@@ -200,6 +200,17 @@ class ApiSetupDialog(wx.Dialog):
         self._cancelled   = False
         self._forced_tag  = forced_tag   # overrides .env WPPCONNECT_TAG_VERSION
 
+        # i18n for user-facing progress labels (_set_stage). parent is usually
+        # MainWindow (has .i18n); fall back to a fresh I18n built on parent so
+        # the dialog never crashes with AttributeError mid-setup.
+        self._i18n = getattr(parent, "i18n", None)
+        if self._i18n is None:
+            try:
+                from core.i18n import I18n
+                self._i18n = I18n(parent)
+            except Exception:
+                self._i18n = None
+
         # Progress-bar state — see _STAGES_FULL/_STAGES_MODULES_ONLY and
         # _set_stage()/_on_pulse().
         self._stage_end_pct = 0
@@ -1093,7 +1104,14 @@ class ApiSetupDialog(wx.Dialog):
             wx.OK | wx.ICON_INFORMATION,
             self,
         )
-        self.EndModal(wx.ID_OK)
+        # EndModal() may only be called while this dialog's own modal loop is
+        # actually running — a worker-thread CallAfter can land after the loop
+        # has already been exited/destroyed (wxAssertionError "IsRunning()
+        # failed"). Guard it exactly like the pairing dialogs do.
+        if self.IsModal():
+            self.EndModal(wx.ID_OK)
+        else:
+            self.Close()
 
     def _finish_error(self, details: str = ""):
         self._timer.Stop()
@@ -1101,4 +1119,7 @@ class ApiSetupDialog(wx.Dialog):
         if details:
             msg = f"{msg}\n\n{details}"
         wx.MessageBox(msg, "Erro de configuração", wx.OK | wx.ICON_ERROR, self)
-        self.EndModal(wx.ID_CANCEL)
+        if self.IsModal():
+            self.EndModal(wx.ID_CANCEL)
+        else:
+            self.Close()
