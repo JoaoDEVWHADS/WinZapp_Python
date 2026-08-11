@@ -883,11 +883,17 @@ class StatusPanel(wx.Panel):
             self._status_list.Select(0)
         self.Layout()
 
-    def _status_row_text(self, entry: dict, i18n, nav_info: str = "") -> str:
+    def _status_row_text(self, entry: dict, i18n, nav_info: str = "", status: dict = None) -> str:
+        """*status*, when given, overrides which of the contact's statuses
+        the preview text is built from — used by _update_focused_status_row_
+        text() so the row reflects whatever status is actually being
+        navigated to, not always the newest one (statuses[0], the default
+        used everywhere else this is called from, e.g. initial population)."""
         name     = entry.get("name", "")
         statuses = entry.get("statuses", [])
-        if statuses:
-            preview = self._status_preview(statuses[0], i18n)
+        preview_source = status if status is not None else (statuses[0] if statuses else None)
+        if preview_source is not None:
+            preview = self._status_preview(preview_source, i18n)
             base = f"{name}: {preview}" if preview else name
         else:
             base = name
@@ -898,7 +904,10 @@ class StatusPanel(wx.Panel):
         is currently open in the viewer, reflecting _current_status_idx —
         called from _show_current_status() so it stays correct both on
         first opening a contact and on Ctrl+Left/Right navigation between
-        their own statuses."""
+        their own statuses. The preview text itself is rebuilt from the
+        actual status being viewed (not always the newest one) so the row
+        doesn't keep announcing the first status after navigating away
+        from it."""
         idx = self._selected_contact_idx
         if idx < 0 or idx >= len(self._status_contacts):
             return
@@ -908,12 +917,15 @@ class StatusPanel(wx.Panel):
         entry    = self._status_contacts[idx]
         i18n     = self.main_window.i18n
         statuses = entry.get("statuses", [])
-        if not statuses:
+        current_idx = self._current_status_idx
+        if not (0 <= current_idx < len(statuses)):
             return
         nav_info = i18n.t("status_of").format(
-            current=self._current_status_idx + 1, total=len(statuses)
+            current=current_idx + 1, total=len(statuses)
         )
-        self._status_list.SetItemText(row, self._status_row_text(entry, i18n, nav_info))
+        self._status_list.SetItemText(
+            row, self._status_row_text(entry, i18n, nav_info, status=statuses[current_idx])
+        )
 
     def _my_status_label(self, i18n) -> str:
         if self._my_statuses:

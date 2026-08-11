@@ -458,9 +458,10 @@ class TestStatusListRowShowsCurrentPositionWhenFocused:
 
         stub._on_next_status(None)
 
-        # The row's preview text always reflects statuses[0] (newest) — only
-        # the ", Status X de Y" suffix tracks the navigated-to index.
-        assert stub._status_list.items[1] == "Ana: a, Status 2 de 3"
+        # The row's preview text tracks whatever status is actually being
+        # viewed now, not always the newest one — otherwise NVDA/JAWS keep
+        # announcing the first status's content after navigating away.
+        assert stub._status_list.items[1] == "Ana: b, Status 2 de 3"
 
     def test_navigating_to_the_previous_status_updates_the_row_text(self):
         stub = _Stub()
@@ -474,6 +475,21 @@ class TestStatusListRowShowsCurrentPositionWhenFocused:
         stub._current_status_idx = 1
 
         stub._on_prev_status(None)
+
+        assert stub._status_list.items[1] == "Ana: a, Status 1 de 3"
+
+    def test_wrap_around_to_the_last_status_updates_the_row_preview_too(self):
+        stub = _Stub()
+        statuses = [_text_status("a"), _text_status("b"), _text_status("c")]
+        stub._status_contacts = [_entry("j@s.whatsapp.net", statuses)]
+        stub._status_row_contact = {1: 0}
+        stub._status_contact_row = {0: 1}
+        stub._status_list = _FakeStatusList()
+        stub._status_list.items = ["My Status", "Ana: a"]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 2  # already on the last one
+
+        stub._on_next_status(None)  # wraps to the first
 
         assert stub._status_list.items[1] == "Ana: a, Status 1 de 3"
 
