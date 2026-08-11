@@ -332,8 +332,9 @@ export async function getStatuses(req: Request, res: Response) {
             }
           }
         }
-        const models =
-          store?.getUnexpired ? store.getUnexpired() : store?.models || [];
+        // Read ALL status models (unread, read/viewed, and muted statuses)
+        // instead of filtering out viewed statuses via getUnexpired().
+        const models = store?.models || (store?.getUnexpired ? store.getUnexpired() : []);
         const me = WPP.conn?.getMyUserWid?.()?.toString?.() ?? '';
         for (const model of models) {
           try {
