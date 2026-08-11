@@ -382,9 +382,21 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
 
     exe_path = os.path.join(install_dir, exe_name)
     log_file = os.path.join(install_dir, "logs", "updater_installer.log")
-    
+    in_progress_marker = os.path.join(install_dir, "update_in_progress.marker")
+    bat_log_dir = os.path.join(install_dir, "logs")
+
     bat = (
         "@echo off\n"
+        "setlocal EnableExtensions\n"
+        # The logs dir is NOT guaranteed to exist in the install root (a fresh
+        # install may never have created it). Create it before any redirect,
+        # or every `>> updater_installer.log` below fails silently and the
+        # batch leaves no trace at all — exactly what made this failure
+        # invisible. Also drop a marker the newly launched app checks on boot
+        # so it does not open while the copy is still finishing (which used to
+        # lock files mid-xcopy and leave the old version installed).
+        f'if not exist "{bat_log_dir}" mkdir "{bat_log_dir}"\n'
+        f'echo update_in_progress > "{in_progress_marker}"\n'
         f'echo [%date% %time%] [UPDATER_BAT] Starting batch update execution for PID {pid}... >> "{log_file}"\n'
         ":WAIT\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\n'
@@ -396,10 +408,10 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         # Give child processes a moment to exit, then kill stragglers holding file locks.
         "timeout /t 2 /nobreak >NUL\n"
         f'echo [%date% %time%] [UPDATER_BAT] Terminating node.exe, chrome-headless-shell.exe, chrome.exe, chromium.exe... >> "{log_file}"\n'
-        "taskkill /F /IM node.exe >> \"%log_file%\" 2>&1\n"
-        "taskkill /F /IM chrome-headless-shell.exe >> \"%log_file%\" 2>&1\n"
-        "taskkill /F /IM chrome.exe >> \"%log_file%\" 2>&1\n"
-        "taskkill /F /IM chromium.exe >> \"%log_file%\" 2>&1\n"
+        f'"taskkill" /F /IM node.exe >> "{log_file}" 2>&1\n'
+        f'"taskkill" /F /IM chrome-headless-shell.exe >> "{log_file}" 2>&1\n'
+        f'"taskkill" /F /IM chrome.exe >> "{log_file}" 2>&1\n'
+        f'"taskkill" /F /IM chromium.exe >> "{log_file}" 2>&1\n'
         f'echo [%date% %time%] [UPDATER_BAT] Clearing processes listening on ports {api_port} and 5433... >> "{log_file}"\n'
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :{api_port} ^| findstr LISTENING') do taskkill /F /PID %%a >> \"{log_file}\" 2>&1\n"
         f"for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :5433 ^| findstr LISTENING') do taskkill /F /PID %%a >> \"{log_file}\" 2>&1\n"
@@ -425,6 +437,10 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         f'    echo [%date% %time%] [UPDATER_BAT] ERROR: Executable not found at "{exe_path}"! >> "{log_file}"\n'
         f'    echo WinZapp exe not found after update: {exe_path} >> "{install_dir}\\update_failed.marker"\n'
         ")\n"
+        # Batch copy/relaunch is done — the marker must go before the new app
+        # boots, or the freshly launched instance would refuse to start / wait
+        # forever on its in-progress guard on first launch.
+        f'del /q "{in_progress_marker}" 2>NUL\n'
         f'echo [%date% %time%] [UPDATER_BAT] Batch update finished. Deleting temporary script. >> "{log_file}"\n'
         'del "%~f0"\n'
     )

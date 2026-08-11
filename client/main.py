@@ -608,6 +608,31 @@ class MainWindow(wx.Frame):
         except Exception as _me:
             logging.warning("[UPDATER_STATUS] Error checking update marker: %s", _me)
         logging.info("[STARTUP] ==================================================")
+
+        # ── Update-in-progress guard ───────────────────────────────────────────
+        # The batch installer drops update_in_progress.marker in the install
+        # root BEFORE it starts copying and deletes it when it relaunches the
+        # app. If we get here while that marker is still present, the previous
+        # instance was closed by the updater but the copy is NOT finished yet
+        # (or is still waiting for the old process to fully exit) — opening
+        # now would lock files mid-xcopy and leave the old version installed.
+        # So wait until the marker disappears (batch finished) before booting.
+        try:
+            from updater import _outer_exe_dir
+            _in_progress = os.path.join(_outer_exe_dir(), "update_in_progress.marker")
+            if os.path.exists(_in_progress):
+                logging.warning("[UPDATER_STATUS] update_in_progress.marker found — previous update not finished. Waiting for batch installer to complete...")
+                _waited = 0
+                while os.path.exists(_in_progress) and _waited < 180:
+                    time.sleep(1.0)
+                    _waited += 1
+                if os.path.exists(_in_progress):
+                    logging.error("[UPDATER_STATUS] update_in_progress.marker still present after 180s — continuing anyway.")
+                else:
+                    logging.info("[UPDATER_STATUS] Batch installer finished (marker removed after %ds).", _waited)
+        except Exception as _we:
+            logging.warning("[UPDATER_STATUS] Error waiting for update_in_progress.marker: %s", _we)
+        logging.info("[STARTUP] ==================================================")
         super().__init__(None)
         # Multi-account context (plan Zad 2.2). account_id is None only in
         # legacy/single-account fallback; new startup always passes it.
