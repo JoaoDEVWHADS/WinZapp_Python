@@ -644,6 +644,11 @@ class StatusPanel(wx.Panel):
 
         voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
+        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
+        self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
+        self._voice_close_btn.Hide()
+        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
+
         self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message") + " (Ctrl+R)")
         self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
         voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
@@ -657,10 +662,6 @@ class StatusPanel(wx.Panel):
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
         self._voice_send_btn.Hide()
         voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
-
-        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
-        self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
-        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
 
         voice_sizer.Add(voice_btn_sizer, 0, wx.ALL, 5)
 
@@ -1794,7 +1795,7 @@ class StatusPanel(wx.Panel):
         self._voice_start_btn.Show()
         self._voice_pause_btn.Hide()
         self._voice_send_btn.Hide()
-        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
+        self._voice_close_btn.Hide()
 
         self._voice_post_panel.Show()
         self.Layout()
@@ -1888,12 +1889,13 @@ class StatusPanel(wx.Panel):
 
         i18n = self.main_window.i18n
         self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
+        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
+        self._voice_close_btn.Show()
         self._voice_start_btn.Hide()
         self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
         self._voice_pause_btn.Show()
         self._voice_send_btn.SetLabel(i18n.t("send_voice_message") + " (Ctrl+R)")
         self._voice_send_btn.Show()
-        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
         self.Layout()
         self._voice_send_btn.SetFocus()
 
