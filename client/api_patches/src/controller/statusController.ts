@@ -116,6 +116,25 @@ export async function sendTextStorie(req: Request, res: Response) {
       `[sendTextStorie] result for text=${JSON.stringify(text).slice(0, 80)}: ` +
         JSON.stringify(posted)?.slice(0, 300)
     );
+    // The status.layer.js async patch makes WPP.status.sendTextStatus resolve
+    // with the REAL post result instead of undefined. A resolved value whose
+    // sendMsgResult.messageSendResult is an error (e.g. "ERROR_UNKNOWN" when
+    // WhatsApp Web rejects the status at protocol level) must be surfaced as
+    // a failure — returning 201 here made WinZapp announce "posted" for a
+    // status that never left the device (ack stays 0).
+    const first = Array.isArray(posted) ? posted[0] : posted;
+    const sendResult = first?.sendMsgResult?.messageSendResult;
+    if (sendResult && !['SUCCESS', 'OK'].includes(String(sendResult))) {
+      req.logger.error(
+        `[sendTextStorie] WhatsApp rejected status: ${sendResult}`
+      );
+      returnError(
+        req,
+        res,
+        new Error(`Status post rejected by WhatsApp: ${sendResult}`)
+      );
+      return;
+    }
     results.push(posted);
 
     if (results.length === 0)
