@@ -14112,15 +14112,14 @@ class MainWindow(wx.Frame):
                 unread_count = 0
             else:
                 # A genuinely new message arrived after the local
-                # read-ack, so the guard above no longer applies. But the
-                # server-reported total can still be stale/inflated —
-                # e.g. it may still include messages we already read
-                # locally that WhatsApp's own servers haven't caught up
-                # with yet. Clamp to what we actually know arrived since
-                # the read-ack instead of trusting the raw server count.
+                # read-ack. Ensure unread_count is at least 1 (or preserves local_new / unread_count)
                 local_new = getattr(self, "_new_since_read", {}).get(normalized)
                 if local_new:
-                    unread_count = min(unread_count, local_new)
+                    unread_count = max(unread_count, local_new)
+                elif unread_count == 0 and old_count > 0:
+                    # Prevent 1:1 WA-JS chat.unread_count_changed from force-zeroing a chat
+                    # when new messages arrived after read_at_t.
+                    unread_count = old_count
                 self._locally_read_at.pop(normalized, None)
                 if hasattr(self, "_new_since_read"):
                     self._new_since_read.pop(normalized, None)
