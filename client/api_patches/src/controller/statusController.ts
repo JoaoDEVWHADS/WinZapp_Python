@@ -324,7 +324,7 @@ export async function getStatuses(req: Request, res: Response) {
         // user scrolls. Pull several pages so the whole list shows, not just
         // the first few contacts.
         if (store?.loadMore) {
-          for (let i = 0; i < 6; i++) {
+          for (let i = 0; i < 40; i++) {
             try {
               await store.loadMore();
             } catch (e) {
