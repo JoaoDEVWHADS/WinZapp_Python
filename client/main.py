@@ -8337,7 +8337,15 @@ class MainWindow(wx.Frame):
             word = (ui.get("self_reference_custom_word") or "").strip()
             if word:
                 return word
-        return self.i18n.t("sender_you")
+        # "eu" (first-person) mode. Was self.i18n.t("sender_you") — a key
+        # meant for "You: ..." message-sender labels elsewhere, whose
+        # natural translation is second-person in every language (pt-BR/
+        # pt-PT "Eu" and es-ES "Yo" only ever happened to already BE
+        # first-person by coincidence; en-US's is "You", making "eu" and
+        # "voce" mode produce the exact same word — the setting had no
+        # effect at all for English users, and the settings dialog itself
+        # showed "You"/"You" as its two options for this same reason.
+        return self.i18n.t("ui_self_reference_eu")
 
     def _is_self_jid(self, jid: str) -> bool:
         """Return True if jid refers to the user's own WhatsApp account.

@@ -582,6 +582,7 @@
     "ui_page_step_box_label": "Page navigation in messages",
     "ui_page_up_down_step_label": "Messages to jump forward/backward with Page Up and Page Down:",
     "ui_self_reference_label": "How should I be referred to?",
+    "ui_self_reference_eu": "Me",
     "ui_self_reference_voce": "You",
     "ui_self_reference_other": "Other",
     "ui_self_reference_custom_label": "Custom word",

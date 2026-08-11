@@ -582,6 +582,7 @@
     "ui_page_step_box_label": "Navegación por página en mensajes",
     "ui_page_up_down_step_label": "Mensajes a avanzar/retroceder con Page Up y Page Down:",
     "ui_self_reference_label": "¿Cómo debo referirme a mí?",
+    "ui_self_reference_eu": "Yo",
     "ui_self_reference_voce": "Tú",
     "ui_self_reference_other": "Otro",
     "ui_self_reference_custom_label": "Palabra personalizada",

@@ -329,7 +329,7 @@ class SettingsDialog(wx.Dialog):
         self_ref_sizer = wx.StaticBoxSizer(self._self_ref_box, wx.VERTICAL)
 
         self._self_ref_eu_rb = wx.RadioButton(
-            self._ui_page, label=i18n.t("sender_you"), style=wx.RB_GROUP
+            self._ui_page, label=i18n.t("ui_self_reference_eu"), style=wx.RB_GROUP
         )
         self_ref_sizer.Add(self._self_ref_eu_rb, 0, wx.LEFT | wx.TOP, 5)
 
@@ -1572,7 +1572,7 @@ class SettingsDialog(wx.Dialog):
         self._msg_list_mode_listbox_rb.SetLabel(i18n.t("ui_message_list_mode_listbox"))
         self._show_listbox_count_cb.SetLabel(i18n.t("ui_show_listbox_item_count"))
         self._self_ref_box.SetLabel(i18n.t("ui_self_reference_label"))
-        self._self_ref_eu_rb.SetLabel(i18n.t("sender_you"))
+        self._self_ref_eu_rb.SetLabel(i18n.t("ui_self_reference_eu"))
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
         self._self_ref_other_rb.SetLabel(i18n.t("ui_self_reference_other"))
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
