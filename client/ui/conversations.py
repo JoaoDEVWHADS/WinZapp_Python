@@ -6297,6 +6297,14 @@ class ConversationsPanel(wx.Panel):
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
+            # _unread_sep_idx pointed into the list just emptied above — left
+            # stale, a live message arriving right after (on_incoming_message,
+            # the _sep_from_open branch) would pop() that now-out-of-range
+            # index from the now-empty _sorted_messages, crashing with
+            # "IndexError: pop from empty list". Same pairing already reset
+            # on conversation switch (see close_conversation()).
+            self._unread_sep_idx = -1
+            self._sep_from_open = False
         # Refresh the conversations list so the emptied preview disappears.
         # The conversation itself stays in the list — clearing is not deleting.
         self.main_window._schedule_set_chats()
@@ -6829,10 +6837,17 @@ class ConversationsPanel(wx.Panel):
         # AND collapses selection down to just the newly-focused item — there
         # is no way to arrow through the list while building up a multi-
         # selection with the default behavior. Remapped here so plain arrows
-        # move focus only (selection untouched); Space/Ctrl+Space/Ctrl+Shift+
-        # Space control selection explicitly instead. Ctrl+Arrow and
-        # Shift+Arrow are left at their native behavior (move-focus-only and
-        # range-select respectively — already exactly what's wanted).
+        # move focus only (selection untouched); Ctrl+Space/Ctrl+Shift+Space
+        # control selection explicitly instead. Ctrl+Arrow and Shift+Arrow
+        # are left at their native behavior (move-focus-only and range-select
+        # respectively — already exactly what's wanted).
+        #
+        # Deliberately NOT plain Space or Shift+Space (an earlier version of
+        # this dialog used those instead): reserved for an upcoming feature
+        # — bulk message selection, where plain Space already plays/pauses
+        # the focused audio message, so it can't double as "select this row"
+        # here without colliding with that. Ctrl+Space/Ctrl+Shift+Space carry
+        # no such conflict.
         #
         # Driven via the raw Win32 listbox messages rather than wx's own
         # Select()/Deselect() for the arrow case specifically: LB_SETCARETINDEX
@@ -6841,6 +6856,7 @@ class ConversationsPanel(wx.Panel):
         # a code path already proven to notify screen readers correctly,
         # rather than reimplementing focus movement by hand.
         _LB_SETSEL        = 0x0185
+        _LB_GETSEL        = 0x0187
         _LB_SETCARETINDEX = 0x019E
         _LB_GETCARETINDEX = 0x019F
 
@@ -6853,6 +6869,9 @@ class ConversationsPanel(wx.Panel):
 
         def _lst_set_caret(idx):
             _lst_send(_LB_SETCARETINDEX, idx, 0)
+
+        def _lst_is_selected(idx):
+            return _lst_send(_LB_GETSEL, idx) > 0
 
         def _lst_set_selected(idx, select):
             _lst_send(_LB_SETSEL, 1 if select else 0, idx)
@@ -6875,31 +6894,27 @@ class ConversationsPanel(wx.Panel):
                 return  # suppressed — no Skip(), so selection is left alone
 
             if key == wx.WXK_SPACE and ctrl and shift:
+                # Toggle everything: select all unless every row is already
+                # selected, in which case clear it all instead.
+                all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
                 for i in range(count):
-                    _lst_set_selected(i, False)
-                return
-
-            if key == wx.WXK_SPACE and shift:
-                for i in range(count):
-                    _lst_set_selected(i, True)
+                    _lst_set_selected(i, not all_selected)
                 return
 
             if key == wx.WXK_SPACE and ctrl:
                 caret = _lst_caret()
                 if caret >= 0:
-                    _lst_set_selected(caret, False)
-                return
-
-            if key == wx.WXK_SPACE:
-                caret = _lst_caret()
-                if caret >= 0:
-                    _lst_set_selected(caret, True)
-                    # LB_SETSEL doesn't move the caret, so no fresh
-                    # "item name, selected" announcement gets triggered the
-                    # way arrowing onto an already-selected item does —
-                    # NVDA/JAWS stay silent on the state change unless told
-                    # explicitly.
-                    wx.CallAfter(mw.output, i18n.t("selected"))
+                    now_selected = not _lst_is_selected(caret)
+                    _lst_set_selected(caret, now_selected)
+                    if now_selected:
+                        # LB_SETSEL doesn't move the caret, so no fresh
+                        # "item name, selected" announcement gets triggered
+                        # the way arrowing onto an already-selected item
+                        # does — NVDA/JAWS stay silent on the state change
+                        # unless told explicitly. Deselecting doesn't need
+                        # this: NVDA/JAWS already announce "not selected" on
+                        # their own for that transition.
+                        wx.CallAfter(mw.output, i18n.t("selected"))
                 return
 
             event.Skip()  # Ctrl+Arrow, Shift+Arrow, everything else: native behavior
@@ -8654,7 +8669,15 @@ class ConversationsPanel(wx.Panel):
                 # _on_message_focused() fires mark-as-read again once focus
                 # reaches/crosses this message.
                 self._unread_sep_marked_read = False
-                if self._unread_sep_idx == -1:
+                # _unread_sep_idx can go stale for a _sorted_messages that
+                # was emptied/rebuilt out from under it without resetting it
+                # back to -1 (e.g. "Limpar conversa" on the currently open
+                # chat) — every branch below that indexes/pops it with it
+                # must treat an out-of-range index the same as "no separator
+                # yet" instead of crashing (observed live: "IndexError: pop
+                # from empty list").
+                sep_idx_valid = 0 <= self._unread_sep_idx < len(self._sorted_messages)
+                if self._unread_sep_idx == -1 or not sep_idx_valid:
                     # No separator yet — insert one before this new message
                     sep_pos = len(self._sorted_messages)
                     sep = {"_type": "unread_separator", "count": 1}

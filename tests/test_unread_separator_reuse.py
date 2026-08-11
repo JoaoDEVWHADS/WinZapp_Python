@@ -159,3 +159,42 @@ class TestOwnMessagesNeverGetSeparatorTreatment:
 
         assert stub._sep_from_open is True  # untouched
         assert stub._sorted_messages[-1]["key"]["id"] == "own1"
+
+
+class TestStaleSeparatorIndexDoesNotCrash:
+    """Reported live: "Limpar conversa" on the currently open chat reset
+    _sorted_messages to [] without also resetting _unread_sep_idx/
+    _sep_from_open back to -1/False. A live message arriving right after hit
+    the _sep_from_open branch with old_idx still pointing at the pre-clear
+    position, and _sorted_messages.pop(old_idx) on the now-empty list raised
+    "IndexError: pop from empty list". Covers both the direct crash (list
+    emptied out) and the general case (index merely out of range) — every
+    branch that reads/pops _unread_sep_idx must treat a stale index the same
+    as "no separator yet" instead of trusting it blindly."""
+
+    def test_index_pointing_into_a_since_emptied_list_does_not_crash(self):
+        stub = _Stub()
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m1"))
+        assert stub._unread_sep_idx >= 0
+        stub._sep_from_open = True
+
+        # Simulate "Limpar conversa" clearing the list without resetting the
+        # separator bookkeeping (the actual bug, now fixed at the clear
+        # site too — this test covers the on_incoming_message() side).
+        stub._sorted_messages = []
+        stub.messages_list.items = []
+
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m2"))  # must not raise
+
+        assert _sep(stub)["count"] == 1
+        assert stub._sorted_messages[-1]["key"]["id"] == "m2"
+
+    def test_index_merely_out_of_range_does_not_crash(self):
+        stub = _Stub()
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m1"))
+        stub._sep_from_open = True
+        stub._unread_sep_idx = 99  # stale — nowhere near len(_sorted_messages)
+
+        stub.on_incoming_message(stub.conversation["remoteJid"], _msg("m2"))  # must not raise
+
+        assert _sep(stub)["count"] == 1

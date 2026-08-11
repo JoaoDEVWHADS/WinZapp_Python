@@ -592,7 +592,7 @@
     "invalid_messages_page_size": "O número de mensagens por página deve ser um número inteiro positivo.",
     "invalid_page_jump_size": "O número de mensagens a pular no PageUp/PageDown deve ser um número inteiro positivo.",
     "forward_search_label": "&Pesquisar",
-    "forward_multiselect_hint": "Espaço: selecionar contato. Ctrl+Espaço: remover seleção. Shift+Espaço: selecionar todos. Ctrl+Shift+Espaço: desmarcar todos. Sem seleção, encaminha para o contato focado.",
+    "forward_multiselect_hint": "Ctrl+Espaço: marcar/desmarcar contato. Ctrl+Shift+Espaço: marcar/desmarcar todos. Sem seleção, encaminha para o contato focado.",
     "selected": "Selecionado",
     "global_hotkey_label": "Atalho global para abrir o WinZapp",
     "global_hotkey_hint": "Pressione um atalho (Delete ou Backspace para remover)",
