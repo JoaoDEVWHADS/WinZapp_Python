@@ -573,16 +573,22 @@ export async function getMediaByMessage(req: Request, res: Response) {
         message.mediaKey = Buffer.from(message.mediaKey, 'base64');
       }
     } else {
-      // Lookup in Puppeteer store using cleanMsgId
+      // Lookup in Puppeteer store using original messageId first (with participant), then cleanMsgId
       try {
-        message = await client.getMessageById(cleanMsgId);
-      } catch (err: any) {
-        req.logger.warn(`client.getMessageById threw error for ${cleanMsgId}: ${err.message || err}. Trying fallback...`);
+        message = await client.getMessageById(messageId);
+      } catch (err: any) {}
+
+      if (!message && messageId.includes(':')) {
+        // Strip device port suffix e.g. 62655318482954:94@lid -> 62655318482954@lid
+        const noPortId = messageId.replace(/:\d+@/, '@');
+        try {
+          message = await client.getMessageById(noPortId);
+        } catch (err: any) {}
       }
 
       if (!message && messageId !== cleanMsgId) {
         try {
-          message = await client.getMessageById(messageId);
+          message = await client.getMessageById(cleanMsgId);
         } catch (err: any) {}
       }
 

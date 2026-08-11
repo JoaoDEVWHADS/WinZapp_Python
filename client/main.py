@@ -1131,34 +1131,41 @@ class MainWindow(wx.Frame):
                     return
 
                 logging.info("[post_ui_init] STEP 6 — connecting WebSocket...")
-                try:
-                    self.connect_websocket()
-                    logging.info("[post_ui_init] STEP 6 — WebSocket connected successfully.")
-                except Exception as e:
-                    logging.exception("[post_ui_init] STEP 6 — Exception during websocket connection")
+                ws_connected = False
+                for attempt in range(1, 7):
+                    try:
+                        self.connect_websocket()
+                        ws_connected = True
+                        logging.info("[post_ui_init] STEP 6 — WebSocket connected successfully on attempt %d.", attempt)
+                        break
+                    except Exception as e:
+                        error_str = str(e)
+                        if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
+                            logging.info("[post_ui_init] STEP 6 — WebSocket namespace invalid (instance not on server). Triggering logout.")
+                            def _gui_logout():
+                                wx.MessageBox(
+                                    self.i18n.t("device_logged_out"),
+                                    self.i18n.t("error").format(self.app_name),
+                                    wx.OK | wx.ICON_ERROR,
+                                )
+                                self._on_disconnect()
+                            wx.CallAfter(_gui_logout)
+                            ws_connected = False
+                            break
+                        else:
+                            logging.warning("[post_ui_init] STEP 6 — WebSocket connect attempt %d/6 failed (%s). Retrying in 3s...", attempt, e)
+                            time.sleep(3.0)
+
+                if not ws_connected and not ("Invalid namespace" in locals().get("error_str", "") or "namespaces failed to connect" in locals().get("error_str", "")):
                     self.error_sound.play()
-                    error_str = str(e)
-                    if "Invalid namespace" in error_str or "namespaces failed to connect" in error_str:
-                        logging.info("[post_ui_init] STEP 6 — WebSocket namespace invalid (instance not on server). Triggering logout.")
-                        def _gui_logout():
-                            wx.MessageBox(
-                                self.i18n.t("device_logged_out"),
-                                self.i18n.t("error").format(self.app_name),
-                                wx.OK | wx.ICON_ERROR,
-                            )
-                            self._on_disconnect()
-                        wx.CallAfter(_gui_logout)
-                    else:
-                        def _gui_failed():
-                            wx.MessageBox(
-                                self.i18n.t("websocket_failed_reconnect"),
-                                self.i18n.t("connection_error"),
-                                wx.OK | wx.ICON_WARNING,
-                            )
-                            self.connect.show_connection_dial()
-                        wx.CallAfter(_gui_failed)
-                    # On websocket failure, clear the "connecting" status so the
-                    # UI is never left frozen on that label.
+                    def _gui_failed():
+                        wx.MessageBox(
+                            self.i18n.t("websocket_failed_reconnect"),
+                            self.i18n.t("connection_error"),
+                            wx.OK | wx.ICON_WARNING,
+                        )
+                        self.connect.show_connection_dial()
+                    wx.CallAfter(_gui_failed)
                     wx.CallAfter(self._set_status, self.i18n.t("tray_wa_disconnected"))
                     self._just_paired = True
 
@@ -1359,7 +1366,24 @@ class MainWindow(wx.Frame):
         Kept as a pure helper so it's unit-testable and reused by tray/refresh.
         """
         return format_window_title("WinZapp", self.account_name, unread,
-                                   is_multi=bool(self.account_id))
+                                   is_multi=self._is_multi_account())
+
+    def _is_multi_account(self) -> bool:
+        """True only when MORE than one account is paired.
+
+        The account name is only meaningful to distinguish windows/alerts when
+        there is more than one connected account; with a single paired account
+        it is redundant and only adds noise to NVDA announcements, the tray
+        tooltip and toast titles — so it is suppressed everywhere (window
+        title, tray, notifications) while len(list_paired()) <= 1.
+        """
+        reg = getattr(self, "registry", None)
+        if reg is None:
+            return False
+        try:
+            return len(reg.list_paired()) > 1
+        except Exception:
+            return False
 
     def _build_menubar(self):
         """Create the menu bar with Arquivo, Sincronização and Ajuda menus."""
@@ -8578,6 +8602,31 @@ class MainWindow(wx.Frame):
             if cpush:
                 chat["pushName"] = cpush
 
+    @staticmethod
+    def _last_received_jid(chat: dict) -> str:
+        """Extract the JID a chat's `lastReceivedKey` belongs to, or ''.
+
+        list-chats serialises every chat with msgs:null (no lastMessage), but
+        the raw ChatModel still carries lastReceivedKey — the key of the last
+        message received in that chat. Its `remote` (or the serialized
+        '<fromMe>_<chatId>_<id>' string) tells us which chat that message
+        actually belongs to, which is how a non-group chat that is really a
+        phantom group-participant entry can be told apart from a genuine 1:1.
+        """
+        if not isinstance(chat, dict):
+            return ""
+        lrc = chat.get("lastReceivedKey")
+        if not isinstance(lrc, dict):
+            return ""
+        lrc_remote = lrc.get("remote")
+        if isinstance(lrc_remote, dict):
+            jid = lrc_remote.get("_serialized") or ""
+            if jid:
+                return jid
+        ser = lrc.get("_serialized") or ""
+        parts = ser.split("_") if ser else []
+        return parts[1] if len(parts) > 1 else ""
+
     def get_remote_chats(self, chats, persist_full: bool = True, notify_errors: bool = True):
         """Fetch/merge the remote chat list into `chats`.
 
@@ -8859,6 +8908,23 @@ class MainWindow(wx.Frame):
                             if not g_name or g_name.strip() in ("", "Grupo sem nome", "Grupo"):
                                 logging.info(f"[get_remote_chats] Skipping ghost/inactive group without name: {jid}")
                                 continue
+                    # A non-group chat whose last received message actually
+                    # belongs to a GROUP is a phantom entry WhatsApp Web creates
+                    # in its store for a group participant: the participant's
+                    # @lid/@c.us surfaces as a "chat" because of messages they
+                    # wrote in groups we are in — never a real 1:1
+                    # conversation. list-chats carries that last message under
+                    # `lastReceivedKey` (it serialises msgs:null, so
+                    # lastMessage is always empty here); real 1:1 chats always
+                    # have a lastReceivedKey whose remote is the chat's own
+                    # @lid/@s.whatsapp.net.
+                    if not jid.endswith("@g.us"):
+                        _lrc_jid = self._last_received_jid(chat)
+                        if _lrc_jid.endswith("@g.us"):
+                            logging.info(
+                                f"[get_remote_chats] Skipping phantom group-participant chat: {jid} "
+                                f"(lastReceivedKey from {_lrc_jid})")
+                            continue
                     if jid not in chats:
                         if "messages" not in chat:
                             chat["messages"] = {"messages": {"records": []}}
@@ -12182,6 +12248,22 @@ class MainWindow(wx.Frame):
             all_messages = [m for m in all_messages
                             if not self._is_cleared_message(remote_jid, m)]
 
+        # Keep only messages that actually belong to THIS chat. WPPConnect's
+        # get-messages can answer a group-participant @lid/@c.us chat with
+        # messages from the GROUPS where that participant wrote (the browser
+        # store indexes those messages under the participant's id too) —
+        # storing them as 1:1 history "confirms" the phantom conversation and
+        # pushes its preview into the chat list. Real 1:1 messages normalize
+        # to the chat's own remote_jid; group messages normalize to @g.us and
+        # are dropped here. (Defense in depth behind the get_remote_chats
+        # lastReceivedKey filter — a phantom chat that somehow slipped in must
+        # not be able to accumulate history.)
+        if all_messages:
+            all_messages = [
+                m for m in all_messages
+                if self._normalize_jid((m.get("key") or {}).get("remoteJid", "")) == remote_jid
+            ]
+
         # After fetching, update chat messages
         for msg in all_messages:
             self._extract_lid_mapping(msg)
@@ -13309,6 +13391,10 @@ class MainWindow(wx.Frame):
             return ""
         # A serialized id may already have been stored as the key id.
         if msg_id.startswith(("true_", "false_")):
+            # If it's a 1-on-1 message (not @g.us or @broadcast), truncate any 4th trailing participant segment
+            parts = msg_id.split("_")
+            if len(parts) > 3 and not ("@g.us" in parts[1] or "@broadcast" in parts[1]):
+                return "_".join(parts[:3])
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
@@ -13356,6 +13442,11 @@ class MainWindow(wx.Frame):
                     or ""
                 )
             participant = _resolve_to_lid_if_available(raw)
+            if ":" in participant and "@" in participant:
+                # Strip device port suffix (e.g. 62655318482954:94@lid -> 62655318482954@lid)
+                u, s = participant.split("@", 1)
+                if ":" in u:
+                    participant = f"{u.split(':', 1)[0]}@{s}"
         if participant:
             return f"{prefix}_{chat}_{msg_id}_{participant}"
         return f"{prefix}_{chat}_{msg_id}"
@@ -14001,28 +14092,53 @@ class MainWindow(wx.Frame):
         # existed on MainWindow and so always fell back to "", silently
         # disabling this guard entirely.
         cp = getattr(self, "conversations_panel", None)
-        if normalized == getattr(cp, "_last_open_jid", ""):
-            unread_count = 0
-        else:
-            read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
-            if read_at_t is not None:
-                incoming_t = int(chat.get("t", 0) or 0)
-                if incoming_t <= read_at_t:
-                    unread_count = 0
-                else:
-                    # A genuinely new message arrived after the local
-                    # read-ack, so the guard above no longer applies. But the
-                    # server-reported total can still be stale/inflated —
-                    # e.g. it may still include messages we already read
-                    # locally that WhatsApp's own servers haven't caught up
-                    # with yet. Clamp to what we actually know arrived since
-                    # the read-ack instead of trusting the raw server count.
-                    local_new = getattr(self, "_new_since_read", {}).get(normalized)
-                    if local_new:
-                        unread_count = min(unread_count, local_new)
-                    self._locally_read_at.pop(normalized, None)
-                    if hasattr(self, "_new_since_read"):
-                        self._new_since_read.pop(normalized, None)
+        # Use the *real* open state (the conversation panel actually showing
+        # this jid) instead of _last_open_jid: that field is never cleared on
+        # close, so a chat the user already left kept being treated as "open"
+        # forever and any chats-update for it was force-zeroed.
+        _open_now = (
+            cp is not None
+            and cp.conversation is not None
+            and cp.conversation.get("remoteJid") == normalized
+        )
+        read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
+        if _open_now:
+            # Chat is genuinely open. Keep a nonzero count only for messages
+            # that arrived while the window was hidden/minimized (tracked in
+            # _new_since_read); otherwise the open conversation is read.
+            local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
+            unread_count = min(unread_count, local_new) if local_new else 0
+        elif read_at_t is None and unread_count < old_count:
+            # WA-JS fires chat.unread_count_changed (forwarded to us as
+            # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
+            # into the browser Store — often with unreadCount=0 BEFORE the real
+            # value is populated — and those events keep arriving for a while
+            # AFTER the initial sync finished, so the _initial_sync_running
+            # guard above has already been passed. A chat never read locally
+            # this session and not currently open must never have its locally
+            # counted unread reduced by such a server event; the local counter
+            # (incremented by on_new_message or set by get_remote_chats) is the
+            # authoritative source. Groups never hit this: the WA-JS event is
+            # 1:1 only, which is exactly why this bug only showed on private
+            # chats.
+            return
+        elif read_at_t is not None:
+            incoming_t = int(chat.get("t", 0) or 0)
+            if incoming_t <= read_at_t:
+                unread_count = 0
+            else:
+                # A genuinely new message arrived after the local
+                # read-ack. Ensure unread_count is at least 1 (or preserves local_new / unread_count)
+                local_new = getattr(self, "_new_since_read", {}).get(normalized)
+                if local_new:
+                    unread_count = max(unread_count, local_new)
+                elif unread_count == 0 and old_count > 0:
+                    # Prevent 1:1 WA-JS chat.unread_count_changed from force-zeroing a chat
+                    # when new messages arrived after read_at_t.
+                    unread_count = old_count
+                self._locally_read_at.pop(normalized, None)
+                if hasattr(self, "_new_since_read"):
+                    self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
@@ -17395,8 +17511,8 @@ if __name__ == "__main__":
             try:
                 if _main_frame_ref:
                     import wx as _wx
-                    _wx.CallAfter(_main_frame_ref[0].real_exit)
-                    return
+                    _wx.CallAfter(_main_frame_ref[0]._perform_shutdown)
+                    _wx.CallAfter(_main_frame_ref[0]._terminate_process)
             except Exception:
                 pass
             os._exit(0)

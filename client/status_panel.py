@@ -17,6 +17,28 @@ except ImportError:
     pyaudio = None
 
 
+def _post_was_rejected(body) -> bool:
+    """True when a send-text-storie response actually means FAILURE.
+
+    With the status.layer.js async patch, WPPConnect answers HTTP 201 even
+    when WhatsApp Web rejected the status at protocol level — the rejection
+    is carried inside the payload as ``sendMsgResult.messageSendResult``
+    (e.g. ``"ERROR_UNKNOWN"``, with ``ack`` staying 0). A null/empty response
+    is also a failure.
+    """
+    if not isinstance(body, dict):
+        return True
+    resp_data = body.get("response")
+    if isinstance(resp_data, list) and resp_data:
+        for item in resp_data:
+            if isinstance(item, dict):
+                s = (item.get("sendMsgResult") or {}).get("messageSendResult")
+                if s and s not in ("SUCCESS", "OK"):
+                    return True
+        return False
+    return resp_data is None
+
+
 def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
     """Human-readable content label for one status update.
 
@@ -454,9 +476,16 @@ class StatusPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # ── Header buttons ────────────────────────────────────────────────
+        header_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self._add_status_btn = wx.Button(self, label=i18n.t("status_add"))
         self._add_status_btn.Bind(wx.EVT_BUTTON, self._on_add_status)
-        sizer.Add(self._add_status_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+        header_sizer.Add(self._add_status_btn, 0, wx.RIGHT, 5)
+
+        self._refresh_status_btn = wx.Button(self, label=i18n.t("status_refresh"))
+        self._refresh_status_btn.Bind(wx.EVT_BUTTON, self._on_refresh_status_btn)
+        header_sizer.Add(self._refresh_status_btn, 0, wx.RIGHT, 5)
+
+        sizer.Add(header_sizer, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         # ── Status contacts list ──────────────────────────────────────────
         self._list_label = wx.StaticText(self, label=i18n.t("status"))
@@ -606,20 +635,35 @@ class StatusPanel(wx.Panel):
 
         self._selected_media_paths: list = []
 
-        # ── Post voice status panel (hidden until recording starts) ────────
+        # ── Post voice status panel (hidden until user clicks Add -> Voice) ────────
         self._voice_post_panel = wx.Panel(self)
         voice_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("recording_in_progress"))
+        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("voice_recording"))
         voice_sizer.Add(self._voice_status_lbl, 0, wx.ALL, 5)
 
-        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("status_send"))
-        self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
-        voice_sizer.Add(self._voice_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("cancel"))
+        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
-        voice_sizer.Add(self._voice_close_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._voice_close_btn.Hide()
+        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
+
+        self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message") + " (Ctrl+R)")
+        self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
+        voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
+
+        self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording") + " (Ctrl+Shift+P)")
+        self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
+        self._voice_pause_btn.Hide()
+        voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.RIGHT, 5)
+
+        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("send_voice_message") + " (Ctrl+R)")
+        self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
+        self._voice_send_btn.Hide()
+        voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
+
+        voice_sizer.Add(voice_btn_sizer, 0, wx.ALL, 5)
 
         self._voice_post_panel.SetSizer(voice_sizer)
         self._voice_post_panel.Hide()
@@ -627,13 +671,15 @@ class StatusPanel(wx.Panel):
 
         # Recording state — same shape as ConversationsPanel's own voice-
         # message recording (client/ui/conversations.py's
-        # _start_voice_recording()/_recording_pa etc.), just scoped to
+        # _start_voice_recording()/_recording_pa etc.), scoped to
         # posting a status instead of sending a chat message.
         self._recording_pa      = None
         self._recording_stream  = None
         self._recording_frames: list = []
         self._recording_rate    = 48000
         self._recording_channels = 1
+        self._recording_paused  = False
+        self._is_recording      = False
 
         self.SetSizer(sizer)
 
@@ -643,22 +689,38 @@ class StatusPanel(wx.Panel):
         self.ID_ESCAPE        = wx.NewIdRef()
         self.ID_CTRL_C        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
+        self.ID_CTRL_R        = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_P  = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_D  = wx.NewIdRef()
+        self.ID_F5            = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL,                    wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
             (wx.ACCEL_NORMAL,                  wx.WXK_ESCAPE, self.ID_ESCAPE),
+            (wx.ACCEL_NORMAL,                  wx.WXK_F5,     self.ID_F5),
             (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
+            (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("P"),      self.ID_CTRL_SHIFT_P),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("D"),      self.ID_CTRL_SHIFT_D),
             # Same combo ConversationsPanel already uses for "save as"
             # (client/ui/conversations.py's ID_CTRL_SHIFT_S) — consistent
             # muscle memory across both places media can be saved from.
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("S"),      self.ID_CTRL_SHIFT_S),
         ])
         self.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self._on_prev_status,       id=self.ID_CTRL_LEFT)
-        self.Bind(wx.EVT_MENU, self._on_next_status,       id=self.ID_CTRL_RIGHT)
-        self.Bind(wx.EVT_MENU, self._on_escape,            id=self.ID_ESCAPE)
-        self.Bind(wx.EVT_MENU, self._on_copy_status_text,  id=self.ID_CTRL_C)
-        self.Bind(wx.EVT_MENU, self._on_save_status_media, id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_prev_status,          id=self.ID_CTRL_LEFT)
+        self.Bind(wx.EVT_MENU, self._on_next_status,          id=self.ID_CTRL_RIGHT)
+        self.Bind(wx.EVT_MENU, self._on_escape,               id=self.ID_ESCAPE)
+        self.Bind(wx.EVT_MENU, self._on_copy_status_text,     id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_save_status_media,    id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,      id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p_shortcut,id=self.ID_CTRL_SHIFT_P)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d_shortcut,id=self.ID_CTRL_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self._on_refresh_status_btn,   id=self.ID_F5)
+
+    def _on_refresh_status_btn(self, event):
+        """Manually reload statuses from WPPConnect API."""
+        self.on_show()
 
     def _on_escape(self, event):
         """Esc closes the open status viewer and returns focus to the list.
@@ -691,23 +753,128 @@ class StatusPanel(wx.Panel):
 
     def _load_statuses(self):
         """
-        Build the status list from status updates received via WebSocket.
+        Build the status list.
 
-        WPPConnect does not expose a REST endpoint to query other users' statuses,
-        so we rely on the in-memory _status_updates dict that is populated by
-        MainWindow._store_status_update() whenever a status@broadcast message
-        arrives over the Socket.IO connection.
+        Primary source: the account's StatusV3Store via
+        GET /api/{session}/statuses — the user's own posted statuses come
+        straight from the account (not from the local DB/in-memory cache),
+        and contacts' statuses are pulled from the browser store. Falls back
+        to the live status@broadcast messages collected in
+        MainWindow._status_updates when the API is unreachable or returns
+        nothing (e.g. the Status view was never opened in the browser yet).
         """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
+        my_statuses, contacts = self._fetch_statuses_from_api()
+        # Merge, never replace: the API's StatusV3Store may only hold the
+        # pages loaded so far, while _status_updates (seeded from the DB at
+        # startup) keeps the stories that arrived via status@broadcast
+        # earlier. Showing both (deduped by message id) covers the whole
+        # picture instead of dropping whichever source has less.
         status_updates = getattr(mw, "_status_updates", {})
         records = []
         for participant, msgs in list(status_updates.items()):
             for msg in msgs:
                 records.append(msg)
-        my_statuses, contacts = self._parse_statuses(records, i18n)
+        if records:
+            fb_my, fb_contacts = self._parse_statuses(records, i18n)
+            my_statuses = self._merge_status_lists(my_statuses, fb_my)
+            contacts = self._merge_status_contacts(contacts, fb_contacts)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
+
+    @staticmethod
+    def _merge_status_lists(a: list, b: list) -> list:
+        """Union of two status-dict lists, deduped by key.id (order: a first)."""
+        seen = set()
+        out = []
+        for s in list(a) + list(b):
+            if not isinstance(s, dict):
+                continue
+            mid = (s.get("key") or {}).get("id")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            out.append(s)
+        return out
+
+    @staticmethod
+    def _merge_status_contacts(a: list, b: list) -> list:
+        """Union of two contact-status lists, grouped by jid, deduped by id."""
+        by_jid = {}
+        for entry in list(a) + list(b):
+            if not isinstance(entry, dict):
+                continue
+            jid = entry.get("jid")
+            if not jid:
+                continue
+            merged = by_jid.get(jid)
+            if merged is None:
+                merged = {
+                    "name": entry.get("name", ""),
+                    "jid": jid,
+                    "statuses": [],
+                    "viewed_all": entry.get("viewed_all", False),
+                }
+                by_jid[jid] = merged
+            seen = {(s.get("key") or {}).get("id") for s in merged["statuses"]}
+            for s in entry.get("statuses") or []:
+                if not isinstance(s, dict):
+                    continue
+                mid = (s.get("key") or {}).get("id")
+                if mid and mid in seen:
+                    continue
+                if mid:
+                    seen.add(mid)
+                merged["statuses"].append(s)
+        return list(by_jid.values())
+
+    def _fetch_statuses_from_api(self) -> tuple:
+        """Query WPPConnect's GET /api/{session}/statuses (StatusV3Store).
+
+        Returns ``(my_statuses, contacts)`` in the same shape as
+        _parse_statuses() — raw store messages are normalized through
+        WebSocketClient._normalize_wpp_message() (the same converter the
+        message sync uses), so both the API and the WebSocket paths feed the
+        panel identical dicts.
+        """
+        mw   = self.main_window
+        i18n = mw.i18n
+        try:
+            url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/statuses"
+            headers = {"Authorization": f"Bearer {mw.token}", "Content-Type": "application/json"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code not in (200, 201):
+                return [], []
+            body = resp.json() or {}
+            data = body.get("response") if isinstance(body, dict) else None
+        except Exception as exc:
+            logging.warning("[status_panel] statuses API failed, falling back to WebSocket cache: %s", exc)
+            return [], []
+        if not isinstance(data, dict):
+            return [], []
+
+        ws  = getattr(mw, "ws", None)
+        raw = []
+        for msgs in (data.get("myStatus") or []):
+            raw.append(msgs)
+        for entry in (data.get("contacts") or []):
+            for msgs in (entry.get("msgs") or []):
+                raw.append(msgs)
+
+        records = []
+        for wm in raw:
+            if not isinstance(wm, dict):
+                continue
+            if ws is not None:
+                try:
+                    records.append(ws._normalize_wpp_message(wm))
+                    continue
+                except Exception as exc:
+                    logging.warning("[status_panel] failed to normalize API status: %s", exc)
+            records.append(wm)
+        return self._parse_statuses(records, i18n)
 
     def _parse_statuses(self, items, i18n) -> tuple:
         """
@@ -1611,20 +1778,68 @@ class StatusPanel(wx.Panel):
     # ── Record & post voice status ───────────────────────────────────────────
 
     def _on_choose_voice_status(self, event):
-        """Start recording a voice status. Same PyAudio open/fallback
-        strategy as ConversationsPanel._start_voice_recording() (client/
-        ui/conversations.py), scoped here since posting a status is not
-        tied to any open conversation."""
+        """Open the voice status post panel in prepared state (NOT recording yet).
+        User can click Record or press Ctrl+R to start recording."""
         self._hide_post_panels()
+        self._viewer_panel.Hide()
+        self._video_player.stop()
 
+        self._is_recording = False
+        self._recording_paused = False
+        self._recording_frames = []
+        self._stop_recording_stream()
+
+        i18n = self.main_window.i18n
+        self._voice_status_lbl.SetLabel(i18n.t("voice_recording"))
+        self._voice_start_btn.SetLabel(i18n.t("record_voice_message") + " (Ctrl+R)")
+        self._voice_start_btn.Show()
+        self._voice_pause_btn.Hide()
+        self._voice_send_btn.Hide()
+        self._voice_close_btn.Hide()
+
+        self._voice_post_panel.Show()
+        self.Layout()
+        self._voice_start_btn.SetFocus()
+
+    def _on_ctrl_r_shortcut(self, event):
+        """Ctrl+R shortcut handler for status panel.
+        If voice post panel is shown: start recording if idle, or send if recording."""
+        if self._voice_post_panel.IsShown():
+            if not self._is_recording:
+                self._start_voice_recording()
+            else:
+                self._on_send_voice_status(None)
+        else:
+            self._on_choose_voice_status(None)
+
+    def _on_ctrl_shift_p_shortcut(self, event):
+        """Ctrl+Shift+P shortcut handler to pause/resume voice recording."""
+        if self._voice_post_panel.IsShown() and self._is_recording:
+            self._toggle_pause_voice_recording(event)
+
+    def _on_ctrl_shift_d_shortcut(self, event):
+        """Ctrl+Shift+D shortcut handler to discard voice recording/panel."""
+        if self._voice_post_panel.IsShown():
+            self._on_close_voice_panel(event)
+
+    def _on_record_voice_button(self, event):
+        if not self._is_recording:
+            self._start_voice_recording()
+        else:
+            self._on_send_voice_status(event)
+
+    def _start_voice_recording(self):
+        """Start recording voice audio stream."""
         if pyaudio is None:
             self.main_window.output(self.main_window.i18n.t("voice_recording_unavailable"))
             return
 
         self._recording_frames = []
+        self._recording_paused = False
 
         def _callback(in_data, frame_count, time_info, status):
-            self._recording_frames.append(in_data)
+            if not self._recording_paused:
+                self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
 
         if self._recording_pa is None:
@@ -1654,9 +1869,6 @@ class StatusPanel(wx.Panel):
 
         stream, rate, ch = _try_open(input_device_index)
         if stream is None and input_device_index is not None:
-            # Configured device failed to open (e.g. unplugged) — fall back
-            # to the system default for this recording, same as
-            # ConversationsPanel's own recording start.
             stream, rate, ch = _try_open(None)
 
         if stream is None:
@@ -1670,12 +1882,39 @@ class StatusPanel(wx.Panel):
         self._recording_stream   = stream
         self._recording_rate     = rate
         self._recording_channels = ch
+        self._is_recording       = True
 
         if hasattr(self.main_window, "voicemsg_startrecording_sound"):
             self.main_window.voicemsg_startrecording_sound.play()
-        self._voice_post_panel.Show()
+
+        i18n = self.main_window.i18n
+        self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
+        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
+        self._voice_close_btn.Show()
+        self._voice_start_btn.Hide()
+        self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
+        self._voice_pause_btn.Show()
+        self._voice_send_btn.SetLabel(i18n.t("send_voice_message") + " (Ctrl+R)")
+        self._voice_send_btn.Show()
         self.Layout()
         self._voice_send_btn.SetFocus()
+
+    def _toggle_pause_voice_recording(self, event):
+        if not self._is_recording:
+            return
+        self._recording_paused = not self._recording_paused
+        if hasattr(self.main_window, "voicemsg_pauserecording_sound"):
+            try:
+                self.main_window.voicemsg_pauserecording_sound.play()
+            except Exception:
+                pass
+        i18n = self.main_window.i18n
+        if self._recording_paused:
+            self._voice_pause_btn.SetLabel(i18n.t("resume_recording") + " (Ctrl+Shift+P)")
+            self._voice_status_lbl.SetLabel(i18n.t("recording_paused"))
+        else:
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
+            self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
 
     def _stop_recording_stream(self):
         if self._recording_stream is not None:
@@ -1687,13 +1926,25 @@ class StatusPanel(wx.Panel):
             self._recording_stream = None
 
     def _on_close_voice_panel(self, event):
+        if self._is_recording and hasattr(self.main_window, "voicemsg_discard_sound"):
+            try:
+                self.main_window.voicemsg_discard_sound.play()
+            except Exception:
+                pass
         self._stop_recording_stream()
         self._recording_frames = []
+        self._is_recording = False
+        self._recording_paused = False
         self._voice_post_panel.Hide()
         self.Layout()
         self._status_list.SetFocus()
 
     def _on_send_voice_status(self, event):
+        if hasattr(self.main_window, "voicemsg_send_sound"):
+            try:
+                self.main_window.voicemsg_send_sound.play()
+            except Exception:
+                pass
         self._stop_recording_stream()
         self._voice_post_panel.Hide()
         self.Layout()
@@ -1820,8 +2071,25 @@ class StatusPanel(wx.Panel):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
             ok   = resp.status_code in (200, 201)
-        except Exception:
+            logging.info(
+                "[status_post] POST %s -> HTTP %s, body=%.300s",
+                url, resp.status_code, (resp.text or "")[:300],
+            )
+            if ok:
+                # Guard against the false-success path: with the status.layer.js
+                # async patch the server now surfaces the real post result, and
+                # a rejected status arrives as HTTP 201 wrapping
+                # sendMsgResult.messageSendResult = "ERROR_UNKNOWN" (ack stays
+                # 0 — WhatsApp never accepted it). Any of those must be
+                # reported as an error instead of "posted".
+                try:
+                    if _post_was_rejected(resp.json()):
+                        ok = False
+                except Exception:
+                    pass
+        except Exception as exc:
             ok = False
+            logging.warning("[status_post] POST failed for %s: %s", url, exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
         else:
@@ -1991,6 +2259,7 @@ class StatusPanel(wx.Panel):
         self._status_list.SetColumn(0, col)
 
         self._add_status_btn.SetLabel(i18n.t("status_add"))
+        self._refresh_status_btn.SetLabel(i18n.t("status_refresh"))
         self._prev_status_btn.SetLabel(i18n.t("status_prev"))
         self._next_status_btn.SetLabel(i18n.t("status_next"))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
