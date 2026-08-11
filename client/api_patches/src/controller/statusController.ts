@@ -332,24 +332,37 @@ export async function getStatuses(req: Request, res: Response) {
             }
           }
         }
-        // Read ALL status models (unread, read/viewed, and muted statuses)
-        // instead of filtering out viewed statuses via getUnexpired().
-        const models = store?.models || (store?.getUnexpired ? store.getUnexpired() : []);
+        // Read ALL status models (unread, read/viewed, and muted statuses).
+        // Try store.getModels(), store._models, store.models, and store.getUnexpired()
+        let rawModels: any[] = [];
+        if (typeof store?.getModels === 'function') {
+          rawModels = store.getModels();
+        } else if (Array.isArray(store?._models)) {
+          rawModels = store._models;
+        } else if (Array.isArray(store?.models)) {
+          rawModels = store.models;
+        } else if (typeof store?.getUnexpired === 'function') {
+          rawModels = store.getUnexpired();
+        }
+
+        console.log(`[getStatuses] StatusV3Store rawModels count=${rawModels.length}`);
+
         const me = WPP.conn?.getMyUserWid?.()?.toString?.() ?? '';
-        for (const model of models) {
+        for (const model of rawModels) {
           try {
             const author = model?.id?._serialized || model?.id || '';
             if (!author || author === me) continue; // own status handled above
-            const msgs = model?.getAllMsgs ? model.getAllMsgs() : [];
+            let msgs = model?.getAllMsgs ? model.getAllMsgs() : (model?.msgs?._models || model?.msgs || []);
             if (!msgs || !msgs.length) continue;
             out.contacts.push({
               jid: author,
               msgs: msgs.map(serialize).filter(Boolean),
             });
           } catch (e) {
-            // skip a broken entry
+            console.error('[getStatuses] error processing model:', e);
           }
         }
+        console.log(`[getStatuses] Returning ${out.contacts.length} contact status entries`);
       } catch (e) {
         // Store not reachable — contacts stay empty
       }
