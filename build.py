@@ -62,7 +62,7 @@ CLIENT_DIR    = os.path.join(ROOT_DIR, "client")
 INSTALLER_DIR = os.path.join(ROOT_DIR, "installer")
 BUILD_DIR     = os.path.join(ROOT_DIR, "build")
 DIST_DIR      = os.path.join(ROOT_DIR, "dist")
-VENV_DIR      = os.path.join(ROOT_DIR, "venv")
+VENV_DIR      = os.environ.get("WINZAPP_VENV") or os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets
 NODE_DIR      = os.path.join(CLIENT_DIR, "node")
@@ -302,9 +302,11 @@ API_CUSTOM_SRC_FILES = [
     "src/util/createSessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
+    "src/middleware/auth.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "dist/middleware/auth.js",
 ]
 
 # -- CLI --------------------------------------------------------------------
@@ -540,6 +542,15 @@ def pyinstaller_compile():
             cmd += ["--add-binary", f"{OPUS_DLL};lib"]
         if FFMPEG_EXE:
             cmd += ["--add-binary", f"{FFMPEG_EXE};lib"]
+
+    # Multi-account modules that may be reached only via lazy imports — pin them
+    # as hidden imports so PyInstaller always bundles them even if a top-level
+    # static import path doesn't reach them (e.g. session_store is imported only
+    # from the live session flow). Belt-and-suspenders; harmless if already found.
+    for _hm in ("accounts", "coord_locks", "node_coord", "ipc", "update_coord",
+                "app_settings", "account_migration", "account_bootstrap",
+                "account_launcher", "account_ui", "session_store", "window_title"):
+        cmd += ["--hidden-import", _hm]
 
     cmd.append(os.path.join(CLIENT_DIR, "main.py"))
 

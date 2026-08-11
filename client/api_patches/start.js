@@ -67,6 +67,52 @@ function findAnyChrome() {
   return findHeadlessShell() || findExecutable(puppeteerCacheDir, FULL_CHROME_NAMES, 0);
 }
 
+// Locate a downloaded-but-maybe-unextracted chrome-headless-shell ZIP, so a
+// botched extraction can be redone by hand (see the safeguard below).
+function findHeadlessShellZip() {
+  const shellCacheDir = path.join(puppeteerCacheDir, 'chrome-headless-shell');
+  let entries;
+  try {
+    entries = fs.readdirSync(shellCacheDir, { withFileTypes: true });
+  } catch (e) {
+    return null;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && /chrome-headless-shell.*\.zip$/i.test(entry.name)) {
+      return path.join(shellCacheDir, entry.name);
+    }
+  }
+  return null;
+}
+
+// puppeteer lays the shell out under .cache/chrome-headless-shell/win64-<ver>/,
+// and the ZIP is named "<ver>-chrome-headless-shell-win64.zip" — derive that
+// destination so a manual extraction lands exactly where findHeadlessShell()
+// looks. Falls back to the ZIP's own dir if the version can't be parsed.
+function headlessShellDestForZip(zipPath) {
+  const m = path.basename(zipPath).match(/^(\d+\.\d+\.\d+\.\d+)-/);
+  const shellCacheDir = path.dirname(zipPath);
+  return m ? path.join(shellCacheDir, 'win64-' + m[1]) : shellCacheDir;
+}
+
+// Extract a ZIP the way puppeteer's own bundled unzip failed to. PowerShell's
+// Expand-Archive ships with every supported Windows; unzip covers dev/Linux.
+function extractZip(zipPath, destDir) {
+  const { execSync } = require('child_process');
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch (e) {}
+  if (process.platform === 'win32') {
+    execSync(
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command ' +
+        `"Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force"`,
+      { stdio: 'inherit' }
+    );
+  } else {
+    execSync(`unzip -o "${zipPath}" -d "${destDir}"`, { stdio: 'inherit' });
+  }
+}
+
 if (!findHeadlessShell()) {
   console.log('[chrome-install] chrome-headless-shell não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
@@ -98,6 +144,29 @@ if (!findHeadlessShell()) {
     console.log('[chrome-install] chrome-headless-shell instalado com sucesso!');
   } catch (err) {
     console.error('[chrome-install] Falha ao instalar o chrome-headless-shell automaticamente:', err);
+  }
+}
+
+// Safeguard against puppeteer's own downloader botching the extraction: on some
+// Windows setups it fetches the full ZIP but leaves only ABOUT/LICENSE behind —
+// no chrome-headless-shell.exe — and then, seeing the ZIP already on disk, never
+// re-downloads, so the session hangs in INITIALIZING (offline) forever. If the
+// binary is still missing but its ZIP is here, extract it ourselves.
+if (!findHeadlessShell()) {
+  const zip = findHeadlessShellZip();
+  if (zip) {
+    const dest = headlessShellDestForZip(zip);
+    console.log(`[chrome-install] Instalação do chrome-headless-shell incompleta; extraindo o ZIP manualmente: ${zip}`);
+    try {
+      extractZip(zip, dest);
+      if (findHeadlessShell()) {
+        console.log('[chrome-install] chrome-headless-shell extraído manualmente com sucesso!');
+      } else {
+        console.error('[chrome-install] Extração manual não produziu o executável esperado.');
+      }
+    } catch (err) {
+      console.error('[chrome-install] Falha ao extrair o chrome-headless-shell manualmente:', err);
+    }
   }
 }
 

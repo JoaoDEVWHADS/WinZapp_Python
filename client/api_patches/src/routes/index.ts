@@ -40,6 +40,21 @@ import swaggerDocument from '../swagger.json';
 const upload = multer(uploadConfig as any) as any;
 const routes: Router = Router();
 
+// ── WinZapp multi-account: Node instance identity (plan Zad 3.0) ─────────────
+// Public, unauthenticated, read-only. Lets a WinZapp client verify that THIS
+// specific Node instance (not just "something on the port") is the one it
+// started/expects, and recover its pid. installation_id / instance_id are
+// injected via env by the client that spawned this server (main.py). Used by
+// client/node_coord.identity_matches() + startup recovery.
+routes.get('/winzapp/identity', (_req, res) => {
+  res.json({
+    installation_id: process.env.WINZAPP_INSTALLATION_ID || '',
+    instance_id: process.env.WINZAPP_INSTANCE_ID || '',
+    protocol_version: 1,
+    pid: process.pid,
+  });
+});
+
 // Generate Token
 routes.post('/api/:session/:secretkey/generate-token', encryptSession);
 

@@ -60,7 +60,14 @@ def enumerate_output_devices() -> list:
         if info.flags & BASS_DEVICE_ENABLED:
             name = info.name
             if isinstance(name, bytes):
-                name = name.decode("mbcs")
+                # Modern BASS returns device names as UTF-8; decoding as mbcs
+                # (the Windows ANSI codepage) mangled Polish characters into
+                # mojibake in the device combos. Try UTF-8 first, fall back to
+                # mbcs only for a legacy BASS that really is ANSI.
+                try:
+                    name = name.decode("utf-8")
+                except UnicodeDecodeError:
+                    name = name.decode("mbcs", "replace")
             name = name.replace("(", "").replace(")", "").strip()
             if name.lower() != "default":
                 devices.append((count, name))
@@ -95,7 +102,17 @@ def enumerate_input_devices(pa: "pyaudio.PyAudio | None" = None) -> list:
     list if PyAudio itself isn't installed (see the import at the top of
     this file) rather than raising."""
     if pyaudio is None:
-        return []
+        # WinZapp fork: PyAudio has no wheel on Python 3.14, so degrade to a
+        # sounddevice query instead of reporting no input devices at all.
+        try:
+            import sounddevice as sd
+            devs = []
+            for idx, info in enumerate(sd.query_devices()):
+                if info.get("max_input_channels", 0) > 0:
+                    devs.append((idx, str(info.get("name", "")).strip()))
+            return devs
+        except Exception:
+            return []
     owns_pa = pa is None
     if owns_pa:
         pa = pyaudio.PyAudio()
@@ -115,6 +132,25 @@ def find_output_device_index(name: str):
     if not name:
         return None
     return _match_device(name, enumerate_output_devices())
+
+
+def find_default_output_device_index():
+    """Return the CONCRETE BASS device index flagged as the system default
+    (BASS_DEVICE_DEFAULT), or None if it can't be determined. Effects routing
+    needs a real index — not the -1/"current device" sentinel — so effect
+    sounds stay pinned to the default device even after the voice output is
+    switched to a different one (switching Output re-inits that one device and
+    would otherwise drag effects along with it)."""
+    from sound_lib.external.pybass import (
+        BASS_DEVICEINFO, BASS_GetDeviceInfo, BASS_DEVICE_ENABLED, BASS_DEVICE_DEFAULT,
+    )
+    info = BASS_DEVICEINFO()
+    count = 1
+    while BASS_GetDeviceInfo(count, ctypes.byref(info)):
+        if (info.flags & BASS_DEVICE_ENABLED) and (info.flags & BASS_DEVICE_DEFAULT):
+            return count
+        count += 1
+    return None
 
 
 def find_input_device_index(name: str, pa: "pyaudio.PyAudio | None" = None):

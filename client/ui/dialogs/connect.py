@@ -93,58 +93,60 @@ class Connect:
         return True
 
     def _cleanup_orphan_sessions(self, keep_token: str = "") -> None:
-        """Close all WPPConnect browser sessions except *keep_token*.
+        """Close ONLY this account's own, explicitly-abandoned WPPConnect
+        sessions (plan Zad 3.2, GPT r2/r5). Never touches another account's
+        session, never the current/active one, never one mid-pairing.
 
-        Each failed / abandoned pairing attempt leaves a headless Chromium
-        process running (visible in wppconnect.log as
-        '[session:client] Auto close remain: Xs').  Having two or more
-        browsers initialising simultaneously eats CPU/RAM and causes the
-        new session to miss the 60 s Auto Close window → ReadTimeout.
-
-        We enumerate the userDataDir sub-folders (one per session) and
-        call /close-session for every entry that is NOT keep_token.
-        Errors are silently swallowed — this is best-effort cleanup.
+        This replaces the old "close every session on the server except one"
+        behaviour, which was catastrophic under multi-account: pairing a second
+        account would tear down the FIRST account's live session (its Chrome
+        page / WhatsApp Web link), disconnecting a working account. The set of
+        closable sessions now comes exclusively from THIS account's
+        sessions.json via session_store.sessions_to_close() — a session whose
+        ownership can't be proven from our own store is left strictly alone.
         """
-        import os
-        api_dir = resource_path("api")
-        udd = os.path.join(api_dir, "userDataDir")
-        if not os.path.isdir(udd):
+        import session_store
+        mw = self.main_window
+        store = None
+        try:
+            store = mw._get_session_store()
+        except Exception:
+            store = None
+        if store is None:
+            # Legacy single-account mode: no per-account store, so there is no
+            # provable ownership. Do NOT blast every session (that's the bug).
             return
 
-        # Keep only the first component of the token (before the colon).
-        keep_raw = keep_token.split(":")[0] if keep_token else ""
+        current = (mw.token or "").split(":")[0]
+        try:
+            closable = session_store.sessions_to_close(store.list(), current)
+        except Exception:
+            logging.exception("[cleanup_orphan_sessions] listing sessions failed")
+            return
 
-        for entry in os.listdir(udd):
-            if entry == keep_raw:
-                continue
-            session_id = entry
-            
-            # Spawn a daemon thread to clean up this session in parallel
-            def _clean_single(sid):
+        for sess in closable:
+            full_token = sess.get("token") or sess["name"]
+            sess_name = sess["name"]
+
+            def _clean_single(tok, name):
                 try:
-                    gen_url = (
-                        f"{self.main_window.wpp_server}"
-                        f":{self.main_window.wpp_port}/api/{sid}"
-                        f"/{self.main_window.wpp_api_key}/generate-token"
+                    url = (
+                        f"{mw.wpp_server}:{mw.wpp_port}/api/{tok}/close-session"
                     )
-                    res = requests.post(gen_url, timeout=5)
-                    if res.status_code in (200, 201):
-                        hash_token = res.json().get("token")
-                        token = f"{sid}:{hash_token}"
-                        url = (
-                            f"{self.main_window.wpp_server}"
-                            f":{self.main_window.wpp_port}/api/{token}/close-session"
-                        )
-                        requests.post(
-                            url,
-                            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                            timeout=5,
-                        )
-                        logging.info("[cleanup_orphan_sessions] Closed orphan session: %s", sid)
+                    requests.post(
+                        url,
+                        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                        timeout=5,
+                    )
+                    logging.info("[cleanup_orphan_sessions] Closed own abandoned session: %s", name)
+                    try:
+                        store.remove(name)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
-            threading.Thread(target=_clean_single, args=(session_id,), daemon=True).start()
+            threading.Thread(target=_clean_single, args=(full_token, sess_name), daemon=True).start()
 
 
 
@@ -293,6 +295,21 @@ class Connect:
                 if status not in _INCOMPLETE and is_paired:
                     # Session is connected or closed (but closed is allowed if still paired)
                     return True
+                # A transient warm-up status right after launch (the WPPConnect
+                # browser is still re-attaching the session) must NOT be treated
+                # as a logout for an already-paired account: doing so wiped a
+                # perfectly valid session on a cold start (the session comes up
+                # as INITIALIZING/notLogged for ~30s). Only an explicit 401/403
+                # (handled above) or a user disconnect may drop a paired token.
+                # Keep it and let the normal connect/reconnect flow settle it.
+                if is_paired:
+                    logging.info(
+                        "[check_connection_status] Token exists, session status is "
+                        "'%s' (transient warm-up) and paired=True — keeping the "
+                        "paired session; connect/reconnect flow will settle it.",
+                        status,
+                    )
+                    return True
                 # Stale token — pairing was never finished. Clear it so the
                 # connection dialog is shown on this and future launches.
                 logging.warning(
@@ -304,8 +321,12 @@ class Connect:
                 self.main_window._set_wa_token("")
                 self.main_window.settings.setdefault("privateinfo", {}).pop("paired", None)
                 self.main_window.save_settings()
-                if is_paired:
-                    # Clear local cached data if it was previously paired
+                if not is_paired:
+                    # Only wipe local cached data when the session was never
+                    # really paired (a genuine orphan). A paired session that
+                    # reached this branch earlier was already kept above via the
+                    # warm-up guard; this 'if is_paired' used to be dead code
+                    # because paired sessions return True before reaching here.
                     self.main_window.clear_local_data()
                 # Best-effort delete of orphaned instance
                 if token:
@@ -481,17 +502,20 @@ class Connect:
         except Exception:
             pass
 
-    def _close_active_session(self):
+    def _close_active_session(self, sync=False):
         # Retrieve the active token from the dialog state
         token = getattr(self, 'raw_token', '')
         if not token:
             token = getattr(self.main_window, 'token', '')
-        logging.info("[_close_active_session] Active token retrieved: %s", token)
+        if not token:
+            token = getattr(self, '_last_started_qr_token', '')
+        logging.info("[_close_active_session] Active token retrieved: %s (sync=%s)", token, sync)
         if token:
             session_name = token.split(':')[0]
             headers = self._wpp_headers(use_global_key=False)
             # Clear reference so we don't try to reuse/double-close this token
             self.raw_token = None
+            self._last_started_qr_token = None
             mw_token = getattr(self.main_window, 'token', '')
             if mw_token.startswith(session_name):
                 if hasattr(self.main_window, 'token'):
@@ -514,7 +538,11 @@ class Connect:
                     logging.info("[_close_active_session] close-session response status: %s", resp.status_code)
                 except Exception as e:
                     logging.error("[_close_active_session] Error sending close-session request: %s", e)
-            threading.Thread(target=_close_api_session, daemon=True).start()
+
+            if sync:
+                _close_api_session()
+            else:
+                threading.Thread(target=_close_api_session, daemon=True).start()
 
     def on_switch_to_phone(self, event):
         # Close the active QR code session first
@@ -553,6 +581,13 @@ class Connect:
     def start_qrcode_connection(self):
         """Initiates QR-CODE connection without user interaction."""
         self.qrcode_connection_started = True
+        # Mark pairing as actively in flight for the WHOLE QR flow. Without this,
+        # the ~30s health poll (check_wa_connection_http) saw the expected QRCODE
+        # "scan me" state as a logout and wiped the session ~1s after the QR
+        # appeared — pairing by QR could never complete on a pending account.
+        # (Phone-code mode already sets this in on_continue.) Cleared by
+        # on_pairing_complete / dialog close, same as the phone-code path.
+        self.main_window._pairing_in_progress = True
         try:
             # Determine whether a token has been saved from a previous session.
             # We still always call _create_instance to (re)start the WPPConnect
@@ -1403,30 +1438,22 @@ class Connect:
             except Exception as e:
                 logging.error("[on_dialog_close] Error disconnecting WebSocket: %s", e)
             self.main_window.ws = None
-        
-        token = getattr(self.main_window, 'token', '')
-        logging.info("[on_dialog_close] Retrieved token: %s", token)
-        if token:
-            headers = self._wpp_headers(use_global_key=False)
-            try:
-                close_url = (
-                    f"{self.main_window.wpp_server}"
-                    f":{self.main_window.wpp_port}/api/{token}/close-session"
-                )
-                logging.info("[on_dialog_close] Sending close-session request to: %s", close_url)
-                resp = requests.post(close_url, headers=headers, timeout=3)
-                logging.info("[on_dialog_close] close-session response status: %s", resp.status_code)
-            except Exception as e:
-                logging.error("[on_dialog_close] Error sending close-session request: %s", e)
+
+        self._close_active_session()
         event.Skip()
 
     def on_quit_from_connect(self, event):
-        token = getattr(self.main_window, 'token', '')
-        if token:
+        logging.info("[on_quit_from_connect] Quit requested from connection dialog.")
+        self._pairing_attempt_id += 1
+        self.main_window._pairing_in_progress = False
+        if hasattr(self.main_window, 'ws') and self.main_window.ws:
             try:
-                headers = self._wpp_headers(use_global_key=False)
-                url = f"{self.main_window.wpp_server}:{self.main_window.wpp_port}/api/{token}/close-session"
-                requests.post(url, headers=headers, timeout=2)
-            except Exception:
-                pass
+                logging.info("[on_quit_from_connect] Disconnecting WebSocket...")
+                self.main_window.ws.sio.disconnect()
+            except Exception as e:
+                logging.error("[on_quit_from_connect] Error disconnecting WebSocket: %s", e)
+            self.main_window.ws = None
+
+        self._close_active_session(sync=True)
         sys.exit()
+

@@ -65,6 +65,7 @@ CUSTOM_SRC_FILES = [
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
+    "src/middleware/auth.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",

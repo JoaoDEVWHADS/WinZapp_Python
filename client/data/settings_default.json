@@ -36,7 +36,8 @@
     },
     "audio_devices": {
         "output_device_name": "",
-        "input_device_name": ""
+        "input_device_name": "",
+        "effects_output_device_name": ""
     },
     "speech_content": {
         "announce_typing": true,

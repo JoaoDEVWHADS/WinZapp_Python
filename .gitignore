@@ -16,6 +16,10 @@ client/data/secret.key
 client/data/media/
 client/data/voice_messages/
 client/data/log/
+# Per-account and install-global runtime data (multi-account: one subfolder per
+# account id holding its own media/voice_messages/db/token — never committed)
+client/data/accounts/
+client/data/global/
 client/logs/
 /log/
 
@@ -203,3 +207,13 @@ db.sqlite3-journal
 .ipynb_checkpoints
 
 wppconnect_repos/
+
+# Windows build scaffolding (local only)
+/venv_build/
+/_build_*.bat
+/_py313.exe
+/_diag_*.py
+/_verify_*.py
+/_evtlog.ps1
+/_backup_stare_dane/
+/boot_trace.log

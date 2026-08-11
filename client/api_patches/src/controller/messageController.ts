@@ -259,10 +259,6 @@ export async function sendFile(req: Request, res: Response) {
   } catch (error) {
     returnError(req, res, error);
   } finally {
-    // Moved out of the try body's happy path: when the send call itself threw,
-    // the old code never reached the unlinkAsync() call at all, leaking the
-    // multer-uploaded temp file on every failed send — worse under load,
-    // since repeated failures never got cleaned up.
     if (req.file) {
       await unlinkAsync(pathFile).catch(() => {});
     }

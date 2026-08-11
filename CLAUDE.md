@@ -94,3 +94,24 @@ This is the app's core differentiator, not an afterthought: UI is built from pla
 
 ### Packaging (`build.py`, `installer/`)
 `build.py` runs PyInstaller (via CLI args with `--collect-all`, not the checked-in `client/WinZapp.spec`, which is stale/unused) to compile `client/main.py`, then for onedir builds also compiles the C installer/uninstaller stubs in `installer/` (gcc + windres), zips the staged app as a `ZIP_STORED` payload, and appends it to the installer stub to produce a single self-extracting `dist/WinZappInstaller.exe`, plus a plain `dist/WinZapp.zip` portable build. `client/api/` and `client/node/` are excluded from git and must exist on disk before running it.
+
+---
+
+## Apêndice — módulos exclusivos deste fork (João / multi-account)
+
+Estes módulos são **extras deste repositório** que NÃO existem no upstream do Gabriel.
+Eles NÃO constam na documentação acima (que espelha o código do Gabriel). São preservados
+e evolvem aqui:
+
+- `client/accounts.py`, `client/account_ui.py`, `client/account_launcher.py`,
+  `client/account_bootstrap.py`, `client/account_migration.py` — gerenciador de contas
+  multi-account.
+- `client/ipc.py` — IPC nível de conta (foreground/quit entre processos).
+- `client/node_coord.py`, `client/node_ports.py` — porta Node dedicada por conta.
+- `client/session_store.py` — registro/isolamento de sessões WPPConnect por conta.
+- `client/connection_state.py` — estado de conexão (resume/suspend/single-flight).
+- `client/coord_locks.py` — locks de coordenação entre contas.
+- `client/app_settings.py`, `client/window_title.py`, `client/update_coord.py` —
+  configuração compartilhada / título por conta / coordenação de updates.
+- `client/api_patches/src/middleware/auth.ts` — validação extra de token.
+- `client/languages/pl.json` — idioma polonês.
