@@ -6,7 +6,7 @@ import tempfile
 import threading
 import wx
 import requests
-from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText
+from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText, AccessibleSaveAs
 from core.utils import format_number, get_downloads_folder
 from core.video_player import VideoPlayer
 from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
@@ -49,6 +49,26 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
         contact = msg_obj.get("contactMessage") or {}
         return i18n.t("contact_message").format(name=contact.get("displayName") or "")
     return i18n.t("notif_unsupported")
+
+
+def _status_media_save_info(msg_type: str, msg_obj: dict, i18n):
+    """Returns (ext, wildcard) for the "Save media as..." dialog, or None
+    if *msg_type* isn't a savable media status. Shared by
+    StatusPanel._on_save_status_media() so the extension/wildcard logic
+    for each media type lives in one place."""
+    if msg_type == "imageMessage":
+        mimetype = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
+        ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "jpg")
+        return ext, f"{i18n.t('photo')} (*{ext})|*{ext}|*.*|*.*"
+    if msg_type == "videoMessage":
+        mimetype = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
+        ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "mp4")
+        return ext, f"{i18n.t('video')} (*{ext})|*{ext}|*.*|*.*"
+    if msg_type == "audioMessage":
+        mimetype = (msg_obj.get("audioMessage") or {}).get("mimetype", "audio/ogg")
+        ext = "." + (mimetype.split("/")[-1].split(";")[0] if "/" in mimetype else "ogg")
+        return ext, f"{i18n.t('message_type_audio')} (*{ext})|*{ext}|*.*|*.*"
+    return None
 
 
 # ── Status reactions dialog ──────────────────────────────────────────────────
@@ -413,6 +433,8 @@ class StatusPanel(wx.Panel):
         # a hardcoded `idx - 1` must go through this map instead now that
         # the header rows shift the offset.
         self._status_row_contact: dict = {}
+        # Reverse of the above: contact index -> its _status_list row.
+        self._status_contact_row: dict = {}
 
         self.init_UI()
         self._create_accelerators()
@@ -494,6 +516,7 @@ class StatusPanel(wx.Panel):
         self._copy_text_btn.Hide()
 
         self._save_media_btn = wx.Button(self._viewer_panel, label=i18n.t("status_save_media"))
+        self._save_media_btn.SetAccessible(AccessibleSaveAs())
         self._save_media_btn.Bind(wx.EVT_BUTTON, self._on_save_status_media)
         viewer_sizer.Add(self._save_media_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._save_media_btn.Hide()
@@ -615,21 +638,27 @@ class StatusPanel(wx.Panel):
         self.SetSizer(sizer)
 
     def _create_accelerators(self):
-        self.ID_CTRL_LEFT  = wx.NewIdRef()
-        self.ID_CTRL_RIGHT = wx.NewIdRef()
-        self.ID_ESCAPE     = wx.NewIdRef()
-        self.ID_CTRL_C     = wx.NewIdRef()
+        self.ID_CTRL_LEFT     = wx.NewIdRef()
+        self.ID_CTRL_RIGHT    = wx.NewIdRef()
+        self.ID_ESCAPE        = wx.NewIdRef()
+        self.ID_CTRL_C        = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_CTRL,   wx.WXK_LEFT,   self.ID_CTRL_LEFT),
-            (wx.ACCEL_CTRL,   wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
-            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESCAPE),
-            (wx.ACCEL_CTRL,   ord("C"),      self.ID_CTRL_C),
+            (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
+            (wx.ACCEL_CTRL,                    wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
+            (wx.ACCEL_NORMAL,                  wx.WXK_ESCAPE, self.ID_ESCAPE),
+            (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
+            # Same combo ConversationsPanel already uses for "save as"
+            # (client/ui/conversations.py's ID_CTRL_SHIFT_S) — consistent
+            # muscle memory across both places media can be saved from.
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("S"),      self.ID_CTRL_SHIFT_S),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self._on_prev_status,       id=self.ID_CTRL_LEFT)
         self.Bind(wx.EVT_MENU, self._on_next_status,       id=self.ID_CTRL_RIGHT)
         self.Bind(wx.EVT_MENU, self._on_escape,            id=self.ID_ESCAPE)
         self.Bind(wx.EVT_MENU, self._on_copy_status_text,  id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_save_status_media, id=self.ID_CTRL_SHIFT_S)
 
     def _on_escape(self, event):
         """Esc closes the open status viewer and returns focus to the list.
@@ -821,6 +850,7 @@ class StatusPanel(wx.Panel):
         self._viewer_panel.Hide()
         self._status_list.DeleteAllItems()
         self._status_row_contact = {}
+        self._status_contact_row = {}
 
         # ── Row 0: always "My Status" ─────────────────────────────────────
         self._status_list.Append((self._my_status_label(i18n),))
@@ -837,16 +867,11 @@ class StatusPanel(wx.Panel):
             self._status_row_contact[row] = -1
             contact_idx = start_contact_idx
             for entry in section_contacts:
-                name     = entry.get("name", "")
-                statuses = entry.get("statuses", [])
-                if statuses:
-                    preview  = self._status_preview(statuses[0], i18n)
-                    row_text = f"{name}: {preview}" if preview else name
-                else:
-                    row_text = name
+                row_text = self._status_row_text(entry, i18n)
                 row = self._status_list.GetItemCount()
                 self._status_list.Append((row_text,))
                 self._status_row_contact[row] = contact_idx
+                self._status_contact_row[contact_idx] = row
                 contact_idx += 1
             return contact_idx
 
@@ -857,6 +882,38 @@ class StatusPanel(wx.Panel):
             self._status_list.Focus(0)
             self._status_list.Select(0)
         self.Layout()
+
+    def _status_row_text(self, entry: dict, i18n, nav_info: str = "") -> str:
+        name     = entry.get("name", "")
+        statuses = entry.get("statuses", [])
+        if statuses:
+            preview = self._status_preview(statuses[0], i18n)
+            base = f"{name}: {preview}" if preview else name
+        else:
+            base = name
+        return f"{base}, {nav_info}" if nav_info else base
+
+    def _update_focused_status_row_text(self):
+        """Appends ", status X de Y" to the list row of whichever contact
+        is currently open in the viewer, reflecting _current_status_idx —
+        called from _show_current_status() so it stays correct both on
+        first opening a contact and on Ctrl+Left/Right navigation between
+        their own statuses."""
+        idx = self._selected_contact_idx
+        if idx < 0 or idx >= len(self._status_contacts):
+            return
+        row = self._status_contact_row.get(idx)
+        if row is None:
+            return
+        entry    = self._status_contacts[idx]
+        i18n     = self.main_window.i18n
+        statuses = entry.get("statuses", [])
+        if not statuses:
+            return
+        nav_info = i18n.t("status_of").format(
+            current=self._current_status_idx + 1, total=len(statuses)
+        )
+        self._status_list.SetItemText(row, self._status_row_text(entry, i18n, nav_info))
 
     def _my_status_label(self, i18n) -> str:
         if self._my_statuses:
@@ -1023,7 +1080,7 @@ class StatusPanel(wx.Panel):
         is_audio = msg_type == "audioMessage"
         is_image = msg_type == "imageMessage"
         self._play_pause_btn.Show(is_video or is_audio)
-        self._save_media_btn.Show(is_video or is_image)
+        self._save_media_btn.Show(is_video or is_image or is_audio)
 
         # Copy-text applies to the actual text content: the full text for a
         # text status, or just the caption (not the "Foto:"/"Vídeo:" label
@@ -1063,6 +1120,8 @@ class StatusPanel(wx.Panel):
 
         self._viewer_panel.Show()
         self.Layout()
+
+        self._update_focused_status_row_text()
 
         if announce:
             self.main_window.output(label, interrupt=True)
@@ -1369,17 +1428,11 @@ class StatusPanel(wx.Panel):
         if status is None:
             return
         msg_type = status.get("messageType", "")
-        if msg_type not in ("imageMessage", "videoMessage"):
-            return
         mw = self.main_window
-        if msg_type == "imageMessage":
-            mimetype = (status.get("message", {}).get("imageMessage") or {}).get("mimetype", "image/jpeg")
-            ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "jpg")
-            wildcard = f"{mw.i18n.t('photo')} (*{ext})|*{ext}|*.*|*.*"
-        else:
-            mimetype = (status.get("message", {}).get("videoMessage") or {}).get("mimetype", "video/mp4")
-            ext = "." + (mimetype.split("/")[-1] if "/" in mimetype else "mp4")
-            wildcard = f"{mw.i18n.t('video')} (*{ext})|*{ext}|*.*|*.*"
+        save_info = _status_media_save_info(msg_type, status.get("message", {}), mw.i18n)
+        if save_info is None:
+            return
+        ext, wildcard = save_info
 
         with wx.FileDialog(
             self, mw.i18n.t("status_save_media"),

@@ -28,7 +28,7 @@ same approach as tests/test_message_bookmarks.py.
 import pytest
 import wx
 
-from status_panel import StatusPanel, _status_content_label
+from status_panel import StatusPanel, _status_content_label, _status_media_save_info
 
 
 class _FakeI18n:
@@ -167,6 +167,11 @@ class _FakeStatusList:
         self.focus_calls.append(idx)
         self._focused = idx
 
+    def SetItemText(self, idx, text):
+        while len(self.items) <= idx:
+            self.items.append("")
+        self.items[idx] = text
+
 
 class _FakeKeyEvent:
     def __init__(self, keycode):
@@ -198,6 +203,7 @@ class _Stub:
     _parse_statuses              = StatusPanel._parse_statuses
     _latest_ts                   = staticmethod(StatusPanel._latest_ts)
     _on_next_status               = StatusPanel._on_next_status
+    _on_prev_status                = StatusPanel._on_prev_status
     _on_escape                    = StatusPanel._on_escape
     _MAX_REMEMBERED_LIKES         = StatusPanel._MAX_REMEMBERED_LIKES
     _on_send_status_reply         = StatusPanel._on_send_status_reply
@@ -208,6 +214,8 @@ class _Stub:
     _populate_list                = StatusPanel._populate_list
     _my_status_label              = StatusPanel._my_status_label
     _set_list_loading             = StatusPanel._set_list_loading
+    _status_row_text              = StatusPanel._status_row_text
+    _update_focused_status_row_text = StatusPanel._update_focused_status_row_text
 
     def __init__(self, contact_names=None, send_text_result=True, settings=None):
         self.main_window = _FakeMainWindow(
@@ -215,6 +223,7 @@ class _Stub:
         )
         self._status_contacts      = []
         self._status_row_contact   = {}
+        self._status_contact_row   = {}
         self._selected_contact_idx = -1
         self._current_status_idx   = 0
         self._current_status       = None
@@ -416,6 +425,78 @@ class TestAnnouncementOnlyOnExplicitNavigation:
         assert len(stub.main_window.outputs) == 1
 
 
+class TestStatusListRowShowsCurrentPositionWhenFocused:
+    """Feature request: once a contact's status is open in the viewer, its
+    own row in the list gains ", status X de Y" — updated live when
+    navigating between that contact's statuses with Ctrl+Left/Right."""
+
+    def test_opening_a_contact_appends_its_position_to_the_row(self):
+        stub = _Stub()
+        statuses = [_text_status("a"), _text_status("b"), _text_status("c")]
+        stub._status_contacts = [_entry("j@s.whatsapp.net", statuses)]
+        stub._status_row_contact = {1: 0}
+        stub._status_contact_row = {0: 1}
+        stub._status_list = _FakeStatusList()
+        stub._status_list.items = ["My Status", "Ana: a"]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+
+        stub._show_current_status()
+
+        assert stub._status_list.items[1] == "Ana: a, Status 1 de 3"
+
+    def test_navigating_to_the_next_status_updates_the_row_text(self):
+        stub = _Stub()
+        statuses = [_text_status("a"), _text_status("b"), _text_status("c")]
+        stub._status_contacts = [_entry("j@s.whatsapp.net", statuses)]
+        stub._status_row_contact = {1: 0}
+        stub._status_contact_row = {0: 1}
+        stub._status_list = _FakeStatusList()
+        stub._status_list.items = ["My Status", "Ana: a"]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 0
+
+        stub._on_next_status(None)
+
+        # The row's preview text always reflects statuses[0] (newest) — only
+        # the ", Status X de Y" suffix tracks the navigated-to index.
+        assert stub._status_list.items[1] == "Ana: a, Status 2 de 3"
+
+    def test_navigating_to_the_previous_status_updates_the_row_text(self):
+        stub = _Stub()
+        statuses = [_text_status("a"), _text_status("b"), _text_status("c")]
+        stub._status_contacts = [_entry("j@s.whatsapp.net", statuses)]
+        stub._status_row_contact = {1: 0}
+        stub._status_contact_row = {0: 1}
+        stub._status_list = _FakeStatusList()
+        stub._status_list.items = ["My Status", "Ana: a"]
+        stub._selected_contact_idx = 0
+        stub._current_status_idx = 1
+
+        stub._on_prev_status(None)
+
+        assert stub._status_list.items[1] == "Ana: a, Status 1 de 3"
+
+    def test_row_not_yet_in_the_map_is_a_safe_no_op(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("j@s.whatsapp.net", [_text_status("a")])]
+        stub._status_contact_row = {}
+        stub._selected_contact_idx = 0
+
+        stub._show_current_status()  # must not raise
+
+    def test_populate_list_builds_the_reverse_row_map(self):
+        stub = _Stub()
+        stub._status_list = _FakeStatusList()
+        contacts = [_entry("a@s.whatsapp.net", [_text_status("oi")])]
+
+        stub._populate_list([], contacts)
+
+        # The contact's row must round-trip through both maps consistently.
+        row = stub._status_contact_row[0]
+        assert stub._status_row_contact[row] == 0
+
+
 class TestVideoPlayback:
     def test_video_status_shows_the_play_pause_button(self):
         stub = _Stub()
@@ -487,6 +568,15 @@ class TestPlayPauseAcceptsAudioStatuses:
         stub._on_play_pause_video(None)
 
         assert stub._video_player.toggle_pause_calls == 1
+
+    def test_audio_status_shows_the_save_media_button(self):
+        stub = _Stub()
+        stub._status_contacts = [_entry("a@s.whatsapp.net", [_audio_status()])]
+        stub._selected_contact_idx = 0
+
+        stub._show_current_status()
+
+        assert stub._save_media_btn.shown is True
 
 
 class TestEnterAndSpaceTogglePlaybackOnStatusList:
@@ -732,6 +822,40 @@ class TestStatusContentLabelHandlesEveryMessageType:
         # Never the raw type string itself.
         label = _status_content_label("someBrandNewWhatsAppType", {}, self.i18n)
         assert label == "Mensagem não suportada"
+
+
+class TestStatusMediaSaveInfoCoversEveryMediaType:
+    """Feature request: "salvar mídia" for status must also work for audio
+    statuses, not only image/video — _on_save_status_media() used to hide
+    the button and refuse to build a wildcard for audioMessage entirely."""
+
+    i18n = _FakeI18n()
+
+    def test_image_uses_its_own_mimetype_extension(self):
+        msg_obj = {"imageMessage": {"mimetype": "image/png"}}
+        ext, wildcard = _status_media_save_info("imageMessage", msg_obj, self.i18n)
+        assert ext == ".png"
+        assert "Foto" in wildcard
+
+    def test_video_uses_its_own_mimetype_extension(self):
+        msg_obj = {"videoMessage": {"mimetype": "video/mp4"}}
+        ext, wildcard = _status_media_save_info("videoMessage", msg_obj, self.i18n)
+        assert ext == ".mp4"
+        assert "Vídeo" in wildcard
+
+    def test_audio_uses_its_own_mimetype_extension(self):
+        msg_obj = {"audioMessage": {"mimetype": "audio/ogg; codecs=opus"}}
+        ext, wildcard = _status_media_save_info("audioMessage", msg_obj, self.i18n)
+        assert ext == ".ogg"
+        assert "Áudio" in wildcard
+
+    def test_audio_falls_back_to_ogg_when_mimetype_missing(self):
+        ext, wildcard = _status_media_save_info("audioMessage", {"audioMessage": {}}, self.i18n)
+        assert ext == ".ogg"
+
+    def test_unsupported_type_returns_none(self):
+        assert _status_media_save_info("documentMessage", {}, self.i18n) is None
+        assert _status_media_save_info("conversation", {}, self.i18n) is None
 
 
 class TestResolveNamePrefersSavedContactNameOverPushName:
