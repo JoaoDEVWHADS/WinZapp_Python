@@ -628,20 +628,34 @@ class StatusPanel(wx.Panel):
 
         self._selected_media_paths: list = []
 
-        # ── Post voice status panel (hidden until recording starts) ────────
+        # ── Post voice status panel (hidden until user clicks Add -> Voice) ────────
         self._voice_post_panel = wx.Panel(self)
         voice_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("recording_in_progress"))
+        self._voice_status_lbl = wx.StaticText(self._voice_post_panel, label=i18n.t("voice_recording"))
         voice_sizer.Add(self._voice_status_lbl, 0, wx.ALL, 5)
+
+        voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message") + " (Ctrl+R)")
+        self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
+        voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
+
+        self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording"))
+        self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
+        self._voice_pause_btn.Hide()
+        voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.RIGHT, 5)
 
         self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("status_send"))
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
-        voice_sizer.Add(self._voice_send_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._voice_send_btn.Hide()
+        voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
 
         self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("cancel"))
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
-        voice_sizer.Add(self._voice_close_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
+
+        voice_sizer.Add(voice_btn_sizer, 0, wx.ALL, 5)
 
         self._voice_post_panel.SetSizer(voice_sizer)
         self._voice_post_panel.Hide()
@@ -649,13 +663,15 @@ class StatusPanel(wx.Panel):
 
         # Recording state — same shape as ConversationsPanel's own voice-
         # message recording (client/ui/conversations.py's
-        # _start_voice_recording()/_recording_pa etc.), just scoped to
+        # _start_voice_recording()/_recording_pa etc.), scoped to
         # posting a status instead of sending a chat message.
         self._recording_pa      = None
         self._recording_stream  = None
         self._recording_frames: list = []
         self._recording_rate    = 48000
         self._recording_channels = 1
+        self._recording_paused  = False
+        self._is_recording      = False
 
         self.SetSizer(sizer)
 
@@ -665,11 +681,13 @@ class StatusPanel(wx.Panel):
         self.ID_ESCAPE        = wx.NewIdRef()
         self.ID_CTRL_C        = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S  = wx.NewIdRef()
+        self.ID_CTRL_R        = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL,                    wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
             (wx.ACCEL_NORMAL,                  wx.WXK_ESCAPE, self.ID_ESCAPE),
             (wx.ACCEL_CTRL,                    ord("C"),      self.ID_CTRL_C),
+            (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
             # Same combo ConversationsPanel already uses for "save as"
             # (client/ui/conversations.py's ID_CTRL_SHIFT_S) — consistent
             # muscle memory across both places media can be saved from.
@@ -681,6 +699,7 @@ class StatusPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_escape,            id=self.ID_ESCAPE)
         self.Bind(wx.EVT_MENU, self._on_copy_status_text,  id=self.ID_CTRL_C)
         self.Bind(wx.EVT_MENU, self._on_save_status_media, id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_r_shortcut,   id=self.ID_CTRL_R)
 
     def _on_escape(self, event):
         """Esc closes the open status viewer and returns focus to the list.
@@ -1738,20 +1757,58 @@ class StatusPanel(wx.Panel):
     # ── Record & post voice status ───────────────────────────────────────────
 
     def _on_choose_voice_status(self, event):
-        """Start recording a voice status. Same PyAudio open/fallback
-        strategy as ConversationsPanel._start_voice_recording() (client/
-        ui/conversations.py), scoped here since posting a status is not
-        tied to any open conversation."""
+        """Open the voice status post panel in prepared state (NOT recording yet).
+        User can click Record or press Ctrl+R to start recording."""
         self._hide_post_panels()
+        self._viewer_panel.Hide()
+        self._video_player.stop()
 
+        self._is_recording = False
+        self._recording_paused = False
+        self._recording_frames = []
+        self._stop_recording_stream()
+
+        i18n = self.main_window.i18n
+        self._voice_status_lbl.SetLabel(i18n.t("voice_recording"))
+        self._voice_start_btn.SetLabel(i18n.t("record_voice_message") + " (Ctrl+R)")
+        self._voice_start_btn.Show()
+        self._voice_pause_btn.Hide()
+        self._voice_send_btn.Hide()
+        self._voice_close_btn.SetLabel(i18n.t("cancel"))
+
+        self._voice_post_panel.Show()
+        self.Layout()
+        self._voice_start_btn.SetFocus()
+
+    def _on_ctrl_r_shortcut(self, event):
+        """Ctrl+R shortcut handler for status panel.
+        If voice post panel is shown: start recording if idle, or send if recording."""
+        if self._voice_post_panel.IsShown():
+            if not self._is_recording:
+                self._start_voice_recording()
+            else:
+                self._on_send_voice_status(None)
+        else:
+            self._on_choose_voice_status(None)
+
+    def _on_record_voice_button(self, event):
+        if not self._is_recording:
+            self._start_voice_recording()
+        else:
+            self._on_send_voice_status(event)
+
+    def _start_voice_recording(self):
+        """Start recording voice audio stream."""
         if pyaudio is None:
             self.main_window.output(self.main_window.i18n.t("voice_recording_unavailable"))
             return
 
         self._recording_frames = []
+        self._recording_paused = False
 
         def _callback(in_data, frame_count, time_info, status):
-            self._recording_frames.append(in_data)
+            if not self._recording_paused:
+                self._recording_frames.append(in_data)
             return (None, pyaudio.paContinue)
 
         if self._recording_pa is None:
@@ -1781,9 +1838,6 @@ class StatusPanel(wx.Panel):
 
         stream, rate, ch = _try_open(input_device_index)
         if stream is None and input_device_index is not None:
-            # Configured device failed to open (e.g. unplugged) — fall back
-            # to the system default for this recording, same as
-            # ConversationsPanel's own recording start.
             stream, rate, ch = _try_open(None)
 
         if stream is None:
@@ -1797,12 +1851,37 @@ class StatusPanel(wx.Panel):
         self._recording_stream   = stream
         self._recording_rate     = rate
         self._recording_channels = ch
+        self._is_recording       = True
 
         if hasattr(self.main_window, "voicemsg_startrecording_sound"):
             self.main_window.voicemsg_startrecording_sound.play()
-        self._voice_post_panel.Show()
+
+        i18n = self.main_window.i18n
+        self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
+        self._voice_start_btn.SetLabel(i18n.t("status_send") + " (Ctrl+R)")
+        self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+        self._voice_pause_btn.Show()
+        self._voice_send_btn.Show()
+        self._voice_close_btn.SetLabel(i18n.t("cancel"))
         self.Layout()
         self._voice_send_btn.SetFocus()
+
+    def _toggle_pause_voice_recording(self, event):
+        if not self._is_recording:
+            return
+        self._recording_paused = not self._recording_paused
+        if hasattr(self.main_window, "voicemsg_pauserecording_sound"):
+            try:
+                self.main_window.voicemsg_pauserecording_sound.play()
+            except Exception:
+                pass
+        i18n = self.main_window.i18n
+        if self._recording_paused:
+            self._voice_pause_btn.SetLabel(i18n.t("resume_recording"))
+            self._voice_status_lbl.SetLabel(i18n.t("recording_paused"))
+        else:
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+            self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
 
     def _stop_recording_stream(self):
         if self._recording_stream is not None:
@@ -1814,13 +1893,25 @@ class StatusPanel(wx.Panel):
             self._recording_stream = None
 
     def _on_close_voice_panel(self, event):
+        if self._is_recording and hasattr(self.main_window, "voicemsg_discard_sound"):
+            try:
+                self.main_window.voicemsg_discard_sound.play()
+            except Exception:
+                pass
         self._stop_recording_stream()
         self._recording_frames = []
+        self._is_recording = False
+        self._recording_paused = False
         self._voice_post_panel.Hide()
         self.Layout()
         self._status_list.SetFocus()
 
     def _on_send_voice_status(self, event):
+        if hasattr(self.main_window, "voicemsg_send_sound"):
+            try:
+                self.main_window.voicemsg_send_sound.play()
+            except Exception:
+                pass
         self._stop_recording_stream()
         self._voice_post_panel.Hide()
         self.Layout()
