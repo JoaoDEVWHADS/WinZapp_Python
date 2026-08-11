@@ -17502,8 +17502,8 @@ if __name__ == "__main__":
             try:
                 if _main_frame_ref:
                     import wx as _wx
-                    _wx.CallAfter(_main_frame_ref[0].real_exit)
-                    return
+                    _wx.CallAfter(_main_frame_ref[0]._perform_shutdown)
+                    _wx.CallAfter(_main_frame_ref[0]._terminate_process)
             except Exception:
                 pass
             os._exit(0)
