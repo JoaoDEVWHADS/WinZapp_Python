@@ -481,7 +481,10 @@ class StatusPanel(wx.Panel):
         self._add_status_btn.Bind(wx.EVT_BUTTON, self._on_add_status)
         header_sizer.Add(self._add_status_btn, 0, wx.RIGHT, 5)
 
-        self._refresh_status_btn = wx.Button(self, label=i18n.t("refresh") if i18n.has_key("refresh") else "Atualizar")
+        lbl_refresh = i18n.t("refresh")
+        if lbl_refresh == "refresh":
+            lbl_refresh = "Atualizar"
+        self._refresh_status_btn = wx.Button(self, label=lbl_refresh)
         self._refresh_status_btn.Bind(wx.EVT_BUTTON, self._on_refresh_status_btn)
         header_sizer.Add(self._refresh_status_btn, 0, wx.RIGHT, 5)
 
@@ -2240,7 +2243,10 @@ class StatusPanel(wx.Panel):
         self._status_list.SetColumn(0, col)
 
         self._add_status_btn.SetLabel(i18n.t("status_add"))
-        self._refresh_status_btn.SetLabel(i18n.t("refresh") if i18n.has_key("refresh") else "Atualizar")
+        lbl_refresh = i18n.t("refresh")
+        if lbl_refresh == "refresh":
+            lbl_refresh = "Atualizar"
+        self._refresh_status_btn.SetLabel(lbl_refresh)
         self._prev_status_btn.SetLabel(i18n.t("status_prev"))
         self._next_status_btn.SetLabel(i18n.t("status_next"))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
