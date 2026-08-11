@@ -26,6 +26,7 @@ Design decisions:
     toaster is created in one thread and show_toast() called in another.
 """
 
+import logging
 import os
 import queue
 import re as _re
@@ -298,6 +299,12 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         return i18n.t("notif_reaction").format(emoji=emoji)
 
     # ── Fallback ──────────────────────────────────────────────────────────────
+    # Logged so a future report of a raw, untranslated messageType showing
+    # up in a notification (e.g. a view-once/ephemeral audio wrapper, which
+    # arrives under a DIFFERENT outer messageType than "audioMessage"
+    # itself and isn't unwrapped by any branch above) can be traced to the
+    # exact type instead of only reproducing "some notification looks wrong".
+    logging.info("[format_notification_body] unhandled messageType=%r", msg_type)
     return i18n.t("notif_unsupported")
 
 
@@ -388,9 +395,19 @@ def format_toast_unread_suffix(unread_count: int, i18n) -> str:
     """Return the '✉️ N mensagens não lidas' line WhatsApp appends to the end
     of its own toast notifications, for the conversation the message arrived
     in. Toast-only — never shown in the foreground sound/AO2 announcements.
+
+    Returns "" for a genuinely-zero count — callers treat an empty string as
+    "omit this line" (see _dispatch()'s `if unread_suffix else` check).
+    `count <= 1` used to fold 0 into the same "1 unread" singular branch as
+    a real single unread message, so this line showed up on every toast
+    that had a synced (but possibly zero) unread count — reported live as
+    a reaction to your own already-read message still announcing "1 não
+    lida" with no unread message actually behind it.
     """
     count = int(unread_count or 0)
-    if count <= 1:
+    if count <= 0:
+        return ""
+    if count == 1:
         text = i18n.t("unread_sep_singular")
     else:
         text = i18n.t("unread_sep_plural").format(count=count)

@@ -17,6 +17,12 @@ import logging
 try:
     import pyaudio
 except ImportError:
+    # No wheel exists for PyAudio on Python 3.14 at the time of writing (it
+    # bundles a C extension nobody has published a matching build for yet —
+    # see requirements.txt's version marker), so `pip install` skips it
+    # entirely there rather than failing outright. Recording device
+    # selection just degrades to "no input devices available" below instead
+    # of crashing the whole Settings dialog / app startup over it.
     pyaudio = None
 
 
@@ -92,8 +98,12 @@ def _pyaudio_input_devices(pa: "pyaudio.PyAudio") -> list:
 
 def enumerate_input_devices(pa: "pyaudio.PyAudio | None" = None) -> list:
     """[(device_index, friendly_name), ...] for input-capable devices. Opens
-    a temporary PyAudio instance if `pa` isn't supplied."""
+    a temporary PyAudio instance if `pa` isn't supplied. Returns an empty
+    list if PyAudio itself isn't installed (see the import at the top of
+    this file) rather than raising."""
     if pyaudio is None:
+        # WinZapp fork: PyAudio has no wheel on Python 3.14, so degrade to a
+        # sounddevice query instead of reporting no input devices at all.
         try:
             import sounddevice as sd
             devs = []
@@ -165,7 +175,9 @@ RECORDING_SAMPLE_CONFIGS = [(48000, 1), (48000, 2), (44100, 1), (44100, 2)]
 def test_input_device(device_index: int) -> bool:
     """Try to briefly open (without starting) an input stream on
     `device_index`, across every sample-rate/channel combo recording itself
-    would try. Returns True if any combo was accepted."""
+    would try. Returns True if any combo was accepted — or False outright
+    if PyAudio isn't installed at all (see the import at the top of this
+    file)."""
     if pyaudio is None:
         return False
     pa = pyaudio.PyAudio()

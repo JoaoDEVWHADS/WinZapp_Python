@@ -1,9 +1,54 @@
 import os
 import re
+import sys
 import json
 import base64
 import requests
 from cryptography.fernet import Fernet
+
+
+def get_downloads_folder() -> str:
+    """Return the current user's Downloads folder.
+
+    Resolves Windows' FOLDERID_Downloads shell API (SHGetKnownFolderPath)
+    rather than assuming ``~/Downloads`` — that plain join is wrong for any
+    user who has redirected their Downloads folder elsewhere (e.g. to a
+    OneDrive-synced location, or a different drive), which the shell API
+    correctly follows. Falls back to ``~/Downloads`` if the API call fails
+    for any reason, or on a non-Windows platform.
+    """
+    fallback = os.path.join(os.path.expanduser("~"), "Downloads")
+    if sys.platform != "win32":
+        return fallback
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_byte * 8),
+            ]
+
+        # FOLDERID_Downloads = {374DE290-123F-4565-9164-39C4925E467B}
+        folder_id = _GUID(
+            0x374DE290, 0x123F, 0x4565,
+            (ctypes.c_byte * 8)(0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B),
+        )
+        path_ptr = ctypes.c_wchar_p()
+        result = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(folder_id), 0, None, ctypes.byref(path_ptr)
+        )
+        if result == 0 and path_ptr.value:
+            path = path_ptr.value
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            if os.path.isdir(path):
+                return path
+    except Exception:
+        pass
+    return fallback
 
 # Single source of truth for settings.json's shape, used both to bootstrap a
 # missing/corrupt settings.json (MainWindow.load_settings()) and to backfill
@@ -158,6 +203,24 @@ def looks_like_binary_blob(value) -> bool:
     if len(s) > 64 and " " not in s and re.fullmatch(r"[A-Za-z0-9+/=_-]+", s):
         return True
     return False
+
+_JID_RE = re.compile(
+    r"^\d+(?::\d+)?@(s\.whatsapp\.net|c\.us|g\.us|lid|broadcast|newsletter)$"
+)
+
+def looks_like_jid(value) -> bool:
+    """Return True if value is nothing but a bare WhatsApp JID.
+
+    Real chat text is never just a phone-number/lid digit string plus a
+    '@...' suffix — this is only ever seen when WPPConnect's raw
+    notification-type payload (internal WhatsApp events with no real text
+    content, e.g. a security-code/E2E-identity-change notice) stuffs the
+    JID of whoever triggered it into the same "body"/"text" field normal
+    messages use, and generic text-fallback code mistakes it for one.
+    """
+    if not value or not isinstance(value, str):
+        return False
+    return bool(_JID_RE.match(value.strip()))
 
 def _clean_mentioned_jid(jid_val):
     """Normalize one mentionedJid entry to a plain '...@s.whatsapp.net'/'@lid'
@@ -486,6 +549,29 @@ def first_unread_index(displayable, unread_count: int) -> int:
         if seen == unread_count:
             return idx
     return -1
+
+
+def db_fetch_limit(configured_limit: int, unread_count: int, cap: int = 2000, buffer: int = 50) -> int:
+    """How many messages navigate_to_conversation() should pull from the DB.
+
+    The configured "messages per conversation" page size is meant to bound a
+    *display* window, not to cap how much unread history gets loaded. When a
+    conversation has more unread messages than that page size (e.g. 350
+    unread against the default 200), fetching only ``configured_limit``
+    messages leaves the unread separator (and every message after it)
+    entirely outside what's loaded — paginated_window()'s widening logic
+    never gets a chance to run because first_unread_index() can't find enough
+    incoming messages in the truncated list to begin with. Alt+3 then reports
+    "no unread" and initial focus falls back to the last message instead of
+    the separator.
+
+    Widen the fetch to cover the unread backlog (plus a small buffer of
+    already-read context above it), capped so a corrupt/absurd unread count
+    can't pull an unbounded amount of history into memory at once.
+    """
+    if unread_count > configured_limit:
+        return min(unread_count + buffer, cap)
+    return configured_limit
 
 
 def paginated_window(total_len: int, limit: int, unread_sep_idx: int) -> tuple:

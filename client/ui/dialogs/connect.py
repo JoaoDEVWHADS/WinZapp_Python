@@ -1003,16 +1003,25 @@ class Connect:
                 def _call_start_session():
                     try:
                         resp = requests.post(url, json=payload, headers=headers, timeout=120)
-                        logging.info("[_call_start_session] start-session response status: %s, body: %s", resp.status_code, resp.text[:300])
+                        # Diagnostics only — deliberately does not change the
+                        # control flow below (the fallback event.set() still
+                        # covers a non-2xx response exactly as before): this
+                        # whole pairing flow is fragile enough (see connect.py's
+                        # module-level notes on the nested-modal-dialog timing)
+                        # that a silent failure here used to be genuinely hard
+                        # to diagnose from a user's log.log alone.
                         if resp.status_code not in (200, 201):
-                            logging.error("[_call_start_session] start-session failed with HTTP %s: %s", resp.status_code, resp.text[:200])
-                            ws_ref._phone_code_event.set()
-                            return
+                            logging.warning(
+                                "[_call_start_session] start-session returned HTTP %s: %s",
+                                resp.status_code, resp.text[:300],
+                            )
+                        # If the code came back inline (rare), unblock the wait loop.
                         inline_code = resp.json().get("phoneCode", "")
                         if inline_code and not ws_ref._phone_code_event.is_set():
                             ws_ref._phone_code_value = str(inline_code)
                             ws_ref._phone_code_event.set()
-                    except Exception:
+                    except Exception as exc:
+                        logging.warning("[_call_start_session] start-session request failed: %s", exc)
                         # Signal the event so the main thread doesn't wait forever.
                         ws_ref._phone_code_event.set()
 

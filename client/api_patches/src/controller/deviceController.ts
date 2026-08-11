@@ -916,7 +916,16 @@ export async function reactMessage(req: Request, res: Response) {
       }
      }
    */
-  const { msgId, reaction } = req.body;
+  const { msgId, reaction: rawReaction } = req.body;
+  // wa-js's sendReactionToMessage() documents `false` (not an empty
+  // string) as the "remove the existing reaction" signal — WinZapp's own
+  // status-unlike flow (status_panel.py) sends an empty string for that,
+  // which used to be passed straight through as `reaction || ''` below
+  // instead of being normalized to the value the library actually expects.
+  const reaction: string | false =
+    rawReaction === '' || rawReaction === undefined || rawReaction === null
+      ? false
+      : rawReaction;
 
   try {
     if (typeof msgId === 'string' && msgId.includes('status@broadcast')) {
@@ -926,18 +935,43 @@ export async function reactMessage(req: Request, res: Response) {
       // StatusV3Store.getMyStatus().msgs, i.e. only YOUR OWN posted
       // statuses. Liking another contact's status therefore always failed
       // to even locate the message, before a reaction was ever attempted.
-      // Resolve the MsgModel ourselves from the global Store.Msg collection
-      // (populated for every status the app has actually received, whoever
-      // posted it — the same store getMessages()'s own browser-evaluate
-      // fallback above searches) and hand the model object straight to
-      // WPP.chat.sendReactionToMessage(): passing an actual MsgModel
-      // instance instead of a string skips getMessageById() entirely.
+      //
+      // Confirmed live (via the error-detail fix above, which used to hide
+      // this): the general Store.Msg.models collection this used to search
+      // does NOT contain other people's status messages at all — WhatsApp
+      // Web keeps those in a separate per-poster StatusV3Model, reachable
+      // via WPP.status.get(posterJid).getAllMsgs(). The serialized id's
+      // trailing segment (see _serialize_msg_id() in main.py, which always
+      // appends the poster's JID as "participant" for @broadcast ids) is
+      // exactly that poster JID. Store.Msg.models is kept as a fallback in
+      // case a status is ever ALSO mirrored there on some WhatsApp Web
+      // version.
       const ok = await req.client.page.evaluate(
         async ({ msgId, reaction }) => {
           const parts = msgId.split('_');
           const rawId = parts.length > 2 ? parts[2] : msgId;
+          const posterJid = parts.length > 3 ? parts[3] : null;
           let model: any = null;
-          if ((window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
+
+          if (posterJid && (window as any).WPP && (window as any).WPP.status) {
+            const statusChat = (window as any).WPP.status.get(posterJid);
+            if (statusChat) {
+              const msgs =
+                (typeof statusChat.getAllMsgs === 'function' && statusChat.getAllMsgs()) ||
+                (statusChat.msgs && typeof statusChat.msgs.getModelsArray === 'function'
+                  ? statusChat.msgs.getModelsArray()
+                  : null) ||
+                [];
+              model = msgs.find((item: any) => {
+                if (!item || !item.id) return false;
+                const ser = item.id._serialized || '';
+                const itemId = item.id.id || '';
+                return itemId === rawId || ser === msgId || (rawId && ser.includes(rawId));
+              });
+            }
+          }
+
+          if (!model && (window as any).Store && (window as any).Store.Msg && (window as any).Store.Msg.models) {
             const models = (window as any).Store.Msg.models;
             model = models.find((item: any) => {
               if (!item || !item.id) return false;
@@ -947,7 +981,7 @@ export async function reactMessage(req: Request, res: Response) {
             });
           }
           if (!model) return false;
-          await (window as any).WPP.chat.sendReactionToMessage(model, reaction || '');
+          await (window as any).WPP.chat.sendReactionToMessage(model, reaction);
           return true;
         },
         { msgId, reaction },
@@ -962,12 +996,20 @@ export async function reactMessage(req: Request, res: Response) {
     res
       .status(200)
       .json({ status: 'success', response: { message: 'Reaction sended' } });
-  } catch (e) {
+  } catch (e: any) {
+    // A bare `error: e` here used to serialize to almost nothing useful:
+    // Error.message/.stack aren't enumerable, so JSON.stringify(e) drops
+    // them — and req.logger.error(e) (winston) can even mutate the object
+    // in place with only a `level` field surviving, which is exactly what
+    // showed up in WinZapp's log.log for every failed status reaction
+    // ({"level":"error"}, no actual cause). Pull message/stack out
+    // explicitly so the next failure is actually diagnosable.
     req.logger.error(e);
     res.status(500).json({
       status: 'error',
       message: 'Error on send reaction to message',
-      error: e,
+      error: e && e.message ? e.message : String(e),
+      stack: e && e.stack ? String(e.stack) : undefined,
     });
   }
 }
@@ -2782,11 +2824,26 @@ export async function getAllContacts(req: Request, res: Response) {
     let response = await req.client.getAllContacts();
 
     if (Array.isArray(response)) {
-      const chats = await req.client.getAllChats().catch(() => []);
+      // Was req.client.getAllChats() — the deprecated, heavier WAPI call
+      // (no ignoreGroupMetadata option, does its own per-group metadata
+      // prefetch). On an account with hundreds of chats it competes for
+      // WhatsApp Web's single JS thread with the real chat sync's own
+      // list-chats (WPP.chat.list) calls running around the same time —
+      // and get_remote_contacts() (WinZapp's Python caller) retries THIS
+      // endpoint up to 5 times on its own whenever it gets 0 contacts back,
+      // so one call here could become five. Confirmed live: a sync that
+      // never finished syncing more than a few dozen of several hundred
+      // chats logged 54 "getAllChats deprecated" warnings in ~15 minutes,
+      // vs. 1 for the same account's next, successful sync — this endpoint
+      // was starving the chat-list fetch of the page's JS thread it needed
+      // to actually finish. listChats() wraps the same modern, non-
+      // deprecated WPP.chat.list() the list-chats route already uses, with
+      // the same ignoreGroupMetadata skip.
+      const chats = await req.client.listChats({ ignoreGroupMetadata: true } as any).catch(() => []);
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
-      
+
       response = response.filter((c: any) => {
         if (!c) return false;
         const jid = c.id?._serialized || c.id;

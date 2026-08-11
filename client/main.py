@@ -46,6 +46,7 @@ from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
+from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path
@@ -538,6 +539,42 @@ def history_gap_detected(fetched: list, local_records: list, page_size: int) -> 
     # this window" (overlap near 100%) from "this window is new" (near 0),
     # not to pin down a precise ratio.
     return known * 2 < len(fetched)
+
+
+def history_gap_closed(fetched: list, local_records: list, hole_top_ts: int) -> bool:
+    """True when a widened fetch has reached back into the history we held.
+
+    Deliberately not "history_gap_detected() is now False". That ratio asks
+    whether *most* of a page is new, and it misreads the widened case: `known`
+    is counted over local_records — the 200 records get_chats() keeps in
+    memory — while the widened page holds 800 or 2000. Whenever the widened
+    window lands *inside* that snapshot instead of reaching past it, some
+    stored records are still older than the page, and `known * 2 <
+    len(fetched)` is then true however complete the overlap is — so a hole
+    that was in fact reached reads as still open and burns another
+    escalation.
+
+    The right question is narrower and has an exact answer: did the widened
+    window come back down far enough to touch a message we already had from
+    *below* the hole? `hole_top_ts` is the oldest timestamp of the original
+    narrow page — the hole's ceiling — so anything stored below it is history
+    on the far side. Restricting the comparison that way also makes it immune
+    to a live message landing mid-sync: those sit above the ceiling and are
+    excluded from the reference set entirely.
+    """
+    if not fetched or not local_records or not hole_top_ts:
+        return False
+    below = {
+        r.get("key", {}).get("id") for r in local_records
+        if isinstance(r, dict) and 0 < _message_ts(r) < hole_top_ts
+    }
+    below.discard(None)
+    below.discard("")
+    if not below:
+        # Nothing stored below the hole, so there is no far side to reach.
+        return False
+    got = {m.get("key", {}).get("id") for m in fetched if isinstance(m, dict)}
+    return bool(below & got)
 
 
 class MainWindow(wx.Frame):
@@ -1296,6 +1333,7 @@ class MainWindow(wx.Frame):
         else:
             logging.error("[init_UI] _post_ui_init_fn is MISSING — connection/sync will NOT start! This is a bug.")
 
+        self.start_ui_watchdog()
         logging.info("[init_UI] Entering app.MainLoop() — main thread will block here until app exits")
         try:
             app.MainLoop()
@@ -1775,18 +1813,19 @@ class MainWindow(wx.Frame):
 
     def _on_about(self, event=None):
         """Show application authorship, version and license information."""
+        i18n = self.i18n
         info = "\n".join(
             textwrap.fill(line, width=100, break_long_words=False, break_on_hyphens=False)
             for line in (
-                "Desenvolvido originalmente por: Gabriel Haberkamp.",
+                i18n.t("about_developed_by"),
                 "",
-                "Agradecimentos especiais:",
-                "Wendrill Aksenow Brandão: pela tradução do programa WinZapp para Português de Portugal.",
-                "Juan Mathews Rebelo Santos, João Jorge e Gustavo Barrios: principais colaboradores."
-                "Fabiano Ferreira, Tadeu Junior, Wagner Soares da Silva, Eduardo Ferreira, Elias Junior e todos da comunidade que ajudaram, seja testando, implementando melhorias ou dando sugestões / relatórios de bugs.",
+                i18n.t("about_special_thanks"),
+                i18n.t("about_translation_thanks"),
+                i18n.t("about_main_contributors"),
+                i18n.t("about_community_thanks"),
                 "",
-                f"Versão atual: {__version__}.",
-                "Licenciado sob a licença GNU Lesser General Public License V3 (GPLV3).",
+                i18n.t("about_current_version").format(version=__version__),
+                i18n.t("about_license"),
             )
         )
 
@@ -3935,6 +3974,14 @@ class MainWindow(wx.Frame):
             )
             if not (_open and _visible):
                 chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+                # Track how many messages have genuinely arrived since the
+                # last local mark-as-read, so on_chat_unread_update() can
+                # tell a real new-unread total apart from a stale server
+                # count that still includes messages we already read locally
+                # but the server hasn't acknowledged as read yet.
+                if not hasattr(self, "_new_since_read"):
+                    self._new_since_read = {}
+                self._new_since_read[remote_jid] = self._new_since_read.get(remote_jid, 0) + 1
 
         # ── Persist in background — debounced so rapid bursts produce one write ─
         self._schedule_save(dirty_jid=remote_jid)
@@ -4184,6 +4231,22 @@ class MainWindow(wx.Frame):
 
         self._apply_group_subject_change(remote_jid, chat, msg)
 
+        # The reactionMessage record still gets appended to `records` below
+        # (needed so ConversationsPanel can rebuild the in-conversation
+        # reaction display on reopen — see populate_messages()'s
+        # _reaction_map scan), but the chat-LIST preview relies on
+        # chat["_last_reaction"] (_track_last_reaction()) to show "you
+        # reacted with X to Y" instead of falling through to formatting the
+        # raw reactionMessage record, which has no case in
+        # _last_msg_preview() and renders as "Mensagem incompatível". The
+        # live path (on_new_message()) and the own-reaction path
+        # (_on_own_reaction_sent()) already call this; history-sync
+        # redelivering a reaction after an app restart or an F5 resync
+        # never did, so _last_reaction stayed empty (it's in-memory only)
+        # and the preview fell through to the raw record instead.
+        if msg.get("messageType") == "reactionMessage":
+            self._track_last_reaction(remote_jid, msg)
+
         records_wrapper = chat.setdefault("messages", {})
         if not isinstance(records_wrapper, dict):
             records_wrapper = chat["messages"] = {}
@@ -4256,8 +4319,13 @@ class MainWindow(wx.Frame):
             # History backfill delivers messages one at a time, most of them
             # already on screen. refresh_messages_if_changed() collapses the
             # no-op ones into nothing instead of rebuilding (and re-placing
-            # focus in) the whole list once per backfilled message.
-            wx.CallAfter(cp.refresh_messages_if_changed)
+            # focus in) the whole list once per backfilled message — but only
+            # the no-op ones: a message that genuinely changes the conversation
+            # rebuilds in full, and during a backfill that is most of them.
+            # Debounced for the same reason _schedule_set_chats() below is; see
+            # _schedule_refresh_messages() for the cost that made this freeze
+            # the UI outright on a large group.
+            self._schedule_refresh_messages()
 
     def _reacted_message_preview(self, remote_jid: str, orig_id: str) -> str:
         """Return a short text preview of the original message a reaction targets."""
@@ -4785,8 +4853,43 @@ class MainWindow(wx.Frame):
                         )
                     else:
                         logging.info("[ensure_api_modules_installed] npm install completed OK")
+                        # This npm install (unlike the main ApiSetupDialog
+                        # flow) rebuilt node_modules outside that dialog, so
+                        # nothing else re-applies WinZapp's node_modules-level
+                        # patches (decrypt.js, host.layer.js pairing-code fix)
+                        # afterwards — without this they'd silently regress
+                        # every time this "missing package" repair path runs.
+                        try:
+                            from ui.dialogs.api_setup import ApiSetupDialog
+                            ApiSetupDialog._apply_node_modules_patches(api_dir)
+                        except Exception as exc:
+                            logging.warning(
+                                "[ensure_api_modules_installed] Failed to apply node_modules patches: %s", exc
+                            )
                 except Exception as exc:
                     logging.error("[ensure_api_modules_installed] npm install error: %s", exc)
+            else:
+                # No new package was missing, so npm install above never ran —
+                # but WinZapp's own node_modules-level patches (host.layer.js
+                # pairing-code fix, status.layer.js posting-result fix,
+                # sender.layer.js sendFile error-detail fix, ...) can still be
+                # stale on their own: a WinZapp update that only ADDS or
+                # CHANGES one of these patches, without adding a new npm
+                # dependency, never reruns npm install, so the patch-reapply
+                # above (which only fires as a side effect of that install)
+                # never fires either — an already-fully-installed node_modules
+                # would otherwise only pick it up via a full API reinstall.
+                # Each _patch_* method is idempotent (a cheap string search,
+                # no-op if already applied), so checking on every startup is
+                # safe.
+                try:
+                    from ui.dialogs.api_setup import ApiSetupDialog
+                    api_dir = resource_path("api")
+                    ApiSetupDialog._apply_node_modules_patches(api_dir)
+                except Exception as exc:
+                    logging.warning(
+                        "[ensure_api_modules_installed] Failed to verify/reapply node_modules patches: %s", exc
+                    )
             return
 
         # Everything already set up — nothing to do.
@@ -5702,16 +5805,45 @@ class MainWindow(wx.Frame):
         if hasattr(self, "navigation_panel"):
             self.navigation_panel.nav_list.SetFocus()
 
+    def _ensure_conversations_panel_visible(self):
+        """Bring conversations_panel to the front if some other top-level
+        panel (archived/status/settings) is currently showing instead.
+
+        _on_global_alt2/_on_global_alt3 act on whichever conversation is
+        open regardless of which panel currently has focus — but a
+        conversation staying "open" (self.conversations_panel.conversation
+        still set) after the user switched to, say, the Status tab used to
+        mean Alt+2/Alt+3 jumped focus inside a conversations_panel that
+        stayed hidden: nothing visibly happened, reported live as "doesn't
+        switch to the right panel" when called from anywhere but the
+        conversations/archived panels.
+        """
+        if self.conversations_panel.IsShown():
+            return
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.Hide()
+        if hasattr(self, "status_panel"):
+            self.status_panel.Hide()
+        # Deliberately does NOT touch conversations_label/conversations_list
+        # visibility (unlike on_alt_1(), which always returns to the LIST
+        # view) — a conversation being open here means the detail pane, not
+        # the list, is what should already be showing; whichever of the two
+        # was visible before the user switched away stays as-is.
+        self.conversations_panel.Show()
+        self.content_panel.Layout()
+
     def _on_global_alt2(self, event):
         """Alt+2: jump to last message regardless of which panel has focus."""
         cp = getattr(self, "conversations_panel", None)
         if cp is not None and cp.conversation is not None:
+            self._ensure_conversations_panel_visible()
             cp._on_accel_jump_last(event)
 
     def _on_global_alt3(self, event):
         """Alt+3: jump to unread separator regardless of which panel has focus."""
         cp = getattr(self, "conversations_panel", None)
         if cp is not None and cp.conversation is not None:
+            self._ensure_conversations_panel_visible()
             cp._on_accel_jump_unread(event)
 
     def on_f1(self, event):
@@ -5784,6 +5916,14 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel.restore_selection()
 
     def on_alt_5(self, event):
+        # A conversation left open (archived or not) while switching to
+        # Status kept sending typing/recording presence updates for it in
+        # the background — the user has no way to see or act on that once
+        # this tab's out of view, so close it the same way Esc would,
+        # without close_conversation()'s own focus-restoration (this panel
+        # sets its own focus right below).
+        if self.conversations_panel.conversation is not None:
+            self.conversations_panel.close_conversation_for_panel_switch()
         self.conversations_panel.Hide()
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.Hide()
@@ -9948,7 +10088,15 @@ class MainWindow(wx.Frame):
             word = (ui.get("self_reference_custom_word") or "").strip()
             if word:
                 return word
-        return self.i18n.t("sender_you")
+        # "eu" (first-person) mode. Was self.i18n.t("sender_you") — a key
+        # meant for "You: ..." message-sender labels elsewhere, whose
+        # natural translation is second-person in every language (pt-BR/
+        # pt-PT "Eu" and es-ES "Yo" only ever happened to already BE
+        # first-person by coincidence; en-US's is "You", making "eu" and
+        # "voce" mode produce the exact same word — the setting had no
+        # effect at all for English users, and the settings dialog itself
+        # showed "You"/"You" as its two options for this same reason.
+        return self.i18n.t("ui_self_reference_eu")
 
     def _is_self_jid(self, jid: str) -> bool:
         """Return True if jid refers to the user's own WhatsApp account.
@@ -10289,6 +10437,148 @@ class MainWindow(wx.Frame):
                 logging.exception("[set_chats] Unhandled error during bg set_chats")
         threading.Thread(target=_bg, daemon=True).start()
 
+    # How often the watchdog pings the wx main loop, and how long a ping may
+    # go unanswered before the UI counts as stalled. One second between pings
+    # costs a single no-op CallAfter per second while everything is healthy.
+    _UI_WATCHDOG_INTERVAL = 1.0
+    _UI_WATCHDOG_STALL_SECONDS = 2.0
+
+    def start_ui_watchdog(self):
+        """Detect a frozen wx main loop and log *where* it is frozen.
+
+        Every UI-freeze report so far has been diagnosed by inference, because
+        the main thread writes nothing to the log while it is blocked — the
+        freeze window simply contains worker-thread lines and a hole. Two
+        successive theories built that way (a refresh storm, then an oversized
+        pagination window) each explained the symptom and each turned out not
+        to be the cause, which is a good sign the guessing should stop.
+
+        This pings the main loop once a second with a no-op CallAfter. When a
+        ping goes unanswered past _UI_WATCHDOG_STALL_SECONDS the main thread is
+        by definition not draining its event queue, and sys._current_frames()
+        gives its stack from *outside* it — so the log gets the exact call the
+        UI is stuck in, repeated every couple of seconds for as long as the
+        stall lasts, followed by how long it took to recover.
+
+        Costs nothing while the UI is healthy and never touches UI state, so it
+        stays on permanently rather than being a debug-only switch.
+        """
+        main_id = threading.main_thread().ident
+
+        def _loop():
+            import sys as _sys
+            import traceback as _traceback
+            while not getattr(self, "_shutting_down", False):
+                pong = threading.Event()
+                t0 = time.monotonic()
+                try:
+                    wx.CallAfter(pong.set)
+                except Exception:
+                    return          # app is going away
+                stalled = False
+                while not pong.wait(self._UI_WATCHDOG_STALL_SECONDS):
+                    if getattr(self, "_shutting_down", False):
+                        return
+                    stalled = True
+                    frame = _sys._current_frames().get(main_id)
+                    stack = ("".join(_traceback.format_stack(frame)) if frame
+                             else "<main thread frame unavailable>")
+                    logging.warning(
+                        "[ui-watchdog] UI thread unresponsive for %.1fs — main thread stack:\n%s",
+                        time.monotonic() - t0, stack)
+                if stalled:
+                    logging.warning(
+                        "[ui-watchdog] UI thread responsive again after %.1fs.",
+                        time.monotonic() - t0)
+                time.sleep(self._UI_WATCHDOG_INTERVAL)
+
+        threading.Thread(target=_loop, daemon=True, name="ui-watchdog").start()
+        logging.info("[ui-watchdog] started (ping every %.0fs, stall threshold %.0fs).",
+                     self._UI_WATCHDOG_INTERVAL, self._UI_WATCHDOG_STALL_SECONDS)
+
+    # Longer than the 300 ms used for content refreshes: this one only ever
+    # repaints *names* that background resolution has just filled in, and a
+    # name settling a second later is invisible to the user — while the
+    # resolution loops that trigger it run in batches for minutes on end.
+    _ACTIVE_REFRESH_DEBOUNCE_MS = 1000
+
+    def _schedule_refresh_active_messages(self):
+        """Debounce refresh_active_conversation_messages().
+
+        That method re-renders every row of the open conversation
+        (SetItemText + _render_message_line per message), and three separate
+        background loops — [Contact Resolution], [Mentions Scan] and
+        [LID Resolution] — used to wx.CallAfter it once per resolved batch.
+        On an account with thousands of unresolved @lid senders those batches
+        arrive continuously for minutes, so the wx event queue filled with
+        full re-renders faster than the main loop could drain them.
+
+        Confirmed, not inferred: the UI watchdog caught three stalls of 9.4 s,
+        19.8 s and 40.1 s, and all 33 stack samples taken during them landed on
+        the same line — conversations.py's `SetItemText(i,
+        self._render_message_line(msg))`. Two earlier theories about this
+        freeze (a refresh storm on the history path, then an oversized
+        pagination window) were wrong; this is what the stacks actually show.
+        """
+        if getattr(self, "_refresh_active_pending", False):
+            return
+        self._refresh_active_pending = True
+        wx.CallLater(self._ACTIVE_REFRESH_DEBOUNCE_MS,
+                     self._do_scheduled_refresh_active_messages)
+
+    def _do_scheduled_refresh_active_messages(self):
+        """Run the coalesced name repaint. Flag is cleared first so a failure
+        cannot wedge every later batch."""
+        self._refresh_active_pending = False
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None:
+            return
+        try:
+            cp.refresh_active_conversation_messages()
+        except Exception:
+            logging.exception("[_do_scheduled_refresh_active_messages] repaint failed")
+
+    def _schedule_refresh_messages(self):
+        """Debounce the open conversation's message-list rebuild.
+
+        on_historical_message() fires once per backfilled message, and for the
+        conversation currently on screen every one of them used to schedule its
+        own refresh_messages_if_changed() on the wx main thread. That call is
+        not cheap: _messages_signature() walks *every stored record* of the chat
+        — ~1400 on the group this was reported against, not just the 200 on
+        screen — calling _get_message_content() on each, and whenever the
+        signature differs, which it does on every genuinely new message,
+        populate_messages() rebuilds the native list with DeleteAllItems() plus
+        one Append() per visible row.
+
+        During a history backfill that is hundreds of full rebuilds queued
+        back-to-back on the UI thread, and wx does not coalesce CallAfter — so
+        opening a large, actively-backfilling group locked the interface up for
+        as long as its history kept landing. Reported live against a group
+        the logs could not show it directly because
+        nothing on the UI thread writes to them, but the freeze window held 95
+        worker-thread lines and not one from the UI module.
+
+        Same shape as _schedule_set_chats() below, and called from the same
+        place, so a burst of N messages costs one rebuild instead of N.
+        """
+        if getattr(self, "_refresh_messages_pending", False):
+            return
+        self._refresh_messages_pending = True
+        wx.CallLater(300, self._do_scheduled_refresh_messages)
+
+    def _do_scheduled_refresh_messages(self):
+        """Run the coalesced rebuild. Re-checks the panel still has a
+        conversation open — the user may have closed it during the window."""
+        self._refresh_messages_pending = False
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None or getattr(cp, "conversation", None) is None:
+            return
+        try:
+            cp.refresh_messages_if_changed()
+        except Exception:
+            logging.exception("[_do_scheduled_refresh_messages] refresh failed")
+
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
@@ -10548,8 +10838,7 @@ class MainWindow(wx.Frame):
                         logging.error(f"[Contact Resolution] Error saving contacts incrementally: {e}")
                         self.save_data(self.chats, self.contacts)
                     wx.CallAfter(self._schedule_set_chats)
-                    if hasattr(self, "conversations_panel"):
-                        wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+                    wx.CallAfter(self._schedule_refresh_active_messages)
             threading.Thread(target=resolve_phones_in_bg, daemon=True).start()
 
     def scan_all_cached_messages_for_mentions(self):
@@ -10672,8 +10961,7 @@ class MainWindow(wx.Frame):
                          logging.error(f"[Mentions Scan] Error saving contacts incrementally: {e}")
                          self.save_data(self.chats, self.contacts)
                      wx.CallAfter(self._schedule_set_chats)
-                     if hasattr(self, "conversations_panel"):
-                         wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+                     wx.CallAfter(self._schedule_refresh_active_messages)
             
             logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
 
@@ -11639,7 +11927,8 @@ class MainWindow(wx.Frame):
         return out
 
     def _refetch_history_gap(self, remote_jid: str, phone: str, headers: dict,
-                             page_size: int, local_records: list) -> list:
+                             page_size: int, local_records: list,
+                             hole_top_ts: int = 0) -> list:
         """Re-query a chat with a wider window until it reaches stored history.
 
         Only called once history_gap_detected() has said the newest page is
@@ -11686,7 +11975,7 @@ class MainWindow(wx.Frame):
                 break
             best_len = len(raw)
             widest = self._normalize_fetched_messages(raw, remote_jid)
-            if not history_gap_detected(widest, local_records, count):
+            if history_gap_closed(widest, local_records, hole_top_ts):
                 logging.info("[history-gap] %s: closed at count=%d (%d messages).",
                              remote_jid, count, len(widest))
                 break
@@ -11855,15 +12144,19 @@ class MainWindow(wx.Frame):
                              .get("messages", {})
                              .get("records") or [])
             if history_gap_detected(all_messages, gap_reference, limit):
+                # Ceiling of the hole: the oldest message the narrow page
+                # reached. Everything stored below it is the far side we are
+                # trying to get back down to.
+                hole_top_ts = min(_message_ts(m) for m in all_messages)
                 logging.warning(
                     "[history-gap] %s: newest page of %d is disjoint from %d stored "
                     "message(s) — widening the window.",
                     remote_jid, len(all_messages), len(gap_reference))
                 wider = self._refetch_history_gap(
-                    remote_jid, fetch_jid, headers, limit, gap_reference)
+                    remote_jid, fetch_jid, headers, limit, gap_reference, hole_top_ts)
                 if len(wider) > len(all_messages):
                     all_messages = wider
-                if history_gap_detected(all_messages, gap_reference, len(all_messages)):
+                if not history_gap_closed(all_messages, gap_reference, hole_top_ts):
                     # Still disjoint: WhatsApp Web has not decoded that stretch
                     # yet. Flag it so the backfill keeps the chat in its queue
                     # instead of retiring it for holding a full page.
@@ -13086,8 +13379,13 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             if response.status_code not in (200, 201):
+                # 1500 chars (not 500) — deviceController.ts's reactMessage
+                # now includes a real error message + stack trace in the
+                # body (see its own comment on why a bare `error: e` used
+                # to serialize down to almost nothing), which can run
+                # longer than the old truncation allowed.
                 logging.error("[send_reaction] HTTP %s: %s",
-                              response.status_code, response.text[:500])
+                              response.status_code, response.text[:1500])
                 return False
             return True
         except Exception as exc:
@@ -13712,7 +14010,19 @@ class MainWindow(wx.Frame):
                 if incoming_t <= read_at_t:
                     unread_count = 0
                 else:
+                    # A genuinely new message arrived after the local
+                    # read-ack, so the guard above no longer applies. But the
+                    # server-reported total can still be stale/inflated —
+                    # e.g. it may still include messages we already read
+                    # locally that WhatsApp's own servers haven't caught up
+                    # with yet. Clamp to what we actually know arrived since
+                    # the read-ack instead of trusting the raw server count.
+                    local_new = getattr(self, "_new_since_read", {}).get(normalized)
+                    if local_new:
+                        unread_count = min(unread_count, local_new)
                     self._locally_read_at.pop(normalized, None)
+                    if hasattr(self, "_new_since_read"):
+                        self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
@@ -14176,6 +14486,9 @@ class MainWindow(wx.Frame):
         if not hasattr(self, "_locally_read_at"):
             self._locally_read_at = {}
         self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
+        if not hasattr(self, "_new_since_read"):
+            self._new_since_read = {}
+        self._new_since_read[remote_jid] = 0
         self._schedule_save(dirty_jid=remote_jid)
         # Immediate single-row update: unlike _schedule_set_chats()/set_chats(),
         # this isn't suppressed while a media sync is running, so the badge
@@ -14654,8 +14967,7 @@ class MainWindow(wx.Frame):
                 logging.error(f"[LID Resolution] Error saving contacts incrementally: {e}")
                 self.save_data(self.chats, self.contacts)
         wx.CallAfter(self._schedule_set_chats)
-        if hasattr(self, "conversations_panel"):
-            wx.CallAfter(self.conversations_panel.refresh_active_conversation_messages)
+        wx.CallAfter(self._schedule_refresh_active_messages)
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from WPPConnect (runs on background thread)."""
@@ -15580,10 +15892,81 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+        # groupController.ts's addParticipant() (upstream, unpatched) reads
+        # req.body.phone — same field name remove/promote/demote already use
+        # below via _group_participant_action(). This used to send
+        # "participantId" instead, a field the controller never reads at
+        # all, so phone came through as undefined and every add attempt
+        # failed with a 500 inside contactToArray(undefined).
         payload = {
-            "groupId":      group_jid,
-            "participantId": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
+            "groupId": group_jid,
+            "phone":   [j if "@" in j else f"{j}@c.us" for j in participant_jids],
         }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _group_participant_action(self, endpoint: str, group_jid: str, participant_jids: list) -> tuple:
+        """Shared POST for remove/promote/demote-participant-group — all
+        three take the same {groupId, phone} shape."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "groupId": group_jid,
+            "phone": [j if "@" in j else f"{j}@c.us" for j in participant_jids],
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def remove_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Remove one or more participants from a group.
+        Returns (True, "") on success, (False, error_message) on failure."""
+        return self._group_participant_action("remove-participant-group", group_jid, participant_jids)
+
+    def promote_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Promote one or more participants to group admin."""
+        return self._group_participant_action("promote-participant-group", group_jid, participant_jids)
+
+    def demote_group_members(self, group_jid: str, participant_jids: list) -> tuple:
+        """Demote one or more participants from group admin."""
+        return self._group_participant_action("demote-participant-group", group_jid, participant_jids)
+
+    def set_group_subject(self, group_jid: str, title: str) -> tuple:
+        """Change a group's name/subject. Returns (True, "") or (False, error)."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-subject"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"groupId": group_jid, "title": title}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code in (200, 201):
+                return True, ""
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def set_group_description(self, group_jid: str, description: str) -> tuple:
+        """Change a group's description. Returns (True, "") or (False, error)."""
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/group-description"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"groupId": group_jid, "description": description}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
@@ -15704,9 +16087,17 @@ class MainWindow(wx.Frame):
                     return msg_id
                 return {"ok": True, "error": "ID not found in response"}
             err = f"HTTP {r.status_code}"
+            inner_error_name = ""
             try:
                 body = r.json()
-                detail = (body.get("message") or body.get("error") or "")
+                inner_error = body.get("error")
+                inner_message = ""
+                if isinstance(inner_error, dict):
+                    inner_error_name = inner_error.get("name") or ""
+                    inner_message = inner_error.get("message") or ""
+                elif isinstance(inner_error, str):
+                    inner_message = inner_error
+                detail = inner_message or (body.get("message") or "")
                 if detail:
                     err = f"{err}: {detail}"
             except Exception:
@@ -15719,6 +16110,19 @@ class MainWindow(wx.Frame):
             # uploads under load. Retry those; treat 4xx as permanent.
             if self._check_wa_connection_closed(r):
                 return {"ok": False, "error": err, "retry": False, "disconnected": True}
+            # MediaUnsupportedError (observed as "video loaded with duration
+            # but no dims") means WhatsApp Web's own upload pipeline rejected
+            # THIS specific file as malformed/unprocessable — retrying sends
+            # the exact same bytes again and fails identically every time, so
+            # unlike a generic 5xx this is never transient. Skip the retry
+            # loop and surface a clear reason immediately instead of the
+            # generic "Erro ao enviar a mensagem" after 4 wasted attempts.
+            if inner_error_name == "MediaUnsupportedError":
+                return {
+                    "ok": False,
+                    "error": self.i18n.t("media_unsupported_error"),
+                    "retry": False,
+                }
             retryable = r.status_code >= 500
             return {"ok": False, "error": err, "retry": retryable}
         except Exception as exc:
@@ -15967,6 +16371,61 @@ class MainWindow(wx.Frame):
             logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
             return False
 
+    def mark_audio_message_played(self, msg: dict):
+        """Mark a received voice message as played, both locally (the
+        status icon in the message list, same as a "played" receipt
+        arriving over the WebSocket) and for real, via a played receipt
+        sent to WhatsApp so the sender's own client shows it too.
+
+        Called once, right when in-app playback of a received audioMessage
+        reaches the end (ConversationsPanel.on_audio_timer(), the same
+        moment the playback controls get hidden) — never for a message we
+        sent ourselves: "played" only ever legitimately reflects the
+        RECIPIENT's own playback, which for our own sends already arrives
+        the normal way via on_message_status_update()/messages.update.
+        """
+        key = msg.get("key", {}) or {}
+        if key.get("fromMe", False):
+            return
+        msg_id = key.get("id", "")
+        remote_jid = key.get("remoteJid", "")
+        if not remote_jid and hasattr(self, "conversations_panel"):
+            conv = self.conversations_panel.conversation
+            remote_jid = conv.get("remoteJid", "") if conv else ""
+        if not msg_id or not remote_jid:
+            return
+        # Local status icon — reuses the exact same path a real
+        # messages.update WebSocket event drives (find the cached record,
+        # append MessageUpdate, persist to DB, refresh the visible row).
+        self.on_message_status_update({
+            "key": {"id": msg_id, "remoteJid": remote_jid},
+            "status": "5",
+        })
+        threading.Thread(
+            target=self._send_mark_played_request,
+            args=(remote_jid, dict(key)),
+            daemon=True,
+        ).start()
+
+    def _send_mark_played_request(self, remote_jid: str, msg_key: dict):
+        """Background: POST the played receipt to WPPConnect's mark-played
+        endpoint (client/api_patches/src/controller/messageController.ts —
+        no equivalent route existed anywhere in WPPConnect Server)."""
+        full_id = self._serialize_msg_id(remote_jid, msg_key)
+        if not full_id:
+            return
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/mark-played"
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        try:
+            r = requests.post(url, json={"messageId": full_id}, headers=headers, timeout=15)
+            if r.status_code not in (200, 201):
+                logging.warning(
+                    "[mark_audio_played] HTTP %s for %s: %s",
+                    r.status_code, full_id, r.text[:200],
+                )
+        except Exception as exc:
+            logging.warning("[mark_audio_played] request failed for %s: %s", full_id, exc)
+
     def _preview_sender_from_jid(self, jid: str) -> str:
         """
         Resolve a participant JID to a display name for chat list previews.
@@ -16003,6 +16462,22 @@ class MainWindow(wx.Frame):
     # a user would recognise as activity. Deliberately excludes the silent
     # bookkeeping WhatsApp stores alongside real messages: groupNotification
     # ("X entrou no grupo"), notification_template, and every unknown type.
+    #
+    # reactionMessage is ALSO deliberately excluded, even though a
+    # reactionMessage record legitimately sits in a chat's `records` (see
+    # on_historical_message() — needed there so ConversationsPanel can
+    # rebuild the in-conversation reaction display on reopen). A reaction
+    # has its own dedicated preview channel — chat["_last_reaction"], set by
+    # _track_last_reaction() and consumed directly by _last_msg_preview()
+    # before it ever reaches this allowlist — so letting a reactionMessage
+    # record ALSO count here served no purpose and was actively harmful:
+    # since _last_msg_preview() has no rendering case for messageType
+    # "reactionMessage", picking one as `last` (which happened whenever
+    # _last_reaction hadn't been (re)populated for it, e.g. right after an
+    # app restart or an F5 resync, since _last_reaction is in-memory only)
+    # rendered as literally "Mensagem incompatível". It also let a bare
+    # reaction's timestamp float a chat to the top of the list via
+    # _chat_last_ts(), independent of any real message ever being sent.
     _PREVIEW_MESSAGE_TYPES = frozenset({
         "conversation", "extendedTextMessage", "imageMessage", "videoMessage",
         "audioMessage", "documentMessage", "stickerMessage", "contactMessage",
@@ -16011,7 +16486,6 @@ class MainWindow(wx.Frame):
         "pollUpdateMessage",
         "buttonsMessage", "listMessage", "templateMessage", "interactiveMessage",
         "buttonsResponseMessage", "listResponseMessage", "protocolMessage",
-        "reactionMessage",
     })
 
     @classmethod
@@ -16168,9 +16642,9 @@ class MainWindow(wx.Frame):
                     dt    = _dt.fromtimestamp(ts_val)
                     today = _dt.now().date()
                     if dt.date() == today:
-                        time_str = dt.strftime(i18n.t("time_fmt"))
+                        time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
                     else:
-                        time_str = dt.strftime(i18n.t("datetime_fmt"))
+                        time_str = dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
                 except Exception:
                     pass
             if last_reaction.get("from_me"):
@@ -16320,6 +16794,14 @@ class MainWindow(wx.Frame):
             else:
                 content = "⚙️ Mensagem do sistema"
         else:
+            # Logged so a future report of a raw, untranslated messageType
+            # showing up in the chat-list preview (e.g. "audioMessage" wraps
+            # such as view-once/ephemeral audio, which arrive under a
+            # DIFFERENT outer messageType than "audioMessage" itself and
+            # aren't unwrapped here) can be traced straight to the exact
+            # type instead of only reproducing "some preview looks wrong".
+            logging.info("[_last_msg_preview] unhandled messageType=%r for chat=%r",
+                         msg_type, chat.get("remoteJid", ""))
             content = i18n.t("notif_unsupported")
 
         # Build time string
@@ -16334,9 +16816,9 @@ class MainWindow(wx.Frame):
                 dt    = _dt.fromtimestamp(ts_val)
                 today = _dt.now().date()
                 if dt.date() == today:
-                    time_str = dt.strftime(i18n.t("time_fmt"))
+                    time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
                 else:
-                    time_str = dt.strftime(i18n.t("datetime_fmt"))
+                    time_str = dt.strftime(get_datetime_format(i18n.t("datetime_fmt")))
             except Exception:
                 pass
 

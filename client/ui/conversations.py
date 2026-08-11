@@ -13,6 +13,10 @@ import pyperclip
 try:
     import pyaudio
 except ImportError:
+    # No wheel exists for PyAudio on Python 3.14 at the time of writing —
+    # see requirements.txt's version marker. Voice recording degrades to a
+    # clear "not available" message (see _start_voice_recording()) instead
+    # of the whole app failing to import.
     pyaudio = None
 import wave
 import sound_lib.stream as sl_stream
@@ -36,7 +40,9 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, looks_like_binary_blob, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, parse_bool_flag as _parse_bool_flag
+from core.locale_format import get_date_format, get_time_format, get_datetime_format
+from core.video_player import VideoPlayer
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
@@ -56,12 +62,12 @@ def _fmt_last_seen(ts, i18n) -> str:
             ts_val //= 1000
         dt       = _dt.fromtimestamp(ts_val)
         now      = _dt.now()
-        time_str = dt.strftime(i18n.t("time_fmt"))
+        time_str = dt.strftime(get_time_format(i18n.t("time_fmt")))
         if dt.date() == now.date():
             return i18n.t("last_seen_today").format(time=time_str)
         if dt.date() == (now - _td(days=1)).date():
             return i18n.t("last_seen_yesterday").format(time=time_str)
-        date_str = dt.strftime(i18n.t("date_fmt"))
+        date_str = dt.strftime(get_date_format(i18n.t("date_fmt")))
         return i18n.t("last_seen_date").format(date=date_str, time=time_str)
     except Exception:
         return ""
@@ -166,7 +172,12 @@ class ConversationsPanel(wx.Panel):
         self._unread_sep_idx: int = -1
         # Unread count captured before mark-as-read thread starts (avoids race)
         self._pending_open_unread: int = 0
-        # True while the separator was placed from the initial open (not from a live message)
+        # True while the current separator anchors an already-read position —
+        # either it was placed from the initial open (unread messages that
+        # existed before this conversation was opened), or the user's focus
+        # has since passed it (see _on_message_focused()). In both cases the
+        # next live message must replace it with a fresh separator (count
+        # reset to 1) instead of just incrementing its count.
         self._sep_from_open: bool = False
         # Latch so the mark-as-read request fires once per separator, not on
         # every focus event at or below it. This used to be inferred from the
@@ -227,6 +238,15 @@ class ConversationsPanel(wx.Panel):
         self.init_UI()
         self.create_accelerator_table()
         self.create_accel_conversation()
+
+        # In-app video-message playback (audio via BASS, frames via ffmpeg —
+        # see core/video_player.py). Created after init_UI() since it needs
+        # _media_bitmap to already exist.
+        self._video_player = VideoPlayer(self.main_window, self._media_bitmap)
+        # id of the video message currently loaded in _video_player, or None
+        # — lets a second Enter on the SAME video toggle pause instead of
+        # restarting it, while Enter on a DIFFERENT video switches to it.
+        self._current_video_msg_id = None
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -703,6 +723,7 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_SHIFT_R    = wx.NewIdRef()  # react to message        (Ctrl+Shift+R)
         self.ID_DELETE_MSG      = wx.NewIdRef()  # delete focused message  (Delete)
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
+        self.ID_CTRL_SHIFT_C    = wx.NewIdRef()  # copy caption (photo/video/doc) (Ctrl+Shift+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         self.ID_ALT_E           = wx.NewIdRef()  # edit message            (Alt+E)
         self.ID_ALT_L           = wx.NewIdRef()  # read-more (truncated)   (Alt+L)
@@ -778,6 +799,7 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("R"),          self.ID_CTRL_SHIFT_R),
             (wx.ACCEL_NORMAL,  wx.WXK_DELETE,     self.ID_DELETE_MSG),
             (wx.ACCEL_CTRL,    ord("C"),          self.ID_CTRL_C),
+            (CS,               ord("C"),          self.ID_CTRL_SHIFT_C),
             (wx.ACCEL_ALT,     ord("C"),          self.ID_ALT_C),
             (wx.ACCEL_ALT,     ord("E"),          self.ID_ALT_E),
             (wx.ACCEL_ALT,     ord("L"),          self.ID_ALT_L),
@@ -822,6 +844,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_react,               id=self.ID_CTRL_SHIFT_R)
         self.Bind(wx.EVT_MENU, self._on_accel_delete_message,      id=self.ID_DELETE_MSG)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_message,        id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_caption,        id=self.ID_CTRL_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup,     id=self.ID_ALT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_edit_message,        id=self.ID_ALT_E)
         self.Bind(wx.EVT_MENU, self._on_read_more,                 id=self.ID_ALT_L)
@@ -924,7 +947,9 @@ class ConversationsPanel(wx.Panel):
         try:
             _conv_jid = conversation.get("remoteJid", "")
             if _conv_jid:
-                limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
+                configured_limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
+                unread_count = int(conversation.get("unreadCount") or 0)
+                limit = db_fetch_limit(configured_limit, unread_count)
                 db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)
                 db_msgs.reverse()
                 if "messages" not in conversation:
@@ -1384,6 +1409,15 @@ class ConversationsPanel(wx.Panel):
                 # builds it from there without copying) — persist it so the
                 # "Editada" marker and new text survive a restart.
                 self.main_window._schedule_save(dirty_jid=remote_jid)
+                # Refresh the conversations list too — _last_msg_preview()
+                # reads straight from these records, but nothing tells the
+                # list widget to redraw the row on its own. Without this the
+                # preview kept showing the pre-edit text until the
+                # conversation was closed (which rebuilds the list from
+                # scratch for an unrelated reason) — see the remote-edit
+                # path (_apply_possible_edit(), main.py), which already
+                # does this and never had the bug.
+                self.main_window._schedule_set_chats()
                 # Rebuild the links/mentions panels if the edited row is the one
                 # currently focused — they are only refreshed on a focus change,
                 # so without this the panels below the list keep describing the
@@ -1590,6 +1624,19 @@ class ConversationsPanel(wx.Panel):
                             os.rename(old_file, new_file)
                     except Exception as e:
                         print(f"[_mark_message_sent] failed to rename local audio: {e}")
+                    # Same trick for document/image/video attachments —
+                    # rename the pre-cached local_id.wzmedia written by
+                    # _pre_cache_sent_media() to the real id so Open/Save As
+                    # find it without a redundant download.
+                    if msg.get("messageType") in ("documentMessage", "imageMessage", "videoMessage"):
+                        try:
+                            media_dir = data_path("media")
+                            old_media = os.path.join(media_dir, f"{local_id}.wzmedia")
+                            new_media = os.path.join(media_dir, f"{real_id}.wzmedia")
+                            if os.path.isfile(old_media) and not os.path.isfile(new_media):
+                                os.rename(old_media, new_media)
+                        except Exception as e:
+                            print(f"[_mark_message_sent] failed to rename local media: {e}")
                     if getattr(self, "_current_audio_id", None) == local_id:
                         self._current_audio_id = real_id
                     if hasattr(self, "_audio_positions") and local_id in self._audio_positions:
@@ -1690,6 +1737,15 @@ class ConversationsPanel(wx.Panel):
         naturalness and quality.
         """
         if self.conversation is None:
+            return
+
+        if pyaudio is None:
+            # No wheel exists for PyAudio on Python 3.14 at the time of
+            # writing — see requirements.txt's version marker and this
+            # file's own `import pyaudio` — so recording degrades to a
+            # clear message instead of crashing on the first pyaudio.*
+            # reference below.
+            self.main_window.output(self.main_window.i18n.t("voice_recording_unavailable"))
             return
 
         self._recording_frames = []
@@ -1821,6 +1877,7 @@ class ConversationsPanel(wx.Panel):
         _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if _rec_jid and not _rec_jid.endswith("@newsletter"):
             self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+        self.message_field.Hide()
         self.send_message_btn.Hide()
         self.record_voice_message_btn.Hide()
         self._add_attachment_btn.Hide()
@@ -1862,11 +1919,15 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 pass
             self._recording_pa = None
+        if getattr(self, "_video_player", None) is not None:
+            self._video_player.stop()
         event.Skip()
 
     def _hide_voice_panel(self):
-        """Hide the voice panel and restore the record / send button visibility."""
+        """Hide the voice panel and restore the message field / record /
+        send button visibility (sent or discarded — both call this)."""
         self._voice_panel.Hide()
+        self.message_field.Show()
         if self.message_field.GetValue().strip():
             self.send_message_btn.Show()
         else:
@@ -2102,11 +2163,25 @@ class ConversationsPanel(wx.Panel):
         self._voice_panel.Hide()
         self.record_voice_message_btn.Show()
 
-    def close_conversation(self, event=None):
+    def _close_conversation_core(self) -> "tuple[bool, str]":
+        """Stop typing/recording indicators and clear the open-conversation
+        state. Returns (closed, closed_jid): closed is False when the
+        mention-suggestions popup was showing (that press is handled by
+        just dismissing the popup — the conversation itself is left open).
+
+        Shared by close_conversation() (Esc — also restores focus to
+        whichever list the conversation was opened from) and
+        close_conversation_for_panel_switch() (used when the user
+        navigates to an entirely different top-level panel, e.g. Status —
+        that panel sets its own focus right after, so it must NOT queue
+        close_conversation()'s focus-restoration CallAfters, which would
+        otherwise steal focus back to the conversations list a moment
+        later).
+        """
         if hasattr(self, "_mention_panel") and self._mention_panel.IsShown():
             self._hide_mention_suggestions()
             self.message_field.SetFocus()
-            return
+            return False, ""
         self._stop_typing_for_current_conversation()
         self._cancel_active_recording()
         self._hide_audio_controls()
@@ -2129,6 +2204,12 @@ class ConversationsPanel(wx.Panel):
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
+        return True, closed_jid
+
+    def close_conversation(self, event=None):
+        closed, closed_jid = self._close_conversation_core()
+        if not closed:
+            return  # _close_conversation_core() only handled the mention popup
         mw = self.main_window
         # If the conversation being closed is archived, it was opened from the
         # archived list (ArchivedConversationsPanel), which stays hidden behind
@@ -2142,6 +2223,11 @@ class ConversationsPanel(wx.Panel):
             # fully processed — calling SetFocus() synchronously inside an EVT_MENU
             # handler can be overridden by wx's post-event focus management on Win32.
             wx.CallAfter(self._restore_conversation_selection)
+
+    def close_conversation_for_panel_switch(self):
+        """Same cleanup as close_conversation() but without its focus-
+        restoration side effects — see _close_conversation_core()."""
+        self._close_conversation_core()
 
     def _restore_conversation_selection(self):
         """Select, focus and give keyboard focus to the last-opened conversation."""
@@ -2291,10 +2377,17 @@ class ConversationsPanel(wx.Panel):
                 add_member_item,
             )
 
-        menu.AppendSeparator()
-
-        close_item = menu.Append(wx.ID_ANY, f"{i18n.t('close_conversation')}\tCtrl+W")
-        self.Bind(wx.EVT_MENU, self.on_context_menu_close, close_item)
+        # "Fechar conversa" only makes sense for the conversation this menu
+        # was actually opened on — showing it for every row regardless let
+        # the user right-click chat B, pick "Fechar conversa", and have it
+        # silently close chat A instead (on_context_menu_close() has no idea
+        # which jid the menu was for; it just closes whatever's currently
+        # open).
+        if (self.conversation and self.conversation.get("remoteJid") == jid
+                and self.conversation_panel.IsShown()):
+            menu.AppendSeparator()
+            close_item = menu.Append(wx.ID_ANY, f"{i18n.t('close_conversation')}\tCtrl+W")
+            self.Bind(wx.EVT_MENU, self.on_context_menu_close, close_item)
 
         self.PopupMenu(menu)
         menu.Destroy()
@@ -2445,16 +2538,7 @@ class ConversationsPanel(wx.Panel):
             video = msg_obj.get("videoMessage") or {}
             if video.get("gifPlayback"):
                 return  # GIFs have no audio track to play
-            duration = video.get("seconds", 0) or 0
-            clean_msg_id = msg_id
-            if "_" in msg_id:
-                parts = msg_id.split("_")
-                clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-            self._toggle_playback(
-                msg_id, duration, msg,
-                file_path=data_path("media", f"{clean_msg_id}.wzmedia"),
-                audio_ext=".mp4",
-            )
+            self._play_toggle_video_message(msg)
 
         elif msg_type in ("imageMessage", "documentMessage"):
             # Enter on an image or document → open in default app
@@ -2536,6 +2620,18 @@ class ConversationsPanel(wx.Panel):
                 copy_file_item,
             )
 
+        # Copy caption (photo/video/document messages that have one) — a
+        # separate shortcut from Ctrl+C, which for these types already
+        # copies the file itself (see _on_accel_copy_message).
+        _has_caption = bool(self._get_message_caption(msg))
+        if _has_caption:
+            copy_caption_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_caption')}\tCtrl+Shift+C")
+            self.Bind(
+                wx.EVT_MENU,
+                lambda e, m=msg: self._on_menu_copy_caption(m),
+                copy_caption_item,
+            )
+
         # Reply (Alt+R)
         reply_item = menu.Append(wx.ID_ANY, f"{i18n.t('reply_message')}\tAlt+R")
         self.Bind(
@@ -2582,8 +2678,8 @@ class ConversationsPanel(wx.Panel):
             react_item,
         )
 
-        # Show text popup (only for text messages)
-        if msg_type in _TEXT_TYPES:
+        # Show text popup (text messages, or a photo/video/document that has a caption)
+        if msg_type in _TEXT_TYPES or _has_caption:
             show_text_item = menu.Append(wx.ID_ANY, f"{i18n.t('show_msg_text')}\tAlt+C")
             self.Bind(
                 wx.EVT_MENU,
@@ -2684,6 +2780,22 @@ class ConversationsPanel(wx.Panel):
     # ── Media controls helpers ──────────────────────────────────────────────
 
     def _hide_all_media_controls(self):
+        # Selection moved off the playing video row — stop it. Unlike audio
+        # playback elsewhere in this file (which is allowed to keep playing
+        # while the user scrolls/selects elsewhere), video also holds a
+        # live ffmpeg subprocess; leaving it running unattended is worth
+        # avoiding outright rather than matching audio's more permissive
+        # behaviour.
+        was_playing_video = self._current_video_msg_id is not None
+        if getattr(self, "_video_player", None) is not None:
+            self._video_player.stop()
+        self._current_video_msg_id = None
+        if was_playing_video:
+            # Video never keeps its shared speed/slider controls visible
+            # once stopped here (unlike audio, which can keep playing in
+            # the background and re-show them on refocus) — nothing else
+            # will hide them since video always stops on defocus.
+            self._hide_audio_controls()
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -3349,6 +3461,14 @@ class ConversationsPanel(wx.Panel):
                 if (not self._unread_sep_marked_read
                         and not getattr(self, "_populating_messages", False)):
                     self._unread_sep_marked_read = True
+                    # The user's focus has now actually passed this
+                    # separator, so it anchors an already-read position —
+                    # same situation as a separator placed at conversation
+                    # open time. The next live message must replace it
+                    # entirely (fresh separator, count reset to 1) rather
+                    # than just bumping its count, or the count would keep
+                    # accumulating on top of messages the user already read.
+                    self._sep_from_open = True
                     if self.conversation is not None:
                         jid = self.conversation.get("remoteJid", "")
                         if jid:
@@ -4058,6 +4178,84 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    # ── Play/pause a video message in-app (audio via BASS, frames via
+    # ffmpeg — see core/video_player.py and _hide_all_media_controls(),
+    # which stops this whenever selection/conversation moves away) ────────
+
+    def _play_toggle_video_message(self, msg: dict):
+        """Enter on a video message: play it in-app (audio via BASS, frames
+        via ffmpeg — see core/video_player.py), applying the conversation's
+        configured playback speed (see on_audio_speed_btn/Alt+,/Alt+.) the
+        same way voice messages already do. A second Enter on the SAME
+        video toggles pause; Enter on a DIFFERENT video while one is
+        playing stops it and switches to the new one."""
+        if msg.get("messageType") != "videoMessage":
+            return
+        msg_id = msg.get("key", {}).get("id", "")
+        if self._video_player.is_playing and self._current_video_msg_id == msg_id:
+            self._video_player.toggle_pause()
+            return
+
+        clean_msg_id = msg_id
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
+        media_path = data_path("media", f"{clean_msg_id}.wzmedia")
+
+        def _run():
+            if not os.path.isfile(media_path):
+                wx.CallAfter(
+                    self.main_window.output, self.main_window.i18n.t("downloading")
+                )
+                try:
+                    self.main_window.handle_media_message(msg)
+                except Exception:
+                    return
+            try:
+                with open(media_path, "rb") as fh:
+                    content = decrypt_bytes(fh.read(), self.main_window.key)
+                tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                tmp.write(content)
+                tmp.close()
+                speed = self._audio_speed_steps[self._audio_speed_index]
+                self._current_video_msg_id = msg_id
+                wx.CallAfter(self._start_video_playback, tmp.name, speed, msg_id)
+            except Exception as exc:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    str(exc),
+                    self.main_window.i18n.t("error").format(
+                        app_name=self.main_window.app_name
+                    ),
+                    wx.OK | wx.ICON_ERROR,
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _start_video_playback(self, path: str, speed: float, msg_id: str):
+        """Runs on the UI thread (via wx.CallAfter from _run() above). Starts
+        the player and — same as _play_audio() already does for voice
+        messages — shows the shared speed button/progress slider so the
+        video gets the same seek/speed controls audio already has, instead
+        of only Enter-to-pause with no other way to scrub or change speed.
+
+        _media_bitmap is otherwise only shown by _try_show_thumbnail() (the
+        static preview, from the message's own jpegThumbnail) — a video
+        with no embedded thumbnail left it Hide()-den for the player's own
+        SetBitmap() calls to render into, so no frame was ever visible even
+        though decoding/playback was working fine underneath. StatusPanel's
+        own video viewer already does this same Show()+Layout() right
+        before load_and_play() (see _on_play_pause_video/
+        _start_downloaded_video in status_panel.py) — mirrored here."""
+        self._media_bitmap.Show()
+        self.conversation_panel.Layout()
+        self._video_player.load_and_play(path, speed)
+        if self._focused_msg_id() == msg_id:
+            self._show_audio_controls()
+            self.audio_speed_btn.SetLabel(self._format_speed(speed))
+        if not self._audio_timer.IsRunning():
+            self._audio_timer.Start(30)
+
     def _resolve_media_filename(self, msg: dict) -> str:
         """Resolve original filename and extension for any media message (document, audio, image, video)."""
         msg_type = msg.get("messageType", "")
@@ -4201,6 +4399,7 @@ class ConversationsPanel(wx.Panel):
         with wx.FileDialog(
             self,
             dlg_title,
+            defaultDir=get_downloads_folder(),
             defaultFile=default_file,
             wildcard=wildcard,
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
@@ -4582,6 +4781,23 @@ class ConversationsPanel(wx.Panel):
         self.refresh_active_conversation_messages()
 
     def on_audio_timer(self, event):
+        if self._current_video_msg_id is not None:
+            if not self._video_player.is_playing:
+                # Reached EOF or was stopped elsewhere (e.g. _hide_all_media_
+                # controls() already cleared this — belt and suspenders for
+                # any path that stops the player without going through it).
+                self._current_video_msg_id = None
+                self._hide_audio_controls()
+                return
+            try:
+                pos   = self._video_player.get_position()
+                total = self._video_player.get_length()
+                if total > 0:
+                    self.audio_slider.SetValue(int(pos / total * 1000))
+                    self.audio_slider.Refresh()
+            except Exception:
+                pass
+            return
         if self._audio_stream is None:
             return
         try:
@@ -4590,14 +4806,26 @@ class ConversationsPanel(wx.Panel):
             total = _ctrl.get_length()
             if total > 0:
                 if pos >= total:
-                    # Save the ID before _stop_audio() clears it
-                    finished_id = self._current_audio_id
+                    # Save the ID/message before _stop_audio() clears it
+                    finished_id  = self._current_audio_id
+                    finished_msg = next(
+                        (m for m in self._sorted_messages
+                         if m.get("key", {}).get("id") == finished_id),
+                        None,
+                    )
                     self._in_auto_timer_stop = True
                     try:
                         self._stop_audio()
                     finally:
                         self._in_auto_timer_stop = False
                     self._hide_audio_controls()
+                    # Reaching the end of playback — right where the controls
+                    # get hidden — is "played" for a received voice message:
+                    # mark it locally and tell WhatsApp so the sender sees it
+                    # too. See MainWindow.mark_audio_message_played()'s own
+                    # docstring for why this never applies to our own sends.
+                    if finished_msg is not None:
+                        self.main_window.mark_audio_message_played(finished_msg)
                     # Try to auto-play the next consecutive audio message
                     if finished_id:
                         self._auto_chain_next_audio(finished_id)
@@ -4760,7 +4988,9 @@ class ConversationsPanel(wx.Panel):
         """Apply the current speed index to the active stream and persist it."""
         speed = self._audio_speed_steps[self._audio_speed_index]
         self.audio_speed_btn.SetLabel(self._format_speed(speed))
-        if self._audio_tempo_ctrl is not None:
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            self._video_player.set_speed(speed)
+        elif self._audio_tempo_ctrl is not None:
             try:
                 self._audio_tempo_ctrl.tempo = self._audio_tempo_map[speed]
             except Exception:
@@ -4769,6 +4999,15 @@ class ConversationsPanel(wx.Panel):
         self.main_window.save_settings()
 
     def on_audio_slider(self, event):
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            try:
+                val   = self.audio_slider.GetValue()
+                total = self._video_player.get_length()
+                if total > 0:
+                    self._video_player.set_position(int(val / 1000 * total))
+            except Exception:
+                pass
+            return
         if self._audio_stream is None:
             return
         try:
@@ -4821,8 +5060,8 @@ class ConversationsPanel(wx.Panel):
             dt    = datetime.fromtimestamp(ts_val)
             today = datetime.now()
             if dt.date() == today.date():
-                return dt.strftime(self.main_window.i18n.t("time_fmt"))
-            return dt.strftime(self.main_window.i18n.t("datetime_fmt"))
+                return dt.strftime(get_time_format(self.main_window.i18n.t("time_fmt")))
+            return dt.strftime(get_datetime_format(self.main_window.i18n.t("datetime_fmt")))
         except Exception:
             return ""
 
@@ -5033,6 +5272,9 @@ class ConversationsPanel(wx.Panel):
             parts = [i18n.t("document"), filename]
             if size_str:
                 parts.append(size_str)
+            caption = (doc.get("caption") or "").strip()
+            if caption:
+                parts.append(caption)
             return ", ".join(parts)
 
         # ── Image ────────────────────────────────────────────────────────────
@@ -5054,7 +5296,9 @@ class ConversationsPanel(wx.Panel):
                 # Animated GIF — treat identically to sticker
                 return i18n.t("sticker")
             dur = self._format_duration(video.get("seconds"))
-            return f"{i18n.t('video')}, {i18n.t('duration')}: {dur}"
+            base = f"{i18n.t('video')}, {i18n.t('duration')}: {dur}"
+            caption = (video.get("caption") or "").strip()
+            return f"{base}, {caption}" if caption else base
 
         # ── Interactive buttons ───────────────────────────────────────────────
         if msg_type == "buttonsMessage":
@@ -5258,6 +5502,13 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("group_notif_generic")
 
         # ── Fallback ─────────────────────────────────────────────────────────
+        # Logged so a future report of a raw, untranslated messageType
+        # showing up in the message list (e.g. a view-once/ephemeral audio
+        # wrapper, which arrives under a DIFFERENT outer messageType than
+        # "audioMessage" itself and isn't unwrapped by any branch above)
+        # can be traced to the exact type instead of only reproducing "some
+        # message looks wrong".
+        logging.info("[_get_message_content] unhandled messageType=%r", msg_type)
         return i18n.t("unsupported_message").format(
             app_name=self.main_window.app_name
         )
@@ -6098,6 +6349,14 @@ class ConversationsPanel(wx.Panel):
         if self.conversation and self.conversation.get("remoteJid") == jid:
             self._sorted_messages = []
             self.messages_list.DeleteAllItems()
+            # _unread_sep_idx pointed into the list just emptied above — left
+            # stale, a live message arriving right after (on_incoming_message,
+            # the _sep_from_open branch) would pop() that now-out-of-range
+            # index from the now-empty _sorted_messages, crashing with
+            # "IndexError: pop from empty list". Same pairing already reset
+            # on conversation switch (see close_conversation()).
+            self._unread_sep_idx = -1
+            self._sep_from_open = False
         # Refresh the conversations list so the emptied preview disappears.
         # The conversation itself stays in the list — clearing is not deleting.
         self.main_window._schedule_set_chats()
@@ -6183,6 +6442,21 @@ class ConversationsPanel(wx.Panel):
         dlg.ShowModal()
         dlg.Destroy()
 
+    # Media types WhatsApp allows a caption on (audio/sticker never do).
+    _CAPTIONABLE_TYPES = ("imageMessage", "videoMessage", "documentMessage")
+
+    def _get_message_caption(self, msg: dict) -> str:
+        """Caption text for a photo/video/document message, or "" if none
+        (either the type doesn't support captions, or this one has none)."""
+        msg_type = msg.get("messageType", "")
+        if msg_type not in self._CAPTIONABLE_TYPES:
+            return ""
+        msg_obj = msg.get("message") or {}
+        inner = msg_obj.get(msg_type)
+        if not isinstance(inner, dict):
+            return ""
+        return (inner.get("caption") or "").strip()
+
     def _on_menu_copy_message(self, msg: dict):
         msg_obj  = msg.get("message") or {}
         msg_type = msg.get("messageType", "")
@@ -6191,6 +6465,20 @@ class ConversationsPanel(wx.Panel):
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        if text:
+            try:
+                pyperclip.copy(text)
+                self.main_window.output(self.main_window.i18n.t("msg_copied"))
+            except Exception:
+                self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+        else:
+            self.main_window.output(self.main_window.i18n.t("msg_copy_error"))
+
+    def _on_menu_copy_caption(self, msg: dict):
+        """Copy a photo/video/document message's caption text — kept
+        separate from _on_menu_copy_message()/Ctrl+C, which for these
+        types already copies the actual file to the clipboard."""
+        text = self._get_message_caption(msg)
         if text:
             try:
                 pyperclip.copy(text)
@@ -6389,6 +6677,23 @@ class ConversationsPanel(wx.Panel):
                     mw.register_jid_mapping(participant_jid, phone)
         if phone:
             return format_number(phone)
+        # No phone mapping for this @lid yet. Unlike a group opened via
+        # ConversationDataDialog (which proactively resolves every unmapped
+        # participant's @lid before showing the list), a participant
+        # mentioned only in a group notification (join/leave/promote/...)
+        # may never have gone through that path — e.g. someone who left
+        # right after being added, with no other message ever attributed to
+        # them. Kick off a background resolution (resolve_lid_jids_via_api
+        # makes a synchronous HTTP call and must never run on this — the UI
+        # — thread; it already dedupes concurrent/repeat requests for the
+        # same JID internally) so a LATER render of this same notification
+        # (conversation reopened, history resynced, ...) shows the real
+        # formatted phone number instead of the raw LID digits forever.
+        threading.Thread(
+            target=mw.resolve_lid_jids_via_api,
+            args=([participant_jid],),
+            daemon=True,
+        ).start()
         # No phone mapping for this @lid — return just the local part (strip "@lid")
         # so the display shows the raw identifier without the domain suffix.
         return participant_jid.rsplit("@", 1)[0]
@@ -6423,7 +6728,9 @@ class ConversationsPanel(wx.Panel):
         self.navigate_to_conversation(chat)
 
     def _on_menu_goto_quoted(self, msg: dict, ctx: dict):
-        """Move focus in the messages list to the quoted message."""
+        """Move focus in the messages list to the quoted message — or, if
+        the quote is actually a reply to a STATUS (never present in this
+        chat's own message list at all), open the status viewer instead."""
         quoted_id = ctx.get("stanzaId") or ""
         if not quoted_id:
             self._show_quoted_not_found_error()
@@ -6435,7 +6742,107 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.EnsureVisible(i)
                 self.messages_list.SetFocus()
                 return
+        if self._goto_quoted_status(quoted_id, ctx):
+            return
         self._show_quoted_not_found_error()
+
+    def _goto_quoted_status(self, quoted_id: str, ctx: dict) -> bool:
+        """Best-effort: the id wasn't found in this chat's own messages —
+        check whether it's a status reply instead. A status still tracked
+        in main_window._status_updates opens in the real viewer; one old
+        enough to have aged out of there is rebuilt from the quoted
+        content WhatsApp still ships inline on the reply itself (same
+        shape a real status dict has) so it opens the same way rather than
+        falling back to a bare text popup. Returns True if it opened
+        something.
+        """
+        mw = self.main_window
+        if not hasattr(mw, "status_panel"):
+            return False
+        sp = mw.status_panel
+        updates = getattr(mw, "_status_updates", {})
+        items = [m for msgs in updates.values() for m in msgs]
+        my_statuses, contacts = sp._parse_statuses(items, mw.i18n)
+
+        for idx, st in enumerate(my_statuses):
+            if st.get("key", {}).get("id") == quoted_id:
+                self._open_my_status_dialog_at(my_statuses, idx)
+                return True
+
+        for entry in contacts:
+            for s_idx, st in enumerate(entry.get("statuses", [])):
+                if st.get("key", {}).get("id") == quoted_id:
+                    self._open_status_panel_at(sp, my_statuses, contacts, entry.get("jid", ""), s_idx)
+                    return True
+
+        quoted_msg = ctx.get("quotedMessage") or {}
+        if not quoted_msg:
+            return False
+        poster_jid = ctx.get("participant", "") or ""
+        msg_type = ""
+        for key in ("videoMessage", "imageMessage", "audioMessage", "documentMessage",
+                    "extendedTextMessage", "conversation"):
+            if key in quoted_msg:
+                msg_type = key
+                break
+        if not msg_type:
+            return False
+        is_mine = bool(poster_jid) and mw._is_self_jid(poster_jid)
+        dummy_status = {
+            "key": {
+                "id": quoted_id,
+                "remoteJid": "status@broadcast",
+                "fromMe": is_mine,
+                "participant": poster_jid,
+            },
+            "message": quoted_msg,
+            "messageType": msg_type,
+            "messageTimestamp": 0,
+        }
+        if is_mine:
+            self._open_my_status_dialog_at([dummy_status], 0)
+        else:
+            name = (mw._resolve_contact_name({"remoteJid": poster_jid}) or format_number(poster_jid)
+                    if poster_jid else mw.i18n.t("unknown_contact"))
+            fake_entry = {"name": name, "jid": poster_jid, "statuses": [dummy_status]}
+            self._open_status_panel_at(sp, [], [fake_entry], poster_jid, 0)
+        return True
+
+    def _open_my_status_dialog_at(self, my_statuses: list, idx: int):
+        mw = self.main_window
+        sp = getattr(mw, "status_panel", None)
+        if sp is not None and sp._video_player.is_playing:
+            sp._video_player.stop()
+        from status_panel import MyStatusDialog
+        dlg = MyStatusDialog(mw, my_statuses)
+        if idx:
+            dlg._current = idx
+            dlg._update_content()
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def _open_status_panel_at(self, sp, my_statuses: list, contacts: list, target_jid: str, s_idx: int):
+        mw = self.main_window
+        mw.on_alt_5(None)
+        sp._populate_list(my_statuses, contacts)
+        c_idx = next((i for i, e in enumerate(sp._status_contacts) if e.get("jid") == target_jid), None)
+        if c_idx is None:
+            return
+        # _populate_list() now interleaves "--- Recentes/Vistos ---" header
+        # rows, so a contact's row in the list is no longer just c_idx + 1
+        # — look it up via the same row->contact-index map the list's own
+        # selection handlers use.
+        row = next(
+            (r for r, ci in sp._status_row_contact.items() if ci == c_idx),
+            c_idx + 1,
+        )
+        sp._status_list.Select(row)
+        sp._status_list.Focus(row)
+        sp._status_list.EnsureVisible(row)
+        sp._selected_contact_idx = c_idx
+        total = len(sp._status_contacts[c_idx].get("statuses", []))
+        sp._current_status_idx = max(0, min(s_idx, total - 1)) if total else 0
+        sp._show_current_status()
 
     def _show_quoted_not_found_error(self):
         wx.MessageBox(
@@ -6447,6 +6854,7 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_forward(self, msg: dict):
         """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
+        import ctypes
         mw   = self.main_window
         i18n = mw.i18n
 
@@ -6475,8 +6883,102 @@ class ConversationsPanel(wx.Panel):
         search_field.SetHint(i18n.t("search_conversations"))
         vsz.Add(search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        lst = wx.ListBox(p, choices=all_names, style=wx.LB_SINGLE)
+        lst = wx.ListBox(p, choices=all_names, style=wx.LB_EXTENDED)
         vsz.Add(lst, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+        vsz.Add(
+            wx.StaticText(p, label=i18n.t("forward_multiselect_hint")),
+            0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6,
+        )
+
+        # ── Custom arrow/selection keyboard handling ────────────────────────
+        # Native wx.LB_EXTENDED semantics: a plain Up/Down both moves focus
+        # AND collapses selection down to just the newly-focused item — there
+        # is no way to arrow through the list while building up a multi-
+        # selection with the default behavior. Remapped here so plain arrows
+        # move focus only (selection untouched); Ctrl+Space/Ctrl+Shift+Space
+        # control selection explicitly instead. Ctrl+Arrow and Shift+Arrow
+        # are left at their native behavior (move-focus-only and range-select
+        # respectively — already exactly what's wanted).
+        #
+        # Deliberately NOT plain Space or Shift+Space (an earlier version of
+        # this dialog used those instead): reserved for an upcoming feature
+        # — bulk message selection, where plain Space already plays/pauses
+        # the focused audio message, so it can't double as "select this row"
+        # here without colliding with that. Ctrl+Space/Ctrl+Shift+Space carry
+        # no such conflict.
+        #
+        # Driven via the raw Win32 listbox messages rather than wx's own
+        # Select()/Deselect() for the arrow case specifically: LB_SETCARETINDEX
+        # is the exact same message the native control's own Ctrl+Arrow
+        # handling uses internally, so remapping plain Arrow onto it reuses
+        # a code path already proven to notify screen readers correctly,
+        # rather than reimplementing focus movement by hand.
+        _LB_SETSEL        = 0x0185
+        _LB_GETSEL        = 0x0187
+        _LB_SETCARETINDEX = 0x019E
+        _LB_GETCARETINDEX = 0x019F
+
+        def _lst_send(msg, wparam=0, lparam=0):
+            return ctypes.windll.user32.SendMessageW(lst.GetHandle(), msg, wparam, lparam)
+
+        def _lst_caret():
+            idx = _lst_send(_LB_GETCARETINDEX)
+            return idx if idx >= 0 else -1
+
+        def _lst_set_caret(idx):
+            _lst_send(_LB_SETCARETINDEX, idx, 0)
+
+        def _lst_is_selected(idx):
+            return _lst_send(_LB_GETSEL, idx) > 0
+
+        def _lst_set_selected(idx, select):
+            _lst_send(_LB_SETSEL, 1 if select else 0, idx)
+
+        def _on_list_key_down(event):
+            key   = event.GetKeyCode()
+            ctrl  = event.ControlDown()
+            shift = event.ShiftDown()
+            count = lst.GetCount()
+
+            if (key in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_NUMPAD_UP, wx.WXK_NUMPAD_DOWN)
+                    and not ctrl and not shift):
+                if count == 0:
+                    return
+                caret = _lst_caret()
+                if caret < 0:
+                    caret = 0
+                delta = -1 if key in (wx.WXK_UP, wx.WXK_NUMPAD_UP) else 1
+                _lst_set_caret(max(0, min(count - 1, caret + delta)))
+                return  # suppressed — no Skip(), so selection is left alone
+
+            if key == wx.WXK_SPACE and ctrl and shift:
+                # Toggle everything: select all unless every row is already
+                # selected, in which case clear it all instead.
+                all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
+                for i in range(count):
+                    _lst_set_selected(i, not all_selected)
+                return
+
+            if key == wx.WXK_SPACE and ctrl:
+                caret = _lst_caret()
+                if caret >= 0:
+                    now_selected = not _lst_is_selected(caret)
+                    _lst_set_selected(caret, now_selected)
+                    if now_selected:
+                        # LB_SETSEL doesn't move the caret, so no fresh
+                        # "item name, selected" announcement gets triggered
+                        # the way arrowing onto an already-selected item
+                        # does — NVDA/JAWS stay silent on the state change
+                        # unless told explicitly. Deselecting doesn't need
+                        # this: NVDA/JAWS already announce "not selected" on
+                        # their own for that transition.
+                        wx.CallAfter(mw.output, i18n.t("selected"))
+                return
+
+            event.Skip()  # Ctrl+Arrow, Shift+Arrow, everything else: native behavior
+
+        lst.Bind(wx.EVT_KEY_DOWN, _on_list_key_down)
 
         btn_sizer  = wx.StdDialogButtonSizer()
         ok_btn     = wx.Button(p, wx.ID_OK,     label=i18n.t("forward_message"))
@@ -6508,24 +7010,44 @@ class ConversationsPanel(wx.Panel):
             _filtered_names = [n for _, n in pairs]
             lst.Set(_filtered_names)
             if _filtered_names:
-                lst.SetSelection(0)
+                # Focus only — do not pre-select, so confirming right away
+                # without ever pressing Space falls through to the "nothing
+                # selected -> use the focused item" behavior below rather
+                # than silently forwarding to whatever the search happened
+                # to focus first.
+                _lst_set_caret(0)
 
         search_field.Bind(wx.EVT_TEXT, _on_search)
         if all_names:
-            lst.SetSelection(0)
+            _lst_set_caret(0)
         ok_btn.SetDefault()
 
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
 
-        sel = lst.GetSelection()
+        sels = list(lst.GetSelections())
+        if not sels:
+            # No explicit multi-selection was made (Space never pressed) —
+            # forward to whichever contact is currently focused, same as
+            # this dialog's original single-target behavior.
+            caret = _lst_caret()
+            if caret >= 0:
+                sels = [caret]
         dlg.Destroy()
-        if sel == wx.NOT_FOUND or sel >= len(_filtered_chats):
+        if not sels:
             return
 
-        target_jid = _filtered_chats[sel].get("remoteJid", "")
-        if not target_jid:
+        target_jids = []
+        target_names = []
+        for i in sels:
+            if i >= len(_filtered_chats):
+                continue
+            jid = _filtered_chats[i].get("remoteJid", "")
+            if jid:
+                target_jids.append(jid)
+                target_names.append(_filtered_names[i])
+        if not target_jids:
             return
 
         # ── Forward via the real WPPConnect forward endpoint ────────────────────
@@ -6539,13 +7061,34 @@ class ConversationsPanel(wx.Panel):
         if not source_jid or not msg_key.get("id"):
             return
 
+        targets = list(zip(target_jids, target_names))
+
         def _do_forward():
-            ok = mw.forward_message(source_jid, msg_key, target_jid)
-            if not ok:
+            failed_names = self._forward_message_to_targets(source_jid, msg_key, targets)
+            if failed_names:
                 wx.CallAfter(mw.error_sound.play)
-                wx.CallAfter(mw.output, i18n.t("forward_failed"))
+                if len(targets) == 1:
+                    wx.CallAfter(mw.output, i18n.t("forward_failed"))
+                else:
+                    wx.CallAfter(
+                        mw.output,
+                        i18n.t("forward_failed_multiple").format(names=", ".join(failed_names)),
+                    )
 
         threading.Thread(target=_do_forward, daemon=True).start()
+
+    def _forward_message_to_targets(self, source_jid: str, msg_key: dict, targets: list) -> list:
+        """Forward one message to each (jid, name) pair in *targets*, one at
+        a time — so one failing recipient (e.g. a stale JID) doesn't abort
+        delivery to the rest, since each main_window.forward_message() call
+        already reports its own success/failure independently. Returns the
+        display names of whichever targets failed (empty if all succeeded).
+        """
+        mw = self.main_window
+        return [
+            name for jid, name in targets
+            if not mw.forward_message(source_jid, msg_key, jid)
+        ]
 
     def _on_menu_star(self, msg: dict):
         msg["starred"] = not msg.get("starred")
@@ -7064,6 +7607,18 @@ class ConversationsPanel(wx.Panel):
         else:
             self._on_menu_copy_message(msg)
 
+    def _on_accel_copy_caption(self, event):
+        """Ctrl+Shift+C: copy the caption of the focused photo/video/document
+        message. Kept on a separate shortcut from Ctrl+C, which already
+        copies the file itself for these message types."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        self._on_menu_copy_caption(msg)
+
     def _on_accel_show_text_popup(self, event):
         """Alt+C: show focused message text in a popup dialog."""
         index = self.messages_list.GetFirstSelected()
@@ -7213,14 +7768,33 @@ class ConversationsPanel(wx.Panel):
     # ── Alt+2: jump to last message ────────────────────────────────────────
 
     def _on_accel_jump_last(self, event):
-        """Alt+2: move focus to the last message in the current conversation."""
-        count = self.messages_list.GetItemCount()
-        if count > 0:
-            last = count - 1
-            if not self.messages_list.HasFocus():
-                self.messages_list.SetFocus()
+        """Alt+2: move focus to the last REAL message in the current
+        conversation — never a sentinel row (unread separator/placeholder).
+        The bottom row is a sentinel whenever the unread separator gets
+        (re)placed at the very end of the list, e.g. right after
+        on_incoming_message() creates a fresh one for a message that just
+        arrived; skip backwards over any such rows instead of focusing them
+        directly, or Alt+2 would land on the separator (or, before that,
+        potentially on a stale earlier row) instead of the newest message.
+        """
+        last = len(self._sorted_messages) - 1
+        while last >= 0 and self._is_separator(self._sorted_messages[last]):
+            last -= 1
+        if last >= 0:
+            # Focus() (not just Select()) is what actually moves the
+            # keyboard-focus/screen-reader cursor to the row — every other
+            # "jump to a specific row" handler in this file calls both
+            # together (see _on_accel_jump_unread() just below, and
+            # populate_messages()'s own default-tail-selection block).
+            # This one only ever called Select(), which on its own can
+            # leave the previous row's focus rectangle in place or just
+            # clear the old selection without moving anything — reported
+            # live as Alt+2 "either staying put or just deselecting the
+            # current message without really moving focus".
+            self.messages_list.Focus(last)
             self.messages_list.Select(last, True)
             self.messages_list.EnsureVisible(last)
+            self.messages_list.SetFocus()
 
     # ── Alt+3: jump to unread separator ────────────────────────────────────
 
@@ -7430,7 +8004,8 @@ class ConversationsPanel(wx.Panel):
         self.main_window.output(ann, interrupt=True)
 
     def _show_message_text_popup(self, msg: dict):
-        """Open a read-only dialog showing the full message text."""
+        """Open a read-only dialog showing the full message text (or, for a
+        photo/video/document message, its caption)."""
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         text = ""
@@ -7438,6 +8013,8 @@ class ConversationsPanel(wx.Panel):
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        else:
+            text = self._get_message_caption(msg)
         if not text:
             return
 
@@ -7610,6 +8187,76 @@ class ConversationsPanel(wx.Panel):
             # suppressed in on_messages_upsert to avoid double-counting.
             wx.CallAfter(self._on_own_reaction_sent, jid, msg_key, emoji)
 
+    def _persist_reaction_record(self, jid: str, orig_id: str, msg_key: dict,
+                                  sender_key: str, from_me: bool, emoji: str,
+                                  participant: str = "") -> "dict | None":
+        """Persist a reaction (ours or someone else's) into the chat's own
+        records, so populate_messages()/refresh_active_conversation_messages()
+        — which rebuild _reaction_map purely by scanning `records` — can
+        recover it after anything repopulates the message list: a
+        conversation close/reopen, an app restart, or any background
+        full-list refresh in between (e.g. a history backfill delivering an
+        already-seen message). A reaction from someone else used to update
+        only the in-memory _reaction_map and nothing else, so it silently
+        vanished — both the inline marker on the message row and the
+        Reactions button — the next time anything rebuilt the list, with no
+        real relation to focus movement despite how it was reported
+        ("reação some ao voltar o foco pra mensagem"). Own reactions already
+        persisted this way; this is the same thing for the received case.
+
+        The synthetic record id is namespaced per (message, sender) — not
+        just per message — since more than one person can react to the same
+        message with different emojis at once; only the mover's own key
+        keeps the original bare `_rxn_{orig_id}` form used before per-sender
+        namespacing existed, so an already-persisted self-reaction record on
+        an existing install is found and updated in place rather than
+        duplicated under a new id.
+
+        Returns the record dict (the caller may still need it, e.g. for
+        _track_last_reaction()), or None if there was nothing to persist.
+        """
+        chat = self.main_window.get_chat(jid)
+        if not chat or not orig_id:
+            return None
+        rxn_id = (
+            f"_rxn_{orig_id}" if sender_key == self._SELF_REACTOR_KEY
+            else f"_rxn_{orig_id}_{sender_key}"
+        )
+        key = {"remoteJid": jid, "fromMe": from_me, "id": rxn_id}
+        if participant:
+            key["participant"] = participant
+        reaction_record = {
+            "messageType": "reactionMessage",
+            "message": {
+                "reactionMessage": {
+                    "key":  msg_key,
+                    "text": emoji,
+                }
+            },
+            "key": key,
+            "messageTimestamp": int(time.time()),
+        }
+        records = (
+            chat.setdefault("messages", {})
+                .setdefault("messages", {})
+                .setdefault("records", [])
+        )
+        # Update the existing reaction record for this (message, sender)
+        # pair in place (changing the emoji) instead of silently no-op'ing —
+        # previously a changed reaction only updated the in-memory map, so
+        # the old emoji came back after reopening the conversation.
+        existing = next((r for r in records if r.get("key", {}).get("id") == rxn_id), None)
+        if existing:
+            existing["message"] = reaction_record["message"]
+            existing["messageTimestamp"] = reaction_record["messageTimestamp"]
+        else:
+            records.append(reaction_record)
+        try:
+            self.main_window.db.insert_message(jid, reaction_record)
+        except Exception:
+            logging.exception("[conversations] insert reaction failed")
+        return reaction_record
+
     def _on_own_reaction_sent(self, jid: str, msg_key: dict, emoji: str):
         """Update reaction_map, re-render the original message, and refresh the list."""
         orig_id = msg_key.get("id", "")
@@ -7629,44 +8276,10 @@ class ConversationsPanel(wx.Panel):
 
         # Persist reaction in chat records so _last_msg_preview and populate_messages
         # can reflect it after a conversation close/reopen.
-        chat = self.main_window.get_chat(jid)
-        if chat:
-            reaction_record = {
-                "messageType": "reactionMessage",
-                "message": {
-                    "reactionMessage": {
-                        "key":  msg_key,
-                        "text": emoji,
-                    }
-                },
-                "key": {
-                    "remoteJid": jid,
-                    "fromMe":    True,
-                    "id":        f"_rxn_{orig_id}",
-                },
-                "messageTimestamp": int(time.time()),
-            }
-            records = (
-                chat.setdefault("messages", {})
-                    .setdefault("messages", {})
-                    .setdefault("records", [])
-            )
-            # Update our existing reaction record for this message in place
-            # (changing the emoji) instead of silently no-op'ing — previously
-            # a changed reaction only updated the in-memory map, so the old
-            # emoji came back after reopening the conversation.
-            rxn_key  = f"_rxn_{orig_id}"
-            existing = next((r for r in records if r.get("key", {}).get("id") == rxn_key), None)
-            if existing:
-                existing["message"] = reaction_record["message"]
-                existing["messageTimestamp"] = reaction_record["messageTimestamp"]
-            else:
-                records.append(reaction_record)
-            try:
-                self.main_window.db.insert_message(jid, reaction_record)
-            except Exception:
-                logging.exception("[conversations] insert reaction failed")
-
+        reaction_record = self._persist_reaction_record(
+            jid, orig_id, msg_key, self._SELF_REACTOR_KEY, True, emoji,
+        )
+        if reaction_record is not None:
             # reaction_record stays in `records` only so populate_messages()
             # can rebuild the reaction map (and thus redraw the reacted-to
             # message's inline reaction marker) after a conversation
@@ -7823,6 +8436,33 @@ class ConversationsPanel(wx.Panel):
 
         self._register_virtual_msg(virtual_msg)
         self.main_window._schedule_set_chats()
+
+    def _pre_cache_sent_media(self, local_id: str, path: str, media_type: str):
+        """Copy a just-sent attachment straight into the local media cache,
+        keyed by its local_id the same way a downloaded copy is keyed by
+        message id.
+
+        We're the sender, so the exact bytes already sit on disk at *path* —
+        there's no reason to require a redundant round-trip download through
+        WPPConnect just to unlock the Open/Save As buttons. This mirrors the
+        existing "rename the local audio file so we don't have to download
+        it" trick _mark_message_sent() already does for recorded voice
+        messages, extended to files sent via the attachment picker
+        (document/image/video/audio). _mark_message_sent() renames the cache
+        entry from local_id to the real WhatsApp id once the echo confirms it.
+        """
+        try:
+            with open(path, "rb") as fh:
+                content = fh.read()
+            encrypted = encrypt(content, self.main_window.key)
+            if media_type == "audio":
+                cache_path = data_path("voice_messages", f"{local_id}.msv")
+            else:
+                cache_path = data_path("media", f"{local_id}.wzmedia")
+            with open(cache_path, "wb") as fh:
+                fh.write(encrypted)
+        except Exception as e:
+            logging.error(f"[_pre_cache_sent_media] failed to pre-cache {path}: {e}")
 
     def _show_attachment_panel(self):
         self._rebuild_attachment_list()
@@ -7983,8 +8623,19 @@ class ConversationsPanel(wx.Panel):
                 media_path=path, media_type=media_type, caption=caption,
                 quoted=quoted,
             )
-            self.main_window.message_queue.enqueue(pm)
             self._register_virtual_msg(virtual_msg)
+
+            # Pre-cache the file under local_id BEFORE enqueueing the actual
+            # send: _mark_message_sent() renames the cache entry from
+            # local_id to the real WhatsApp id as soon as the send is
+            # confirmed, so the file must already exist under local_id by
+            # then, or that rename silently no-ops and the cache is never
+            # found under the real id afterwards.
+            def _cache_then_enqueue(pm=pm, local_id=local_id, path=path, media_type=media_type):
+                self._pre_cache_sent_media(local_id, path, media_type)
+                self.main_window.message_queue.enqueue(pm)
+
+            threading.Thread(target=_cache_then_enqueue, daemon=True).start()
 
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
@@ -8079,6 +8730,22 @@ class ConversationsPanel(wx.Panel):
                     if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
                         self.messages_list.SetItemText(i, self._render_message_line(m))
                         break
+                # Persist so populate_messages()/refresh_active_conversation_
+                # messages() (which rebuild _reaction_map purely from
+                # `records`) can recover this reaction after anything
+                # repopulates the message list — see
+                # _persist_reaction_record()'s own docstring for the bug
+                # this fixes (a reaction from someone else used to vanish
+                # the next time anything rebuilt the list, since it only
+                # ever touched the in-memory map). Not _track_last_reaction()
+                # or _schedule_set_chats() here — main.py's on_new_message()
+                # already calls both for every reaction from someone else.
+                own_key = msg.get("key", {}) or {}
+                self._persist_reaction_record(
+                    remote_jid, orig_id, reaction.get("key") or {}, sender_key,
+                    bool(own_key.get("fromMe")), emoji,
+                    participant=own_key.get("participant", ""),
+                )
             return  # Don't add reaction as a separate row
         # Avoid duplicates
         msg_id = msg.get("key", {}).get("id", "")
@@ -8091,37 +8758,64 @@ class ConversationsPanel(wx.Panel):
 
         # Batch all list operations so the screen reader receives a single
         # accessibility event rather than one per insertion/update.
+        from_me = bool(msg.get("key", {}).get("fromMe"))
         self.messages_list.Freeze()
         try:
-            # Manage unread separator
-            if self._unread_sep_idx == -1:
-                # No separator yet — insert one before this new message
-                sep_pos = len(self._sorted_messages)
-                sep = {"_type": "unread_separator", "count": 1}
-                self._sorted_messages.insert(sep_pos, sep)
-                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
-                self._unread_sep_idx = sep_pos
-                self._sep_from_open = False
-            elif self._sep_from_open:
-                # Separator was placed when the conversation was opened (old
-                # unread messages). Move it just before this new message and
-                # reset the count to 1.
-                old_idx = self._unread_sep_idx
-                self._sorted_messages.pop(old_idx)
-                self.messages_list.DeleteItem(old_idx)
-                sep_pos = len(self._sorted_messages)
-                sep = {"_type": "unread_separator", "count": 1}
-                self._sorted_messages.insert(sep_pos, sep)
-                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
-                self._unread_sep_idx = sep_pos
-                self._sep_from_open = False
-            else:
-                # Separator was placed by a previous live message — increment count
-                sep = self._sorted_messages[self._unread_sep_idx]
-                sep["count"] = sep.get("count", 0) + 1
-                self.messages_list.SetItemText(
-                    self._unread_sep_idx, self._render_separator(sep["count"])
-                )
+            # Manage unread separator — never for our OWN messages. This
+            # branch also runs for the WebSocket echo of a message we just
+            # sent (when it isn't matched to its optimistic pending row by
+            # main.py's by-type matching, e.g. sent from another linked
+            # device) — an own message is never "unread", the same
+            # principle first_unread_index() already applies when placing
+            # the separator on conversation open. Without this guard, that
+            # echo could insert/relocate a separator directly above the
+            # user's own just-sent message, which is what made Alt+2 ("jump
+            # to last message") land on a stale earlier separator/row
+            # instead of the message the user actually just sent.
+            if not from_me:
+                # A new live message always represents genuinely new unread
+                # content, even if the user had already reached the bottom
+                # (and thus marked-as-read) earlier in this same
+                # conversation session. Re-arm the latch so
+                # _on_message_focused() fires mark-as-read again once focus
+                # reaches/crosses this message.
+                self._unread_sep_marked_read = False
+                # _unread_sep_idx can go stale for a _sorted_messages that
+                # was emptied/rebuilt out from under it without resetting it
+                # back to -1 (e.g. "Limpar conversa" on the currently open
+                # chat) — every branch below that indexes/pops it with it
+                # must treat an out-of-range index the same as "no separator
+                # yet" instead of crashing (observed live: "IndexError: pop
+                # from empty list").
+                sep_idx_valid = 0 <= self._unread_sep_idx < len(self._sorted_messages)
+                if self._unread_sep_idx == -1 or not sep_idx_valid:
+                    # No separator yet — insert one before this new message
+                    sep_pos = len(self._sorted_messages)
+                    sep = {"_type": "unread_separator", "count": 1}
+                    self._sorted_messages.insert(sep_pos, sep)
+                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self._unread_sep_idx = sep_pos
+                    self._sep_from_open = False
+                elif self._sep_from_open:
+                    # Separator was placed when the conversation was opened (old
+                    # unread messages). Move it just before this new message and
+                    # reset the count to 1.
+                    old_idx = self._unread_sep_idx
+                    self._sorted_messages.pop(old_idx)
+                    self.messages_list.DeleteItem(old_idx)
+                    sep_pos = len(self._sorted_messages)
+                    sep = {"_type": "unread_separator", "count": 1}
+                    self._sorted_messages.insert(sep_pos, sep)
+                    self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                    self._unread_sep_idx = sep_pos
+                    self._sep_from_open = False
+                else:
+                    # Separator was placed by a previous live message — increment count
+                    sep = self._sorted_messages[self._unread_sep_idx]
+                    sep["count"] = sep.get("count", 0) + 1
+                    self.messages_list.SetItemText(
+                        self._unread_sep_idx, self._render_separator(sep["count"])
+                    )
 
             # Append the real message (focus must NOT move)
             self._sorted_messages.append(msg)

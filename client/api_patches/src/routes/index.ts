@@ -153,6 +153,12 @@ routes.post(
   MessageController.pinMessage
 );
 routes.post(
+  '/api/:session/mark-played',
+  verifyToken,
+  statusConnection,
+  MessageController.markPlayed
+);
+routes.post(
   '/api/:session/send-image',
   upload.single('file'),
   verifyToken,
@@ -214,6 +220,12 @@ routes.post(
   verifyToken,
   statusConnection,
   MessageController.sendStatusText
+);
+routes.post(
+  '/api/:session/send-status-voice-base64',
+  verifyToken,
+  statusConnection,
+  MessageController.sendStatusVoice64
 );
 routes.post(
   '/api/:session/send-link-preview',

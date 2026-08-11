@@ -572,6 +572,28 @@ class DatabaseManager:
     # ── Messages ────────────────────────────────────────────────────────────
 
 
+    @staticmethod
+    def _jid_variants(remote_jid: str) -> list[str]:
+        """*remote_jid* plus its @c.us/@s.whatsapp.net counterpart.
+
+        Everything is SUPPOSED to be normalized to @s.whatsapp.net before it
+        ever reaches the database (see main.py's extensive JID-normalization
+        docs — "the single most common bug source in this codebase"), so
+        under correct operation this is a one-element list and a no-op. It
+        exists as a defensive second line: if a message ever got inserted
+        under the legacy @c.us form by some path that skipped
+        normalization, a plain single-JID lookup would silently never find
+        it again (not an error — just messages that quietly never load).
+        Querying both forms costs nothing extra when only one is ever
+        actually populated (SQLite's `IN` short-circuits false-y branches
+        the same as `=`), and closes that failure mode either way.
+        """
+        if remote_jid.endswith("@s.whatsapp.net"):
+            return [remote_jid, remote_jid.replace("@s.whatsapp.net", "@c.us")]
+        if remote_jid.endswith("@c.us"):
+            return [remote_jid, remote_jid.replace("@c.us", "@s.whatsapp.net")]
+        return [remote_jid]
+
     async def get_messages(
         self, remote_jid: str, limit: int = 200, offset: int = 0
     ) -> list[dict]:
@@ -592,11 +614,7 @@ class DatabaseManager:
             Normalized message dicts (same shape as current messages.dat).
         """
         conn = await self._ensure_conn()
-        jids = [remote_jid]
-        if "@s.whatsapp.net" in remote_jid:
-            jids.append(remote_jid.replace("@s.whatsapp.net", "@c.us"))
-        elif "@c.us" in remote_jid:
-            jids.append(remote_jid.replace("@c.us", "@s.whatsapp.net"))
+        jids = self._jid_variants(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
             f"""SELECT message_json FROM messages
@@ -618,11 +636,7 @@ class DatabaseManager:
     ) -> list[dict]:
         """Return message dicts oldest-first (for initial chat load)."""
         conn = await self._ensure_conn()
-        jids = [remote_jid]
-        if "@s.whatsapp.net" in remote_jid:
-            jids.append(remote_jid.replace("@s.whatsapp.net", "@c.us"))
-        elif "@c.us" in remote_jid:
-            jids.append(remote_jid.replace("@c.us", "@s.whatsapp.net"))
+        jids = self._jid_variants(remote_jid)
         placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
             f"""SELECT message_json FROM messages
@@ -642,9 +656,11 @@ class DatabaseManager:
     async def get_message_count(self, remote_jid: str) -> int:
         """Return total message count for a chat."""
         conn = await self._ensure_conn()
+        jids = self._jid_variants(remote_jid)
+        placeholders = ",".join("?" for _ in jids)
         cursor = await conn.execute(
-            "SELECT COUNT(*) AS cnt FROM messages WHERE remote_jid=?",
-            (remote_jid,),
+            f"SELECT COUNT(*) AS cnt FROM messages WHERE remote_jid IN ({placeholders})",
+            tuple(jids),
         )
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
