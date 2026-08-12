@@ -32,6 +32,12 @@ from core.websocket_client import WebSocketClient
 class _Stub:
     on_wpp_qrcode      = WebSocketClient.on_wpp_qrcode
     on_wpp_phone_code  = WebSocketClient.on_wpp_phone_code
+    # Both handlers were later routed through this shared session guard. It has
+    # to be bound here or the AttributeError raised by calling it gets swallowed
+    # by each handler's own `except Exception`, and every test in this file
+    # fails as "the event was ignored" — the exact symptom the filter is
+    # supposed to produce only for *foreign* sessions.
+    _belongs_to_this_session = WebSocketClient._belongs_to_this_session
 
     def __init__(self, instance_name="abc123"):
         self.instance_name = instance_name

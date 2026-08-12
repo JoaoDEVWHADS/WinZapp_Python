@@ -545,9 +545,27 @@ class WebSocketClient:
 
     def on_qrcode_update(self, info):
         logging.debug(f"[WebSocketClient] event payload: {info}")
-        # Ignore QR code events if WhatsApp is already connected or paired
-        if getattr(self.main_window, "_wa_connected", False) or self.main_window.settings.get("privateinfo", {}).get("paired", False):
-            logging.info("[on_qrcode_update] Session already connected/paired — ignoring qrCode event.")
+        # A live connection makes any QR event stale by definition — but being
+        # *paired* deliberately does not, and testing it here disabled this
+        # method's whole reason for existing. `paired` is written once on the
+        # first successful pairing and only cleared on an explicit logout, so
+        # on every install that has ever paired it is permanently True: the
+        # early return fired unconditionally, and the proactive pairing dialog
+        # below could never open again.
+        #
+        # That dialog exists for exactly the case this guard excluded — the
+        # stored session can no longer be restored, so WPPConnect starts
+        # emitting fresh QR codes while `paired` is still True. Without it the
+        # user sits on "offline" with no explanation for minutes, until the
+        # much slower confirmed-logout path finally reacts. See
+        # tests/test_qrcode_auto_repair_dialog.py.
+        #
+        # Stale events from a previous session, which is what that guard was
+        # reaching for, are already filtered upstream by
+        # _belongs_to_this_session() and on_wpp_qrcode()'s own instance_name
+        # check — this method never needed to re-decide it.
+        if getattr(self.main_window, "_wa_connected", False):
+            logging.info("[on_qrcode_update] WhatsApp already connected — ignoring qrCode event.")
             return
         base64_img, pairing_code = self._extract_qr_payload(info)
         if not base64_img and not pairing_code:

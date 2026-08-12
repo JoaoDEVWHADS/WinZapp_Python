@@ -3333,9 +3333,34 @@ class MainWindow(wx.Frame):
         flush, stop Node, close DB) and _terminate_process() (the terminal
         os._exit). The IPC quit handler needs the teardown WITHOUT the immediate
         os._exit so it can flag `released` and reply to the initiating account
-        before the process vanishes (see _ipc_quit)."""
-        self._perform_shutdown()
-        self._terminate_process()
+        before the process vanishes (see _ipc_quit).
+
+        The teardown runs on a background thread, and that is not incidental:
+        _perform_shutdown() calls _stop_wpp_server(), which waits out the
+        graceful-stop budget (an HTTP request to close WhatsApp Web cleanly
+        rather than taskkill'ing Chrome and risking its LevelDB credentials).
+        Running that on the wx main thread stops the message loop from pumping,
+        and Windows tags any window whose loop goes quiet for a few seconds as
+        "Not Responding" — reported live as "Sair" leaving a frozen window on
+        screen for tens of seconds. The window is hidden first so quitting
+        still *looks* instant while the teardown finishes behind it.
+
+        _ipc_quit() keeps calling _perform_shutdown() directly: it is already
+        off the UI thread and needs the teardown to complete before it replies.
+        See tests/test_shutdown_wait.py.
+        """
+        try:
+            self.Hide()
+        except Exception:
+            pass
+
+        def _teardown():
+            try:
+                self._perform_shutdown()
+            finally:
+                self._terminate_process()
+
+        threading.Thread(target=_teardown, daemon=True, name="winzapp-shutdown").start()
 
     def _perform_shutdown(self):
         """Reversible shutdown: stop timers/threads, gracefully close the WPP
@@ -14127,15 +14152,25 @@ class MainWindow(wx.Frame):
             if incoming_t <= read_at_t:
                 unread_count = 0
             else:
-                # A genuinely new message arrived after the local
-                # read-ack. Ensure unread_count is at least 1 (or preserves local_new / unread_count)
+                # A genuinely new message arrived after the local read-ack.
+                # The server reports an ABSOLUTE total that can still be
+                # counting messages already read locally, so it is clamped
+                # DOWN to what we counted ourselves since the read — min(),
+                # not max(). Flipping this to max() reinstated the exact bug
+                # this whole path exists to prevent: one new message with a
+                # stale server total of 4 showed a badge of 4 instead of 1.
+                #
+                # The zero case is handled first rather than in an elif, so it
+                # survives whether or not local tracking has an entry: a
+                # server-sent 0 must never wipe a badge for messages that
+                # arrived after the read-ack (1:1 WA-JS
+                # chat.unread_count_changed does exactly that), and with
+                # local_new set the old elif could never be reached at all.
                 local_new = getattr(self, "_new_since_read", {}).get(normalized)
-                if local_new:
-                    unread_count = max(unread_count, local_new)
-                elif unread_count == 0 and old_count > 0:
-                    # Prevent 1:1 WA-JS chat.unread_count_changed from force-zeroing a chat
-                    # when new messages arrived after read_at_t.
-                    unread_count = old_count
+                if unread_count == 0 and old_count > 0:
+                    unread_count = local_new or old_count
+                elif local_new:
+                    unread_count = min(unread_count, local_new)
                 self._locally_read_at.pop(normalized, None)
                 if hasattr(self, "_new_since_read"):
                     self._new_since_read.pop(normalized, None)

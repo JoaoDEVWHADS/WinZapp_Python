@@ -98,14 +98,47 @@ class TestStaleServerCountAfterLocalRead:
 
         assert stub.chats[JID]["unreadCount"] == 3
 
-    def test_currently_open_conversation_always_clears_to_zero(self):
-        class _CP:
-            _last_open_jid = JID
+class _CP:
+    """Conversation panel stub.
 
+    The open-conversation check moved from `_last_open_jid` to the panel's live
+    `conversation` dict: the old field was never cleared on close, so a chat the
+    user had already left kept counting as open forever and every chats-update
+    for it was force-zeroed.
+    """
+
+    def __init__(self, jid=None):
+        self.conversation = {"remoteJid": jid} if jid else None
+
+
+class TestCurrentlyOpenConversation:
+    def test_an_open_conversation_with_nothing_new_clears_to_zero(self):
         stub = _Stub(_chat(t=1000))
-        stub.conversations_panel = _CP()
-        stub._new_since_read[JID] = 5
+        stub.conversations_panel = _CP(JID)
 
         stub.on_chat_unread_update(JID, 5)
 
         assert stub.chats[JID]["unreadCount"] == 0
+
+    def test_an_open_conversation_keeps_what_arrived_while_hidden(self):
+        """Deliberately not "open always means zero" any more: messages that
+        landed while the window was minimized are tracked in _new_since_read
+        and stay counted, clamped down to that locally-known number."""
+        stub = _Stub(_chat(t=1000))
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 2
+
+        stub.on_chat_unread_update(JID, 5)
+
+        assert stub.chats[JID]["unreadCount"] == 2
+
+    def test_a_closed_panel_is_not_treated_as_the_open_chat(self):
+        """The regression the move away from _last_open_jid fixed."""
+        stub = _Stub(_chat(t=2000))
+        stub.conversations_panel = _CP(None)
+        stub._locally_read_at[JID] = 1000
+        stub._new_since_read[JID] = 3
+
+        stub.on_chat_unread_update(JID, 3)
+
+        assert stub.chats[JID]["unreadCount"] == 3
