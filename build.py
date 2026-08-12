@@ -306,6 +306,7 @@ API_CUSTOM_SRC_FILES = [
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/controller/statusController.ts",
     "dist/middleware/auth.js",
 ]
 

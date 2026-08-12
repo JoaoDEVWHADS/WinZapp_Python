@@ -162,6 +162,7 @@ _CUSTOM_SRC_FILES = [
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/controller/statusController.ts",
     "src/routes/index.ts",
     "dist/middleware/auth.js",
     "decrypt.js",
