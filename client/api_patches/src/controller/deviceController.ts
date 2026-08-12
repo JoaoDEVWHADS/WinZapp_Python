@@ -868,11 +868,11 @@ export async function deleteMessage(req: Request, res: Response) {
       deleteMediaInDevice
     );
     if (result) {
-      res
+      return res
         .status(200)
         .json({ status: 'success', response: { message: 'Message deleted' } });
     }
-    res.status(401).json({
+    return res.status(401).json({
       status: 'error',
       response: { message: 'Error unknown on delete message' },
     });
