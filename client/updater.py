@@ -604,7 +604,12 @@ class UpdateDialog(wx.Dialog):
 
         self._yes_btn.Bind(wx.EVT_BUTTON, self._on_yes)
         self._no_btn.Bind(wx.EVT_BUTTON,  self._on_no)
-        self._yes_btn.SetDefault()
+        # Not is the default (Enter-activated) button on purpose: this dialog
+        # can pop up while the user is typing a message, and Space is how
+        # NVDA/JAWS/Narrator users activate the focused button — landing on
+        # Yes by default risked installing an update from an accidental
+        # keystroke instead of a deliberate choice.
+        self._no_btn.SetDefault()
 
     def _on_yes(self, event):
         self.EndModal(wx.ID_YES)
@@ -955,10 +960,14 @@ class WppUpdateChecker:
 
     def _prompt_update(self, installed: str, remote_version: str, tag: str):
         i18n = self._mw.i18n
+        # wx.NO_DEFAULT: this can pop up while the user is typing a message,
+        # and Space is how NVDA/JAWS/Narrator users activate the focused
+        # button — defaulting to Yes risked reinstalling the API session
+        # from an accidental keystroke instead of a deliberate choice.
         if wx.MessageBox(
             i18n.t("wpp_update_available_msg").format(current=installed, new=remote_version),
             i18n.t("wpp_update_available_title"),
-            wx.YES_NO | wx.ICON_INFORMATION,
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_INFORMATION,
             self._mw,
         ) == wx.YES:
             self._mw._update_wpp_server(tag)
