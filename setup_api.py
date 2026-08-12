@@ -7,8 +7,12 @@ out a specific tag. After cloning, follow the build instructions printed at
 the end to compile the API before running build.py.
 
 Configuration (via .env at the project root):
-  WPPCONNECT_TAG_VERSION  — git tag to check out after cloning.
-                            Leave unset or empty to keep the default branch (main).
+  WPPCONNECT_TAG_VERSION  — git tag to pin to. Leave unset or empty to
+                            auto-track the latest stable (non-prerelease)
+                            release tag instead — this script fetches tags
+                            and updates client/api/ to it on every run, even
+                            when client/api/ already exists from a previous
+                            run.
 
 Usage:
   venv\\Scripts\\python.exe setup_api.py
@@ -16,6 +20,7 @@ Usage:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -111,6 +116,45 @@ def _run(cmd: list, cwd: str = None):
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         sys.exit(result.returncode)
+
+
+def _latest_stable_tag(cwd: str) -> str:
+    """Return the highest vX.Y.Z release tag reachable from origin, or "" if
+    none is found (e.g. offline, or no tags match the vX.Y.Z pattern —
+    pre-release tags like v2.10.4-rc.1 are deliberately excluded so this
+    never auto-updates a dev/CI setup onto an unstable release).
+    """
+    result = subprocess.run(
+        ["git", "fetch", "--tags", "--force"], cwd=cwd,
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"[WARNING] git fetch --tags failed — skipping auto-update check.\n{result.stderr}")
+        return ""
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*"], cwd=cwd, capture_output=True, text=True
+    )
+    candidates = []
+    for line in result.stdout.splitlines():
+        tag = line.strip()
+        m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+        if m:
+            candidates.append((tuple(int(x) for x in m.groups()), tag))
+    if not candidates:
+        return ""
+    candidates.sort()
+    return candidates[-1][1]
+
+
+def _current_tag(cwd: str) -> str:
+    """Return the tag the working tree is currently checked out at exactly,
+    or "" if HEAD isn't exactly on a tag (detached at an arbitrary commit,
+    or on a branch)."""
+    result = subprocess.run(
+        ["git", "describe", "--tags", "--exact-match"], cwd=cwd,
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 # The only dependency entries WinZapp actually overrides on top of whatever
@@ -505,7 +549,7 @@ def main():
             print(f"[INFO] client/api_patches/{rel_path} not found — stashed current client/api/{rel_path} instead")
 
     if already_cloned:
-        print(f"[INFO] client/api/ already exists — skipping clone.")
+        print(f"[INFO] client/api/ already exists — skipping clone (checking for updates below).")
     else:
         print(f"[INFO] Cloning WPPConnect Server …")
         import shutil
@@ -538,10 +582,27 @@ def main():
                 print(f"[WARNING] Failed to restore node_modules: {e}")
 
     if tag:
-        print(f"[INFO] Checking out tag: {tag}")
-        _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
+        current = _current_tag(CLIENT_API_DIR)
+        if current == tag:
+            print(f"[INFO] Already pinned to {tag}.")
+        else:
+            print(f"[INFO] WPPCONNECT_TAG_VERSION pinned — checking out {tag}.")
+            _run(["git", "fetch", "--tags", "--force"], cwd=CLIENT_API_DIR)
+            _run(["git", "checkout", "-f", tag], cwd=CLIENT_API_DIR)
     else:
-        print("[INFO] WPPCONNECT_TAG_VERSION not set — using default branch (main).")
+        latest = _latest_stable_tag(CLIENT_API_DIR)
+        if not latest:
+            print("[INFO] No stable release tag found (offline or no tags) — using default branch (main).")
+        else:
+            current = _current_tag(CLIENT_API_DIR)
+            if current == latest:
+                print(f"[INFO] Already at the latest stable release ({latest}).")
+            else:
+                if current:
+                    print(f"[INFO] Newer WPPConnect Server release found: {current} -> {latest}. Updating...")
+                else:
+                    print(f"[INFO] No WPPCONNECT_TAG_VERSION pinned — using latest stable release {latest}.")
+                _run(["git", "checkout", "-f", latest], cwd=CLIENT_API_DIR)
 
     # Single restore point, deliberately outside every branch above: the clone,
     # the tag checkout (`git checkout -f` overwrites the patched files with
