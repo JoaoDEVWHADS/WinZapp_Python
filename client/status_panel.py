@@ -69,7 +69,21 @@ def _status_content_label(msg_type: str, msg_obj: dict, i18n) -> str:
         return i18n.t("sticker")
     if msg_type == "contactMessage":
         contact = msg_obj.get("contactMessage") or {}
-        return i18n.t("contact_message").format(name=contact.get("displayName") or "")
+        name  = contact.get("displayName") or ""
+        vcard = contact.get("vcard") or ""
+        # Same vCard-leak bug as MainWindow._get_message_content /
+        # ConversationsPanel._get_message_content (issue #22): displayName
+        # is sometimes empty, or is itself the raw vCard blob — parse the
+        # FN: line instead of ever putting BEGIN:VCARD...END:VCARD on screen.
+        if not name or "BEGIN:VCARD" in name:
+            vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
+            parsed_name = ""
+            for line in vcard_to_parse.splitlines():
+                if line.startswith("FN:"):
+                    parsed_name = line[3:].strip()
+                    break
+            name = parsed_name or i18n.t("unknown_contact")
+        return i18n.t("contact_message").format(name=name)
     return i18n.t("notif_unsupported")
 
 
