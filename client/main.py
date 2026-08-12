@@ -15345,20 +15345,26 @@ class MainWindow(wx.Frame):
         return local.split(":", 1)[0]
 
     def is_contact_blocked(self, jid: str) -> bool:
+        # getattr, not a bare attribute access: add_chats_to_ui() can render
+        # a cached/offline chat list before prepare_sync() has reached the
+        # point where it restores _blocked_contacts from the database (e.g.
+        # a re-pairing flow after a stale token), which crashed here with
+        # AttributeError and left the chat list stuck empty.
+        blocked_contacts = getattr(self, "_blocked_contacts", None) or set()
         digits = self._bare_phone_digits(jid)
         if not digits:
             return False
-        if digits in self._blocked_contacts:
+        if digits in blocked_contacts:
             return True
         # Brazilian mobile 8/9-digit interchangeable form — a contact can be
         # blocked under either digit count depending on how WhatsApp/the
         # phone reported it, same tolerance _get_contact_tolerant() applies.
         if digits.startswith("55"):
             if len(digits) == 13 and digits[4] == "9":
-                if (digits[:4] + digits[5:]) in self._blocked_contacts:
+                if (digits[:4] + digits[5:]) in blocked_contacts:
                     return True
             elif len(digits) == 12:
-                if (digits[:4] + "9" + digits[4:]) in self._blocked_contacts:
+                if (digits[:4] + "9" + digits[4:]) in blocked_contacts:
                     return True
         return False
 
