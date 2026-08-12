@@ -756,6 +756,8 @@ class WebSocketClient:
         Handle group metadata updates from WPPConnect.
         """
         try:
+            if not isinstance(info, dict) or not self._belongs_to_this_session(info):
+                return
             updates = info.get("data", [])
             if not isinstance(updates, list):
                 updates = [updates]
