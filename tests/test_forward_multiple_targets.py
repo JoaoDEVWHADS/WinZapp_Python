@@ -10,6 +10,11 @@ each target is forwarded independently so one bad JID doesn't abort
 delivery to the rest, and the caller gets back exactly which targets (by
 display name) failed, if any.
 
+The method later grew a `keep_caption` path (forwarding a media message by
+re-uploading it through resend_media_message_with_caption instead of
+WPPConnect's native forward, which drops the caption) — those cases are
+covered separately below.
+
 ConversationsPanel is a wx.Panel and can't be instantiated without a
 running wx.App, so the method under test is bound onto a plain stub —
 same approach as tests/test_conversation_video_playback.py.
@@ -22,9 +27,14 @@ class _FakeMainWindow:
     def __init__(self, failing_jids=None):
         self._failing_jids = set(failing_jids or ())
         self.calls = []
+        self.resend_calls = []
 
     def forward_message(self, source_jid, msg_key, target_jid):
         self.calls.append((source_jid, msg_key, target_jid))
+        return target_jid not in self._failing_jids
+
+    def resend_media_message_with_caption(self, msg, target_jid):
+        self.resend_calls.append((msg, target_jid))
         return target_jid not in self._failing_jids
 
 
@@ -36,6 +46,7 @@ class _Stub:
 
 
 MSG_KEY = {"id": "ABC123", "remoteJid": "source@g.us"}
+MSG = {"key": MSG_KEY, "message": {}}
 
 
 class TestForwardToMultipleTargets:
@@ -43,7 +54,7 @@ class TestForwardToMultipleTargets:
         stub = _Stub()
         targets = [("a@s.whatsapp.net", "Alice"), ("b@s.whatsapp.net", "Bob")]
 
-        failed = stub._forward_message_to_targets("source@g.us", MSG_KEY, targets)
+        failed = stub._forward_message_to_targets(MSG, targets)
 
         assert failed == []
         assert stub.main_window.calls == [
@@ -59,7 +70,7 @@ class TestForwardToMultipleTargets:
             ("c@s.whatsapp.net", "Carol"),
         ]
 
-        failed = stub._forward_message_to_targets("source@g.us", MSG_KEY, targets)
+        failed = stub._forward_message_to_targets(MSG, targets)
 
         assert failed == ["Bob"]
         # Carol must still have been attempted despite Bob's failure.
@@ -73,14 +84,41 @@ class TestForwardToMultipleTargets:
             ("c@s.whatsapp.net", "Carol"),
         ]
 
-        failed = stub._forward_message_to_targets("source@g.us", MSG_KEY, targets)
+        failed = stub._forward_message_to_targets(MSG, targets)
 
         assert failed == ["Alice", "Carol"]
 
     def test_no_targets_is_a_no_op(self):
         stub = _Stub()
 
-        failed = stub._forward_message_to_targets("source@g.us", MSG_KEY, [])
+        failed = stub._forward_message_to_targets(MSG, [])
 
         assert failed == []
         assert stub.main_window.calls == []
+        assert stub.main_window.resend_calls == []
+
+    def test_keep_caption_uses_resend_instead_of_native_forward(self):
+        stub = _Stub()
+        targets = [("a@s.whatsapp.net", "Alice"), ("b@s.whatsapp.net", "Bob")]
+
+        failed = stub._forward_message_to_targets(MSG, targets, keep_caption=True)
+
+        assert failed == []
+        assert stub.main_window.calls == []
+        assert stub.main_window.resend_calls == [
+            (MSG, "a@s.whatsapp.net"),
+            (MSG, "b@s.whatsapp.net"),
+        ]
+
+    def test_keep_caption_one_failure_does_not_abort_the_rest(self):
+        stub = _Stub(failing_jids={"b@s.whatsapp.net"})
+        targets = [
+            ("a@s.whatsapp.net", "Alice"),
+            ("b@s.whatsapp.net", "Bob"),
+            ("c@s.whatsapp.net", "Carol"),
+        ]
+
+        failed = stub._forward_message_to_targets(MSG, targets, keep_caption=True)
+
+        assert failed == ["Bob"]
+        assert stub.main_window.resend_calls[-1] == (MSG, "c@s.whatsapp.net")

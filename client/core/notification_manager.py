@@ -258,14 +258,14 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
             if parsed_name:
                 name = parsed_name
             else:
-                name = "Desconhecido"
+                name = i18n.t("unknown_contact")
 
         return i18n.t("contact_message").format(name=name)
 
     if msg_type == "contactsArrayMessage":
         arr = msg_obj.get("contactsArrayMessage") or {}
         contacts = arr.get("contacts") or []
-        return i18n.t("contact_message").format(name=f"{len(contacts)} contatos")
+        return i18n.t("contacts_count").format(count=len(contacts))
 
     # ── Location ──────────────────────────────────────────────────────────────
     if msg_type in ("locationMessage", "liveLocationMessage"):

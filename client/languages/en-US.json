@@ -224,6 +224,7 @@
     "loading": "Loading...",
     "media_count": "{count} media file(s)",
     "contact_message": "Contact: {name}",
+    "contacts_count": "{count} contacts",
     "attachment_sending": "sending...",
     "files_selected": "{count} file(s) selected",
     "delete_for_me": "Delete for me",

@@ -16595,14 +16595,23 @@ class MainWindow(wx.Frame):
                 encrypted_data = f.read()
             decrypted_data = decrypt_bytes(encrypted_data, self.key)
             
+            import mimetypes as _mimetypes
             ext = ".bin"
-            if media_type == "image": ext = ".jpg"
-            elif media_type == "video": ext = ".mp4"
-            elif media_type == "document":
+            if media_type == "document":
                 fname = msg_inner.get("documentMessage", {}).get("fileName", "")
                 if fname:
                     _, ext2 = os.path.splitext(fname)
-                    if ext2: ext = ext2
+                    if ext2:
+                        ext = ext2
+            else:
+                mime = msg_inner.get(f"{media_type}Message", {}).get("mimetype", "")
+                guessed = _mimetypes.guess_extension(mime.split(";")[0].strip()) if mime else None
+                if guessed:
+                    ext = guessed
+                elif media_type == "image":
+                    ext = ".jpg"
+                elif media_type == "video":
+                    ext = ".mp4"
             
             temp_path = data_path("media", f"temp_{msg_id}{ext}")
             with open(temp_path, "wb") as f:
@@ -17033,13 +17042,13 @@ class MainWindow(wx.Frame):
                 if parsed_name:
                     name = parsed_name
                 else:
-                    name = "Desconhecido"
+                    name = i18n.t("unknown_contact")
 
             content = i18n.t("contact_message").format(name=name)
         elif msg_type == "contactsArrayMessage":
             arr = msg_obj.get("contactsArrayMessage") or {}
             contacts = arr.get("contacts") or []
-            content = i18n.t("contact_message").format(name=f"{len(contacts)} contatos")
+            content = i18n.t("contacts_count").format(count=len(contacts))
         elif msg_type == "locationMessage":
             content = i18n.t("notif_location")
         elif msg_type == "pollCreationMessage":

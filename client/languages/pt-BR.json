@@ -224,6 +224,7 @@
     "loading": "Carregando...",
     "media_count": "{count} mídia(s)",
     "contact_message": "Contato: {name}",
+    "contacts_count": "{count} contatos",
     "attachment_sending": "enviando...",
     "files_selected": "{count} arquivo(s) selecionado(s)",
     "delete_for_me": "Apagar para mim",
