@@ -3945,6 +3945,29 @@ class ConversationsPanel(wx.Panel):
         except (ValueError, TypeError):
             step = 15
 
+        # Shift+arrow/PageUp/PageDown/Home/End seek the currently playing
+        # voice message or video instead of moving list focus (issue #17).
+        # Checked before the plain (unmodified) equivalents below, since
+        # Home/PageUp/PageDown already have their own unmodified meaning
+        # here (jump N messages / load older history).
+        if event.ShiftDown() and key in (
+            wx.WXK_LEFT, wx.WXK_NUMPAD_LEFT, wx.WXK_RIGHT, wx.WXK_NUMPAD_RIGHT,
+            wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN,
+            wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END,
+        ):
+            if key in (wx.WXK_LEFT, wx.WXK_NUMPAD_LEFT):
+                self.seek_active_playback_by(-5)
+            elif key in (wx.WXK_RIGHT, wx.WXK_NUMPAD_RIGHT):
+                self.seek_active_playback_by(5)
+            elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
+                self.seek_active_playback_by(-60)
+            elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
+                self.seek_active_playback_by(60)
+            elif key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME):
+                self.seek_active_playback_to_edge(to_end=False)
+            elif key in (wx.WXK_END, wx.WXK_NUMPAD_END):
+                self.seek_active_playback_to_edge(to_end=True)
+            return
         if key == wx.WXK_SPACE:
             if idx >= 0:
                 self._do_activate_message(idx)
@@ -5031,11 +5054,86 @@ class ConversationsPanel(wx.Panel):
         if self._audio_stream is None:
             return
         try:
+            # Seek on the same control that's actually playing and that
+            # on_audio_timer() reads position back from — when Tempo FX is
+            # active, _audio_stream is a decode-only source with no direct
+            # audio output; playback runs through _audio_tempo_ctrl instead.
+            # Setting position on the raw decode stream still "worked" in
+            # that it eventually reached the new position, but only once
+            # Tempo's own already-decoded-ahead buffer finished draining
+            # first — reported live as audio taking a long time to resume
+            # after a slider seek.
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
             val   = self.audio_slider.GetValue()
-            total = self._audio_stream.get_length()
-            self._audio_stream.set_position(int(val / 1000 * total))
+            total = _ctrl.get_length()
+            _ctrl.set_position(int(val / 1000 * total))
         except Exception:
             pass
+
+    def _has_active_audio_or_video(self) -> bool:
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            return True
+        return self._audio_stream is not None
+
+    def seek_active_playback_by(self, delta_seconds: float) -> bool:
+        """Seek the currently playing voice message or video by *delta_seconds*
+        (negative = backward), clamped to [0, length]. Returns False when
+        nothing is playing, so callers (keyboard shortcuts) can fall through
+        to their normal behavior instead. Issue #17."""
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            try:
+                total = self._video_player.get_length()
+                if total <= 0:
+                    return False
+                pos = self._video_player.get_position()
+                delta_bytes = self._video_player.seconds_to_bytes(abs(delta_seconds))
+                if delta_seconds < 0:
+                    delta_bytes = -delta_bytes
+                new_pos = max(0, min(total, pos + delta_bytes))
+                self._video_player.set_position(new_pos)
+                return True
+            except Exception:
+                return False
+        if self._audio_stream is None:
+            return False
+        try:
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            total = _ctrl.get_length()
+            if total <= 0:
+                return False
+            pos = _ctrl.get_position()
+            delta_bytes = _ctrl.seconds_to_bytes(abs(delta_seconds))
+            if delta_seconds < 0:
+                delta_bytes = -delta_bytes
+            new_pos = max(0, min(total, pos + delta_bytes))
+            _ctrl.set_position(new_pos)
+            return True
+        except Exception:
+            return False
+
+    def seek_active_playback_to_edge(self, to_end: bool) -> bool:
+        """Seek the currently playing voice message or video to its very
+        start (to_end=False) or end (to_end=True). Issue #17."""
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            try:
+                total = self._video_player.get_length()
+                if total <= 0:
+                    return False
+                self._video_player.set_position(total if to_end else 0)
+                return True
+            except Exception:
+                return False
+        if self._audio_stream is None:
+            return False
+        try:
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            total = _ctrl.get_length()
+            if total <= 0:
+                return False
+            _ctrl.set_position(total if to_end else 0)
+            return True
+        except Exception:
+            return False
 
     def _show_audio_controls(self):
         self.audio_speed_btn.Show()
