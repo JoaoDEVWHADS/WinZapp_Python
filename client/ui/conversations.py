@@ -3343,13 +3343,24 @@ class ConversationsPanel(wx.Panel):
             self._update_mention_suggestions(self._mention_query)
 
     def _on_message_field_key_down(self, event):
-        """↓ moves focus to the mention list when suggestions are visible."""
+        """↓ moves focus to the mention list when suggestions are visible.
+        Shift+Enter inserts a newline instead of sending — TE_PROCESS_ENTER
+        makes plain Enter fire EVT_TEXT_ENTER (send) on this control, and
+        wx's native multiline edit control only inserts a literal newline on
+        Ctrl+Enter, with no Shift+Enter equivalent of its own (issue #16)."""
         kc = event.GetKeyCode()
         if kc == wx.WXK_DOWN and self._mention_panel.IsShown():
             if self._mention_list.GetCount() > 0:
                 self._mention_list.SetFocus()
                 self._mention_list.SetSelection(0)
             return  # consume — don't let the field handle ↓
+        if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and event.ShiftDown():
+            pos = self.message_field.GetInsertionPoint()
+            text = self.message_field.GetValue()
+            self.message_field.ChangeValue(text[:pos] + "\n" + text[pos:])
+            self.message_field.SetInsertionPoint(pos + 1)
+            self.on_change_message_field(None)
+            return  # consume — don't send and don't double-insert
         event.Skip()
 
     def _on_mention_list_key_down(self, event):
