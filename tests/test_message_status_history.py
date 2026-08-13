@@ -18,7 +18,23 @@ tests/test_message_bookmarks.py.
 
 from datetime import datetime
 
+import pytest
+
 from ui.conversations import ConversationsPanel
+
+
+@pytest.fixture(autouse=True)
+def _fixed_locale_format(monkeypatch):
+    """_format_date() resolves the OS's actual Windows regional format via
+    core.locale_format.get_time_format/get_datetime_format, so on a real
+    Windows runner it can render 12-hour "02:29 PM" instead of the language
+    file's own %H:%M fallback — making the exact rendered string depend on
+    whatever locale happens to be configured on the machine running the
+    suite. Pin both to their fallback argument (the CI-runner-independent
+    behavior _format_date already has off-Windows) so this test's expected
+    strings are deterministic everywhere."""
+    monkeypatch.setattr("ui.conversations.get_time_format", lambda fallback: fallback)
+    monkeypatch.setattr("ui.conversations.get_datetime_format", lambda fallback: fallback)
 
 
 class _FakeI18n:
