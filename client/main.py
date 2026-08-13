@@ -1469,7 +1469,7 @@ class MainWindow(wx.Frame):
                     self.Bind(wx.EVT_MENU,
                               lambda e, a=action: self._on_accounts_menu(a), id=int(wid))
                 menubar.Append(accounts_menu, self.i18n.t("acc_menu_title"))
-                # Ctrl+Shift+1..9 → switch to the n-th paired account. Menu-label
+                # Ctrl+Alt+1..9 → switch to the n-th paired account. Menu-label
                 # accelerators alone don't fire reliably here: focused child
                 # panels (conversation list, message field, …) install their own
                 # wx.AcceleratorTable, which swallows the keystroke before the
@@ -1493,7 +1493,7 @@ class MainWindow(wx.Frame):
         # Frame-level Ctrl+0..9 → jump to an existing message bookmark,
         # regardless of which control currently has focus — bound
         # unconditionally (not just in multi-account context, unlike the
-        # Ctrl+Shift+1..9 account-switch hook above). Jumping to a bookmark
+        # Ctrl+Alt+1..9 account-switch hook above). Jumping to a bookmark
         # can open a DIFFERENT conversation entirely (see
         # ConversationsPanel._on_bookmark_set_or_jump), so it must not
         # require the messages list to already be focused. Setting a NEW
@@ -1534,7 +1534,17 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _on_account_hotkey_char(self, event):
-        """Frame-level Ctrl+Shift+1..9 → switch to the n-th paired account.
+        """Frame-level Ctrl+Alt+1..9 → switch to the n-th paired account.
+
+        Was Ctrl+Shift+1..9 — moved to Ctrl+Alt to stop colliding with the
+        pre-existing, non-multi-account message-bookmark-removal shortcut
+        (ConversationsPanel._on_bookmark_remove, Ctrl+Shift+0..9): this
+        handler's EVT_CHAR_HOOK intercepts its combo before it can ever
+        reach that panel's own AcceleratorTable, so sharing Ctrl+Shift+
+        <digit> silently broke bookmark removal for any account count below
+        9 (i.e. almost every install). Ctrl+Alt was deliberately avoided at
+        first because AltGr reports as Ctrl+Alt on a PL keyboard — kept as
+        a known tradeoff by deliberate choice, not an oversight.
 
         Bound via EVT_CHAR_HOOK so it fires no matter which child control holds
         focus (child panels' own AcceleratorTables would otherwise swallow the
@@ -1542,7 +1552,7 @@ class MainWindow(wx.Frame):
         through untouched with event.Skip().
         """
         try:
-            if (event.GetModifiers() == (wx.MOD_CONTROL | wx.MOD_SHIFT)):
+            if (event.GetModifiers() == (wx.MOD_CONTROL | wx.MOD_ALT)):
                 code = event.GetKeyCode()
                 if ord("1") <= code <= ord("9"):
                     slot = code - ord("0")
@@ -1554,12 +1564,7 @@ class MainWindow(wx.Frame):
                     # No paired account at this slot (e.g. a single-account
                     # install, or fewer than <slot> paired accounts) — there
                     # is nothing to switch to, so this combo isn't actually
-                    # ours. Falling through to event.Skip() below used to be
-                    # unreachable here: the unconditional `return` above ate
-                    # every Ctrl+Shift+1..9 regardless of whether a target
-                    # existed, which silently broke the unrelated per-
-                    # conversation message bookmarks' Ctrl+Shift+<digit>
-                    # (remove bookmark) for any account count below 9.
+                    # ours; fall through to event.Skip() below.
         except Exception:
             logging.exception("[accounts] hotkey char handler failed")
         event.Skip()
@@ -3230,7 +3235,7 @@ class MainWindow(wx.Frame):
             # process paired / changed state after this menu was built (or its
             # process was still coming up), this window's menu goes stale and an
             # account "disappears" from it until 'Switch account' is opened.
-            # Rebuilding on focus-gain keeps the menu (and the Ctrl+Shift+1..9
+            # Rebuilding on focus-gain keeps the menu (and the Ctrl+Alt+1..9
             # hotkey slot map, rebuilt inside _build_menubar) in sync with the
             # live registry — this is the moment the user returns to the window.
             self._refresh_accounts_menu_if_stale()

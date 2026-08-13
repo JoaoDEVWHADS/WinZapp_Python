@@ -22,7 +22,15 @@ import logging
 
 # ── pure helpers (unit-tested, no wx) ────────────────────────────────────────
 
-# Ctrl+Shift+1..9 (NOT Ctrl+Alt — that clashes with AltGr on a PL keyboard).
+# Ctrl+Alt+1..9. Was Ctrl+Shift+1..9 (chosen specifically to avoid Ctrl+Alt,
+# which AltGr reports as on a PL keyboard) until that combo turned out to
+# collide with the pre-existing, non-multi-account message-bookmark-removal
+# shortcut (ConversationsPanel._on_bookmark_remove, Ctrl+Shift+0..9) — the
+# frame-level EVT_CHAR_HOOK this feature needs to work from anywhere in the
+# window (see _on_account_hotkey_char in main.py) intercepts the combo
+# before it can ever reach that panel's own AcceleratorTable, silently
+# breaking bookmark removal for any account count below 9. Moved to
+# Ctrl+Alt+1..9 by deliberate choice despite the AltGr caveat above.
 _MAX_HOTKEY_SLOTS = 9
 
 
@@ -310,7 +318,7 @@ def build_accounts_menu(menu, accounts, current_account_id, i18n, id_factory):
     id_map: dict = {}
     for slot, acc in accelerator_slots(switchable_accounts(accounts)):
         item_id = id_factory()
-        label = f"&{slot} {acc.get('name', acc['id'])}\tCtrl+Shift+{slot}"
+        label = f"&{slot} {acc.get('name', acc['id'])}\tCtrl+Alt+{slot}"
         item = menu.AppendRadioItem(item_id, label)
         if acc.get("id") == current_account_id:
             item.Check(True)
