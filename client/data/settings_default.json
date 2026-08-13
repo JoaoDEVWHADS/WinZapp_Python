@@ -41,7 +41,9 @@
     },
     "speech_content": {
         "announce_typing": true,
-        "announce_recording": true
+        "announce_recording": true,
+        "speak_active_conv_messages": true,
+        "speak_other_conv_messages": true
     },
     "active_sound_pack": "default",
     "alert_tones": {
