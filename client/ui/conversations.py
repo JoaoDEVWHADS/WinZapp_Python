@@ -154,13 +154,14 @@ class ConversationsPanel(wx.Panel):
         self._editing_message_index: int = -1          # list row index
 
         # ── Message bookmarks (Ctrl+0..9 / Ctrl+Shift+0..9) ──────────────────
-        # digit (0-9) -> stable message identifier (key.id, or _local_id for a
-        # still-pending outgoing message). Identifiers, not raw list indices,
-        # so a bookmark keeps pointing at the same message even if the list
-        # is rebuilt/reordered (new message arriving, pagination, etc.)
-        # between setting it and jumping to it. Scoped to the open
-        # conversation only — cleared on close_conversation() and on every
-        # conversation switch in navigate_to_conversation(), never persisted.
+        # digit (0-9) -> (conversation JID, stable message identifier). The
+        # message id, not a raw list index, so a bookmark keeps pointing at
+        # the same message even if the list is rebuilt/reordered (new
+        # message arriving, pagination, etc.) between setting it and jumping
+        # to it. Bookmarks now span conversations rather than being scoped to
+        # the one they were set in: jumping to one set in a different
+        # conversation than the one currently open navigates there first.
+        # Not persisted across restarts.
         self._msg_bookmarks: dict = {}
 
         # ── Media download progress ─────────────────────────────────────────
@@ -920,7 +921,8 @@ class ConversationsPanel(wx.Panel):
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
-        self._msg_bookmarks = {}  # bookmarks are scoped to the conversation being left
+        # _msg_bookmarks is intentionally NOT reset here — bookmarks now span
+        # conversations (see the declaration in __init__).
         self._first_unread_msg_id = None
         self._first_unread_count = 0
         self._unread_sep_marked_read = False
@@ -2199,7 +2201,7 @@ class ConversationsPanel(wx.Panel):
             self._search_panel.Hide()
             self._search_open_btn.Show()
             self._search_field.SetValue("")
-        self._msg_bookmarks = {}
+        # _msg_bookmarks is intentionally NOT reset here — see __init__.
         closed_jid = self._last_open_jid
         self.conversation = None
         self.conversation_panel.Hide()
@@ -8033,9 +8035,10 @@ class ConversationsPanel(wx.Panel):
         # fires when Focus() is called above — no need to call it here again.
 
     # ── Ctrl+0..9 / Ctrl+Shift+0..9: message bookmarks ──────────────────────
-    # Scoped to the currently open conversation only (see _msg_bookmarks'
-    # declaration in __init__): cleared on close_conversation() and on every
-    # conversation switch in navigate_to_conversation().
+    # Bookmarks span conversations (see _msg_bookmarks' declaration in
+    # __init__): jumping to one set in a conversation other than the one
+    # currently open navigates there first, then focuses the bookmarked
+    # message — never cleared by closing/switching conversations.
 
     def _find_index_by_msg_id(self, msg_id: str) -> int:
         """Return the current _sorted_messages index for a message ID, or -1."""
@@ -8047,35 +8050,89 @@ class ConversationsPanel(wx.Panel):
                 return i
         return -1
 
+    def _conversation_position(self, jid: str) -> int:
+        """1-based position of *jid* in the currently displayed (non-archived)
+        conversation list, or 0 if it isn't currently shown there (archived,
+        filtered out by search/the active filter, etc.). Chats reorder
+        whenever new messages arrive, so this is always looked up live —
+        never cached alongside a bookmark."""
+        for i, chat in enumerate(self.chats_list):
+            if chat.get("remoteJid", "") == jid:
+                return i + 1
+        return 0
+
+    def _select_bookmarked_message(self, digit: int, jid: str, msg_id: str, i18n,
+                                    other_conversation: bool):
+        """Focus/select *msg_id* in the (already-open) conversation's message
+        list and announce the jump. Shared by the same-conversation and
+        just-navigated-to-a-different-conversation cases below — the only
+        difference is which text explains where the message ended up."""
+        idx = self._find_index_by_msg_id(msg_id)
+        if idx < 0:
+            self._msg_bookmarks.pop(digit, None)
+            self.main_window.output(
+                i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        self.messages_list.Focus(idx)
+        self.messages_list.Select(idx, True)
+        self.messages_list.EnsureVisible(idx)
+        self.messages_list.SetFocus()
+        if not other_conversation:
+            self.main_window.output(
+                i18n.t("bookmark_jumped").format(position=idx + 1, digit=digit),
+                interrupt=True,
+            )
+            return
+        conv_position = self._conversation_position(jid)
+        conv_name = self.conversation_name or jid
+        if conv_position:
+            text = i18n.t("bookmark_jumped_other_conversation").format(
+                position=idx + 1, digit=digit, conv_position=conv_position, conv_name=conv_name,
+            )
+        else:
+            text = i18n.t("bookmark_jumped_other_conversation_no_position").format(
+                position=idx + 1, digit=digit, conv_name=conv_name,
+            )
+        self.main_window.output(text, interrupt=True)
+
     def _on_bookmark_set_or_jump(self, digit: int):
         """Ctrl+<digit>: bookmark the focused message, or — if <digit> already
-        has a bookmark — move focus/selection to it instead.
+        has a bookmark — move focus/selection to it instead, navigating to
+        the bookmark's own conversation first if it's not the one currently
+        open.
 
-        Bookmarks store the message's stable key.id rather than a raw list
-        index, so a bookmark still finds the right message even if the list
-        was rebuilt (e.g. a new message arrived) between setting it and
-        jumping to it.
+        Bookmarks store (conversation JID, message key.id) rather than a raw
+        list index/position, so a bookmark still finds the right message
+        even if either list was rebuilt/reordered (a new message arriving,
+        pagination, etc.) between setting it and jumping to it.
         """
         i18n = self.main_window.i18n
-        existing_id = self._msg_bookmarks.get(digit)
-        if existing_id is not None:
-            idx = self._find_index_by_msg_id(existing_id)
-            if idx < 0:
-                # The bookmarked message is no longer in the loaded list
-                # (deleted, paged out, etc.) — drop the stale bookmark
-                # instead of silently doing nothing.
+        existing = self._msg_bookmarks.get(digit)
+        if existing is not None:
+            bm_jid, existing_id = existing
+            current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+            if bm_jid == current_jid:
+                self._select_bookmarked_message(digit, bm_jid, existing_id, i18n, other_conversation=False)
+                return
+            target_chat = self.main_window.chats.get(bm_jid)
+            if target_chat is None:
+                # The whole conversation is gone (chat deleted) — nothing
+                # left to jump to.
                 del self._msg_bookmarks[digit]
                 self.main_window.output(
                     i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
                 )
                 return
-            self.messages_list.Focus(idx)
-            self.messages_list.Select(idx, True)
-            self.messages_list.EnsureVisible(idx)
-            self.messages_list.SetFocus()
-            self.main_window.output(
-                i18n.t("bookmark_jumped").format(position=idx + 1, digit=digit),
-                interrupt=True,
+            self.navigate_to_conversation(target_chat)
+            # navigate_to_conversation() queues its own focus (message field
+            # or messages list, per the "focus_on_open" setting) via
+            # wx.CallAfter — ours must be queued AFTER that call returns so
+            # it runs last and wins, same ordering this file already relies
+            # on elsewhere (see navigate_to_conversation()'s own comment
+            # about focus-CallAfter ordering).
+            wx.CallAfter(
+                self._select_bookmarked_message, digit, bm_jid, existing_id, i18n, True
             )
             return
 
@@ -8088,21 +8145,40 @@ class ConversationsPanel(wx.Panel):
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id:
             return
-        self._msg_bookmarks[digit] = msg_id
-        self.main_window.output(
-            i18n.t("bookmark_set").format(
-                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx)
-            ),
-            interrupt=True,
-        )
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            return
+        self._msg_bookmarks[digit] = (jid, msg_id)
+        conv_position = self._conversation_position(jid)
+        if conv_position:
+            text = i18n.t("bookmark_set").format(
+                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx),
+                conv_position=conv_position,
+            )
+        else:
+            text = i18n.t("bookmark_set_no_position").format(
+                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx),
+            )
+        self.main_window.output(text, interrupt=True)
 
     def _on_bookmark_remove(self, digit: int):
         """Ctrl+Shift+<digit>: remove the bookmark at that digit, if any."""
         i18n = self.main_window.i18n
-        existing_id = self._msg_bookmarks.pop(digit, None)
-        if existing_id is None:
+        existing = self._msg_bookmarks.pop(digit, None)
+        if existing is None:
             self.main_window.output(
                 i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        bm_jid, existing_id = existing
+        current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if bm_jid != current_jid:
+            # Can't cheaply confirm a bookmark set in another (possibly
+            # unloaded) conversation still points at a real message without
+            # loading that conversation's messages just to check — trust it
+            # and confirm the removal without a position.
+            self.main_window.output(
+                i18n.t("bookmark_removed_other_conversation").format(digit=digit), interrupt=True
             )
             return
         idx = self._find_index_by_msg_id(existing_id)
