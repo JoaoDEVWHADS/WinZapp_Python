@@ -259,8 +259,18 @@ jobs:
       # reflects the version that was actually released, not just the build
       # artifacts. Runs after a successful build/verify so a failed build
       # never lands a version bump for a release that didn't ship.
+      # Best-effort: a branch-protection ruleset requiring PRs on main can
+      # (and, once added on 2026-08-12, does) reject this bot push outright
+      # — the GitHub Actions token has no ruleset-bypass path available on a
+      # personal-account repo (only a RepositoryRole bypass works there, and
+      # this token isn't one). That must never cost the release its actual
+      # assets: continue-on-error keeps the job green so SHA256SUMS
+      # generation and the asset upload below still run even when this
+      # commit is rejected — version.py in source control then just lags
+      # one release behind until someone bumps it via a normal PR.
       - name: Commit version.py bump back to the repository
         uses: stefanzweifel/git-auto-commit-action@v5
+        continue-on-error: true
         with:
           commit_message: "chore: bump version to ${{ github.event.release.tag_name }} [skip ci]"
           file_pattern: client/version.py
