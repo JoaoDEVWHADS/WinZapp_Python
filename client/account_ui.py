@@ -459,7 +459,7 @@ class AccountManagerDialog:
     def _on_add(self, _e):
         wx = _wx()
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_add_prompt"),
-                                 self.i18n.t("acc_btn_add"))
+                                 self.i18n.t("acc_btn_add").replace("&", ""))
         _relabel_stock_buttons(dlg, self.i18n)
         try:
             if dlg.ShowModal() == wx.ID_OK:
@@ -472,7 +472,7 @@ class AccountManagerDialog:
                     # (a pending account is not in the switch list by design).
                     if self._pair_cb and wx.MessageBox(
                             self.i18n.t("acc_pair_now_prompt").format(name=name),
-                            self.i18n.t("acc_btn_pair"),
+                            self.i18n.t("acc_btn_pair").replace("&", ""),
                             wx.YES_NO | wx.ICON_QUESTION) == wx.YES:
                         self._pair_cb(acc["id"])
                         self.dlg.EndModal(wx.ID_CLOSE)
@@ -497,7 +497,7 @@ class AccountManagerDialog:
         if not acc:
             return
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_rename_prompt"),
-                                 self.i18n.t("acc_btn_rename"), acc.get("name", ""))
+                                 self.i18n.t("acc_btn_rename").replace("&", ""), acc.get("name", ""))
         _relabel_stock_buttons(dlg, self.i18n)
         try:
             if dlg.ShowModal() == wx.ID_OK:
@@ -540,7 +540,7 @@ class AccountManagerDialog:
             self._error(reason)
             return
         if wx.MessageBox(self.i18n.t("acc_delete_confirm").format(name=acc.get("name", "")),
-                         self.i18n.t("acc_btn_delete"),
+                         self.i18n.t("acc_btn_delete").replace("&", ""),
                          wx.YES_NO | wx.ICON_WARNING) != wx.YES:
             return
         try:

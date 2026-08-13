@@ -740,7 +740,7 @@ class ConversationDataDialog(wx.Dialog):
             prefill_name=p_name,
             prefill_surname=p_sur,
         )
-        dlg.SetTitle(self._i18n.t("edit_contact_local"))
+        dlg.SetTitle(self._i18n.t("edit_contact_local").replace("&", ""))
         result = dlg.ShowModal()
         dlg.Destroy()
         if result == wx.ID_OK:
@@ -753,7 +753,7 @@ class ConversationDataDialog(wx.Dialog):
         i18n = self._i18n
         if wx.MessageBox(
             i18n.t("delete_contact_local_confirm_msg").format(name=self._name),
-            i18n.t("delete_contact_local"),
+            i18n.t("delete_contact_local").replace("&", ""),
             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
             self,
         ) != wx.YES:
