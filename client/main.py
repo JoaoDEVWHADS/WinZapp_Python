@@ -2735,16 +2735,29 @@ class MainWindow(wx.Frame):
             self._auto_offline = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
-            if not self._wa_connect_announced:
+            first_ever_connect = not self._wa_connect_announced
+            if first_ever_connect:
                 self._wa_connect_announced = True
                 if not self.background_mode:
                     self.connected_sound.play()
             elif announce and not self.background_mode:
                 self.output(self.i18n.t("connection_restored"), interrupt=False)
-            # Clear only the transient "connecting"/"disconnected" text — a
-            # sync running in parallel owns the status line otherwise
-            # ("sincronizando", "baixando mídias").
-            if self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
+            if first_ever_connect and not self.background_mode:
+                # The "Conectando..."/tray_connecting title must hold until
+                # this exact moment — the sound firing IS the signal that the
+                # connection is real, so the status advancing any earlier (as
+                # it briefly did: prepare_sync() set "preparing_to_sync"
+                # synchronously during __init__, well before the connection
+                # was actually confirmed and this branch got to run) made the
+                # title claim progress the app hadn't made yet.
+                # wait_messages_set() no longer sets this status itself —
+                # this is the one place that does, in lockstep with the sound.
+                wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+            elif self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
+                # Reconnect (not the first-ever connect, handled above) —
+                # clear only the transient "connecting"/"disconnected" text; a
+                # sync running in parallel owns the status line otherwise
+                # ("sincronizando", "baixando mídias").
                 wx.CallAfter(self._set_status, "")
             self._sync_retry_count = 0
             if was_offline:
@@ -8414,7 +8427,13 @@ class MainWindow(wx.Frame):
         # _initial_sync_running is reset by start_sync()'s finally block.
 
     def wait_messages_set(self):
-        self._set_status(self.i18n.t("preparing_to_sync"))
+        # _set_wa_connected() is what sets "preparing_to_sync" now, exactly
+        # when the connected sound plays — not here. This function runs
+        # (from prepare_sync(), synchronously during __init__, before the
+        # window/tray even exist) well before the connection is actually
+        # confirmed; setting the status here made the title claim progress
+        # the app hadn't made yet, decoupled from the sound that's supposed
+        # to mark the same milestone.
         # Fallback: WPPConnect does not emit a messages.set WebSocket event.
         # Poll the API every 5 s for up to 60 s and start sync as soon as it
         # responds.  If the API never responds within the window, start sync
