@@ -6989,6 +6989,28 @@ class ConversationsPanel(wx.Panel):
             self,
         )
 
+    @staticmethod
+    def _forward_target_chats(mw) -> tuple:
+        """All chats offerable as a forward target: the main (non-archived)
+        conversations_panel's own chats_list/chat_names, plus every archived
+        chat from the separate ArchivedConversationsPanel that isn't already
+        in that list. conversations_panel.chats_list alone only ever holds
+        non-archived chats, so forwarding used to silently exclude every
+        archived chat (not just groups) as a target."""
+        panel     = mw.conversations_panel
+        all_chats = list(panel.chats_list)
+        all_names = list(panel.chat_names)
+        seen_jids = {c.get("remoteJid", "") for c in all_chats}
+        arch_panel = getattr(mw, "archived_conversations_panel", None)
+        if arch_panel is not None:
+            for chat, name in zip(arch_panel.chats_list, arch_panel.chat_names):
+                jid = chat.get("remoteJid", "")
+                if jid and jid not in seen_jids:
+                    seen_jids.add(jid)
+                    all_chats.append(chat)
+                    all_names.append(name)
+        return all_chats, all_names
+
     def _on_menu_forward(self, msg: dict):
         """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
         import ctypes
@@ -6996,9 +7018,7 @@ class ConversationsPanel(wx.Panel):
         i18n = mw.i18n
 
         # ── Collect available conversations ───────────────────────────────────
-        panel       = mw.conversations_panel
-        all_chats   = list(getattr(panel, "_all_chats_list", panel.chats_list))
-        all_names   = list(getattr(panel, "_all_chat_names", panel.chat_names))
+        all_chats, all_names = self._forward_target_chats(mw)
         if not all_chats:
             return
 
