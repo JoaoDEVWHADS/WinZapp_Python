@@ -120,6 +120,23 @@ def _wx():
     return wx
 
 
+def _relabel_stock_buttons(dlg, i18n):
+    """wx.TextEntryDialog (and other stock wx.GenericValidationDialog-style
+    dialogs) build their own OK/Cancel buttons internally with no way to pass
+    a label at construction time — they always show wx's own built-in stock
+    string, which is English regardless of WinZapp's own language setting.
+    Re-labels them in place after construction, same fix applied to the
+    plain wx.Button(..., wx.ID_CANCEL)/wx.ID_CLOSE instances elsewhere in
+    this module."""
+    wx = _wx()
+    ok_btn = dlg.FindWindow(wx.ID_OK)
+    if ok_btn is not None:
+        ok_btn.SetLabel(i18n.t("ok"))
+    cancel_btn = dlg.FindWindow(wx.ID_CANCEL)
+    if cancel_btn is not None:
+        cancel_btn.SetLabel(i18n.t("cancel"))
+
+
 class SwitchAccountDialog:
     """Accessible 'Switch account' chooser (plan Zad 4.3).
 
@@ -150,8 +167,10 @@ class SwitchAccountDialog:
         # not the dialog — mixing parents trips wxAssertionError
         # CheckExpectedParentIs and the dialog silently fails to open.
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_ok = wx.Button(panel, wx.ID_OK)
-        self.btn_cancel = wx.Button(panel, wx.ID_CANCEL)
+        # Explicit labels: a stock id with no label= falls back to wx's own
+        # (always-English) stock string regardless of WinZapp's language.
+        self.btn_ok = wx.Button(panel, wx.ID_OK, label=i18n.t("ok"))
+        self.btn_cancel = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
         btns.Add(self.btn_ok, 0, wx.ALL, 4)
         btns.Add(self.btn_cancel, 0, wx.ALL, 4)
         vbox.Add(btns, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
@@ -335,7 +354,7 @@ class AccountManagerDialog:
         vbox.Add(self.lst, 1, wx.EXPAND | wx.ALL, 8)
         # buttons
         hbox = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_open = wx.Button(panel, label=i18n.t("acc_btn_open") if hasattr(i18n, 't') and i18n.t("acc_btn_open") != "acc_btn_open" else "Abrir")
+        self.btn_open = wx.Button(panel, label=i18n.t("acc_btn_open"))
         self.btn_add = wx.Button(panel, label=i18n.t("acc_btn_add"))
         self.btn_pair = wx.Button(panel, label=i18n.t("acc_btn_pair"))
         self.btn_rename = wx.Button(panel, label=i18n.t("acc_btn_rename"))
@@ -349,7 +368,10 @@ class AccountManagerDialog:
         # Close button parented to the SAME panel as the sizer (wx requires the
         # sizer's managed widgets to share the sizer's window as parent, else
         # wxAssertionError CheckExpectedParentIs and the dialog never shows).
-        self.btn_close = wx.Button(panel, wx.ID_CLOSE)
+        # Explicit label+mnemonic: wx.ID_CLOSE with no label= falls back to wx's
+        # own stock string, which is always English ("Close") regardless of
+        # WinZapp's own language setting.
+        self.btn_close = wx.Button(panel, wx.ID_CLOSE, label=i18n.t("close"))
         vbox.Add(self.btn_close, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         panel.SetSizer(vbox)
         # Panel fills the dialog.
@@ -368,6 +390,8 @@ class AccountManagerDialog:
         self.btn_restore.Bind(wx.EVT_BUTTON, self._on_restore)
         self.btn_delete.Bind(wx.EVT_BUTTON, self._on_delete)
         self.lst.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_open)
+        self.lst.Bind(wx.EVT_LIST_ITEM_SELECTED, lambda e: self._update_button_visibility())
+        self.lst.Bind(wx.EVT_LIST_ITEM_DESELECTED, lambda e: self._update_button_visibility())
         self._reload()
         self.lst.SetFocus()
 
@@ -383,12 +407,33 @@ class AccountManagerDialog:
         if self.lst.GetItemCount():
             self.lst.Select(0)
             self.lst.Focus(0)
+        self._update_button_visibility()
 
     def _selected(self):
         i = self.lst.GetFirstSelected()
         if i < 0 or i >= len(self._rows):
             return None
         return self._rows[i]
+
+    def _update_button_visibility(self):
+        """Show only the actions that actually apply to the selected account
+        — "Abrir"/"Conectar" never make sense for the account already running
+        this process, "Arquivar" never for an already-archived account, and
+        "Restaurar" only ever for one. Reuses the same can_open/can_pair/
+        can_archive guards _on_open/_on_pair/_on_archive already validate
+        against, so a button visible here is guaranteed to actually work
+        instead of popping an error dialog after the click.
+        """
+        acc = self._selected()
+        if acc is None:
+            for b in (self.btn_open, self.btn_pair, self.btn_archive, self.btn_restore):
+                b.Show(False)
+        else:
+            self.btn_open.Show(can_open(acc, self.current)[0])
+            self.btn_pair.Show(can_pair(acc, self.current)[0])
+            self.btn_archive.Show(can_archive(acc, self.current)[0])
+            self.btn_restore.Show(acc.get("state") == "archived")
+        self.btn_open.GetContainingSizer().Layout()
 
     # ── actions ──────────────────────────────────────────────────────────
     def _on_open(self, _e):
@@ -407,6 +452,7 @@ class AccountManagerDialog:
         wx = _wx()
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_add_prompt"),
                                  self.i18n.t("acc_btn_add"))
+        _relabel_stock_buttons(dlg, self.i18n)
         try:
             if dlg.ShowModal() == wx.ID_OK:
                 name = dlg.GetValue().strip()
@@ -444,6 +490,7 @@ class AccountManagerDialog:
             return
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_rename_prompt"),
                                  self.i18n.t("acc_btn_rename"), acc.get("name", ""))
+        _relabel_stock_buttons(dlg, self.i18n)
         try:
             if dlg.ShowModal() == wx.ID_OK:
                 name = dlg.GetValue().strip()
