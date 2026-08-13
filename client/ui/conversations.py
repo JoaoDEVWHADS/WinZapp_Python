@@ -8264,10 +8264,16 @@ class ConversationsPanel(wx.Panel):
                 i18n.t("bookmark_removed_stale").format(digit=digit), interrupt=True
             )
             return
-        self.main_window.output(
-            i18n.t("bookmark_removed").format(digit=digit, position=idx + 1),
-            interrupt=True,
-        )
+        conv_position = self._conversation_position(bm_jid)
+        if conv_position:
+            text = i18n.t("bookmark_removed").format(
+                digit=digit, position=idx + 1, conv_position=conv_position,
+            )
+        else:
+            text = i18n.t("bookmark_removed_no_position").format(
+                digit=digit, position=idx + 1,
+            )
+        self.main_window.output(text, interrupt=True)
 
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 

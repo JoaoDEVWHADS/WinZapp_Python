@@ -32,7 +32,8 @@ class _FakeI18n:
         "bookmark_jumped": "Movido para a posição {position} da lista (marcador {digit})",
         "bookmark_jumped_other_conversation": "Movido para a conversa {conv_position}, {conv_name}, posição {position} da lista (marcador {digit})",
         "bookmark_jumped_other_conversation_no_position": "Movido para a conversa {conv_name}, posição {position} da lista (marcador {digit})",
-        "bookmark_removed": "Removido marcador {digit} na posição {position}",
+        "bookmark_removed": "Removido marcador {digit} na posição {position} (conversa {conv_position})",
+        "bookmark_removed_no_position": "Removido marcador {digit} na posição {position}",
         "bookmark_removed_other_conversation": "Removido marcador {digit} (apontava para outra conversa)",
         "bookmark_removed_stale": "Removido marcador {digit} (a mensagem original não está mais na lista)",
         "bookmark_not_found": "Nenhum marcador encontrado para o número {digit}",
@@ -327,8 +328,19 @@ class TestBookmarkRemove:
 
         assert 9 not in panel._msg_bookmarks
         assert panel.main_window.outputs == [
-            "Removido marcador 9 na posição 2"
+            "Removido marcador 9 na posição 2 (conversa 1)"
         ]
+
+    def test_removing_bookmark_without_a_visible_conversation_position_omits_it(self):
+        """Same graceful-degradation as TestBookmarkSet: the conversation
+        isn't in chats_list (filtered out by search, or archived)."""
+        panel = _Stub([_msg("A"), _msg("B")], focused_item=1, chats_list=[])
+        panel._on_bookmark_set_or_jump(9)  # bookmark "B" at position 2
+        panel.main_window.outputs.clear()
+
+        panel._on_bookmark_remove(9)
+
+        assert panel.main_window.outputs == ["Removido marcador 9 na posição 2"]
 
     def test_removing_unset_bookmark_announces_not_found(self):
         panel = _Stub([_msg("A")], focused_item=0)
