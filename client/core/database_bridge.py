@@ -288,6 +288,9 @@ class DatabaseBridge:
     def delete_chat(self, jid: str) -> None:
         return self._call(self._db.delete_chat(jid))
 
+    def delete_contact(self, jid: str) -> None:
+        return self._call(self._db.delete_contact(jid))
+
     def merge_or_rename_chat(self, old_jid: str, new_jid: str) -> None:
         return self._call(self._db.merge_or_rename_chat(old_jid, new_jid))
 
@@ -300,6 +303,9 @@ class DatabaseBridge:
 
     def delete_chat_messages(self, remote_jid: str) -> None:
         return self._call(self._db.delete_chat_messages(remote_jid))
+
+    def delete_chat_messages_except(self, remote_jid: str, keep_message_ids) -> None:
+        return self._call(self._db.delete_chat_messages_except(remote_jid, keep_message_ids))
 
     def upsert_contact(self, jid: str, data: dict) -> None:
         return self._call(self._db.upsert_contact(jid, data))

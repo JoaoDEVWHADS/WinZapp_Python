@@ -4071,8 +4071,6 @@ class MainWindow(wx.Frame):
             return
         if self.is_chat_archived(remote_jid):
             return
-        if not self.settings.get("general", {}).get("notifications_enabled", True):
-            return
 
         from core.notification_manager import (
             format_notification_title, format_notification_body,
@@ -4090,6 +4088,7 @@ class MainWindow(wx.Frame):
         )
 
         if window_active:
+            speech = self.settings.get("speech_content", {})
             # Determine if the incoming message is for the currently-open conversation
             cp = getattr(self, "conversations_panel", None)
             current_jid = (
@@ -4101,10 +4100,14 @@ class MainWindow(wx.Frame):
 
             if is_current_conv:
                 # Scenario 1: message in the ACTIVE conversation
-                # Play current-conversation sound, speak "Sender: body" via AO2
+                # Play current-conversation sound (always), speak "Sender: body"
+                # via AO2 only when speak_active_conv_messages is on. Neither of
+                # these is the background toast this function's general.
+                # notifications_enabled setting is meant to gate — see below.
                 self.message_current_sound.play()
-                sender = format_foreground_sender(msg, self, self.i18n)
-                self.output(f"{sender}: {body}")
+                if speech.get("speak_active_conv_messages", True):
+                    sender = format_foreground_sender(msg, self, self.i18n)
+                    self.output(f"{sender}: {body}")
                 # Mark the active conversation as read immediately, but only if the
                 # window has been focused for at least 5 seconds (to prevent marking
                 # startup/offline messages as read automatically).
@@ -4117,14 +4120,23 @@ class MainWindow(wx.Frame):
                     ).start()
             else:
                 # Scenario 2: message in a DIFFERENT conversation (window active)
-                # Play foreground sound, speak "Nova mensagem de X: body" via AO2
+                # Play foreground sound (always), speak "Nova mensagem de X: body"
+                # via AO2 only when speak_other_conv_messages is on.
                 self.message_foreground_sound.play()
-                title = format_notification_title(msg, self, self.i18n)
-                spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
-                self.output(spoken)
+                if speech.get("speak_other_conv_messages", True):
+                    title = format_notification_title(msg, self, self.i18n)
+                    spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+                    self.output(spoken)
             return  # never send system toast when window is active
 
-        # Window is not focused → send system toast notification
+        # Window is not focused → send system toast notification. This is the
+        # ONLY thing general.notifications_enabled controls — it used to gate
+        # the whole function above this point too, silently killing the
+        # foreground sounds/announcements above (and, when a burst of
+        # messages included one in a muted/archived chat before this point,
+        # nothing else) whenever the user turned it off.
+        if not self.settings.get("general", {}).get("notifications_enabled", True):
+            return
         if not self.settings.get("general", {}).get("show_tray_icon", True):
             return
         title = format_notification_title(msg, self, self.i18n)
@@ -4476,8 +4488,6 @@ class MainWindow(wx.Frame):
 
             if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
                 return
-            if not self.settings.get("general", {}).get("notifications_enabled", True):
-                return
 
             from core.notification_manager import format_notification_title
 
@@ -4497,6 +4507,10 @@ class MainWindow(wx.Frame):
             if window_active:
                 self.message_foreground_sound.play()
                 self.output(f"{title}: {body}")
+                return
+            # general.notifications_enabled only ever gates the background
+            # toast below — see the matching comment in on_new_message().
+            if not self.settings.get("general", {}).get("notifications_enabled", True):
                 return
             if not self.settings.get("general", {}).get("show_tray_icon", True):
                 return
@@ -15771,6 +15785,9 @@ class MainWindow(wx.Frame):
 
         Clearing removes the messages and the last-message preview — it must
         NOT remove the conversation itself; that is what "delete chat" does.
+        Starred messages are the one exception — starring is meant to make a
+        message durable, so clearing a chat must not wipe them, matching
+        WhatsApp's own behavior.
         `record_cutoff` is False when we are only mirroring a clear that already
         happened on the phone (no new cutoff to remember, the server is the
         source of truth).
@@ -15778,17 +15795,24 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(jid)
         if not chat:
             return
-        chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
-        chat["lastMessage"] = None
+        records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        starred = [m for m in records if isinstance(m, dict) and m.get("starred")]
+        chat.setdefault("messages", {}).setdefault("messages", {})["records"] = starred
         chat["unreadCount"] = 0
         if record_cutoff:
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
             self.save_settings()
         self._schedule_save(dirty_jid=jid)
+        # Recomputes lastMessage/t from the survivors (a kept starred message,
+        # or None/0 if there aren't any) and persists the chat row itself.
+        self._recompute_chat_last_message(jid)
         if hasattr(self, "db") and self.db is not None:
             try:
-                self.db.delete_chat_messages(jid)
-                self.db.upsert_chat(jid, chat)
+                keep_ids = [
+                    m.get("key", {}).get("id", "") for m in starred
+                    if m.get("key", {}).get("id")
+                ]
+                self.db.delete_chat_messages_except(jid, keep_ids)
             except Exception as exc:
                 logging.warning("[clear_chat_messages_local] DB clear failed for %s: %s", jid, exc)
 

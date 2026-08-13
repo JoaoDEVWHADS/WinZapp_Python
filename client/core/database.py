@@ -494,6 +494,16 @@ class DatabaseManager:
             await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
             await conn.commit()
 
+    async def delete_contact(self, jid: str) -> None:
+        """Remove a contact record — used to undo a locally-added contact
+        (NewContactDialog). A periodic WPPConnect contact sync repopulates
+        this row from scratch if *jid* also happens to be a real WhatsApp
+        contact independently of the local add."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute("DELETE FROM contacts WHERE jid=?", (jid,))
+            await conn.commit()
+
     async def merge_or_rename_chat(self, old_jid: str, new_jid: str) -> None:
         """Merge or rename a chat and its messages in the database.
 
@@ -800,6 +810,25 @@ class DatabaseManager:
             await conn.execute(
                 "DELETE FROM messages WHERE remote_jid=?", (remote_jid,)
             )
+            await conn.commit()
+
+    async def delete_chat_messages_except(self, remote_jid: str, keep_message_ids) -> None:
+        """Remove all messages for a chat except *keep_message_ids* — used
+        by "clear chat" so starred messages survive it, same as WhatsApp's
+        own behavior (starring a message is meant to make it durable)."""
+        keep = [m for m in (keep_message_ids or []) if m]
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            if not keep:
+                await conn.execute(
+                    "DELETE FROM messages WHERE remote_jid=?", (remote_jid,)
+                )
+            else:
+                placeholders = ",".join("?" * len(keep))
+                await conn.execute(
+                    f"DELETE FROM messages WHERE remote_jid=? AND message_id NOT IN ({placeholders})",
+                    (remote_jid, *keep),
+                )
             await conn.commit()
 
     # ── Contacts ────────────────────────────────────────────────────────────
