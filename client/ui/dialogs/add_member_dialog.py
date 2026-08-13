@@ -141,10 +141,32 @@ class AddMemberDialog(wx.Dialog):
         self._phone_field.SetValue("")
 
     def _populate_contacts(self):
-        """Fill the list with all available contacts."""
+        """Fill the list with the user's own contacts — not every entry in
+        main_window.contacts. That dict is also where group-participant name
+        resolution (on_presence_update, LID bridging, sender-name learning)
+        writes {name, pushName} for anyone who ever spoke in a group with the
+        user, with no isMyContact/isSaved flag at all — those aren't real
+        WhatsApp contacts the user could plausibly add to a *different*
+        group, but used to show up here alongside genuine ones anyway.
+        Mirrors the same legitimacy check get_remote_contacts() already uses
+        to decide what counts as "my contact" in the first place, plus
+        isSaved for a contact added locally (NewContactDialog) and an
+        existing 1:1 chat (a contact WhatsApp itself may not flag as
+        isMyContact — e.g. someone who messaged first — but the user
+        evidently already has a real conversation with).
+        """
         self._contact_jids = []  # parallel list of JIDs
+        chats = getattr(self._mw, "chats", {})
         for jid, contact in self._mw.contacts.items():
             if not jid or jid.endswith("@g.us"):
+                continue
+            is_own_contact = (
+                contact.get("isMyContact") is True
+                or contact.get("isMe") is True
+                or contact.get("isSaved") is True
+                or jid in chats
+            )
+            if not is_own_contact:
                 continue
             name = contact.get("name") or contact.get("pushName") or format_number(jid)
             phone = format_number(jid)
