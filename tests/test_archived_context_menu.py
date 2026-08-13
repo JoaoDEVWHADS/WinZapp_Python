@@ -109,7 +109,7 @@ class TestMenuParity:
         archived_src = self._source(ArchivedConversationsPanel.on_context_menu)
         shared_hints = [
             "Ctrl+Shift+D", "Ctrl+Shift+M", "Alt+Shift+S",
-            "Ctrl+Shift+B", "Alt+Shift+C", "Ctrl+Q", "Ctrl+P",
+            "Ctrl+Shift+B", "Alt+Shift+C", "Ctrl+Shift+Q", "Ctrl+P",
             "Ctrl+Shift+L", "Delete",
         ]
         for hint in shared_hints:

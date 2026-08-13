@@ -686,7 +686,11 @@ class ConversationsPanel(wx.Panel):
             (AS,              ord("S"),         self.ID_MUTE_LIST),
             (CS,              ord("B"),         self.ID_BLOCK_LIST),
             (CS,              ord("L"),         self.ID_CLEAR_LIST),
-            (wx.ACCEL_CTRL,   ord("Q"),         self.ID_ARCHIVE_LIST),
+            # Ctrl+Shift+Q, not plain Ctrl+Q: archiving is destructive-ish
+            # (drops the conversation out of the main list) and Ctrl+Q sits
+            # right next to other single-Ctrl combos a user can easily
+            # fat-finger while just trying to navigate the list.
+            (CS,              ord("Q"),         self.ID_ARCHIVE_LIST),
             (wx.ACCEL_CTRL,   ord("P"),         self.ID_PIN_LIST),
             (wx.ACCEL_CTRL,   ord("W"),         self.ID_CLOSE_CONV_LIST),
         ])
@@ -2342,10 +2346,10 @@ class ConversationsPanel(wx.Panel):
 
         # ── Archive / Unarchive ───────────────────────────────────────────
         if mw.is_chat_archived(jid):
-            ua_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
+            ua_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Shift+Q")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_unarchive(j), ua_item)
         else:
-            arch_item = menu.Append(wx.ID_ANY, f"{i18n.t('archive_chat')}\tCtrl+Q")
+            arch_item = menu.Append(wx.ID_ANY, f"{i18n.t('archive_chat')}\tCtrl+Shift+Q")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_archive(j), arch_item)
 
         # ── Pin / Unpin ───────────────────────────────────────────────────
@@ -4004,9 +4008,10 @@ class ConversationsPanel(wx.Panel):
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
-        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives."""
-        key  = event.GetKeyCode()
-        ctrl = event.ControlDown()
+        Ctrl+P pins/unpins, Ctrl+Shift+Q archives/unarchives."""
+        key   = event.GetKeyCode()
+        ctrl  = event.ControlDown()
+        shift = event.ShiftDown()
 
         if key == wx.WXK_SPACE:
             idx = self.conversations_list.GetFocusedItem()
@@ -4026,7 +4031,11 @@ class ConversationsPanel(wx.Panel):
                         self._on_menu_unpin(jid)
                     else:
                         self._on_menu_pin(jid)
-        elif ctrl and key == ord("Q"):
+        # Ctrl+Shift+Q, not plain Ctrl+Q — archiving isn't reversible from a
+        # single accidental keystroke the way pinning is, and plain Ctrl+Q
+        # sits right next to other single-Ctrl combos a user can easily
+        # fat-finger while just navigating the list.
+        elif ctrl and shift and key == ord("Q"):
             idx = self.conversations_list.GetFocusedItem()
             if 0 <= idx < len(self.chats_list):
                 jid = self.chats_list[idx].get("remoteJid", "")
@@ -9578,9 +9587,9 @@ class ArchivedConversationsPanel(wx.Panel):
         missing everything except unarchive/clear/delete. Ctrl+F (search) and
         Ctrl+N (new conversation) are left out: this panel has no search field
         of its own, and Ctrl+W (close conversation) doesn't apply — there is no
-        split conversation view to close from this list. Ctrl+Q always means
-        "unarchive" here rather than toggling, since every row is archived by
-        definition.
+        split conversation view to close from this list. Ctrl+Shift+Q always
+        means "unarchive" here rather than toggling, since every row is
+        archived by definition.
         """
         self.ID_DELETE_CONV      = wx.NewIdRef()
         self.ID_ALT_SHIFT_C_LIST = wx.NewIdRef()
@@ -9601,7 +9610,7 @@ class ArchivedConversationsPanel(wx.Panel):
             (AS,              ord("S"),      self.ID_MUTE_LIST),
             (CS,              ord("B"),      self.ID_BLOCK_LIST),
             (CS,              ord("L"),      self.ID_CLEAR_LIST),
-            (wx.ACCEL_CTRL,   ord("Q"),      self.ID_UNARCHIVE_LIST),
+            (CS,              ord("Q"),      self.ID_UNARCHIVE_LIST),
             (wx.ACCEL_CTRL,   ord("P"),      self.ID_PIN_LIST),
         ])
         self.SetAcceleratorTable(accel_tbl)
@@ -9828,7 +9837,7 @@ class ArchivedConversationsPanel(wx.Panel):
         menu.AppendSeparator()
 
         # ── Unarchive — always, every row here is already archived ─────────
-        unarch_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
+        unarch_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Shift+Q")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unarchive(j), unarch_item)
 
         # ── Pin / Unpin ───────────────────────────────────────────────────
