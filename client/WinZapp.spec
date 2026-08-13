@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = []
+hiddenimports = ['accounts', 'coord_locks', 'node_coord', 'ipc', 'update_coord', 'app_settings', 'account_migration', 'account_bootstrap', 'account_launcher', 'account_ui', 'session_store', 'window_title']
 tmp_ret = collect_all('sound_lib')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('accessible_output2')
@@ -30,16 +30,8 @@ tmp_ret = collect_all('windows_toasts')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('winrt')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-try:
-    tmp_ret = collect_all('pyaudio')
-    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-except Exception:
-    pass
-try:
-    tmp_ret = collect_all('sounddevice')
-    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-except Exception:
-    pass
+tmp_ret = collect_all('pyaudio')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('aiosqlite')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
