@@ -13807,7 +13807,7 @@ class MainWindow(wx.Frame):
             )
             for msg in records:
                 if msg.get("key", {}).get("id") == msg_id:
-                    msg.setdefault("MessageUpdate", []).append({"status": status})
+                    msg.setdefault("MessageUpdate", []).append({"status": status, "ts": time.time()})
                     found_msg = msg
                     found_chat_jid = chat_jid
                     logging.info(f"[on_message_status_update] Updated status to {status} for msg_id={msg_id} in records of chat={chat_jid}")
@@ -13832,7 +13832,7 @@ class MainWindow(wx.Frame):
                 )
                 for msg in recs:
                     if msg.get("key", {}).get("id") == msg_id:
-                        msg.setdefault("MessageUpdate", []).append({"status": status})
+                        msg.setdefault("MessageUpdate", []).append({"status": status, "ts": time.time()})
                         found_msg = msg
                         found_chat_jid = jid
                         logging.info(

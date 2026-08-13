@@ -195,6 +195,7 @@
     "attach_contact_title": "Anexar contato",
     "no_contacts": "Nenhum contato disponível.",
     "message_data": "Dados da mensagem",
+    "message_data_status_label": "Status",
     "reply_message": "Responder",
     "copy_message_text": "Copiar",
     "copy_file": "Copiar arquivo",

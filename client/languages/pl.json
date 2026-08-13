@@ -193,6 +193,7 @@
     "attach_contact_title": "Załącz kontakt",
     "no_contacts": "Brak dostępnych kontaktów.",
     "message_data": "Informacje o wiadomości",
+    "message_data_status_label": "Status",
     "reply_message": "Odpowiedz",
     "copy_message_text": "Kopiuj",
     "copy_file": "Kopiuj plik",

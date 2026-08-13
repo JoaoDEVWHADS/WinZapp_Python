@@ -5778,6 +5778,69 @@ class ConversationsPanel(wx.Panel):
                 return i18n.t("status_sent")
         return ""
 
+    def _classify_status_entry(self, raw) -> str:
+        """Classify one raw MessageUpdate status value into a single stage
+        name, using the same string/numeric matching _map_status() applies
+        to the aggregate status. Returns "" when unrecognised."""
+        s = str(raw or "").upper()
+        if not s:
+            return ""
+        if "PLAYED" in s or s == "5":
+            return "played"
+        if s.startswith("-"):
+            return "failed"
+        if "READ" in s or s == "4":
+            return "read"
+        if "DELIVERED" in s or "DELIVERY_ACK" in s or s == "3":
+            return "delivered"
+        if "SENT" in s or "ACK" in s or s == "2":
+            return "sent"
+        return ""
+
+    def _status_history_lines(self, msg) -> list:
+        """Per-stage delivery/read/played timeline for a sent message, one
+        line per stage actually reached ("Enviada: 14:29", "Entregue: 14:30",
+        "Lida: 14:32", …), mirroring the official WhatsApp message-info
+        screen. Only stages carrying a real timestamp (recorded from live
+        messages.update events onward, see MainWindow.on_message_status_update)
+        are shown — messages whose status was only ever seen as a single
+        aggregate value (e.g. loaded from history sync) fall back to the
+        caller's plain "Status: X" line instead, since no per-stage time
+        exists for them."""
+        i18n = self.main_window.i18n
+        from_me = msg.get("key", {}).get("fromMe", False)
+        updates = msg.get("MessageUpdate")
+        if not isinstance(updates, list):
+            return []
+        stage_order = ["sent", "delivered", "read", "played"] if from_me else ["played"]
+        label_keys = {
+            "sent": "status_sent", "delivered": "status_delivered",
+            "read": "status_read", "played": "status_played",
+        }
+        first_ts = {}
+        failed_ts = None
+        for u in updates:
+            if not isinstance(u, dict):
+                continue
+            ts = u.get("ts")
+            if ts is None:
+                continue
+            stage = self._classify_status_entry(u.get("status"))
+            if stage == "failed":
+                if from_me:
+                    failed_ts = ts
+                continue
+            if stage in stage_order:
+                first_ts.setdefault(stage, ts)
+        lines = []
+        for stage in stage_order:
+            ts = first_ts.get(stage)
+            if ts is not None:
+                lines.append(f"{i18n.t(label_keys[stage])}: {self._format_date(ts)}")
+        if failed_ts is not None:
+            lines.append(f"{i18n.t('status_failed')}: {self._format_date(failed_ts)}")
+        return lines
+
     def _sender_label(self, msg) -> str:
         if msg.get("key", {}).get("fromMe"):
             return self.main_window.self_reference_label()
@@ -6590,14 +6653,19 @@ class ConversationsPanel(wx.Panel):
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
         sender   = self._sender_label(msg)
-        status   = self._map_status(msg)
         content  = self._get_message_content(msg)
 
         lines = [f"{sender}: {content}"]
         if time_str:
             lines.append(time_str)
-        if status:
-            lines.append(f"Status: {status}")
+
+        history = self._status_history_lines(msg)
+        if history:
+            lines.extend(history)
+        else:
+            status = self._map_status(msg)
+            if status:
+                lines.append(f"{i18n.t('message_data_status_label')}: {status}")
 
         dlg = wx.Dialog(
             self.main_window, title=i18n.t("message_data"),
