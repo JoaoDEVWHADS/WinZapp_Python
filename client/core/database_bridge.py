@@ -196,16 +196,23 @@ class DatabaseBridge:
 
     # ── Full-state save (replacement for save_data) ───────────────────────────
 
-    def save_full_state(self, data: dict[str, Any], clear_first: bool = True) -> None:
+    def save_full_state(self, data: dict[str, Any], clear_first: bool = True,
+                         clear_metadata: bool = True) -> None:
         """Replace all data in the database with the given dict.
 
         This is the SQLite equivalent of the old full-state rewrite: it
         clears all tables then re-imports everything within a single
         transaction. Uses the longer bulk timeout — a large account's full
         chat/message set can legitimately take longer than a routine call.
+
+        clear_metadata=False preserves system_metadata (cleared_chats,
+        deleted_chats, archived_chats, pinned_chats, muted_chats,
+        blocked_contacts, ...) across the wipe — see
+        DatabaseManager.import_from_dict()'s own docstring for when that
+        matters (an F5 resync should not also discard those).
         """
         self._call(
-            self._db.import_from_dict(data, clear_first=clear_first),
+            self._db.import_from_dict(data, clear_first=clear_first, clear_metadata=clear_metadata),
             timeout=_BULK_CALL_TIMEOUT,
         )
 

@@ -3007,7 +3007,11 @@ class MainWindow(wx.Frame):
             # A user-requested resync gets a fresh automatic-retry budget, even if
             # earlier syncs this session already burned through it.
             self._sync_retry_count = 0
-            self.clear_local_data()
+            # F5 resyncs the chat/message set from WhatsApp again — it must
+            # not also discard cleared/deleted/archived/muted/blocked-contact
+            # state the user set locally on top of them (see
+            # clear_local_data()'s own docstring).
+            self.clear_local_data(wipe_metadata=False)
             try:
                 media_failed_path = data_path("media_failed.json")
                 if os.path.isfile(media_failed_path):
@@ -8598,8 +8602,19 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def clear_local_data(self):
-        """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
+    def clear_local_data(self, wipe_metadata: bool = True):
+        """Wipe all cached chats, contacts, messages, media, and mapping caches.
+
+        wipe_metadata=True (default, used for a confirmed logout/account
+        switch via _on_disconnect) also wipes system_metadata — cleared_chats,
+        deleted_chats, archived_chats, pinned_chats, muted_chats,
+        blocked_contacts and more — so nothing leaks into whatever account
+        pairs next. wipe_metadata=False (used by _resync_all_worker(), F5)
+        keeps that table intact: the point of a resync is only to refetch
+        chats/messages from WhatsApp again, not to also discard every local
+        action (a cleared/deleted/archived/muted/blocked chat) the user took
+        on top of them — resyncing used to silently undo all of those too.
+        """
         logging.info("[clear_local_data] Clearing all local caches, media, and database...")
         self.chats = {}
         self.contacts = {}
@@ -8627,7 +8642,7 @@ class MainWindow(wx.Frame):
             
         try:
             if hasattr(self, "db") and self.db is not None:
-                self.db.save_full_state({"chats": {}, "contacts": {}})
+                self.db.save_full_state({"chats": {}, "contacts": {}}, clear_metadata=wipe_metadata)
                 logging.info("[clear_local_data] Database cleared successfully.")
         except Exception as e:
             logging.error(f"[clear_local_data] Failed to clear database: {e}")

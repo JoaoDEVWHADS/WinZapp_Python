@@ -1016,7 +1016,8 @@ class DatabaseManager:
 
     # ── Bulk Import / Export (for migration) ─────────────────────────────────
 
-    async def import_from_dict(self, data: dict, clear_first: bool = False) -> int:
+    async def import_from_dict(self, data: dict, clear_first: bool = False,
+                                clear_metadata: bool = True) -> int:
         """Populate the database from a messages.dat-shaped dict.
 
         Parameters
@@ -1027,6 +1028,18 @@ class DatabaseManager:
             ``status_updates``).
         clear_first : bool
             If ``True``, delete all existing records before importing.
+        clear_metadata : bool
+            If ``True`` (default) and ``clear_first`` is also ``True``, also
+            wipes ``system_metadata`` — the key/value table backing
+            cleared_chats/deleted_chats/archived_chats/pinned_chats/
+            muted_chats/blocked_contacts and more. Pass ``False`` for a
+            resync-in-place (MainWindow.clear_local_data(), F5): the point
+            there is only to refetch chats/messages from WhatsApp, not to
+            discard the user's own local actions on top of them — an
+            account switch/logout (the only other clear_first=True caller)
+            still wants the full wipe, since leaving another account's
+            blocked-contacts list or archived state behind would leak
+            between accounts.
 
         Returns
         -------
@@ -1047,11 +1060,11 @@ class DatabaseManager:
                 await conn.execute("BEGIN")
 
                 if clear_first:
-                    for tbl in (
-                        "chats", "messages", "contacts",
-                        "lid_mappings", "unresolvable_lids", "status_updates",
-                        "system_metadata",
-                    ):
+                    tables = ["chats", "messages", "contacts",
+                              "lid_mappings", "unresolvable_lids", "status_updates"]
+                    if clear_metadata:
+                        tables.append("system_metadata")
+                    for tbl in tables:
                         await conn.execute(f"DELETE FROM {tbl}")
 
                 # ── Chats + messages ─────────────────────────────────────
