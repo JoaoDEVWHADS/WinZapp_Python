@@ -43,6 +43,7 @@
     "status_read": "Lida",
     "status_played": "Reproduzida",
     "status_edited": "Editada",
+    "status_forwarded": "Encaminhada",
     "msg_status_none": "Sem estado disponível.",
     "msg_datetime_none": "Sem data disponível.",
     "read_more_button": "&Ler mais",

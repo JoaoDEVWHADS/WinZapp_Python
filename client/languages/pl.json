@@ -43,6 +43,7 @@
     "status_read": "Przeczytano",
     "status_played": "Odtworzono",
     "status_edited": "Edytowano",
+    "status_forwarded": "Przekazano dalej",
     "msg_status_none": "Brak dostępnego statusu.",
     "msg_datetime_none": "Brak dostępnej daty.",
     "read_more_button": "&Czytaj więcej",

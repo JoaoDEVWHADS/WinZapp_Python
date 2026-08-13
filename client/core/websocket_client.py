@@ -1703,6 +1703,14 @@ class WebSocketClient:
                     ctx_info = sub_msg[sub_key].get("contextInfo")
                     if ctx_info:
                         break
+        # isForwarded is a real WhatsApp protocol field (contextInfo.isForwarded
+        # in the raw proto; WPPConnect's own Message model also exposes it as a
+        # convenience top-level boolean — see node_modules/@wppconnect-team/
+        # wppconnect's message.d.ts) present for ANY message that was forwarded,
+        # from anyone, not just ones this app itself forwarded. It used to be
+        # silently dropped here since this function only ever built a
+        # contextInfo dict when there was a quote or a mention.
+        is_forwarded = bool(wpp_msg.get("isForwarded"))
         if isinstance(ctx_info, dict):
             if not quoted_stanza_id:
                 quoted_stanza_id = ctx_info.get("stanzaId")
@@ -1710,6 +1718,8 @@ class WebSocketClient:
                 quoted_participant = ctx_info.get("participant")
             if not quoted_msg:
                 quoted_msg = ctx_info.get("quotedMessage")
+            if not is_forwarded:
+                is_forwarded = bool(ctx_info.get("isForwarded"))
 
         # Debug quotes
         body_text = str(wpp_msg.get('body') or '').strip().lower()
@@ -1808,7 +1818,7 @@ class WebSocketClient:
             if m
         ]
 
-        if has_quote or mentioned_jids:
+        if has_quote or mentioned_jids or is_forwarded:
             # Store only a slim quoted preview — never the full quoted message,
             # whose thumbnail/mediaKey/directPath/hashes bloat messages.dat and
             # slow conversation loading without ever being read by the UI.
@@ -1823,7 +1833,9 @@ class WebSocketClient:
                 context_info["quotedMessage"] = quoted_msg_payload
             if mentioned_jids:
                 context_info["mentionedJid"] = mentioned_jids
-            
+            if is_forwarded:
+                context_info["isForwarded"] = True
+
             # If msg_type is conversation, promote it to extendedTextMessage
             if mapped_type == "conversation":
                 mapped_type = "extendedTextMessage"

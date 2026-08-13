@@ -6008,6 +6008,35 @@ class ConversationsPanel(wx.Panel):
                     return ctx
         return None
 
+    def _is_message_forwarded(self, msg) -> bool:
+        """True when contextInfo.isForwarded is set — a real WhatsApp
+        protocol field present on any forwarded message, from anyone, not
+        only ones this app itself forwarded (WebSocketClient._normalize_wpp_message
+        threads it through from WPPConnect's own Message.isForwarded).
+        Deliberately does not reuse _get_context_info(): that helper only
+        ever returns contextInfo when it also carries a quote, and a
+        forwarded message is very often neither a reply nor a mention.
+        """
+        if not isinstance(msg, dict):
+            return False
+        top_ctx = msg.get("contextInfo")
+        if isinstance(top_ctx, dict) and top_ctx.get("isForwarded"):
+            return True
+        msg_obj = msg.get("message") or {}
+        if not isinstance(msg_obj, dict):
+            return False
+        for sub_key in (
+            "extendedTextMessage", "audioMessage", "imageMessage",
+            "videoMessage", "documentMessage", "stickerMessage",
+            "locationMessage", "contactMessage", "buttonsMessage",
+            "listMessage",
+        ):
+            sub = msg_obj.get(sub_key)
+            if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
+                if sub["contextInfo"].get("isForwarded"):
+                    return True
+        return False
+
     def _get_quoted_sender(self, ctx: dict, msg: dict) -> str:
         """Resolve the display name of the quoted message sender from contextInfo."""
         mw   = self.main_window
@@ -6148,6 +6177,8 @@ class ConversationsPanel(wx.Panel):
             pieces[-1] += f", {status}"
         if msg.get("_edited") and not self._is_system_event(msg):
             pieces[-1] += f", {i18n.t('status_edited')}"
+        if not self._is_system_event(msg) and self._is_message_forwarded(msg):
+            pieces[-1] += f", {i18n.t('status_forwarded')}"
 
         # Append quoted message preview (if this is a reply)
         if ctx:
