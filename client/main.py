@@ -1490,6 +1490,21 @@ class MainWindow(wx.Frame):
             except Exception:
                 logging.exception("[menu] building Accounts menu failed (non-fatal)")
 
+        # Frame-level Ctrl+0..9 → jump to an existing message bookmark,
+        # regardless of which control currently has focus — bound
+        # unconditionally (not just in multi-account context, unlike the
+        # Ctrl+Shift+1..9 account-switch hook above). Jumping to a bookmark
+        # can open a DIFFERENT conversation entirely (see
+        # ConversationsPanel._on_bookmark_set_or_jump), so it must not
+        # require the messages list to already be focused. Setting a NEW
+        # bookmark still needs a focused message, so this only ever handles
+        # the jump case; event.Skip() when there's no bookmark for that
+        # digit lets it fall through to ConversationsPanel's own
+        # AcceleratorTable (Ctrl+0..9 there does both set and jump).
+        if not getattr(self, "_bookmark_hotkey_hook_bound", False):
+            self.Bind(wx.EVT_CHAR_HOOK, self._on_bookmark_hotkey_char)
+            self._bookmark_hotkey_hook_bound = True
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -1532,11 +1547,54 @@ class MainWindow(wx.Frame):
                 if ord("1") <= code <= ord("9"):
                     slot = code - ord("0")
                     target = getattr(self, "_account_hotkey_slots", {}).get(slot)
-                    if target and target != getattr(self, "account_id", None):
-                        self._switch_to_account(target)
-                    return  # consume the combo (even a no-op self-switch)
+                    if target:
+                        if target != getattr(self, "account_id", None):
+                            self._switch_to_account(target)
+                        return  # consume the combo (even a no-op self-switch)
+                    # No paired account at this slot (e.g. a single-account
+                    # install, or fewer than <slot> paired accounts) — there
+                    # is nothing to switch to, so this combo isn't actually
+                    # ours. Falling through to event.Skip() below used to be
+                    # unreachable here: the unconditional `return` above ate
+                    # every Ctrl+Shift+1..9 regardless of whether a target
+                    # existed, which silently broke the unrelated per-
+                    # conversation message bookmarks' Ctrl+Shift+<digit>
+                    # (remove bookmark) for any account count below 9.
         except Exception:
             logging.exception("[accounts] hotkey char handler failed")
+        event.Skip()
+
+    def _on_bookmark_hotkey_char(self, event):
+        """Frame-level Ctrl+0..9 → jump to an existing message bookmark, no
+        matter which control currently has focus.
+
+        Bound via EVT_CHAR_HOOK for the same reason _on_account_hotkey_char()
+        is: a focused child panel's own AcceleratorTable would otherwise
+        require focus to already be inside it for Ctrl+<digit> to fire at
+        all — but jumping to a bookmark can open a DIFFERENT conversation
+        entirely (ConversationsPanel._on_bookmark_set_or_jump), so it needs
+        to work from the conversation list, the navigation panel, or
+        anywhere else in the window, not only once already inside the
+        messages list.
+
+        Only ever handles the JUMP case — setting a NEW bookmark still
+        requires a focused message, which only makes sense with the
+        messages list itself focused, so that continues to go through
+        ConversationsPanel's own Ctrl+0..9 AcceleratorTable entry
+        unchanged. Anything that isn't our exact combo, or a digit with no
+        bookmark set, is passed through untouched with event.Skip().
+        """
+        try:
+            if event.GetModifiers() == wx.MOD_CONTROL:
+                code = event.GetKeyCode()
+                if ord("0") <= code <= ord("9"):
+                    digit = code - ord("0")
+                    panel = getattr(self, "conversations_panel", None)
+                    if panel is not None and digit in getattr(panel, "_msg_bookmarks", {}):
+                        panel._on_bookmark_set_or_jump(digit)
+                        return  # consume — this was a jump to an existing bookmark
+        except Exception:
+            logging.exception("[bookmarks] hotkey char handler failed")
         event.Skip()
 
     def _on_accounts_menu(self, action: dict):
