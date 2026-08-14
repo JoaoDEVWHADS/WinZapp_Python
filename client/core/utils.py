@@ -74,7 +74,11 @@ DEFAULT_SETTINGS = {
         "terms_alert_displayed": False,
         "quick_tip_shown": False,
         "global_hotkey": None,
-        "switch_behavior": "single"
+        "switch_behavior": "single",
+        # Master mute (Settings > Geral) for the spoken+sound announcements of
+        # sync progress/completion, media downloads and the automatic offline
+        # transition. On by default; unchecked = those warnings stay silent.
+        "announce_sync_events": True
     },
     "status": {
         "messages_set_completed": False

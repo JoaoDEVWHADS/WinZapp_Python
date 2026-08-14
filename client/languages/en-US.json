@@ -237,6 +237,7 @@
     "cancel_edit": "Cancel editing",
     "noise_reduction_label": "Enable microphone &noise reduction",
     "notifications_label": "Enable background &notifications for new messages",
+    "announce_sync_events_label": "Announce sync, media downloads and automatic &offline mode",
     "tray_show_icon": "Show icon and unread message count in the system tray",
     "tray_open": "Open",
     "tray_offline_mode": "Offline mode",
