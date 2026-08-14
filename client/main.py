@@ -441,6 +441,13 @@ class MediaExpiredError(Exception):
 # disk in SQLite, just not resident).
 _MAX_RESIDENT_MESSAGES_PER_CHAT = 1000
 
+# Identifier for the Ctrl+Shift+0 Win32 hotkey (see
+# MainWindow._set_bookmark_zero_hotkey). ::RegisterHotKey() only accepts ids
+# in 0x0000-0xBFFF for an application, so this cannot be a wx.NewIdRef()
+# (those are negative) — it is a fixed constant instead, and doubles as the
+# wx.EVT_HOTKEY binding id.
+BOOKMARK_ZERO_HOTKEY_ID = 0xB000
+
 # Message types that are WhatsApp/system-generated rather than something a
 # person actually sent, even though they ARE worth showing as the chat-list
 # preview text once you're already looking at the list (a revoke reads
@@ -1505,6 +1512,22 @@ class MainWindow(wx.Frame):
             self.Bind(wx.EVT_CHAR_HOOK, self._on_bookmark_hotkey_char)
             self._bookmark_hotkey_hook_bound = True
 
+        # Ctrl+Shift+0 (remove bookmark 0) never reaches any of the paths
+        # above — see _set_bookmark_zero_hotkey() for why, and why it needs a
+        # Win32 hotkey registration to be reclaimed at all.
+        if (not getattr(self, "_bookmark_zero_hotkey_bound", False)
+                and hasattr(wx, "EVT_HOTKEY")):
+            self.Bind(wx.EVT_HOTKEY, self._on_bookmark_zero_hotkey,
+                      id=BOOKMARK_ZERO_HOTKEY_ID)
+            self._bookmark_zero_hotkey_bound = True
+            # EVT_ACTIVATE drives register/unregister from here on, but the
+            # window may already be the active one by the time the menu bar is
+            # built (no further activation event would follow).
+            try:
+                self._set_bookmark_zero_hotkey(bool(self.IsActive()))
+            except Exception:
+                logging.exception("[bookmarks] initial Ctrl+Shift+0 registration failed")
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -1601,6 +1624,93 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[bookmarks] hotkey char handler failed")
         event.Skip()
+
+    # ── Ctrl+Shift+0: reclaimed from the Windows IME hotkey ─────────────────
+
+    def _bookmark_hotkey_panel(self):
+        """The ConversationsPanel iff its conversation view currently owns
+        focus — i.e. exactly the condition under which that panel's own
+        AcceleratorTable (Ctrl+Shift+1..9) would fire.
+
+        Needed only by the Ctrl+Shift+0 path below: a Win32 hotkey is
+        window-global and fires wherever focus sits inside this frame, so the
+        scope the accelerator table gives the other nine digits for free has
+        to be re-checked by hand here to keep all ten behaving identically.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        conv = getattr(panel, "conversation_panel", None)
+        if conv is None or not conv.IsShown():
+            return None
+        focus = wx.Window.FindFocus()
+        while focus is not None:
+            if focus is conv:
+                return panel
+            focus = focus.GetParent()
+        return None
+
+    def _set_bookmark_zero_hotkey(self, active: bool):
+        """Register/unregister Ctrl+Shift+0 as a Win32 hotkey, following this
+        window's activation state.
+
+        Windows ships a default IME "direct switch" hotkey bound to exactly
+        Ctrl+Shift+0 (HKCU\\Control Panel\\Input Method\\Hot Keys\\00000104 —
+        the 0x100-0x11F id range is IME_HOTKEY_DSWITCH, "switch straight to
+        input method X": Virtual Key = 0x30 = VK_0, Key Modifiers = 0xC006 =
+        MOD_CONTROL | MOD_SHIFT | MOD_LEFT | MOD_RIGHT). Note the entry
+        survives even with its target input method not installed at all
+        (Target IME = 0xE0010411, the Japanese MS-IME, on a Preload holding
+        only pt-BR) — the switch is then a no-op, but the key is swallowed
+        all the same, which is why the symptom is total silence rather than a
+        visible layout change. No sibling entry exists for VK_1..VK_9, hence
+        digits 1-9 never had the problem. The OS consumes the combo in the
+        IMM/TSF layer before it is ever dispatched to a window, so the
+        WM_KEYDOWN for VK_0 never arrives: neither ConversationsPanel's
+        AcceleratorTable nor a frame-level EVT_CHAR_HOOK can see it, which is
+        why removing bookmark 0 silently did nothing while Ctrl+Shift+1..9
+        worked. ::RegisterHotKey() takes precedence over the IME hotkey and is
+        the only way to get the combo back.
+
+        That registration is system-global, though — while it is held, no
+        other application can receive Ctrl+Shift+0 either. So it is tied to
+        this window's focus (EVT_ACTIVATE): held only while WinZapp is the
+        active window, released the moment it isn't, which also matches the
+        scope the other nine digits already have.
+
+        A failed registration (another process holding the combo) is logged
+        and otherwise ignored — Ctrl+Shift+0 then simply stays unavailable,
+        exactly as it was before.
+        """
+        if not getattr(self, "_bookmark_zero_hotkey_bound", False):
+            return
+        if bool(active) == getattr(self, "_bookmark_zero_hotkey_on", False):
+            return
+        try:
+            if active:
+                ok = bool(self.RegisterHotKey(
+                    BOOKMARK_ZERO_HOTKEY_ID, wx.MOD_CONTROL | wx.MOD_SHIFT, ord("0")
+                ))
+                self._bookmark_zero_hotkey_on = ok
+                if not ok:
+                    logging.warning(
+                        "[bookmarks] Ctrl+Shift+0 hotkey registration refused "
+                        "(another application holds it) — bookmark 0 removal unavailable"
+                    )
+            else:
+                self.UnregisterHotKey(BOOKMARK_ZERO_HOTKEY_ID)
+                self._bookmark_zero_hotkey_on = False
+        except Exception:
+            logging.exception("[bookmarks] Ctrl+Shift+0 hotkey toggle failed")
+            self._bookmark_zero_hotkey_on = False
+
+    def _on_bookmark_zero_hotkey(self, event):
+        """WM_HOTKEY for Ctrl+Shift+0 → remove bookmark 0, mirroring what
+        ConversationsPanel's AcceleratorTable does for Ctrl+Shift+1..9."""
+        try:
+            panel = self._bookmark_hotkey_panel()
+            if panel is not None:
+                panel._on_bookmark_remove(0)
+        except Exception:
+            logging.exception("[bookmarks] Ctrl+Shift+0 hotkey handler failed")
 
     def _on_accounts_menu(self, action: dict):
         """Handle a click in the Accounts menu (plan Zad 4.2-4.5)."""
@@ -3231,6 +3341,10 @@ class MainWindow(wx.Frame):
         presence POST. Only the state that's still current after a short
         quiet window gets sent, collapsing that flicker into a single request.
         """
+        # Not debounced and deliberately ahead of every early return below:
+        # holding a system-global hotkey is only acceptable while this window
+        # really is the active one (see _set_bookmark_zero_hotkey).
+        self._set_bookmark_zero_hotkey(bool(event.GetActive()))
         if self.background_mode:
             event.Skip()
             return
