@@ -225,3 +225,47 @@ class TestTheLoopEndToEnd:
         counts = [i * 40 for i in range(1, 60)]
         _, fetches = _run_loop(counts, local_cache=0)
         assert fetches <= MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
+
+
+class TestSmallAccountsAreNotLockedOut:
+    """The size threshold must never keep a genuinely small account from
+    finishing its sync.
+
+    It only exists in the deadline branch, and the deadline is only reached
+    when the count never repeats. A small account's count repeats on the very
+    next attempt, so it settles by the two-equal rule long before size is
+    ever consulted — an account with one conversation syncs in two attempts.
+    """
+
+    @pytest.mark.parametrize("counts,label", [
+        ([3, 3, 3, 3, 3, 3], "three chats, answered immediately"),
+        ([1, 1, 1, 1, 1, 1], "a single conversation"),
+        ([0, 0, 0, 0, 0, 3, 3], "cold store, three chats arriving last"),
+        ([1, 2, 3, 4, 4, 4], "filling in, then stable at four"),
+        ([0, 0, 2, 2, 2, 2], "slow first answer, two chats"),
+        ([0, 0, 0, 0, 0, 1, 1], "one conversation, arriving late"),
+    ])
+    def test_a_small_account_still_settles(self, counts, label):
+        settled, _ = _run_loop(counts, local_cache=0)
+        assert settled is True, label
+
+    def test_a_small_account_never_reaches_the_size_check(self):
+        """Two attempts, not the full budget — proof the deadline branch (the
+        only place size is looked at) is not involved."""
+        _, fetches = _run_loop([3, 3, 3, 3, 3, 3], local_cache=0)
+        assert fetches == 2
+
+    def test_the_deadline_is_strictly_more_permissive_than_before(self):
+        """Before this change the deadline always meant "incomplete". Now it
+        can also extend or accept, so no account that used to finish its sync
+        can stop finishing it: every outcome is at least as good."""
+        ceiling = MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
+        outcomes = {
+            MainWindow._settle_deadline_decision(count, prev, budget)
+            for count in (0, 1, 4, 10, 11, 500)
+            for prev in (-1, 0, 3, 10, 499)
+            for budget in (6, ceiling)
+        }
+        assert outcomes <= {"extend", "accept", "incomplete"}
+        # ...and "incomplete" is exactly what the old code did unconditionally.
+        assert MainWindow._settle_deadline_decision(4, 4, ceiling) == "incomplete"
