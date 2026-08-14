@@ -23,6 +23,10 @@ from ui.conversations import ConversationsPanel
 
 class _FakeMainWindow:
     _is_bad_contact_name = staticmethod(MainWindow._is_bad_contact_name)
+    # The real lookup, not chats.get(): it falls back to the mapped @lid/phone
+    # variant, which is the whole reason the panel calls it. This stub already
+    # carries chats/_lid_to_phone/_phone_to_lid, so the real method just works.
+    get_chat = MainWindow.get_chat
 
     def __init__(self, contacts=None, chats=None):
         self.contacts = contacts or {}
