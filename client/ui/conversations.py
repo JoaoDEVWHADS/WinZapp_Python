@@ -314,14 +314,6 @@ class ConversationsPanel(wx.Panel):
         self._conv_data_btn.Bind(wx.EVT_BUTTON, self._show_conversation_data)
         conv_sizer.Add(self._conv_data_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
-        # ── Add attachment button (before messages list for easy keyboard reach) ─
-        self._add_attachment_btn = wx.Button(
-            self.conversation_panel, label=i18n.t("add_attachment")
-        )
-        self._add_attachment_btn.SetAccessible(AccessibleAddAttachmentButton())
-        self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
-        conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
-
         # ── Search in conversation button ───────────────────────────────────
         self._search_open_btn = wx.Button(
             self.conversation_panel, label=i18n.t("search_in_conv")
@@ -583,6 +575,14 @@ class ConversationsPanel(wx.Panel):
         )
         self.record_voice_message_btn.Bind(wx.EVT_BUTTON, self.on_record_voice_message)
         conv_sizer.Add(self.record_voice_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        # ── Add attachment button (moved closer to message input area) ─────────
+        self._add_attachment_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("add_attachment")
+        )
+        self._add_attachment_btn.SetAccessible(AccessibleAddAttachmentButton())
+        self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
+        conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         # ── Attachment staging panel (hidden until files are chosen) ─────────
         self._attachment_panel = wx.Panel(self.conversation_panel)
@@ -1476,6 +1476,7 @@ class ConversationsPanel(wx.Panel):
             virtual_msg.setdefault("contextInfo", {})["mentionedJid"] = _mentioned
 
         # Add to sorted list and UI list immediately.
+        self._clear_empty_placeholder()
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
         # Scroll to the new item.
@@ -2041,6 +2042,8 @@ class ConversationsPanel(wx.Panel):
                 "quotedMessage": quoted_msg.get("message") or {},
                 "_quotedFromMe": bool(_qk.get("fromMe", False)),
             }
+        
+        self._clear_empty_placeholder()
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
         last = self.messages_list.GetItemCount() - 1
@@ -3033,7 +3036,7 @@ class ConversationsPanel(wx.Panel):
         if alt_jid and alt_jid in mw.chats:
             target_jid = alt_jid
         
-        chat = mw.chats.get(target_jid)
+        chat = mw.get_chat(target_jid)
         if chat is None:
             name = self._get_participant_name(target_jid)
             chat = {"remoteJid": target_jid, "pushName": name}
@@ -5897,7 +5900,7 @@ class ConversationsPanel(wx.Panel):
                     n = (c.get("name") or c.get("pushName") or "").strip()
                     if n and not mw._is_bad_contact_name(n):
                         return n
-                chat_obj = mw.chats.get(cjid)
+                chat_obj = mw.get_chat(cjid)
                 if chat_obj:
                     cn = (chat_obj.get("name") or "").strip()
                     if cn and not mw._is_bad_contact_name(cn):
@@ -5949,6 +5952,13 @@ class ConversationsPanel(wx.Panel):
         if phone_jid and not phone_jid.endswith("@lid") and not phone_jid.endswith("@g.us"):
             return format_number(phone_jid)
         return ""
+
+    def _clear_empty_placeholder(self):
+        """Remove the 'no messages' placeholder from the list if it is present."""
+        if self._sorted_messages and isinstance(self._sorted_messages[0], dict) and self._sorted_messages[0].get("_type") == "empty_placeholder":
+            self._sorted_messages.pop(0)
+            self.messages_list.DeleteItem(0)
+            self._recompute_unread_sep_idx()
 
     def _is_separator(self, msg: dict) -> bool:
         """Return True if msg is a non-message sentinel row (unread separator
@@ -6178,7 +6188,12 @@ class ConversationsPanel(wx.Panel):
         remote = conv.get("remoteJid", "")
         if remote and not remote.endswith("@g.us"):
             p_phone = _phone_part(clean_p)
-            r_phone = _phone_part(remote)
+            
+            remote_to_compare = remote
+            if remote_to_compare.endswith("@lid"):
+                remote_to_compare = getattr(mw, "_lid_to_phone", {}).get(remote_to_compare, remote_to_compare)
+            r_phone = _phone_part(remote_to_compare)
+            
             my_jid = getattr(mw, "my_jid", "")
             my_phone = _phone_part(my_jid) if my_jid else ""
             if my_phone and p_phone == my_phone:
@@ -6189,8 +6204,6 @@ class ConversationsPanel(wx.Panel):
                     or conv.get("pushName", "")
                     or (format_number(remote) if not remote.endswith("@lid") else "")
                 )
-            else:
-                return mw.self_reference_label()
 
         # Check if the quoted sender is "me" — strip device suffix from both sides
         my_jid = getattr(mw, "my_jid", "")
@@ -6878,7 +6891,7 @@ class ConversationsPanel(wx.Panel):
                 name = (contact.get("name") or contact.get("pushName") or "").strip()
                 if name and not mw._is_bad_contact_name(name):
                     return name
-            chat_obj = mw.chats.get(cjid)
+            chat_obj = mw.get_chat(cjid)
             if chat_obj:
                 cn = (chat_obj.get("name") or "").strip()
                 if cn and not mw._is_bad_contact_name(cn):
@@ -6957,7 +6970,7 @@ class ConversationsPanel(wx.Panel):
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
         mw = self.main_window
-        chat = mw.chats.get(participant_jid)
+        chat = mw.get_chat(participant_jid)
         if chat is None:
             pname = self._get_participant_name(participant_jid, msg)
             chat = {"remoteJid": participant_jid, "pushName": pname}
@@ -6969,7 +6982,7 @@ class ConversationsPanel(wx.Panel):
     def _on_menu_converse_private(self, participant_jid: str, participant_name: str):
         """Open a private conversation with the group participant (no citation)."""
         mw = self.main_window
-        chat = mw.chats.get(participant_jid)
+        chat = mw.get_chat(participant_jid)
         if chat is None:
             chat = {"remoteJid": participant_jid, "pushName": participant_name}
         self.navigate_to_conversation(chat)
@@ -8800,6 +8813,8 @@ class ConversationsPanel(wx.Panel):
                 "participant":   _qk.get("participant", ""),
                 "quotedMessage": self._quoted_message.get("message") or {},
             }
+        
+        self._clear_empty_placeholder()
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
         last = self.messages_list.GetItemCount() - 1
@@ -8990,6 +9005,8 @@ class ConversationsPanel(wx.Panel):
                     "participant":   _qk.get("participant", ""),
                     "quotedMessage": quoted.get("message") or {},
                 }
+            
+            self._clear_empty_placeholder()
             self._sorted_messages.append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
@@ -9195,6 +9212,7 @@ class ConversationsPanel(wx.Panel):
                     )
 
             # Append the real message (focus must NOT move)
+            self._clear_empty_placeholder()
             self._sorted_messages.append(msg)
             self.messages_list.Append((self._render_message_line(msg),))
         finally:

@@ -13557,6 +13557,10 @@ class MainWindow(wx.Frame):
         def _format_1on1_chat(jid: str) -> str:
             if not jid:
                 return jid
+            if jid.endswith("@lid"):
+                resolved = getattr(self, "_lid_to_phone", {}).get(jid)
+                if resolved:
+                    jid = resolved
             if jid.endswith("@s.whatsapp.net"):
                 return jid.replace("@s.whatsapp.net", "@c.us")
             return jid
