@@ -724,13 +724,18 @@ export default class CreateSessionUtil {
             // just read this chat on their phone" unless you know whether the
             // count actually fell from something.
             //
-            // Both sources are tried because the two disagree: wa-js types
-            // this event's third field as `previousUnreadCount: number`, but
-            // it emits it straight from the Store's `change:unreadCount`
-            // callback, whose third argument is the Backbone-style options
-            // object in every other handler of that shape. Whichever one is
-            // actually a number wins; if neither is, null is sent and the
-            // client keeps its own (conservative) count.
+            // Measured against a live session: the field really is a plain
+            // number, matching wa-js's own typing. Three consecutive messages
+            // in one group came through as unreadCount 1/2/3 with
+            // previousUnreadCount 0/1/2 — tracking exactly one step behind.
+            // The suspicion it might be Backbone's options object (wa-js
+            // emits it straight from the Store's `change:unreadCount`
+            // callback, whose third argument is options in every other
+            // handler of that shape) did not hold. The `.previous()` fallback
+            // stays anyway: it costs nothing, and it is what keeps this
+            // working if a future wa-js changes the payload — silently, since
+            // nothing else here would notice. Neither being a number sends
+            // null, and the client then keeps its own conservative count.
             // Deriving `previous` must never be able to suppress the event
             // itself: the unread count is the payload that matters and the
             // previous value is an extra, so it is computed defensively and
