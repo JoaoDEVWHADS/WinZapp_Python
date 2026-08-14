@@ -8055,6 +8055,50 @@ class MainWindow(wx.Frame):
             return max_attempts
         return attempt + 1 + confirm_attempts
 
+    # Ceiling for the deadline extensions below. _CHAT_RETRIES (6) x
+    # _CHAT_DELAY (5 s) gives the settle loop about 30 seconds, which is not
+    # enough for an account whose chat list WhatsApp Web is still streaming in
+    # from the phone — the loop ran out, the sync was declared incomplete, and
+    # the health checker started it over. Reported live as "it finished
+    # syncing, then a while later said it was syncing again", with no
+    # connection drop involved. 30 attempts x 5 s caps the wait at ~2.5
+    # minutes, past which something is wrong that waiting will not fix.
+    _CHAT_ABSOLUTE_MAX_ATTEMPTS = 30
+    # Attempts granted per extension: small enough that a list which settles
+    # right after the deadline costs one short extra wait, not a full round.
+    _CHAT_ATTEMPT_EXTENSION = 2
+    # Below this, a still-growing snapshot is too small to be worth keeping:
+    # accepting e.g. 4 chats as a finished sync is the exact failure the
+    # settle rule exists to prevent (see tests/test_chat_list_settled.py).
+    # Above it the snapshot is a real, if possibly incomplete, account — and
+    # the periodic chat poller plus live WebSocket events keep filling it in,
+    # which beats re-running the whole sync every time the health checker
+    # comes round.
+    _CHAT_MIN_ACCEPTABLE_SNAPSHOT = 10
+
+    @classmethod
+    def _settle_deadline_decision(cls, server_count: int, prev_server_count: int,
+                                  max_attempts: int) -> str:
+        """What to do when the settle loop reaches its last attempt without a
+        stable count: ``"extend"``, ``"accept"`` or ``"incomplete"``.
+
+        Still growing and there is budget left -> extend, because a list that
+        is visibly still arriving just needs more time. Otherwise a snapshot
+        big enough to be a real account is accepted (an incomplete sync gets
+        retried from scratch by the health checker, which is what users saw as
+        spontaneous re-syncing); anything smaller stays incomplete, since
+        accepting it would strand the account on a handful of conversations.
+
+        Pulled out of _run_sync()'s retry loop purely so it can be tested —
+        see tests/test_chat_list_settled.py.
+        """
+        is_growing = server_count > prev_server_count and server_count > 0
+        if is_growing and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
+            return "extend"
+        if server_count > cls._CHAT_MIN_ACCEPTABLE_SNAPSHOT:
+            return "accept"
+        return "incomplete"
+
     def _should_abort_sync_for_offline(self) -> bool:
         """True once offline mode (manual or auto-detected) has come on while
         this sync is still incomplete.
@@ -8227,34 +8271,34 @@ class MainWindow(wx.Frame):
                 chat_list_settled = True
                 break
             if attempt == max_attempts - 1:
-                # Still growing when we ran out of attempts.
-                # If the server is actively downloading chats from the phone (count is growing),
-                # grant extensions up to an absolute maximum (e.g. 30 attempts = ~2.5 minutes).
-                _ABSOLUTE_MAX_ATTEMPTS = 30
-                is_growing = server_count > prev_server_count and server_count > 0
-                if is_growing and max_attempts < _ABSOLUTE_MAX_ATTEMPTS:
-                    max_attempts += 2
+                # Out of attempts without two equal counts. See
+                # _settle_deadline_decision() for what each outcome means and
+                # why the thresholds are what they are.
+                decision = self._settle_deadline_decision(
+                    server_count, prev_server_count, max_attempts
+                )
+                if decision == "extend":
+                    max_attempts += self._CHAT_ATTEMPT_EXTENSION
                     logging.info(
-                        "[start_sync] Chat list is still growing (%d -> %d), extending timeout to %d attempts...",
-                        prev_server_count, server_count, max_attempts
+                        "[start_sync] Chat list is still growing (%d -> %d), extending to %d attempts...",
+                        prev_server_count, server_count, max_attempts,
                     )
                     prev_server_count = server_count
                     time.sleep(_CHAT_DELAY)
                     continue
-
-                if server_count > 10:
+                if decision == "accept":
                     logging.warning(
-                        "[start_sync] Chat list never settled (last count: %d) but reached hard timeout limit. "
-                        "Accepting current snapshot to avoid infinite loop.", server_count,
+                        "[start_sync] Chat list never settled (last count: %d) but the extension "
+                        "budget is spent — accepting this snapshot rather than declaring the sync "
+                        "incomplete and having the health checker start it over.", server_count,
                     )
                     chat_list_settled = True
                     break
-                else:
-                    logging.warning(
-                        "[start_sync] Chat list never settled (last count: %d) and too small to accept — "
-                        "treating this sync as incomplete.", server_count,
-                    )
-                    break
+                logging.warning(
+                    "[start_sync] Chat list never settled (last count: %d) and too small to accept — "
+                    "treating this sync as incomplete.", server_count,
+                )
+                break
             prev_server_count = server_count
             # See the comment on the other retry branch above — status stays
             # "synchronizing" here too.
@@ -12255,8 +12299,20 @@ class MainWindow(wx.Frame):
             logging.warning(f"[sync_chat_messages] Aborting sync for invalid JID: {remote_jid}")
             return
             
-        # Formata o JID corretamente para o WPPConnect
-        if remote_jid.endswith("@s.whatsapp.net"):
+        # Formata o JID corretamente para o WPPConnect.
+        #
+        # Prefer the @lid when the cache knows one. Measured against a live
+        # session, get-messages on 12 private chats that exist under both
+        # forms: @lid answered 200 with messages 12/12, the phone form
+        # answered 401 12/12. Starting from the phone form does not lose
+        # anything — the alternate-JID fallback below recovers — but it spends
+        # one guaranteed-failing request per chat, which on an account with
+        # hundreds of private chats is hundreds of wasted round-trips in the
+        # very sync this is meant to make lighter.
+        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
+        if lid:
+            phone = lid
+        elif remote_jid.endswith("@s.whatsapp.net"):
             phone = remote_jid.replace("@s.whatsapp.net", "@c.us")
         else:
             phone = remote_jid
