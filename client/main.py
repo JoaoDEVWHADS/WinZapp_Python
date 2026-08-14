@@ -49,7 +49,7 @@ from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_an
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
-from app_paths import resource_path, data_path
+from app_paths import resource_path, data_path, accounts_root
 from core.message_queue import MessageQueue, PendingMessage
 import wx
 import wx.adv
@@ -8227,13 +8227,34 @@ class MainWindow(wx.Frame):
                 chat_list_settled = True
                 break
             if attempt == max_attempts - 1:
-                # Still growing when we ran out of attempts: use what we have,
-                # but do NOT call this sync complete — it gets retried below.
-                logging.warning(
-                    "[start_sync] Chat list never settled (last count: %d) — "
-                    "treating this sync as incomplete.", server_count,
-                )
-                break
+                # Still growing when we ran out of attempts.
+                # If the server is actively downloading chats from the phone (count is growing),
+                # grant extensions up to an absolute maximum (e.g. 30 attempts = ~2.5 minutes).
+                _ABSOLUTE_MAX_ATTEMPTS = 30
+                is_growing = server_count > prev_server_count and server_count > 0
+                if is_growing and max_attempts < _ABSOLUTE_MAX_ATTEMPTS:
+                    max_attempts += 2
+                    logging.info(
+                        "[start_sync] Chat list is still growing (%d -> %d), extending timeout to %d attempts...",
+                        prev_server_count, server_count, max_attempts
+                    )
+                    prev_server_count = server_count
+                    time.sleep(_CHAT_DELAY)
+                    continue
+
+                if server_count > 10:
+                    logging.warning(
+                        "[start_sync] Chat list never settled (last count: %d) but reached hard timeout limit. "
+                        "Accepting current snapshot to avoid infinite loop.", server_count,
+                    )
+                    chat_list_settled = True
+                    break
+                else:
+                    logging.warning(
+                        "[start_sync] Chat list never settled (last count: %d) and too small to accept — "
+                        "treating this sync as incomplete.", server_count,
+                    )
+                    break
             prev_server_count = server_count
             # See the comment on the other retry branch above — status stays
             # "synchronizing" here too.
@@ -10128,6 +10149,9 @@ class MainWindow(wx.Frame):
                     if response.status_code not in (200, 201):
                         logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
                         response_data = []
+                        if response.status_code >= 500:
+                            # Server is overloaded (e.g. syncing a huge contact list). Don't blindly retry 5 times and block startup.
+                            break
                     else:
                         try:
                             body = response.json()
