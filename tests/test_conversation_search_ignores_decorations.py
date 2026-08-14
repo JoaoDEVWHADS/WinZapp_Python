@@ -33,12 +33,12 @@ class _FakeSearchField:
 
 
 class _FakeMainWindow:
-    """Accent folding off — the default. Covered on its own in
+    """Unicode folding off — the default. Covered on its own in
     tests/test_search_normalization.py; here it must not interfere."""
 
     @staticmethod
-    def _search_folds_accents():
-        return False
+    def _search_normalization_mode():
+        return "off"
 
 
 class _Stub:

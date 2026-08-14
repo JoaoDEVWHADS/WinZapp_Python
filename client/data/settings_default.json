@@ -17,7 +17,7 @@
         "terms_alert_displayed": false,
         "quick_tip_shown": false,
         "announce_sync_events": true,
-        "search_normalize_unicode": false
+        "search_normalization": "off"
     },
     "status": {
         "messages_set_completed": false

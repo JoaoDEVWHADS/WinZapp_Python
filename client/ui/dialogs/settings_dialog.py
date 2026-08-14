@@ -113,7 +113,7 @@ class _HotkeyCapture(wx.TextCtrl):
         self.SetValue(_vk_mod_to_str(vk, mod))
 
 
-from core.utils import DEFAULT_SETTINGS
+from core.utils import DEFAULT_SETTINGS, SEARCH_NORMALIZATION_MODES, search_normalization_mode
 
 
 def ensure_default_settings_file():
@@ -212,10 +212,22 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._announce_sync_check, 0, wx.ALL, 8)
 
-        self._search_normalize_check = wx.CheckBox(
-            self._general_page, label=i18n.t("search_normalize_unicode_label")
+        # Radio group, not a checkbox: the two folding levels are different
+        # trades, not "more of the same", so the user picks one rather than
+        # discovering NFKD's extra rewrites by surprise (see
+        # core.utils.normalize_for_search).
+        self._search_norm_radio = wx.RadioBox(
+            self._general_page,
+            label=i18n.t("search_normalization_label"),
+            choices=[
+                i18n.t("search_normalization_off"),
+                i18n.t("search_normalization_nfd"),
+                i18n.t("search_normalization_nfkd"),
+            ],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_COLS,
         )
-        gen_sizer.Add(self._search_normalize_check, 0, wx.ALL, 8)
+        gen_sizer.Add(self._search_norm_radio, 0, wx.EXPAND | wx.ALL, 8)
 
         self._autostart_check = wx.CheckBox(
             self._general_page, label=i18n.t("autostart_label")
@@ -700,11 +712,13 @@ class SettingsDialog(wx.Dialog):
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
         self._announce_sync_check.SetValue(announce_sync)
 
-        # Off unless the user turned it on — including for installs whose
-        # settings.json predates the option and has no key at all.
-        self._search_normalize_check.SetValue(
-            bool(self.main_window.settings.get("general", {}).get("search_normalize_unicode", False))
+        # "off" unless the user chose otherwise — including for installs
+        # whose settings.json predates the option and has no key at all.
+        _general = self.main_window.settings.get("general", {})
+        _mode = search_normalization_mode(
+            _general.get("search_normalization", _general.get("search_normalize_unicode"))
         )
+        self._search_norm_radio.SetSelection(SEARCH_NORMALIZATION_MODES.index(_mode))
 
         from autostart import is_autostart_enabled
         self._autostart_check.SetValue(is_autostart_enabled())
@@ -1526,10 +1540,15 @@ class SettingsDialog(wx.Dialog):
             self._announce_sync_check.GetValue()
         )
 
-        # Accent folding in searches
-        self.main_window.settings.setdefault("general", {})["search_normalize_unicode"] = (
-            self._search_normalize_check.GetValue()
-        )
+        # Unicode folding in searches. The old checkbox key is dropped rather
+        # than left behind to be read by some future code path as if it still
+        # meant something.
+        _gen = self.main_window.settings.setdefault("general", {})
+        _sel = self._search_norm_radio.GetSelection()
+        _gen["search_normalization"] = SEARCH_NORMALIZATION_MODES[
+            _sel if 0 <= _sel < len(SEARCH_NORMALIZATION_MODES) else 0
+        ]
+        _gen.pop("search_normalize_unicode", None)
 
         # Autostart
         from autostart import is_autostart_enabled
@@ -1684,7 +1703,13 @@ class SettingsDialog(wx.Dialog):
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
-        self._search_normalize_check.SetLabel(i18n.t("search_normalize_unicode_label"))
+        self._search_norm_radio.SetLabel(i18n.t("search_normalization_label"))
+        for _i, _key in enumerate((
+            "search_normalization_off",
+            "search_normalization_nfd",
+            "search_normalization_nfkd",
+        )):
+            self._search_norm_radio.SetItemLabel(_i, i18n.t(_key))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))

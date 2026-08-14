@@ -8,37 +8,70 @@ import requests
 from cryptography.fernet import Fernet
 
 
-def normalize_for_search(text: str, fold_accents: bool = False) -> str:
+# How much Unicode folding searching applies, in the order the Settings radio
+# group offers them. Stored in settings as one of these strings.
+SEARCH_NORMALIZATION_MODES = ("off", "nfd", "nfkd")
+
+
+def search_normalization_mode(value) -> str:
+    """Canonicalize whatever settings.json holds into one of the three modes.
+
+    Anything unrecognised — a typo, a hand-edited file, a value from a newer
+    version — reads as "off", which is the mode that cannot surprise anyone:
+    searching then behaves exactly as it always did.
+
+    Booleans are accepted because this setting shipped briefly as a checkbox
+    (``search_normalize_unicode``) before becoming a three-way choice, so an
+    existing settings.json can still carry True/False; True meant NFD.
+    """
+    if value is True:
+        return "nfd"
+    if value is False or value is None:
+        return "off"
+    mode = str(value).strip().lower()
+    return mode if mode in SEARCH_NORMALIZATION_MODES else "off"
+
+
+def normalize_for_search(text: str, mode="off") -> str:
     """Prepare *text* for a case-insensitive substring search.
 
-    With *fold_accents* off this is plain ``.lower()`` — byte for byte the
-    behaviour every search in the app had before the setting existed, so
-    leaving the option unchecked changes nothing at all.
+    ``off`` is plain ``.lower()`` — byte for byte the behaviour every search
+    in the app had before this setting existed, so the default changes
+    nothing at all.
 
-    With it on, diacritics are dropped as well (NFD, then combining marks
-    removed), so "reuniao" finds "reunião" and "acao" finds "ação" — the
-    thing a user typing without accents actually wants. Deliberately NFD and
-    not NFKD: NFKD would also rewrite compatibility characters (ﬁ to fi, ½ to
-    1⁄2, superscripts to digits), which is a different and much more
-    surprising transformation than "ignore the accents I did not type".
+    ``nfd`` additionally drops diacritics (decompose, then discard combining
+    marks), so "reuniao" finds "reunião" and "acao" finds "ação" — what a
+    user typing without accents actually wants.
 
-    It stays opt-in because folding is not free: languages where an accent
-    changes the word (Spanish "año"/"ano", French "sur"/"sûr") lose the
-    ability to search for the exact one, and that trade is the user's to make.
+    ``nfkd`` folds the accents too, and on top of that the *compatibility*
+    forms: the ligature "ﬁ" matches "fi", "½" matches "1⁄2", superscripts
+    match plain digits, and full-width characters match their ASCII
+    equivalents. Useful against text pasted from PDFs, spreadsheets and CJK
+    input methods, where those forms turn up without the author ever having
+    typed them deliberately.
 
-    Known limit, worth knowing before promising too much: this folds marks
-    that NFD actually separates from their base letter (á, ç, ñ, ś, ż...).
-    Letters written with a stroke or slash are single indivisible codepoints
-    with no decomposition — Polish "ł", Danish/Norwegian "ø", Croatian "đ" —
-    so "lodka" still will not find "łódka" (the ó folds, the ł does not).
-    Handling those needs a transliteration table, which is a different and
-    much larger promise than "ignore the accents I did not type".
+    Folding is offered rather than imposed because it is not free: in
+    languages where an accent changes the word (Spanish "año"/"ano", French
+    "sur"/"sûr") the exact one becomes unsearchable, and NFKD goes further
+    still by erasing distinctions that are sometimes meaningful. Which trade
+    is worth making is the user's call, not this function's.
+
+    Known limit of both folding modes, worth knowing before promising too
+    much: only marks that decomposition actually separates from their base
+    letter are folded (á, ç, ñ, ś, ż...). Letters written with a stroke or
+    slash are single indivisible codepoints with no decomposition — Polish
+    "ł", Danish/Norwegian "ø", Croatian "đ" — so "lodka" still will not find
+    "łódka" (the ó folds, the ł does not). Handling those needs a
+    transliteration table, a much larger promise than "ignore the accents I
+    did not type".
     """
     text = (text or "").lower()
-    if not fold_accents:
+    mode = search_normalization_mode(mode)
+    if mode == "off":
         return text
+    form = "NFD" if mode == "nfd" else "NFKD"
     return "".join(
-        ch for ch in unicodedata.normalize("NFD", text)
+        ch for ch in unicodedata.normalize(form, text)
         if not unicodedata.combining(ch)
     )
 

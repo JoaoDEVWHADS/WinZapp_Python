@@ -8503,9 +8503,9 @@ class ConversationsPanel(wx.Panel):
             self._search_results = []
             self._search_result_idx = -1
             return
-        # Read the setting per search, not once at startup: toggling it in
+        # Read the setting per search, not once at startup: changing it in
         # Settings takes effect on the very next keystroke.
-        fold = self.main_window._search_folds_accents()
+        fold = self.main_window._search_normalization_mode()
         qlow = normalize_for_search(query, fold)
         # Store message IDs, not raw row indices: _sorted_messages can be
         # mutated (a new message arrives, more history is paginated in, a
