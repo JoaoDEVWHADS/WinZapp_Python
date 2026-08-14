@@ -14361,6 +14361,14 @@ class MainWindow(wx.Frame):
         Unknown (None) is deliberately read as "not confirmed": that is the
         conservative side — the badge survives until the next full sync
         reconciles it, rather than unread messages being silently dropped.
+
+        All three shapes were observed on a live session, on group chats —
+        which is where this was reported, and which the code used to claim
+        could not happen at all:
+
+            unreadCount=1/2/3, previous=0/1/2   messages arriving
+            unreadCount=0,     previous=0       the Store load, means nothing
+            unreadCount=0,     previous=2       a chat opened on the phone
         """
         if unread_count != 0:
             return False
