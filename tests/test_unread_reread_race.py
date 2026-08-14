@@ -142,3 +142,75 @@ class TestCurrentlyOpenConversation:
         stub.on_chat_unread_update(JID, 3)
 
         assert stub.chats[JID]["unreadCount"] == 3
+
+
+class TestOpenConversationSurvivesSpuriousServerZeros:
+    """Reported live: closing with Alt+F4 (which only hides to tray) and
+    leaving the app minimized made every notification announce "✉️ 1 mensagem
+    não lida" no matter how many had piled up — while reopening the window
+    showed the conversation really did hold several.
+
+    A conversation left open stays open with the window gone, so this is the
+    _open_now branch, and WA-JS keeps firing chat.unread_count_changed with
+    unreadCount=0 for 1:1 chats. Clamping with a plain min() against those
+    zeros reset the count after every message, so the next arrival counted up
+    from zero again and its toast always read "1".
+    """
+
+    def test_a_server_zero_does_not_wipe_what_arrived_while_hidden(self):
+        chat = _chat(t=1000)
+        # on_new_message() moves both of these together, once per arrival —
+        # a chat at 0 with a nonzero _new_since_read is not a reachable state.
+        chat["unreadCount"] = 4
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 4
+
+        stub.on_chat_unread_update(JID, 0)
+
+        assert stub.chats[JID]["unreadCount"] == 4
+
+    def test_the_count_keeps_climbing_across_a_burst(self):
+        """The symptom itself: five messages with a spurious zero after each
+        must leave five unread, not one. Mirrors what on_new_message() does
+        (increment both the chat and _new_since_read) between the events."""
+        stub = _Stub(_chat(t=1000))
+        stub.conversations_panel = _CP(JID)
+        seen_by_toasts = []
+
+        for _ in range(5):
+            chat = stub.chats[JID]
+            chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+            stub._new_since_read[JID] = stub._new_since_read.get(JID, 0) + 1
+            # What the toast reads (NotificationManager._dispatch samples the
+            # live chat right before showing the banner).
+            seen_by_toasts.append(chat["unreadCount"])
+            stub.on_chat_unread_update(JID, 0)
+
+        assert seen_by_toasts == [1, 2, 3, 4, 5]
+        assert stub.chats[JID]["unreadCount"] == 5
+
+    def test_a_real_server_count_is_still_clamped_down(self):
+        """The spurious-zero rescue must not become a licence to trust the
+        server's absolute total, which can still be counting messages already
+        read locally — that is the bug this whole function exists to prevent."""
+        stub = _Stub(_chat(t=1000))
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 2
+
+        stub.on_chat_unread_update(JID, 7)
+
+        assert stub.chats[JID]["unreadCount"] == 2
+
+    def test_an_open_chat_with_no_local_arrivals_still_clears(self):
+        """A zero with nothing counted locally means what it says: the open
+        conversation is read. The badge here came from a sync, not from
+        arrivals this session, so there is nothing local to defend."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 3
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+
+        stub.on_chat_unread_update(JID, 0)
+
+        assert stub.chats[JID]["unreadCount"] == 0

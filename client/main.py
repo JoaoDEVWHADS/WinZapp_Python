@@ -14395,8 +14395,27 @@ class MainWindow(wx.Frame):
             # Chat is genuinely open. Keep a nonzero count only for messages
             # that arrived while the window was hidden/minimized (tracked in
             # _new_since_read); otherwise the open conversation is read.
+            #
+            # "Open" outlives the window: closing with Alt+F4 only hides to
+            # tray (see _on_close), so a conversation left open stays open
+            # with the window gone — which is precisely when this branch has
+            # to survive the spurious WA-JS zeros described in the branch
+            # below. A plain min() against those collapsed the count to 0
+            # after every message, so the next arrival counted up from zero
+            # again and its toast forever announced "1 mensagem não lida"
+            # while the conversation really held several. The `elif` guard
+            # below is unreachable here (this branch already matched), so the
+            # same protection has to be spelled out on this side too.
             local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
-            unread_count = min(unread_count, local_new) if local_new else 0
+            if not local_new:
+                unread_count = 0
+            elif unread_count == 0:
+                # Server says zero, we counted arrivals since the last local
+                # read: trust ourselves, exactly as the read-ack branch below
+                # does for the same event.
+                unread_count = local_new
+            else:
+                unread_count = min(unread_count, local_new)
         elif read_at_t is None and unread_count < old_count:
             # WA-JS fires chat.unread_count_changed (forwarded to us as
             # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
