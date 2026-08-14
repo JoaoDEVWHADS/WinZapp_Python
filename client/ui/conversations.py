@@ -8469,6 +8469,34 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
         self.messages_list.SetFocus()
 
+    def _message_search_text(self, msg) -> str:
+        """The part of a message row that searching should actually look at.
+
+        Not the rendered row: _render_message_line() also appends delivery
+        status, the timestamp, "Editada"/"Encaminhada", and the reaction
+        summary. Searching that string made every decoration a false match —
+        reported live for "reproduz", which hit every played voice message
+        through its "Reproduzida" status, but "editada", "encaminhada", a
+        date, or a reaction label would all have done the same.
+
+        What stays is what a user would call content: who wrote it, the text
+        or media description itself, and — when the message is a reply — who
+        was quoted and what the quote says. That last part is deliberate: a
+        reply can quote a message that scrolled out of the loaded history, so
+        the quote is sometimes the only copy of those words in the list.
+        """
+        parts = []
+        if not self._is_system_event(msg):
+            parts.append(self._sender_label(msg))
+        parts.append(self._get_message_content(msg) or "")
+        ctx = self._get_context_info(msg)
+        if ctx:
+            # The bare name, never the "respondendo a {name}" phrasing around
+            # it — that wording is decoration and would match on its own.
+            parts.append(self._get_quoted_sender(ctx, msg) or "")
+            parts.append(self._get_quoted_preview(ctx.get("quotedMessage") or {}) or "")
+        return " ".join(p for p in parts if p)
+
     def _on_search_text_changed(self, event):
         query = self._search_field.GetValue()
         if not query.strip():
@@ -8488,7 +8516,7 @@ class ConversationsPanel(wx.Panel):
             for msg in self._sorted_messages
             if not self._is_separator(msg)
             and msg.get("key", {}).get("id")
-            and qlow in self._render_message_line(msg).lower()
+            and qlow in self._message_search_text(msg).lower()
         ]
         self._search_result_idx = -1
 
