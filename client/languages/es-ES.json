@@ -741,7 +741,7 @@
     "acc_btn_open": "A&brir",
     "acc_err_open_current": "Esta es la cuenta actual — ya está abierta.",
     "acc_err_open_invalid_state": "No se puede abrir una cuenta archivada o en eliminación.",
-    "soundpack_import_error_invalid_zip": "Carpeta no válida.",
+    "soundpack_import_error_invalid_zip": "Archivo .zip no válido.",
     "media_unsupported_error": "el archivo parece estar dañado o en un formato que WhatsApp no puede procesar",
     "voice_recording_unavailable": "Grabación de voz no disponible en esta instalación de Python (biblioteca de audio no encontrada).",
     "copy_caption": "Copiar leyenda",

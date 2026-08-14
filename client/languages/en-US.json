@@ -741,7 +741,7 @@
     "acc_btn_open": "&Open",
     "acc_err_open_current": "This is the current account — it is already open.",
     "acc_err_open_invalid_state": "Cannot open an archived or deleting account.",
-    "soundpack_import_error_invalid_zip": "Invalid folder.",
+    "soundpack_import_error_invalid_zip": "Invalid .zip file.",
     "media_unsupported_error": "the file appears to be corrupted or in a format WhatsApp cannot process",
     "voice_recording_unavailable": "Voice recording is unavailable on this Python install (audio library not found).",
     "copy_caption": "Copy caption",

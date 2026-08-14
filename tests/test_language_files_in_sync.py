@@ -72,6 +72,28 @@ def test_locale_has_no_blank_translations(locale):
 
 
 @pytest.mark.parametrize("locale", LOCALES)
+def test_every_ampersand_is_a_well_formed_mnemonic(locale):
+    # wx reads "&" in a label as "the next character is this control's Alt
+    # shortcut", so a translator using it as the word "and" silently eats a
+    # character and hands the shortcut to whatever followed. pt-PT shipped
+    # "Fotos & vídeos" for exactly that reason; a literal ampersand has to be
+    # written "&&". WHICH letter carries the mnemonic is a per-language
+    # decision, so this checks only that every "&" is well formed — never that
+    # locales agree on where mnemonics go.
+    malformed = sorted(
+        key for key, text in _load(locale).items()
+        # "&&" is the escape for a literal "&" — drop those first, then no
+        # surviving "&" may sit before anything but a letter or digit.
+        if any(not m.group(1).isalnum()
+               for m in re.finditer(r"&(.?)", text.replace("&&", "")))
+    )
+    assert malformed == [], (
+        f"{locale}.json uses & as text rather than as a mnemonic marker "
+        f"(write it as &&): {malformed}"
+    )
+
+
+@pytest.mark.parametrize("locale", LOCALES)
 def test_placeholders_match_the_reference(locale, reference):
     # Every string is fed through str.format(): a translation that drops
     # {name} silently loses information, and one that invents a placeholder

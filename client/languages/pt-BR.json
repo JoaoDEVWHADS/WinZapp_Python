@@ -741,7 +741,7 @@
     "acc_btn_open": "A&brir",
     "acc_err_open_current": "Esta é a conta atual — já está aberta em segundo plano ou em exibição.",
     "acc_err_open_invalid_state": "Não é possível abrir uma conta arquivada ou em exclusão.",
-    "soundpack_import_error_invalid_zip": "Pasta inválida.",
+    "soundpack_import_error_invalid_zip": "Arquivo .zip inválido.",
     "media_unsupported_error": "o arquivo parece estar corrompido ou em um formato que o WhatsApp não consegue processar",
     "voice_recording_unavailable": "Gravação de voz indisponível nesta instalação do Python (biblioteca de áudio não encontrada).",
     "copy_caption": "Copiar legenda",
