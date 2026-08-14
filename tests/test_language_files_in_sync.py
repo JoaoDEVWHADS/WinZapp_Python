@@ -1,15 +1,23 @@
 """Every UI language ships the same set of keys.
 
-I18n.t() is `translations.get(key, key)` — there is no per-key fallback to
-pt-BR. A key present in pt-BR but missing from another language file therefore
-reaches the user as the raw key name ("about_license", "status_reply_send") in
-the middle of the UI, which is exactly what happened to pl.json: it drifted 68
-keys behind while features were added, and nothing failed until someone
-actually switched the app to Polish.
+I18n.t() is `translations.get(key, key)` — there is no per-key fallback to any
+other locale. A key missing from the language file in use therefore reaches the
+user as the raw key name ("about_license", "status_reply_send") in the middle
+of the UI, which is exactly what happened to pl.json: it drifted 68 keys behind
+while features were added, and nothing failed until someone actually switched
+the app to Polish.
 
-pt-BR is the reference set (it is the locale the app defaults to and the one
-new strings get written in first). These tests are what "add the key to all
-five files" in CLAUDE.md is enforced by.
+The expected key set is the *union* of what all five locales define, not
+pt-BR's. Anchoring on pt-BR would assume it is always the most complete file,
+and that assumption breaks the moment a string arrives from outside the usual
+flow: a contributor adding a key to en-US (or pl) and forgetting pt-BR would
+leave pt-BR — the locale the app defaults to — showing a raw key name, while a
+pt-BR-anchored check happily reported that en-US had an "unknown" key, if it
+said anything at all. With the union, a key added anywhere is owed by everyone,
+and whichever file is behind is the one that fails.
+
+These tests are what "add the key to all five files" in CLAUDE.md is enforced
+by.
 """
 
 import json
@@ -19,7 +27,9 @@ import pytest
 
 from app_paths import resource_path
 
-REFERENCE = "pt-BR"
+# The locale I18n falls back to when settings carry none (see I18n.__init__ /
+# get_language) — it has to exist, whatever the union says.
+DEFAULT_LOCALE = "pt-BR"
 
 
 def _load(name):
@@ -35,12 +45,22 @@ LOCALES = sorted(_language_map())
 
 
 @pytest.fixture(scope="module")
-def reference():
-    return _load(REFERENCE)
+def translations():
+    """{locale: {key: text}} for every registered locale."""
+    return {locale: _load(locale) for locale in LOCALES}
 
 
-def test_the_reference_locale_is_registered():
-    assert REFERENCE in _language_map()
+@pytest.fixture(scope="module")
+def every_key(translations):
+    """Every key any locale defines — the set all of them are held to."""
+    keys = set()
+    for table in translations.values():
+        keys |= set(table)
+    return keys
+
+
+def test_the_default_locale_is_registered():
+    assert DEFAULT_LOCALE in _language_map()
 
 
 @pytest.mark.parametrize("locale", LOCALES)
@@ -49,20 +69,20 @@ def test_every_registered_locale_has_a_language_file(locale):
 
 
 @pytest.mark.parametrize("locale", LOCALES)
-def test_locale_has_no_missing_keys(locale, reference):
-    missing = sorted(set(reference) - set(_load(locale)))
+def test_locale_defines_every_key_the_others_do(locale, translations, every_key):
+    missing = sorted(every_key - set(translations[locale]))
+    # Name who does have each one, so the fix is a copy from a known file
+    # rather than a hunt — and so a key that exists in only one locale is
+    # visibly a forgotten translation rather than a mystery.
+    owners = {
+        key: sorted(loc for loc, table in translations.items() if key in table)
+        for key in missing[:10]
+    }
     assert missing == [], (
-        f"{locale}.json is missing {len(missing)} key(s) that pt-BR defines — "
-        f"they would render as the raw key name in the UI: {missing[:10]}"
+        f"{locale}.json is missing {len(missing)} key(s) other locales define — "
+        f"they would render as the raw key name in the UI. "
+        f"First few, with the locales that have them: {owners}"
     )
-
-
-@pytest.mark.parametrize("locale", LOCALES)
-def test_locale_has_no_unknown_keys(locale, reference):
-    # A key only some locales know is either a typo or a string that was never
-    # added to pt-BR — both mean somebody sees the raw key name.
-    extra = sorted(set(_load(locale)) - set(reference))
-    assert extra == [], f"{locale}.json defines keys pt-BR does not: {extra[:10]}"
 
 
 @pytest.mark.parametrize("locale", LOCALES)
@@ -93,20 +113,24 @@ def test_every_ampersand_is_a_well_formed_mnemonic(locale):
     )
 
 
-@pytest.mark.parametrize("locale", LOCALES)
-def test_placeholders_match_the_reference(locale, reference):
-    # Every string is fed through str.format(): a translation that drops
-    # {name} silently loses information, and one that invents a placeholder
-    # pt-BR does not pass raises KeyError at the call site instead.
-    translations = _load(locale)
-    mismatched = {}
-    for key, text in translations.items():
-        if key not in reference:
-            continue
-        want = sorted(re.findall(r"\{(\w+)\}", reference[key]))
-        got = sorted(re.findall(r"\{(\w+)\}", text))
-        if want != got:
-            mismatched[key] = (want, got)
-    assert mismatched == {}, (
-        f"{locale}.json placeholders diverge from pt-BR (key: expected, got): {mismatched}"
+def test_placeholders_agree_across_locales(translations, every_key):
+    # Every string is fed through str.format(): a translation that drops {name}
+    # silently loses information, and one that invents a placeholder the call
+    # site does not pass raises KeyError instead. Compared between all locales
+    # that define the key rather than against one reference file, for the same
+    # reason the key set is a union — the reference is not guaranteed to be the
+    # correct one, or even to have the key.
+    divergent = {}
+    for key in sorted(every_key):
+        variants = {}
+        for locale, table in translations.items():
+            if key not in table:
+                continue
+            found = tuple(sorted(re.findall(r"\{(\w+)\}", table[key])))
+            variants.setdefault(found, []).append(locale)
+        if len(variants) > 1:
+            divergent[key] = {ph: locs for ph, locs in variants.items()}
+    assert divergent == {}, (
+        f"placeholders differ between locales for these keys "
+        f"(placeholders: locales that use them): {divergent}"
     )
