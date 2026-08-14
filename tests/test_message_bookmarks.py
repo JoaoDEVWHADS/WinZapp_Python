@@ -98,6 +98,7 @@ class _Stub:
     _is_separator = ConversationsPanel._is_separator
     _find_index_by_msg_id = ConversationsPanel._find_index_by_msg_id
     _conversation_position = ConversationsPanel._conversation_position
+    _focus_message_row = ConversationsPanel._focus_message_row
     _select_bookmarked_message = ConversationsPanel._select_bookmarked_message
     _on_bookmark_set_or_jump = ConversationsPanel._on_bookmark_set_or_jump
     _on_bookmark_remove = ConversationsPanel._on_bookmark_remove

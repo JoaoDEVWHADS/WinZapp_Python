@@ -66,6 +66,7 @@ class _Stub:
         self._search_results = []
         self._search_result_idx = -1
         self._msg_bookmarks = {}
+        self._msg_temp_bookmarks = {}
         self.conversation_panel = _FakeWidget(shown=True)
         self.message_field = _FakeWidget()
         self.restore_calls = []
@@ -134,6 +135,28 @@ class TestCloseConversationForPanelSwitch:
             wx.CallAfter = original_call_after
 
         assert calls == []
+
+
+class TestBookmarkLifetimeOnClose:
+    """The two bookmark sets differ precisely here: the ten permanent ones
+    (Ctrl+0..9) span conversations and must survive closing one, while the
+    temporary ones (Alt+Shift+0..9) exist only for the open conversation."""
+
+    def test_temporary_bookmarks_are_dropped(self):
+        stub = _Stub(_conv())
+        stub._msg_temp_bookmarks = {1: "MSG-A", 7: "MSG-B"}
+
+        stub.close_conversation_for_panel_switch()
+
+        assert stub._msg_temp_bookmarks == {}
+
+    def test_permanent_bookmarks_survive(self):
+        stub = _Stub(_conv())
+        stub._msg_bookmarks = {1: ("5511999999999@s.whatsapp.net", "MSG-A")}
+
+        stub.close_conversation_for_panel_switch()
+
+        assert stub._msg_bookmarks == {1: ("5511999999999@s.whatsapp.net", "MSG-A")}
 
 
 class TestCloseConversationStillRestoresFocus:
