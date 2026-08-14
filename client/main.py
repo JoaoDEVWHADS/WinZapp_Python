@@ -14339,8 +14339,44 @@ class MainWindow(wx.Frame):
         if conv_jid in self._presence_cache:
             panel._refresh_presence_note(conv_jid)
 
-    def on_chat_unread_update(self, jid: str, unread_count: int):
-        """Handle unread-count change from chats.update (e.g. read on another device)."""
+    @staticmethod
+    def _remote_read_confirmed(unread_count: int, previous_unread: int | None) -> bool:
+        """True when a chats-update's zero is a real read somewhere else.
+
+        WhatsApp Web reports unreadCount=0 for two completely different
+        things, and for a long time WinZapp could not tell them apart:
+
+        1. The user read the chat on their phone or another linked device —
+           the count genuinely fell from N to 0.
+        2. The chat was merely loaded into WhatsApp Web's own Store, which
+           announces 0 before the real value is populated. Nothing was read;
+           the event carries no information whatsoever.
+
+        Treating (2) as (1) is what erased locally counted arrivals and left
+        every notification announcing "1 mensagem não lida". Treating (1) as
+        (2) leaves a badge lit for messages the user already read elsewhere.
+        The difference is whether the count actually *fell*, which the page
+        knows and now forwards as previousUnreadCount.
+
+        Unknown (None) is deliberately read as "not confirmed": that is the
+        conservative side — the badge survives until the next full sync
+        reconciles it, rather than unread messages being silently dropped.
+        """
+        if unread_count != 0:
+            return False
+        return isinstance(previous_unread, int) and previous_unread > 0
+
+    def on_chat_unread_update(self, jid: str, unread_count: int, previous_unread: int | None = None):
+        """Handle unread-count change from chats.update (e.g. read on another device).
+
+        *previous_unread* is what WhatsApp Web's own chat model held before
+        this change, when the page could tell us (None = unknown). A zero
+        that fell from a positive previous count is a genuine read somewhere
+        else — the phone, another linked device — and must clear the badge.
+        A zero whose previous count was also zero is the chat simply being
+        loaded into the Store with nothing behind it, which is the event that
+        used to wipe locally counted arrivals; see _remote_read_confirmed().
+        """
         normalized = self._normalize_jid(jid)
         chat = self.chats.get(normalized)
         if chat is None:
@@ -14391,6 +14427,10 @@ class MainWindow(wx.Frame):
             and cp.conversation.get("remoteJid") == normalized
         )
         read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
+        # A zero that fell from a positive count is somebody actually reading
+        # the chat elsewhere; a zero with no such drop behind it carries no
+        # information at all (see _remote_read_confirmed).
+        _remote_read = self._remote_read_confirmed(unread_count, previous_unread)
         if _open_now:
             # Chat is genuinely open. Keep a nonzero count only for messages
             # that arrived while the window was hidden/minimized (tracked in
@@ -14409,14 +14449,18 @@ class MainWindow(wx.Frame):
             local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
             if not local_new:
                 unread_count = 0
-            elif unread_count == 0:
-                # Server says zero, we counted arrivals since the last local
-                # read: trust ourselves, exactly as the read-ack branch below
-                # does for the same event.
+            elif unread_count == 0 and not _remote_read:
+                # Server says zero and nothing says it was a real read: trust
+                # ourselves, exactly as the read-ack branch below does for the
+                # same event.
                 unread_count = local_new
+            elif unread_count == 0:
+                # A confirmed read elsewhere — the messages we counted really
+                # have been read, so the badge goes with them.
+                self._new_since_read.pop(normalized, None)
             else:
                 unread_count = min(unread_count, local_new)
-        elif read_at_t is None and unread_count < old_count:
+        elif read_at_t is None and unread_count < old_count and not _remote_read:
             # WA-JS fires chat.unread_count_changed (forwarded to us as
             # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
             # into the browser Store — often with unreadCount=0 BEFORE the real
@@ -14429,6 +14473,12 @@ class MainWindow(wx.Frame):
             # authoritative source. Groups never hit this: the WA-JS event is
             # 1:1 only, which is exactly why this bug only showed on private
             # chats.
+            #
+            # This guard used to swallow real reads too, because a load-time
+            # zero and a phone read looked identical from here: reading a chat
+            # on the phone left its badge lit in WinZapp until some later sync
+            # happened to correct it. With previousUnreadCount telling the two
+            # apart, only the uninformative kind is rejected.
             return
         elif read_at_t is not None:
             incoming_t = int(chat.get("t", 0) or 0)

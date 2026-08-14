@@ -27,6 +27,7 @@ from main import MainWindow
 class _Stub:
     on_chat_unread_update = MainWindow.on_chat_unread_update
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _remote_read_confirmed = staticmethod(MainWindow._remote_read_confirmed)
 
     def __init__(self, chat):
         self.chats = {"5511999999999@s.whatsapp.net": chat}
@@ -199,6 +200,63 @@ class TestOpenConversationSurvivesSpuriousServerZeros:
         stub._new_since_read[JID] = 2
 
         stub.on_chat_unread_update(JID, 7)
+
+        assert stub.chats[JID]["unreadCount"] == 2
+
+    def test_a_read_on_the_phone_does_clear_the_open_chat(self):
+        """The other side of the same coin: a zero that really fell from a
+        positive count is somebody reading the chat elsewhere, and must clear
+        the badge — including the messages counted while hidden, which is
+        exactly what the user just read on their phone."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 4
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 4
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=4)
+
+        assert stub.chats[JID]["unreadCount"] == 0
+        # ...and the local counter goes with it, or the next arrival would be
+        # clamped against a backlog that no longer exists.
+        assert JID not in stub._new_since_read
+
+    def test_a_read_on_the_phone_clears_a_chat_that_is_not_open(self):
+        """Same for the closed-chat guard: it exists to reject uninformative
+        zeros, not real reads. This used to leave the badge lit until some
+        later full sync happened to correct it."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 3
+        stub = _Stub(chat)
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=3)
+
+        assert stub.chats[JID]["unreadCount"] == 0
+
+    def test_an_unknown_previous_count_stays_conservative(self):
+        """The page could not tell us (None). Keeping the badge risks a stale
+        badge until the next sync; dropping it risks silently losing unread
+        messages — so the safe reading is 'not confirmed'."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 4
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 4
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=None)
+
+        assert stub.chats[JID]["unreadCount"] == 4
+
+    def test_a_previous_of_zero_is_the_store_load_not_a_read(self):
+        """previousUnreadCount=0 means the count never fell: nothing was read,
+        the chat was just loaded into WhatsApp Web's Store."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 2
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 2
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=0)
 
         assert stub.chats[JID]["unreadCount"] == 2
 

@@ -692,9 +692,9 @@ export default class CreateSessionUtil {
     try {
       await client.page.exposeFunction(
         '__winzappOnUnreadChanged',
-        (chatId: string, unreadCount: number) => {
+        (chatId: string, unreadCount: number, previousUnreadCount: number | null) => {
           req.io.emit('chats-update', {
-            data: [{ remoteJid: chatId, unreadCount }],
+            data: [{ remoteJid: chatId, unreadCount, previousUnreadCount }],
             session: client.session,
           });
         }
@@ -716,7 +716,29 @@ export default class CreateSessionUtil {
           WPP.on('chat.unread_count_changed', (evt: any) => {
             const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
             if (!chatId) return;
-            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount);
+            // The count this chat held BEFORE the change, forwarded so the
+            // client can tell a real read apart from a meaningless zero.
+            // A chat merely being loaded into the Store reports unreadCount=0
+            // with nothing behind it, and is indistinguishable from "the user
+            // just read this chat on their phone" unless you know whether the
+            // count actually fell from something.
+            //
+            // Both sources are tried because the two disagree: wa-js types
+            // this event's third field as `previousUnreadCount: number`, but
+            // it emits it straight from the Store's `change:unreadCount`
+            // callback, whose third argument is the Backbone-style options
+            // object in every other handler of that shape. Whichever one is
+            // actually a number wins; if neither is, null is sent and the
+            // client keeps its own (conservative) count.
+            let previous: any = evt?.previousUnreadCount;
+            if (typeof previous !== 'number' && typeof evt?.chat?.previous === 'function') {
+              previous = evt.chat.previous('unreadCount');
+            }
+            (window as any).__winzappOnUnreadChanged(
+              chatId,
+              evt.unreadCount,
+              typeof previous === 'number' ? previous : null
+            );
           });
         })
         .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));
