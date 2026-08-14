@@ -42,17 +42,13 @@ class TestModeCanonicalization:
     def test_accepts_the_stored_strings(self, raw, expected):
         assert search_normalization_mode(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["", "nfc", "yes", "1", 7, [], {}])
+    @pytest.mark.parametrize("raw", ["", "nfc", "yes", "1", 7, [], {}, True, False, None])
     def test_anything_unrecognised_falls_back_to_off(self, raw):
-        """A typo or a hand-edited settings.json must not silently turn
-        folding on — "off" is the only mode that cannot surprise anyone."""
+        """A missing key, a typo or a hand-edited settings.json must not
+        silently turn folding on — "off" is the only mode that cannot
+        surprise anyone. Booleans are in here deliberately: they are not a
+        supported value, just one more thing that reads as off."""
         assert search_normalization_mode(raw) == "off"
-
-    @pytest.mark.parametrize("raw,expected", [(True, "nfd"), (False, "off"), (None, "off")])
-    def test_the_old_checkbox_booleans_still_read(self, raw, expected):
-        """This setting shipped briefly as a checkbox; an existing
-        settings.json can still carry True/False, where True meant NFD."""
-        assert search_normalization_mode(raw) == expected
 
 
 class TestOff:

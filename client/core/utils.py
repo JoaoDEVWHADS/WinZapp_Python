@@ -16,19 +16,11 @@ SEARCH_NORMALIZATION_MODES = ("off", "nfd", "nfkd")
 def search_normalization_mode(value) -> str:
     """Canonicalize whatever settings.json holds into one of the three modes.
 
-    Anything unrecognised — a typo, a hand-edited file, a value from a newer
-    version — reads as "off", which is the mode that cannot surprise anyone:
-    searching then behaves exactly as it always did.
-
-    Booleans are accepted because this setting shipped briefly as a checkbox
-    (``search_normalize_unicode``) before becoming a three-way choice, so an
-    existing settings.json can still carry True/False; True meant NFD.
+    Anything unrecognised — a missing key, a typo, a hand-edited file, a value
+    from a newer version — reads as "off", which is the mode that cannot
+    surprise anyone: searching then behaves exactly as it always did.
     """
-    if value is True:
-        return "nfd"
-    if value is False or value is None:
-        return "off"
-    mode = str(value).strip().lower()
+    mode = str(value).strip().lower() if value is not None else ""
     return mode if mode in SEARCH_NORMALIZATION_MODES else "off"
 
 

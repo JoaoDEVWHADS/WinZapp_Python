@@ -2300,14 +2300,10 @@ class MainWindow(wx.Frame):
         list (Ctrl+F) and messages inside a conversation (Ctrl+Shift+F) —
         because a single setting that only affected one of them would be its
         own kind of surprise.
-
-        Falls back to the key this shipped under while it was still a
-        checkbox, so an existing settings.json keeps whatever it recorded
-        instead of silently resetting.
         """
-        general = self.settings.get("general", {})
-        raw = general.get("search_normalization", general.get("search_normalize_unicode"))
-        return search_normalization_mode(raw)
+        return search_normalization_mode(
+            self.settings.get("general", {}).get("search_normalization")
+        )
 
     def _on_power_suspended(self, event):
         logging.info("[power] System is suspending.")

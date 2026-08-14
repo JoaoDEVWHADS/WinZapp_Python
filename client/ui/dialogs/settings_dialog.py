@@ -714,9 +714,8 @@ class SettingsDialog(wx.Dialog):
 
         # "off" unless the user chose otherwise — including for installs
         # whose settings.json predates the option and has no key at all.
-        _general = self.main_window.settings.get("general", {})
         _mode = search_normalization_mode(
-            _general.get("search_normalization", _general.get("search_normalize_unicode"))
+            self.main_window.settings.get("general", {}).get("search_normalization")
         )
         self._search_norm_radio.SetSelection(SEARCH_NORMALIZATION_MODES.index(_mode))
 
@@ -1540,15 +1539,13 @@ class SettingsDialog(wx.Dialog):
             self._announce_sync_check.GetValue()
         )
 
-        # Unicode folding in searches. The old checkbox key is dropped rather
-        # than left behind to be read by some future code path as if it still
-        # meant something.
-        _gen = self.main_window.settings.setdefault("general", {})
+        # Unicode folding in searches
         _sel = self._search_norm_radio.GetSelection()
-        _gen["search_normalization"] = SEARCH_NORMALIZATION_MODES[
-            _sel if 0 <= _sel < len(SEARCH_NORMALIZATION_MODES) else 0
-        ]
-        _gen.pop("search_normalize_unicode", None)
+        self.main_window.settings.setdefault("general", {})["search_normalization"] = (
+            SEARCH_NORMALIZATION_MODES[
+                _sel if 0 <= _sel < len(SEARCH_NORMALIZATION_MODES) else 0
+            ]
+        )
 
         # Autostart
         from autostart import is_autostart_enabled
