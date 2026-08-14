@@ -12256,12 +12256,8 @@ class MainWindow(wx.Frame):
             return
             
         # Formata o JID corretamente para o WPPConnect
-        # Se houver mapeamento phone -> LID, usamos o LID.
-        lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid:
-            phone = lid
-        elif remote_jid.endswith("@s.whatsapp.net"):
-            phone = remote_jid.split("@")[0] + "@c.us"
+        if remote_jid.endswith("@s.whatsapp.net"):
+            phone = remote_jid.replace("@s.whatsapp.net", "@c.us")
         else:
             phone = remote_jid
 
