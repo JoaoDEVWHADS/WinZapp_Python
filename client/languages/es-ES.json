@@ -239,6 +239,7 @@
     "noise_reduction_label": "Activar &reducción de ruido del micrófono",
     "notifications_label": "Activar &notificaciones de mensajes nuevos en segundo plano",
     "announce_sync_events_label": "Anunciar sincronización, descarga de medios y modo &sin conexión automático",
+    "search_normalize_unicode_label": "Usar &normalización Unicode en las búsquedas (ignorar acentos: \"reunion\" encuentra \"reunión\")",
     "tray_show_icon": "Mostrar icono y recuento de mensajes no leídos en la bandeja del sistema",
     "tray_open": "Abrir",
     "tray_offline_mode": "Modo sin conexión",

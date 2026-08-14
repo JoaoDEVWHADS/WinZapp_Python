@@ -45,7 +45,7 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
@@ -2286,6 +2286,21 @@ class MainWindow(wx.Frame):
         offline toggle's own feedback are unaffected).
         """
         return bool(self.settings.get("general", {}).get("announce_sync_events", True))
+
+    def _search_folds_accents(self) -> bool:
+        """Settings > Geral > "Usar normalização Unicode nas pesquisas".
+
+        Off by default, so searching keeps matching exactly what it always
+        did unless the user asks otherwise. Read live on every search rather
+        than cached: toggling it in Settings then takes effect on the next
+        keystroke, with no restart and nothing to invalidate.
+
+        Applies to both searches the user can type into — the conversation
+        list (Ctrl+F) and messages inside a conversation (Ctrl+Shift+F) —
+        because a single switch that only fixed one of them would be its own
+        kind of surprise.
+        """
+        return bool(self.settings.get("general", {}).get("search_normalize_unicode", False))
 
     def _on_power_suspended(self, event):
         logging.info("[power] System is suspending.")
@@ -17572,7 +17587,10 @@ class MainWindow(wx.Frame):
         always consistent.  Without this sync the user would open the wrong
         conversation when a search was active.
         """
-        search       = self.conversations_panel.search_field.GetValue().strip().lower()
+        _fold        = self._search_folds_accents()
+        search       = normalize_for_search(
+            self.conversations_panel.search_field.GetValue().strip(), _fold
+        )
         conv_filter  = getattr(self.conversations_panel, '_conv_filter', 'all')
 
         # Used below to tell "the same filtered view just lost an item" (where
@@ -17648,7 +17666,7 @@ class MainWindow(wx.Frame):
                 continue
             if conv_filter == 'individual' and chat_jid.endswith("@g.us"):
                 continue
-            if search and search not in name.lower():
+            if search and search not in normalize_for_search(name, _fold):
                 continue
             displayed_chats.append(chat)
             displayed_names.append(name)

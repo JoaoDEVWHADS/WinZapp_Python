@@ -16,7 +16,8 @@
         "show_tray_icon": true,
         "terms_alert_displayed": false,
         "quick_tip_shown": false,
-        "announce_sync_events": true
+        "announce_sync_events": true,
+        "search_normalize_unicode": false
     },
     "status": {
         "messages_set_completed": false

@@ -212,6 +212,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._announce_sync_check, 0, wx.ALL, 8)
 
+        self._search_normalize_check = wx.CheckBox(
+            self._general_page, label=i18n.t("search_normalize_unicode_label")
+        )
+        gen_sizer.Add(self._search_normalize_check, 0, wx.ALL, 8)
+
         self._autostart_check = wx.CheckBox(
             self._general_page, label=i18n.t("autostart_label")
         )
@@ -694,6 +699,12 @@ class SettingsDialog(wx.Dialog):
 
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
         self._announce_sync_check.SetValue(announce_sync)
+
+        # Off unless the user turned it on — including for installs whose
+        # settings.json predates the option and has no key at all.
+        self._search_normalize_check.SetValue(
+            bool(self.main_window.settings.get("general", {}).get("search_normalize_unicode", False))
+        )
 
         from autostart import is_autostart_enabled
         self._autostart_check.SetValue(is_autostart_enabled())
@@ -1515,6 +1526,11 @@ class SettingsDialog(wx.Dialog):
             self._announce_sync_check.GetValue()
         )
 
+        # Accent folding in searches
+        self.main_window.settings.setdefault("general", {})["search_normalize_unicode"] = (
+            self._search_normalize_check.GetValue()
+        )
+
         # Autostart
         from autostart import is_autostart_enabled
         new_autostart = self._autostart_check.GetValue()
@@ -1668,6 +1684,7 @@ class SettingsDialog(wx.Dialog):
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
+        self._search_normalize_check.SetLabel(i18n.t("search_normalize_unicode_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))

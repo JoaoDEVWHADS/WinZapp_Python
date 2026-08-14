@@ -3,8 +3,44 @@ import re
 import sys
 import json
 import base64
+import unicodedata
 import requests
 from cryptography.fernet import Fernet
+
+
+def normalize_for_search(text: str, fold_accents: bool = False) -> str:
+    """Prepare *text* for a case-insensitive substring search.
+
+    With *fold_accents* off this is plain ``.lower()`` — byte for byte the
+    behaviour every search in the app had before the setting existed, so
+    leaving the option unchecked changes nothing at all.
+
+    With it on, diacritics are dropped as well (NFD, then combining marks
+    removed), so "reuniao" finds "reunião" and "acao" finds "ação" — the
+    thing a user typing without accents actually wants. Deliberately NFD and
+    not NFKD: NFKD would also rewrite compatibility characters (ﬁ to fi, ½ to
+    1⁄2, superscripts to digits), which is a different and much more
+    surprising transformation than "ignore the accents I did not type".
+
+    It stays opt-in because folding is not free: languages where an accent
+    changes the word (Spanish "año"/"ano", French "sur"/"sûr") lose the
+    ability to search for the exact one, and that trade is the user's to make.
+
+    Known limit, worth knowing before promising too much: this folds marks
+    that NFD actually separates from their base letter (á, ç, ñ, ś, ż...).
+    Letters written with a stroke or slash are single indivisible codepoints
+    with no decomposition — Polish "ł", Danish/Norwegian "ø", Croatian "đ" —
+    so "lodka" still will not find "łódka" (the ó folds, the ł does not).
+    Handling those needs a transliteration table, which is a different and
+    much larger promise than "ignore the accents I did not type".
+    """
+    text = (text or "").lower()
+    if not fold_accents:
+        return text
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text)
+        if not unicodedata.combining(ch)
+    )
 
 
 def get_downloads_folder() -> str:

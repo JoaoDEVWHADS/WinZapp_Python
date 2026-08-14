@@ -32,6 +32,15 @@ class _FakeSearchField:
         return self._value
 
 
+class _FakeMainWindow:
+    """Accent folding off — the default. Covered on its own in
+    tests/test_search_normalization.py; here it must not interfere."""
+
+    @staticmethod
+    def _search_folds_accents():
+        return False
+
+
 class _Stub:
     _is_separator = ConversationsPanel._is_separator
     _message_search_text = ConversationsPanel._message_search_text
@@ -42,6 +51,7 @@ class _Stub:
         self._search_field = _FakeSearchField(query)
         self._search_results = []
         self._search_result_idx = -1
+        self.main_window = _FakeMainWindow()
 
     # ── stand-ins for the real content helpers ──────────────────────────
     def _is_system_event(self, msg):

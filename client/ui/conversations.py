@@ -40,7 +40,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, parse_bool_flag as _parse_bool_flag
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -8503,7 +8503,10 @@ class ConversationsPanel(wx.Panel):
             self._search_results = []
             self._search_result_idx = -1
             return
-        qlow = query.lower()
+        # Read the setting per search, not once at startup: toggling it in
+        # Settings takes effect on the very next keystroke.
+        fold = self.main_window._search_folds_accents()
+        qlow = normalize_for_search(query, fold)
         # Store message IDs, not raw row indices: _sorted_messages can be
         # mutated (a new message arrives, more history is paginated in, a
         # message is deleted) between when the query runs and when the user
@@ -8516,7 +8519,7 @@ class ConversationsPanel(wx.Panel):
             for msg in self._sorted_messages
             if not self._is_separator(msg)
             and msg.get("key", {}).get("id")
-            and qlow in self._message_search_text(msg).lower()
+            and qlow in normalize_for_search(self._message_search_text(msg), fold)
         ]
         self._search_result_idx = -1
 
