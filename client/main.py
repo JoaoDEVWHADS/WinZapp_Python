@@ -14470,9 +14470,15 @@ class MainWindow(wx.Frame):
             # this session and not currently open must never have its locally
             # counted unread reduced by such a server event; the local counter
             # (incremented by on_new_message or set by get_remote_chats) is the
-            # authoritative source. Groups never hit this: the WA-JS event is
-            # 1:1 only, which is exactly why this bug only showed on private
-            # chats.
+            # authoritative source.
+            #
+            # This used to claim groups never hit this path because the WA-JS
+            # event was 1:1 only. That is false, and measured to be false:
+            # listening on the live Socket.IO stream shows @g.us chats
+            # emitting chats-update both with a climbing count and with a bare
+            # unreadCount=0, exactly like private chats. The claim mattered —
+            # it is why a report of this bug happening in groups looked
+            # inconsistent with the code.
             #
             # This guard used to swallow real reads too, because a load-time
             # zero and a phone read looked identical from here: reading a chat
