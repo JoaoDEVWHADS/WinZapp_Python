@@ -50,6 +50,18 @@ from datetime import datetime
 # Compiled URL regex used for link extraction from message text
 _URL_RE = re.compile(r'https?://\S+|www\.\S+')
 
+# Message types that carry a file "Save as" can actually write to disk.
+# Everything else — text, stickers, locations, contacts, system events — has
+# no payload to save: _resolve_media_filename() falls back to "<id>.bin" for
+# those, so the save dialog used to open on a plain text message offering a
+# .bin that no download could ever produce, and saving it just errored.
+# The context menu was already gating on this set; the Ctrl+Shift+S
+# accelerator and the toolbar button reached _on_action_save_as() without
+# passing anywhere near it, which is how the two disagreed.
+_SAVEABLE_MESSAGE_TYPES = frozenset({
+    "documentMessage", "imageMessage", "videoMessage", "audioMessage",
+})
+
 
 def _fmt_last_seen(ts, i18n) -> str:
     """Format a Unix timestamp as a localized last-seen string."""
@@ -2759,8 +2771,12 @@ class ConversationsPanel(wx.Panel):
             pin_msg_item,
         )
 
-        # Save As (media only, only when the file is already cached locally)
-        _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
+        # Save As (media only, only when the file is already cached locally).
+        # Audio is excluded here because it has its own branch below (separate
+        # cache, its own label) — the set itself stays shared with
+        # _on_action_save_as() so the menu and the shortcut can never again
+        # disagree about what is saveable.
+        _SAVEABLE = _SAVEABLE_MESSAGE_TYPES - {"audioMessage"}
         clean_msg_id = msg_id
         if "_" in msg_id:
             parts = msg_id.split("_")
@@ -4439,7 +4455,19 @@ class ConversationsPanel(wx.Panel):
         if index < 0 or index >= len(self._sorted_messages):
             return
         msg      = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
         msg_type = msg.get("messageType", "")
+
+        # Nothing to save: say so instead of opening a file dialog over a
+        # message that has no file. Silence would be worse than the bug it
+        # replaces — pressing Ctrl+Shift+S and getting no reaction at all
+        # reads as "the shortcut is broken" to a screen-reader user.
+        if msg_type not in _SAVEABLE_MESSAGE_TYPES:
+            self.main_window.output(
+                self.main_window.i18n.t("save_as_nothing_to_save"), interrupt=True
+            )
+            return
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 

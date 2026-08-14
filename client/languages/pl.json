@@ -135,6 +135,7 @@
     "open_image": "Otwórz obraz",
     "save_as": "Zapisz jako...",
     "save_audio_as": "Zapisz audio jako...",
+    "save_as_nothing_to_save": "Ta wiadomość nie ma pliku do zapisania",
     "all_files": "Wszystkie pliki",
     "audio_convert_failed": "Nie udało się przekonwertować audio. Brak FFmpeg lub jest on niedostępny w tym systemie.",
     "downloading_progress": "pobieranie, ukończono {pct}%",

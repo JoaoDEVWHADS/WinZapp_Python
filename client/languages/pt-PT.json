@@ -135,6 +135,7 @@
     "open_image": "Abrir imagem",
     "save_as": "Guardar como...",
     "save_audio_as": "Guardar áudio como...",
+    "save_as_nothing_to_save": "Esta mensagem não tem ficheiro para guardar",
     "all_files": "Todos os ficheiros",
     "audio_convert_failed": "Falha ao converter áudio. FFmpeg ausente ou indisponível no sistema.",
     "downloading_progress": "a descarregar, {pct}% concluído",
