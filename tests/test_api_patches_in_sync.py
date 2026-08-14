@@ -48,8 +48,12 @@ def _setup_api_module():
     spec.loader.exec_module(module)
     return module
 
-# Mirrors setup_api.py's CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES, minus
-# package.json (see the module docstring).
+# Mirrors setup_api.py's CUSTOM_ROOT_FILES + CUSTOM_SRC_FILES exactly — the
+# test below asserts that equality against the real constants, in both
+# directions, so a file added to setup_api.py can no longer stay uncompared
+# here (which is what happened to auth.ts and statusController.ts: both were
+# restored by setup_api.py and documented in CLAUDE.md, but drift in either
+# went undetected because only this list was checked, and only one way round).
 MIRRORED_FILES = [
     "start.js",
     "config.json",
@@ -60,9 +64,11 @@ MIRRORED_FILES = [
     "src/util/sessionUtil.ts",
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
+    "src/middleware/auth.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
+    "src/controller/statusController.ts",
     "src/routes/index.ts",
 ]
 
@@ -86,17 +92,36 @@ def test_the_two_copies_of_each_patch_are_identical(rel_path):
 
 
 def test_setup_api_patch_list_matches_this_one():
-    """If setup_api.py starts patching another file, this test must cover it too."""
-    src = (ROOT / "setup_api.py").read_text(encoding="utf-8")
-    for rel_path in MIRRORED_FILES:
-        assert f'"{rel_path}"' in src, f"{rel_path} is no longer listed in setup_api.py"
+    """MIRRORED_FILES and setup_api.py's own lists must name the same files.
+
+    Checked as a set equality against the imported constants rather than by
+    grepping the source, because the direction that actually bites is the one
+    a subset check misses: a file added to setup_api.py and never added here
+    is restored on every setup run while nothing ever compares the two copies.
+    src/middleware/auth.ts and src/controller/statusController.ts sat in
+    exactly that blind spot.
+    """
+    setup_api = _setup_api_module()
+    patched = set(setup_api.CUSTOM_ROOT_FILES) | set(setup_api.CUSTOM_SRC_FILES)
+    assert patched == set(MIRRORED_FILES), (
+        f"only in setup_api.py (patched but never compared): "
+        f"{sorted(patched - set(MIRRORED_FILES))}; "
+        f"only here (compared but no longer patched): "
+        f"{sorted(set(MIRRORED_FILES) - patched)}"
+    )
 
 
 def test_the_in_app_installer_restores_the_same_patches():
     """ApiSetupDialog — the "install modules" flow every end user goes through
     just by running the program — has its own copy of the list. It must not fall
     behind setup_api.py's, or the API installed on users' machines is not the
-    one we develop and test against."""
+    one we develop and test against.
+
+    A containment check rather than the set equality used for setup_api.py:
+    ApiSetupDialog also restores dist/middleware/auth.js, a *compiled* artifact
+    with no counterpart in api_patches/, so there are legitimately no two
+    copies of it to compare.
+    """
     src = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
     for rel_path in MIRRORED_FILES:
         assert f'"{rel_path}"' in src, f"ApiSetupDialog does not restore {rel_path}"
