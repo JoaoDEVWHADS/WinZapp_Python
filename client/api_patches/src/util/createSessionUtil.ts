@@ -714,6 +714,7 @@ export default class CreateSessionUtil {
           }
           (window as any).__winzappUnreadListenerInstalled = true;
           WPP.on('chat.unread_count_changed', (evt: any) => {
+            try {
             const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
             if (!chatId) return;
             // The count this chat held BEFORE the change, forwarded so the
@@ -730,15 +731,36 @@ export default class CreateSessionUtil {
             // object in every other handler of that shape. Whichever one is
             // actually a number wins; if neither is, null is sent and the
             // client keeps its own (conservative) count.
-            let previous: any = evt?.previousUnreadCount;
-            if (typeof previous !== 'number' && typeof evt?.chat?.previous === 'function') {
-              previous = evt.chat.previous('unreadCount');
+            // Deriving `previous` must never be able to suppress the event
+            // itself: the unread count is the payload that matters and the
+            // previous value is an extra, so it is computed defensively and
+            // the emit happens regardless. Reading `.previous` off a Store
+            // model is a property access on foreign, minified code that can
+            // throw or be a getter with side effects, and a throw anywhere in
+            // this callback silently takes the whole listener down — the
+            // client then stops being told about unread counts at all, with
+            // nothing in any log to say so. Measured, not hypothetical: an
+            // earlier version of this block computed `previous` inline and
+            // the chats-update stream stopped dead.
+            let previous: any = null;
+            try {
+              const raw = evt?.previousUnreadCount;
+              if (typeof raw === 'number') {
+                previous = raw;
+              } else if (typeof evt?.chat?.previous === 'function') {
+                const p = evt.chat.previous('unreadCount');
+                previous = typeof p === 'number' ? p : null;
+              }
+            } catch (e) {
+              previous = null;
             }
-            (window as any).__winzappOnUnreadChanged(
-              chatId,
-              evt.unreadCount,
-              typeof previous === 'number' ? previous : null
-            );
+            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount, previous);
+            } catch (e) {
+              // Anything unexpected in here costs at most this one event.
+              // Never the listener: WhatsApp Web's own objects are foreign
+              // and minified, and losing this stream means unread counts
+              // silently stop updating everywhere in the app.
+            }
           });
         })
         .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));
