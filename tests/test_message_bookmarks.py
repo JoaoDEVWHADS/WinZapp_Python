@@ -30,6 +30,7 @@ class _FakeI18n:
         "bookmark_set": "Posicionado marcador {digit} no elemento {position} (conversa {conv_position}): {text}",
         "bookmark_set_no_position": "Posicionado marcador {digit} no elemento {position}: {text}",
         "bookmark_jumped": "Movido para a posição {position} da lista (marcador {digit})",
+        "bookmark_already_there": "Você já está na posição {position} da lista (marcador {digit})",
         "bookmark_jumped_other_conversation": "Movido para a conversa {conv_position}, {conv_name}, posição {position} da lista (marcador {digit})",
         "bookmark_jumped_other_conversation_no_position": "Movido para a conversa {conv_name}, posição {position} da lista (marcador {digit})",
         "bookmark_removed": "Removido marcador {digit} na posição {position} (conversa {conv_position})",
@@ -46,13 +47,17 @@ class _FakeI18n:
 class _FakeMessagesList:
     """Records Focus()/Select()/EnsureVisible()/SetFocus() calls."""
 
-    def __init__(self, focused_item=-1):
+    def __init__(self, focused_item=-1, has_focus=False):
         self._focused_item = focused_item
+        self._has_focus = has_focus
         self.focused_calls = []
         self.selected_calls = []
         self.ensure_visible_calls = []
         self.set_focus_called = False
         self._texts = {}
+
+    def HasFocus(self):
+        return self._has_focus
 
     def GetFocusedItem(self):
         return self._focused_item
@@ -98,16 +103,17 @@ class _Stub:
     _is_separator = ConversationsPanel._is_separator
     _find_index_by_msg_id = ConversationsPanel._find_index_by_msg_id
     _conversation_position = ConversationsPanel._conversation_position
+    _already_on_message_row = ConversationsPanel._already_on_message_row
     _focus_message_row = ConversationsPanel._focus_message_row
     _select_bookmarked_message = ConversationsPanel._select_bookmarked_message
     _on_bookmark_set_or_jump = ConversationsPanel._on_bookmark_set_or_jump
     _on_bookmark_remove = ConversationsPanel._on_bookmark_remove
 
     def __init__(self, sorted_messages, focused_item=-1, conversation_jid=CONV_A,
-                 chats=None, chats_list=None):
+                 chats=None, chats_list=None, list_has_focus=False):
         self._msg_bookmarks = {}
         self._sorted_messages = sorted_messages
-        self.messages_list = _FakeMessagesList(focused_item)
+        self.messages_list = _FakeMessagesList(focused_item, list_has_focus)
         self.main_window = _FakeMainWindow(chats=chats)
         self.conversation = _chat(conversation_jid, conversation_jid) if conversation_jid else None
         self.conversation_name = conversation_jid
@@ -203,6 +209,36 @@ class TestBookmarkJumpSameConversation:
         # Same conversation — no navigation should have happened.
         assert panel.navigate_calls == []
 
+    def test_pressing_it_while_already_on_the_message_says_so(self):
+        # Announcing "moved to position 1" without moving anything is a lie a
+        # screen-reader user cannot check against the screen.
+        panel = _Stub([_msg("A"), _msg("B")], focused_item=0, list_has_focus=True)
+        panel._on_bookmark_set_or_jump(7)
+        panel.main_window.outputs.clear()
+
+        panel._on_bookmark_set_or_jump(7)
+
+        assert panel.main_window.outputs == [
+            "Você já está na posição 1 da lista (marcador 7)"
+        ]
+        assert panel.messages_list.focused_calls == []
+        assert panel.messages_list.set_focus_called is False
+        assert panel._msg_bookmarks[7] == (CONV_A, "A")   # the bookmark survives
+
+    def test_the_row_cursor_alone_is_not_being_there(self):
+        # Focus moved to the message field: the list still reports the row as
+        # its focused item, but the jump does have work to do — bring focus
+        # back into the list — so it must not short-circuit.
+        panel = _Stub([_msg("A"), _msg("B")], focused_item=0, list_has_focus=True)
+        panel._on_bookmark_set_or_jump(7)
+        panel.messages_list._has_focus = False
+        panel.main_window.outputs.clear()
+
+        panel._on_bookmark_set_or_jump(7)
+
+        assert panel.messages_list.set_focus_called is True
+        assert panel.main_window.outputs == ["Movido para a posição 1 da lista (marcador 7)"]
+
     def test_jump_follows_message_after_list_is_rebuilt(self):
         """A bookmark keeps pointing at the same message even if the list
         was rebuilt (e.g. a new message arrived) and the position shifted."""
@@ -253,6 +289,26 @@ class TestBookmarkJumpOtherConversation:
 
         assert panel.navigate_calls == [CONV_B]
         assert panel.messages_list.focused_calls[-1] == 0
+        assert panel.main_window.outputs == [
+            "Movido para a conversa 2, b@s.whatsapp.net, posição 1 da lista (marcador 3)"
+        ]
+
+    def test_a_coinciding_row_index_is_not_reported_as_already_being_there(self):
+        """The user really did move — the conversation changed — even though
+        the row number happens to match the one focused before. Only the
+        same-conversation path may short-circuit."""
+        chat_b = _chat(CONV_B, "Bob")
+        panel = _Stub(
+            [_msg("X")], focused_item=0, conversation_jid=CONV_A,
+            chats_list=[_chat(CONV_A, "Alice"), chat_b], list_has_focus=True,
+        )
+        panel.main_window.chats = {CONV_B: chat_b}
+        panel._msg_bookmarks[3] = (CONV_B, "X")   # also lands on row index 0
+
+        panel._on_bookmark_set_or_jump(3)
+
+        assert panel.navigate_calls == [CONV_B]
+        assert panel.messages_list.set_focus_called is True
         assert panel.main_window.outputs == [
             "Movido para a conversa 2, b@s.whatsapp.net, posição 1 da lista (marcador 3)"
         ]

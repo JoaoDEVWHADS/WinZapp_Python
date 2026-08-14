@@ -31,6 +31,7 @@ class _FakeI18n:
     _STRINGS = {
         "temp_bookmark_set": "Posicionado marcador temporário {digit} no elemento {position}: {text}",
         "temp_bookmark_jumped": "Movido para a posição {position} da lista (marcador temporário {digit})",
+        "temp_bookmark_already_there": "Você já está na posição {position} da lista (marcador temporário {digit})",
         "temp_bookmark_removed": "Removido marcador temporário {digit} na posição {position}",
         "temp_bookmark_removed_stale": "Removido marcador temporário {digit} (a mensagem original não está mais na lista)",
         "temp_bookmark_not_found": "Nenhum marcador temporário encontrado para o número {digit}",
@@ -41,12 +42,16 @@ class _FakeI18n:
 
 
 class _FakeMessagesList:
-    def __init__(self, focused_item=-1):
+    def __init__(self, focused_item=-1, has_focus=False):
         self._focused_item = focused_item
+        self._has_focus = has_focus
         self.focused_calls = []
         self.selected_calls = []
         self.ensure_visible_calls = []
         self.set_focus_called = False
+
+    def HasFocus(self):
+        return self._has_focus
 
     def GetFocusedItem(self):
         return self._focused_item
@@ -85,14 +90,16 @@ class _Stub:
 
     _is_separator = ConversationsPanel._is_separator
     _find_index_by_msg_id = ConversationsPanel._find_index_by_msg_id
+    _already_on_message_row = ConversationsPanel._already_on_message_row
     _focus_message_row = ConversationsPanel._focus_message_row
     _on_temp_bookmark_set_or_jump = ConversationsPanel._on_temp_bookmark_set_or_jump
     _on_temp_bookmark_remove = ConversationsPanel._on_temp_bookmark_remove
 
-    def __init__(self, sorted_messages, focused_item=-1, conversation_jid=CONV):
+    def __init__(self, sorted_messages, focused_item=-1, conversation_jid=CONV,
+                 list_has_focus=False):
         self._msg_temp_bookmarks = {}
         self._sorted_messages = sorted_messages
-        self.messages_list = _FakeMessagesList(focused_item)
+        self.messages_list = _FakeMessagesList(focused_item, list_has_focus)
         self.main_window = _FakeMainWindow()
         self.conversation = {"remoteJid": conversation_jid} if conversation_jid else None
 
@@ -186,6 +193,38 @@ class TestJump:
         panel._on_temp_bookmark_set_or_jump(6)
 
         assert panel.messages_list.focused_calls[-1] == 3
+
+    def test_pressing_it_while_already_on_the_message_says_so(self):
+        # Announcing "moved to position 2" without moving anything is a lie a
+        # screen-reader user cannot check against the screen.
+        panel = _Stub([_msg("A"), _msg("B")], focused_item=1, list_has_focus=True)
+        panel._on_temp_bookmark_set_or_jump(4)
+        panel.main_window.outputs.clear()
+
+        panel._on_temp_bookmark_set_or_jump(4)
+
+        assert panel.main_window.outputs == [
+            "Você já está na posição 2 da lista (marcador temporário 4)"
+        ]
+        assert panel.messages_list.focused_calls == []
+        assert panel.messages_list.set_focus_called is False
+        assert panel._msg_temp_bookmarks == {4: "B"}   # the bookmark survives
+
+    def test_the_row_cursor_alone_is_not_being_there(self):
+        # Focus moved to the message field: the list still reports the row as
+        # its focused item, but the jump does have work to do — bring focus
+        # back into the list — so it must not short-circuit.
+        panel = _Stub([_msg("A"), _msg("B")], focused_item=1, list_has_focus=True)
+        panel._on_temp_bookmark_set_or_jump(4)
+        panel.messages_list._has_focus = False
+        panel.main_window.outputs.clear()
+
+        panel._on_temp_bookmark_set_or_jump(4)
+
+        assert panel.messages_list.set_focus_called is True
+        assert panel.main_window.outputs == [
+            "Movido para a posição 2 da lista (marcador temporário 4)"
+        ]
 
     def test_message_gone_drops_the_bookmark_and_says_so(self):
         panel = _Stub([_msg("A"), _msg("B")], focused_item=1)

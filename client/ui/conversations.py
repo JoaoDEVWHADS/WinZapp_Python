@@ -8172,6 +8172,22 @@ class ConversationsPanel(wx.Panel):
                 return i + 1
         return 0
 
+    def _already_on_message_row(self, idx: int) -> bool:
+        """True when the messages list already holds the keyboard focus, on
+        exactly this row — i.e. jumping here would move nothing.
+
+        Both conditions matter. The row cursor alone is not enough: it survives
+        the user tabbing away to the message field, and in that state a jump
+        does have work to do (bring focus back into the list), so announcing
+        "you are already there" and stopping would strand the focus where it
+        was. Only when the list itself is focused *and* sitting on the row is
+        the jump genuinely a no-op.
+        """
+        try:
+            return self.messages_list.GetFocusedItem() == idx and self.messages_list.HasFocus()
+        except Exception:
+            return False
+
     def _focus_message_row(self, idx: int):
         """Move focus + selection to a message row and scroll it into view.
 
@@ -8196,6 +8212,15 @@ class ConversationsPanel(wx.Panel):
             self._msg_bookmarks.pop(digit, None)
             self.main_window.output(
                 i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        # Only in the same conversation: having just navigated to another one,
+        # the user did move, even if the row index happens to coincide with
+        # the one the newly opened conversation focused on its own.
+        if not other_conversation and self._already_on_message_row(idx):
+            self.main_window.output(
+                i18n.t("bookmark_already_there").format(position=idx + 1, digit=digit),
+                interrupt=True,
             )
             return
         self._focus_message_row(idx)
@@ -8340,6 +8365,14 @@ class ConversationsPanel(wx.Panel):
                 del self._msg_temp_bookmarks[digit]
                 self.main_window.output(
                     i18n.t("temp_bookmark_not_found").format(digit=digit), interrupt=True
+                )
+                return
+            if self._already_on_message_row(idx):
+                self.main_window.output(
+                    i18n.t("temp_bookmark_already_there").format(
+                        position=idx + 1, digit=digit
+                    ),
+                    interrupt=True,
                 )
                 return
             self._focus_message_row(idx)
