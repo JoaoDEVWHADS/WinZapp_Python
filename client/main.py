@@ -13541,25 +13541,15 @@ class MainWindow(wx.Frame):
         `_<participant>` — including for our own group messages (`fromMe=True`).
         """
         def _resolve_to_lid_if_available(jid: str) -> str:
-            """Resolve JID to cached @lid if available, keeping @g.us / @broadcast, and formatting to @c.us otherwise."""
+            """Keep JIDs exactly as provided by Baileys, only formatting @s.whatsapp.net to @c.us."""
             if not jid:
                 return jid
-            if jid.endswith(("@g.us", "@broadcast")):
-                return jid
-            if jid.endswith("@lid"):
-                return jid
-            clean = jid.replace("@c.us", "@s.whatsapp.net")
-            lid = getattr(self, "_phone_to_lid", {}).get(clean, "")
-            if lid:
-                return lid
             return jid.replace("@s.whatsapp.net", "@c.us")
 
         def _format_1on1_chat(jid: str) -> str:
             if not jid:
                 return jid
-            if jid.endswith("@s.whatsapp.net"):
-                return jid.replace("@s.whatsapp.net", "@c.us")
-            return jid
+            return jid.replace("@s.whatsapp.net", "@c.us")
 
         msg_id = msg_key.get("id", "")
         if not msg_id:
@@ -13628,11 +13618,6 @@ class MainWindow(wx.Frame):
 
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
         """Send a reaction to a message via the WPPConnect Server API."""
-        # Resolve the @lid chat to its phone JID the same way deletes do, so the
-        # serialized id matches the chat WPPConnect actually has loaded.
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/react-message"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -14409,15 +14394,6 @@ class MainWindow(wx.Frame):
         callback is called with a float in [0, 1] as each chunk arrives.
         """
         _key = media.get("key", {})
-        remote_jid = _key.get("remoteJid", "") or media.get("from", "")
-        # If remote_jid is phone@c.us and we have an LID mapping for it, prefer LID JID
-        if remote_jid and not remote_jid.endswith("@lid"):
-            norm_phone = self._normalize_jid(remote_jid)
-            alt_lid = getattr(self, "_phone_to_lid", {}).get(norm_phone, "")
-            if alt_lid:
-                _key = dict(_key)
-                _key["remoteJid"] = alt_lid
-
         msg_id = self._serialize_msg_id(_key.get("remoteJid", "") or media.get("from", ""), _key, full_msg=media)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-media-by-message/{msg_id}"
         headers = {
@@ -16576,9 +16552,6 @@ class MainWindow(wx.Frame):
         that weren't your own, and revoke only fires when the message is yours or
         you are a group admin.
         """
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/delete-message"
@@ -16616,9 +16589,6 @@ class MainWindow(wx.Frame):
         POST /api/session/delete-message endpoint delete_message_for_everyone()
         uses, with onlyLocal=True.
         """
-        lid_jid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
-        if lid_jid:
-            remote_jid = lid_jid
         url = (
             f"{self.wpp_server}:{self.wpp_port}"
             f"/api/{self.token}/delete-message"
