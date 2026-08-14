@@ -237,6 +237,7 @@
     "cancel_edit": "Cancelar edição",
     "noise_reduction_label": "Ativar &redução de ruído do microfone",
     "notifications_label": "Ativar &notificações de novas mensagens em segundo plano",
+    "announce_sync_events_label": "Anunciar sincronização, download de mídias e modo &offline automático",
     "tray_show_icon": "Mostrar ícone e contagem de mensagens não lidas na bandeja do sistema",
     "tray_open": "Abrir",
     "tray_offline_mode": "Modo offline",

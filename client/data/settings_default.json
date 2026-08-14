@@ -15,7 +15,8 @@
         "autostart": false,
         "show_tray_icon": true,
         "terms_alert_displayed": false,
-        "quick_tip_shown": false
+        "quick_tip_shown": false,
+        "announce_sync_events": true
     },
     "status": {
         "messages_set_completed": false

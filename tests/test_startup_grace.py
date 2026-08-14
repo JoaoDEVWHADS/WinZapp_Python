@@ -55,6 +55,7 @@ class _I18n:
 class _Stub:
     _set_wa_connected = MainWindow._set_wa_connected
     _reset_startup_probe = MainWindow._reset_startup_probe
+    _announce_sync_events_enabled = MainWindow._announce_sync_events_enabled
     _WA_STARTUP_GRACE_SECONDS = MainWindow._WA_STARTUP_GRACE_SECONDS
 
     # Overridden per-test; the default keeps the grace intact.
@@ -63,6 +64,7 @@ class _Stub:
 
     def __init__(self, started_ago=0.0, network_down=False):
         self.network_down = network_down
+        self.settings = {}
         self._shutting_down = False
         self._wa_connected = False
         self._auto_offline = False

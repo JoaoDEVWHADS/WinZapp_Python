@@ -2119,8 +2119,11 @@ class MainWindow(wx.Frame):
         elif self._auto_offline:
             # Turning the manual switch off does not put us back online when
             # the connection itself is down — say so instead of announcing a
-            # state change that did not happen.
-            self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=True)
+            # state change that did not happen. This is the automatic-offline
+            # warning, so it respects the announce_sync_events master mute for
+            # the SPEECH; the sound above is the manual toggle's own feedback.
+            if self._announce_sync_events_enabled():
+                self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=True)
         else:
             self.output(self.i18n.t("offline_mode_disabled"), interrupt=True)
         self._apply_offline_state()
@@ -2162,6 +2165,17 @@ class MainWindow(wx.Frame):
             _ui()
         else:
             wx.CallAfter(_ui)
+
+    def _announce_sync_events_enabled(self) -> bool:
+        """Master mute for the sync/media/auto-offline spoken+sound warnings.
+
+        Settings > Geral > "Anunciar sincronização, download de mídias e modo
+        offline automático" (on by default). When unchecked, the synchronizing /
+        sync-complete / media-download / automatic-offline announcements must
+        not fire — no speech, no event sound (status text and the manual
+        offline toggle's own feedback are unaffected).
+        """
+        return bool(self.settings.get("general", {}).get("announce_sync_events", True))
 
     def _on_power_suspended(self, event):
         logging.info("[power] System is suspending.")
@@ -2901,7 +2915,7 @@ class MainWindow(wx.Frame):
         # — it only reaches here on an actual state change — so this is safe
         # to fire unconditionally, matching the manual toggle's own behaviour
         # (offline_mode_sound + speech) exactly.
-        if announce and not self.background_mode:
+        if announce and not self.background_mode and self._announce_sync_events_enabled():
             self.offline_mode_sound.play()
             self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=False)
 
@@ -2921,16 +2935,16 @@ class MainWindow(wx.Frame):
                 logging.info("[_on_menu_sync_media] Aborting media sync: offline mode active.")
                 return
             wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-            if not self.background_mode:
+            if not self.background_mode and self._announce_sync_events_enabled():
                 wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
             self._media_sync_running = True
             try:
                 self.sync_media_for_all_chats()
-                if not self.background_mode:
+                if not self.background_mode and self._announce_sync_events_enabled():
                     wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception as exc:
                 logging.exception("[_on_menu_sync_media] Erro ao baixar mídias: %s", exc)
-                if not self.background_mode:
+                if not self.background_mode and self._announce_sync_events_enabled():
                     wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
             finally:
                 self._media_sync_running = False
@@ -8090,9 +8104,10 @@ class MainWindow(wx.Frame):
         # land in the same UI-thread tick.
         def _announce_synchronizing():
             self._set_status(self.i18n.t("synchronizing"))
-            self.synchronizing_sound.play()
-            if not self.background_mode:
-                self.output(self.i18n.t("synchronization_started"), interrupt=True)
+            if self._announce_sync_events_enabled():
+                self.synchronizing_sound.play()
+                if not self.background_mode:
+                    self.output(self.i18n.t("synchronization_started"), interrupt=True)
         wx.CallAfter(_announce_synchronizing)
 
         # After first pairing the API may need a few seconds to populate chats.
@@ -8352,9 +8367,10 @@ class MainWindow(wx.Frame):
             # 3-or-4-conversations failure look like a success, right before
             # the sync restarted itself.
             if chat_list_ok and chat_list_settled:
-                self.sync_complete_sound.play()
-                if not self.background_mode:
-                    self.output(self.i18n.t("sync_complete"))
+                if self._announce_sync_events_enabled():
+                    self.sync_complete_sound.play()
+                    if not self.background_mode:
+                        self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(_announce_messages_synced)
 
         # Mark sync as done for this session so late-arriving messages.set
@@ -8460,7 +8476,7 @@ class MainWindow(wx.Frame):
                 )
                 if has_media:
                     wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-                    if not self.background_mode:
+                    if not self.background_mode and self._announce_sync_events_enabled():
                         announced = True
                         wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
 

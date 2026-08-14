@@ -235,6 +235,7 @@
     "cancel_edit": "Anuluj edycję",
     "noise_reduction_label": "Włącz &redukcję szumów mikrofonu",
     "notifications_label": "Włącz &powiadomienia w tle o nowych wiadomościach",
+    "announce_sync_events_label": "Anonsuj synchronizację, pobieranie multimediów i automatyczny tryb &offline",
     "tray_show_icon": "Pokaż ikonę i licznik nieprzeczytanych wiadomości w zasobniku systemowym",
     "tray_open": "Otwórz",
     "tray_offline_mode": "Tryb offline",

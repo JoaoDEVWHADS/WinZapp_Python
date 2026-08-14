@@ -41,7 +41,10 @@ class _Stub:
         from main import MainWindow
         self._set_wa_connected = MainWindow._set_wa_connected.__get__(self)
         self._reset_startup_probe = MainWindow._reset_startup_probe.__get__(self)
+        self._announce_sync_events_enabled = MainWindow._announce_sync_events_enabled.__get__(self)
         self._WA_STARTUP_GRACE_SECONDS = MainWindow._WA_STARTUP_GRACE_SECONDS
+
+        self.settings = {}
 
         self._shutting_down = False
         self._wa_connected = False

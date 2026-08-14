@@ -207,6 +207,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._notifications_check, 0, wx.ALL, 8)
 
+        self._announce_sync_check = wx.CheckBox(
+            self._general_page, label=i18n.t("announce_sync_events_label")
+        )
+        gen_sizer.Add(self._announce_sync_check, 0, wx.ALL, 8)
+
         self._autostart_check = wx.CheckBox(
             self._general_page, label=i18n.t("autostart_label")
         )
@@ -686,6 +691,9 @@ class SettingsDialog(wx.Dialog):
 
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
+
+        announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
+        self._announce_sync_check.SetValue(announce_sync)
 
         from autostart import is_autostart_enabled
         self._autostart_check.SetValue(is_autostart_enabled())
@@ -1502,6 +1510,11 @@ class SettingsDialog(wx.Dialog):
             self._notifications_check.GetValue()
         )
 
+        # Sync/media/auto-offline announcements
+        self.main_window.settings.setdefault("general", {})["announce_sync_events"] = (
+            self._announce_sync_check.GetValue()
+        )
+
         # Autostart
         from autostart import is_autostart_enabled
         new_autostart = self._autostart_check.GetValue()
@@ -1654,6 +1667,7 @@ class SettingsDialog(wx.Dialog):
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
+        self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
