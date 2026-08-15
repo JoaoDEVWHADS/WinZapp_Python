@@ -40,7 +40,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, parse_bool_flag as _parse_bool_flag
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -49,6 +49,18 @@ from datetime import datetime
 
 # Compiled URL regex used for link extraction from message text
 _URL_RE = re.compile(r'https?://\S+|www\.\S+')
+
+# Message types that carry a file "Save as" can actually write to disk.
+# Everything else — text, stickers, locations, contacts, system events — has
+# no payload to save: _resolve_media_filename() falls back to "<id>.bin" for
+# those, so the save dialog used to open on a plain text message offering a
+# .bin that no download could ever produce, and saving it just errored.
+# The context menu was already gating on this set; the Ctrl+Shift+S
+# accelerator and the toolbar button reached _on_action_save_as() without
+# passing anywhere near it, which is how the two disagreed.
+_SAVEABLE_MESSAGE_TYPES = frozenset({
+    "documentMessage", "imageMessage", "videoMessage", "audioMessage",
+})
 
 
 def _fmt_last_seen(ts, i18n) -> str:
@@ -163,6 +175,20 @@ class ConversationsPanel(wx.Panel):
         # conversation than the one currently open navigates there first.
         # Not persisted across restarts.
         self._msg_bookmarks: dict = {}
+
+        # ── Temporary bookmarks (Alt+Shift+0..9 / Ctrl+Alt+Shift+0..9) ───────
+        # digit (0-9) -> stable message identifier, scoped to the conversation
+        # currently open and dropped the moment it is left — which is exactly
+        # how _msg_bookmarks behaved before it was widened to span
+        # conversations. Both kinds are needed: the ten cross-conversation
+        # bookmarks are a scarce resource a user assigns to messages that
+        # matter for a long time, so spending one on "hold my place while I
+        # scroll up to check something" would cost a slot they were keeping.
+        # These are the scratch set for that, and being cleared on leaving the
+        # conversation is the point, not a limitation — nothing accumulates.
+        # Only a message id is stored (no JID): the conversation a temporary
+        # bookmark belongs to is always the open one, by construction.
+        self._msg_temp_bookmarks: dict = {}
 
         # ── Media download progress ─────────────────────────────────────────
         # msg_id -> float 0.0-1.0  (absent = not tracked / already complete)
@@ -745,6 +771,9 @@ class ConversationsPanel(wx.Panel):
         # ── Message bookmarks ────────────────────────────────────────────────
         self.ID_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Ctrl+0..9)
         self.ID_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Shift+0..9)
+        # ── Temporary (this-conversation-only) bookmarks ─────────────────────
+        self.ID_TEMP_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Alt+Shift+0..9)
+        self.ID_TEMP_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Alt+Shift+0..9)
         # ── Group actions ────────────────────────────────────────────────────
         self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
@@ -759,6 +788,7 @@ class ConversationsPanel(wx.Panel):
 
         CS  = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
         AS  = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
+        CAS = wx.ACCEL_CTRL | wx.ACCEL_ALT | wx.ACCEL_SHIFT
 
         # message_label's own native mnemonic ("&" in "type_message"/
         # "reply_to"/"reply_to_group", all deliberately kept on the same
@@ -831,6 +861,15 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_CTRL, ord(str(d)), self.ID_BOOKMARK[d]) for d in range(10)
         ] + [
             (CS,            ord(str(d)), self.ID_BOOKMARK_REMOVE[d]) for d in range(10)
+        ] + [
+            # Alt+Shift+<digit> / Ctrl+Alt+Shift+<digit>: temporary bookmarks.
+            # Both combos were verified to reach the app for all ten digits —
+            # including the zeros, where the extra Alt is what keeps them from
+            # matching the Windows IME hotkey that eats plain Ctrl+Shift+0
+            # (see MainWindow._set_bookmark_zero_hotkey).
+            (AS,            ord(str(d)), self.ID_TEMP_BOOKMARK[d]) for d in range(10)
+        ] + [
+            (CAS,           ord(str(d)), self.ID_TEMP_BOOKMARK_REMOVE[d]) for d in range(10)
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self._on_accel_focus_field,          id=self.ID_ALT_FOCUS_FIELD)
@@ -872,6 +911,8 @@ class ConversationsPanel(wx.Panel):
         for _d in range(10):
             self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_set_or_jump(d), id=self.ID_BOOKMARK[_d])
             self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_remove(d),      id=self.ID_BOOKMARK_REMOVE[_d])
+            self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_temp_bookmark_set_or_jump(d), id=self.ID_TEMP_BOOKMARK[_d])
+            self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_temp_bookmark_remove(d),      id=self.ID_TEMP_BOOKMARK_REMOVE[_d])
 
     # ── Conversations list events ───────────────────────────────────────────
 
@@ -926,7 +967,10 @@ class ConversationsPanel(wx.Panel):
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
         # _msg_bookmarks is intentionally NOT reset here — bookmarks now span
-        # conversations (see the declaration in __init__).
+        # conversations (see the declaration in __init__). _msg_temp_bookmarks
+        # is the opposite: scoped to one conversation, so switching away from
+        # it is exactly when it must go.
+        self._msg_temp_bookmarks.clear()
         self._first_unread_msg_id = None
         self._first_unread_count = 0
         self._unread_sep_marked_read = False
@@ -2209,6 +2253,8 @@ class ConversationsPanel(wx.Panel):
             self._search_open_btn.Show()
             self._search_field.SetValue("")
         # _msg_bookmarks is intentionally NOT reset here — see __init__.
+        # _msg_temp_bookmarks is, for the same reason spelled out there.
+        self._msg_temp_bookmarks.clear()
         closed_jid = self._last_open_jid
         self.conversation = None
         self.conversation_panel.Hide()
@@ -2728,8 +2774,12 @@ class ConversationsPanel(wx.Panel):
             pin_msg_item,
         )
 
-        # Save As (media only, only when the file is already cached locally)
-        _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
+        # Save As (media only, only when the file is already cached locally).
+        # Audio is excluded here because it has its own branch below (separate
+        # cache, its own label) — the set itself stays shared with
+        # _on_action_save_as() so the menu and the shortcut can never again
+        # disagree about what is saveable.
+        _SAVEABLE = _SAVEABLE_MESSAGE_TYPES - {"audioMessage"}
         clean_msg_id = msg_id
         if "_" in msg_id:
             parts = msg_id.split("_")
@@ -4408,7 +4458,19 @@ class ConversationsPanel(wx.Panel):
         if index < 0 or index >= len(self._sorted_messages):
             return
         msg      = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
         msg_type = msg.get("messageType", "")
+
+        # Nothing to save: say so instead of opening a file dialog over a
+        # message that has no file. Silence would be worse than the bug it
+        # replaces — pressing Ctrl+Shift+S and getting no reaction at all
+        # reads as "the shortcut is broken" to a screen-reader user.
+        if msg_type not in _SAVEABLE_MESSAGE_TYPES:
+            self.main_window.output(
+                self.main_window.i18n.t("save_as_nothing_to_save"), interrupt=True
+            )
+            return
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
@@ -8151,6 +8213,35 @@ class ConversationsPanel(wx.Panel):
                 return i + 1
         return 0
 
+    def _already_on_message_row(self, idx: int) -> bool:
+        """True when the messages list already holds the keyboard focus, on
+        exactly this row — i.e. jumping here would move nothing.
+
+        Both conditions matter. The row cursor alone is not enough: it survives
+        the user tabbing away to the message field, and in that state a jump
+        does have work to do (bring focus back into the list), so announcing
+        "you are already there" and stopping would strand the focus where it
+        was. Only when the list itself is focused *and* sitting on the row is
+        the jump genuinely a no-op.
+        """
+        try:
+            return self.messages_list.GetFocusedItem() == idx and self.messages_list.HasFocus()
+        except Exception:
+            return False
+
+    def _focus_message_row(self, idx: int):
+        """Move focus + selection to a message row and scroll it into view.
+
+        Focus() alone moves the screen-reader cursor without selecting, and
+        Select() alone selects a row the keyboard cursor isn't on — both
+        bookmark kinds want the row to become the one and only current
+        message, which takes all four calls together.
+        """
+        self.messages_list.Focus(idx)
+        self.messages_list.Select(idx, True)
+        self.messages_list.EnsureVisible(idx)
+        self.messages_list.SetFocus()
+
     def _select_bookmarked_message(self, digit: int, jid: str, msg_id: str, i18n,
                                     other_conversation: bool):
         """Focus/select *msg_id* in the (already-open) conversation's message
@@ -8164,10 +8255,16 @@ class ConversationsPanel(wx.Panel):
                 i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
             )
             return
-        self.messages_list.Focus(idx)
-        self.messages_list.Select(idx, True)
-        self.messages_list.EnsureVisible(idx)
-        self.messages_list.SetFocus()
+        # Only in the same conversation: having just navigated to another one,
+        # the user did move, even if the row index happens to coincide with
+        # the one the newly opened conversation focused on its own.
+        if not other_conversation and self._already_on_message_row(idx):
+            self.main_window.output(
+                i18n.t("bookmark_already_there").format(position=idx + 1, digit=digit),
+                interrupt=True,
+            )
+            return
+        self._focus_message_row(idx)
         if not other_conversation:
             self.main_window.output(
                 i18n.t("bookmark_jumped").format(position=idx + 1, digit=digit),
@@ -8288,6 +8385,83 @@ class ConversationsPanel(wx.Panel):
             )
         self.main_window.output(text, interrupt=True)
 
+    # ── Alt+Shift+0..9 / Ctrl+Alt+Shift+0..9: temporary bookmarks ──────────
+    # The scratch counterpart to the ten bookmarks above: scoped to the open
+    # conversation and cleared on leaving it (see _msg_temp_bookmarks'
+    # declaration in __init__ for why both kinds exist). No cross-conversation
+    # case to handle here, which is why these are far shorter than their
+    # permanent equivalents — a temporary bookmark can only ever point into
+    # the conversation that is already open.
+
+    def _on_temp_bookmark_set_or_jump(self, digit: int):
+        """Alt+Shift+<digit>: bookmark the focused message temporarily, or —
+        if <digit> already holds one — move focus/selection to it instead."""
+        i18n = self.main_window.i18n
+        existing = self._msg_temp_bookmarks.get(digit)
+        if existing is not None:
+            idx = self._find_index_by_msg_id(existing)
+            if idx < 0:
+                # The message left the list (deleted, or trimmed out by a
+                # rebuild) — drop the marker rather than keep pointing nowhere.
+                del self._msg_temp_bookmarks[digit]
+                self.main_window.output(
+                    i18n.t("temp_bookmark_not_found").format(digit=digit), interrupt=True
+                )
+                return
+            if self._already_on_message_row(idx):
+                self.main_window.output(
+                    i18n.t("temp_bookmark_already_there").format(
+                        position=idx + 1, digit=digit
+                    ),
+                    interrupt=True,
+                )
+                return
+            self._focus_message_row(idx)
+            self.main_window.output(
+                i18n.t("temp_bookmark_jumped").format(position=idx + 1, digit=digit),
+                interrupt=True,
+            )
+            return
+
+        if self.conversation is None:
+            return
+        idx = self.messages_list.GetFocusedItem()
+        if idx < 0 or idx >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[idx]
+        if self._is_separator(msg):
+            return
+        msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id:
+            return
+        self._msg_temp_bookmarks[digit] = msg_id
+        self.main_window.output(
+            i18n.t("temp_bookmark_set").format(
+                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx),
+            ),
+            interrupt=True,
+        )
+
+    def _on_temp_bookmark_remove(self, digit: int):
+        """Ctrl+Alt+Shift+<digit>: remove the temporary bookmark at that digit."""
+        i18n = self.main_window.i18n
+        existing = self._msg_temp_bookmarks.pop(digit, None)
+        if existing is None:
+            self.main_window.output(
+                i18n.t("temp_bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        idx = self._find_index_by_msg_id(existing)
+        if idx < 0:
+            self.main_window.output(
+                i18n.t("temp_bookmark_removed_stale").format(digit=digit), interrupt=True
+            )
+            return
+        self.main_window.output(
+            i18n.t("temp_bookmark_removed").format(digit=digit, position=idx + 1),
+            interrupt=True,
+        )
+
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 
     def _on_accel_open_search(self, event):
@@ -8308,13 +8482,44 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Layout()
         self.messages_list.SetFocus()
 
+    def _message_search_text(self, msg) -> str:
+        """The part of a message row that searching should actually look at.
+
+        Not the rendered row: _render_message_line() also appends delivery
+        status, the timestamp, "Editada"/"Encaminhada", and the reaction
+        summary. Searching that string made every decoration a false match —
+        reported live for "reproduz", which hit every played voice message
+        through its "Reproduzida" status, but "editada", "encaminhada", a
+        date, or a reaction label would all have done the same.
+
+        What stays is what a user would call content: who wrote it, the text
+        or media description itself, and — when the message is a reply — who
+        was quoted and what the quote says. That last part is deliberate: a
+        reply can quote a message that scrolled out of the loaded history, so
+        the quote is sometimes the only copy of those words in the list.
+        """
+        parts = []
+        if not self._is_system_event(msg):
+            parts.append(self._sender_label(msg))
+        parts.append(self._get_message_content(msg) or "")
+        ctx = self._get_context_info(msg)
+        if ctx:
+            # The bare name, never the "respondendo a {name}" phrasing around
+            # it — that wording is decoration and would match on its own.
+            parts.append(self._get_quoted_sender(ctx, msg) or "")
+            parts.append(self._get_quoted_preview(ctx.get("quotedMessage") or {}) or "")
+        return " ".join(p for p in parts if p)
+
     def _on_search_text_changed(self, event):
         query = self._search_field.GetValue()
         if not query.strip():
             self._search_results = []
             self._search_result_idx = -1
             return
-        qlow = query.lower()
+        # Read the setting per search, not once at startup: changing it in
+        # Settings takes effect on the very next keystroke.
+        fold = self.main_window._search_normalization_mode()
+        qlow = normalize_for_search(query, fold)
         # Store message IDs, not raw row indices: _sorted_messages can be
         # mutated (a new message arrives, more history is paginated in, a
         # message is deleted) between when the query runs and when the user
@@ -8327,7 +8532,7 @@ class ConversationsPanel(wx.Panel):
             for msg in self._sorted_messages
             if not self._is_separator(msg)
             and msg.get("key", {}).get("id")
-            and qlow in self._render_message_line(msg).lower()
+            and qlow in normalize_for_search(self._message_search_text(msg), fold)
         ]
         self._search_result_idx = -1
 

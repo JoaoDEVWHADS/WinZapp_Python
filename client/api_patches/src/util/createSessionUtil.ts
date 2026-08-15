@@ -692,9 +692,9 @@ export default class CreateSessionUtil {
     try {
       await client.page.exposeFunction(
         '__winzappOnUnreadChanged',
-        (chatId: string, unreadCount: number) => {
+        (chatId: string, unreadCount: number, previousUnreadCount: number | null) => {
           req.io.emit('chats-update', {
-            data: [{ remoteJid: chatId, unreadCount }],
+            data: [{ remoteJid: chatId, unreadCount, previousUnreadCount }],
             session: client.session,
           });
         }
@@ -714,9 +714,58 @@ export default class CreateSessionUtil {
           }
           (window as any).__winzappUnreadListenerInstalled = true;
           WPP.on('chat.unread_count_changed', (evt: any) => {
+            try {
             const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
             if (!chatId) return;
-            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount);
+            // The count this chat held BEFORE the change, forwarded so the
+            // client can tell a real read apart from a meaningless zero.
+            // A chat merely being loaded into the Store reports unreadCount=0
+            // with nothing behind it, and is indistinguishable from "the user
+            // just read this chat on their phone" unless you know whether the
+            // count actually fell from something.
+            //
+            // Measured against a live session: the field really is a plain
+            // number, matching wa-js's own typing. Three consecutive messages
+            // in one group came through as unreadCount 1/2/3 with
+            // previousUnreadCount 0/1/2 — tracking exactly one step behind.
+            // The suspicion it might be Backbone's options object (wa-js
+            // emits it straight from the Store's `change:unreadCount`
+            // callback, whose third argument is options in every other
+            // handler of that shape) did not hold. The `.previous()` fallback
+            // stays anyway: it costs nothing, and it is what keeps this
+            // working if a future wa-js changes the payload — silently, since
+            // nothing else here would notice. Neither being a number sends
+            // null, and the client then keeps its own conservative count.
+            // Deriving `previous` must never be able to suppress the event
+            // itself: the unread count is the payload that matters and the
+            // previous value is an extra, so it is computed defensively and
+            // the emit happens regardless. Reading `.previous` off a Store
+            // model is a property access on foreign, minified code that can
+            // throw or be a getter with side effects, and a throw anywhere in
+            // this callback silently takes the whole listener down — the
+            // client then stops being told about unread counts at all, with
+            // nothing in any log to say so. Measured, not hypothetical: an
+            // earlier version of this block computed `previous` inline and
+            // the chats-update stream stopped dead.
+            let previous: any = null;
+            try {
+              const raw = evt?.previousUnreadCount;
+              if (typeof raw === 'number') {
+                previous = raw;
+              } else if (typeof evt?.chat?.previous === 'function') {
+                const p = evt.chat.previous('unreadCount');
+                previous = typeof p === 'number' ? p : null;
+              }
+            } catch (e) {
+              previous = null;
+            }
+            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount, previous);
+            } catch (e) {
+              // Anything unexpected in here costs at most this one event.
+              // Never the listener: WhatsApp Web's own objects are foreign
+              // and minified, and losing this stream means unread counts
+              // silently stop updating everywhere in the app.
+            }
           });
         })
         .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));

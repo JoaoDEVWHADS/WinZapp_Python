@@ -27,6 +27,7 @@ from main import MainWindow
 class _Stub:
     on_chat_unread_update = MainWindow.on_chat_unread_update
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _remote_read_confirmed = staticmethod(MainWindow._remote_read_confirmed)
 
     def __init__(self, chat):
         self.chats = {"5511999999999@s.whatsapp.net": chat}
@@ -142,3 +143,132 @@ class TestCurrentlyOpenConversation:
         stub.on_chat_unread_update(JID, 3)
 
         assert stub.chats[JID]["unreadCount"] == 3
+
+
+class TestOpenConversationSurvivesSpuriousServerZeros:
+    """Reported live: closing with Alt+F4 (which only hides to tray) and
+    leaving the app minimized made every notification announce "✉️ 1 mensagem
+    não lida" no matter how many had piled up — while reopening the window
+    showed the conversation really did hold several.
+
+    A conversation left open stays open with the window gone, so this is the
+    _open_now branch, and WA-JS keeps firing chat.unread_count_changed with
+    unreadCount=0 for 1:1 chats. Clamping with a plain min() against those
+    zeros reset the count after every message, so the next arrival counted up
+    from zero again and its toast always read "1".
+    """
+
+    def test_a_server_zero_does_not_wipe_what_arrived_while_hidden(self):
+        chat = _chat(t=1000)
+        # on_new_message() moves both of these together, once per arrival —
+        # a chat at 0 with a nonzero _new_since_read is not a reachable state.
+        chat["unreadCount"] = 4
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 4
+
+        stub.on_chat_unread_update(JID, 0)
+
+        assert stub.chats[JID]["unreadCount"] == 4
+
+    def test_the_count_keeps_climbing_across_a_burst(self):
+        """The symptom itself: five messages with a spurious zero after each
+        must leave five unread, not one. Mirrors what on_new_message() does
+        (increment both the chat and _new_since_read) between the events."""
+        stub = _Stub(_chat(t=1000))
+        stub.conversations_panel = _CP(JID)
+        seen_by_toasts = []
+
+        for _ in range(5):
+            chat = stub.chats[JID]
+            chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+            stub._new_since_read[JID] = stub._new_since_read.get(JID, 0) + 1
+            # What the toast reads (NotificationManager._dispatch samples the
+            # live chat right before showing the banner).
+            seen_by_toasts.append(chat["unreadCount"])
+            stub.on_chat_unread_update(JID, 0)
+
+        assert seen_by_toasts == [1, 2, 3, 4, 5]
+        assert stub.chats[JID]["unreadCount"] == 5
+
+    def test_a_real_server_count_is_still_clamped_down(self):
+        """The spurious-zero rescue must not become a licence to trust the
+        server's absolute total, which can still be counting messages already
+        read locally — that is the bug this whole function exists to prevent."""
+        stub = _Stub(_chat(t=1000))
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 2
+
+        stub.on_chat_unread_update(JID, 7)
+
+        assert stub.chats[JID]["unreadCount"] == 2
+
+    def test_a_read_on_the_phone_does_clear_the_open_chat(self):
+        """The other side of the same coin: a zero that really fell from a
+        positive count is somebody reading the chat elsewhere, and must clear
+        the badge — including the messages counted while hidden, which is
+        exactly what the user just read on their phone."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 4
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 4
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=4)
+
+        assert stub.chats[JID]["unreadCount"] == 0
+        # ...and the local counter goes with it, or the next arrival would be
+        # clamped against a backlog that no longer exists.
+        assert JID not in stub._new_since_read
+
+    def test_a_read_on_the_phone_clears_a_chat_that_is_not_open(self):
+        """Same for the closed-chat guard: it exists to reject uninformative
+        zeros, not real reads. This used to leave the badge lit until some
+        later full sync happened to correct it."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 3
+        stub = _Stub(chat)
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=3)
+
+        assert stub.chats[JID]["unreadCount"] == 0
+
+    def test_an_unknown_previous_count_stays_conservative(self):
+        """The page could not tell us (None). Keeping the badge risks a stale
+        badge until the next sync; dropping it risks silently losing unread
+        messages — so the safe reading is 'not confirmed'."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 4
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 4
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=None)
+
+        assert stub.chats[JID]["unreadCount"] == 4
+
+    def test_a_previous_of_zero_is_the_store_load_not_a_read(self):
+        """previousUnreadCount=0 means the count never fell: nothing was read,
+        the chat was just loaded into WhatsApp Web's Store."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 2
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+        stub._new_since_read[JID] = 2
+
+        stub.on_chat_unread_update(JID, 0, previous_unread=0)
+
+        assert stub.chats[JID]["unreadCount"] == 2
+
+    def test_an_open_chat_with_no_local_arrivals_still_clears(self):
+        """A zero with nothing counted locally means what it says: the open
+        conversation is read. The badge here came from a sync, not from
+        arrivals this session, so there is nothing local to defend."""
+        chat = _chat(t=1000)
+        chat["unreadCount"] = 3
+        stub = _Stub(chat)
+        stub.conversations_panel = _CP(JID)
+
+        stub.on_chat_unread_update(JID, 0)
+
+        assert stub.chats[JID]["unreadCount"] == 0
