@@ -368,20 +368,12 @@ class ApiSetupDialog(wx.Dialog):
     # ── Extract helper ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _merge_package_json_dependencies(api_dir: str, patches_dir: str) -> None:
-        """Apply WinZapp's dependency patches onto the downloaded package.json.
+    def _apply_central_package_manifest(api_dir: str, patches_dir: str) -> None:
+        """Apply api_patches/package.json as the sole dependency manifest.
 
-        Port of setup_api.py's function of the same name — until this existed,
-        an install done through this dialog (i.e. every end-user install) kept
-        the vanilla upstream package.json, so `npm install` below never
-        installed @ffmpeg-installer/ffmpeg at all (upstream wppconnect-server
-        does not declare it). Only setup_api.py — a developer tool nobody but
-        us runs — applied it.
-
-        Deliberately a merge and not an overwrite; see _PATCHED_DEPENDENCY_KEYS.
-        Never fatal: a missing or unreadable package.json is left exactly as it
-        was, because npm install can still succeed on the upstream file, while
-        writing a half-merged one could not.
+        Preserve only the downloaded WPPConnect version used by the updater.
+        Every install path otherwise receives the exact same dependencies,
+        scripts, overrides and engine requirements from the tracked manifest.
         """
         pkg_path = os.path.join(api_dir, "package.json")
         patch_path = os.path.join(patches_dir, "package.json")
@@ -401,27 +393,39 @@ class ApiSetupDialog(wx.Dialog):
             logging.warning("[api_setup] Failed to read package.json for merge: %s", exc)
             return
 
-        patch_deps = patch.get("dependencies", {})
-        deps = pkg.setdefault("dependencies", {})
-        applied = []
-        for key in _PATCHED_DEPENDENCY_KEYS:
-            if key in patch_deps:
-                deps[key] = patch_deps[key]
-                applied.append(f"{key}@{patch_deps[key]}")
-        if not applied:
-            return
-        try:
-            with open(pkg_path, "w", encoding="utf-8") as fh:
-                json.dump(pkg, fh, indent=2)
-                fh.write("\n")
-        except Exception as exc:
-            logging.warning("[api_setup] Failed to write merged package.json: %s", exc)
-            return
-        logging.info(
-            "[api_setup] Applied patched dependencies into package.json: %s "
-            "(WPPConnect version kept at %s)",
-            ", ".join(applied), pkg.get("version", "?"),
+        installed_version = pkg.get("version")
+        manifest = dict(patch)
+        if installed_version:
+            manifest["version"] = installed_version
+
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".package.", suffix=".tmp", dir=api_dir
         )
+        os.close(fd)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, pkg_path)
+        except Exception as exc:
+            logging.warning("[api_setup] Failed to apply package.json: %s", exc)
+            return
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+        logging.info(
+            "[api_setup] Applied central package.json manifest "
+            "(WPPConnect version kept at %s)",
+            manifest.get("version", "?"),
+        )
+
+    # Compatibility for callers from older builds during an in-place update.
+    _merge_package_json_dependencies = _apply_central_package_manifest
 
     @staticmethod
     def _apply_node_modules_patches(api_dir: str) -> None:
@@ -949,8 +953,6 @@ class ApiSetupDialog(wx.Dialog):
                                 rel_path, exc,
                             )
 
-                    self._merge_package_json_dependencies(api_dir, patches_dir)
-
                 finally:
                     try:
                         os.remove(tmp_zip)
@@ -959,6 +961,10 @@ class ApiSetupDialog(wx.Dialog):
 
                 if self._cancelled:
                     return
+
+            # Apply on both full setup and modules-only repair. package.json is
+            # the single source of dependency and script configuration.
+            self._apply_central_package_manifest(api_dir, patches_dir)
 
             # ── Step 4: npm install ───────────────────────────────────────
             self._set_stage("Instalando dependências (npm install)...", *stages["npm_install"])

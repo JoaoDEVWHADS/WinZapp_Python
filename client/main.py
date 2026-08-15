@@ -5236,20 +5236,31 @@ class MainWindow(wx.Frame):
         def _is_free(port: int) -> bool:
             try:
                 with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                    s.settimeout(0.3)
-                    return s.connect_ex(("127.0.0.1", port)) != 0
+                    s.bind(("127.0.0.1", port))
+                    return True
             except OSError:
-                return True
+                return False
 
-        port = node_ports.resolve_account_port(
-            self.account_id, conn.get("wpp_port"), self._peer_node_ports(), is_free=_is_free)
-        # Persist so the choice is stable next launch.
-        if conn.get("wpp_port") != port:
-            self.settings.setdefault("connection", {})["wpp_port"] = port
-            try:
-                self.save_settings()
-            except Exception:
-                logging.exception("[node-port] persisting resolved port failed (non-fatal)")
+        # Two accounts can start simultaneously. Keep peer discovery, free-port
+        # selection and persistence in one cross-process critical section so
+        # they cannot both claim the same port.
+        from coord_locks import node_port_lock
+        with node_port_lock(self.global_dir):
+            port = node_ports.resolve_account_port(
+                self.account_id,
+                conn.get("wpp_port"),
+                self._peer_node_ports(),
+                is_free=_is_free,
+            )
+            # Persist so the choice is stable next launch.
+            if conn.get("wpp_port") != port:
+                self.settings.setdefault("connection", {})["wpp_port"] = port
+                try:
+                    self.save_settings()
+                except Exception:
+                    logging.exception(
+                        "[node-port] persisting resolved port failed (non-fatal)"
+                    )
         logging.info("[node-port] account %s → WPPConnect port %s",
                      getattr(self, "account_id", None), port)
         return port
@@ -6534,25 +6545,11 @@ class MainWindow(wx.Frame):
 
     def save_settings(self):
         try:
-            target = data_path("settings.json")
-            # Write to a temp file in the same directory, then atomically
-            # replace the real file. Writing settings.json in place used to
-            # truncate it immediately on open("w") — a crash, forced
-            # shutdown, or antivirus lock mid-write (this fires often, via
-            # the debounced timer below, e.g. on every presence-update burst)
-            # left a truncated/corrupt file. load_settings() has no recovery
-            # for that: it shows an error and calls sys.exit(), so a
-            # corrupted settings.json bricked the app until the user found
-            # and deleted/fixed the file by hand. os.replace() is atomic on
-            # both Windows and POSIX — the old file is never observably
-            # partial, even if the process dies mid-write.
-            tmp = f"{target}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.settings, f, indent=4)
-            os.replace(tmp, target)
-            # Mirror install-wide keys to global/app.json so other accounts see
-            # the change (plan Zad 2.3b). Best-effort; never blocks the save.
-            self._persist_global_settings()
+            # WebSocket handlers and the debounce timer can save concurrently.
+            # Serialize the entire write so they cannot replace the same temp
+            # file or overwrite a newer snapshot with an older one.
+            with self._save_lock:
+                self._save_settings_locked()
         except Exception:
             self.error_sound.play()
             # save_settings() is called from many places, including several
@@ -6562,6 +6559,28 @@ class MainWindow(wx.Frame):
             msg   = f"{self.i18n.t('settings_save_failed')} {format_exc()}"
             title = self.i18n.t("error").format(app_name=self.app_name)
             wx.CallAfter(wx.MessageBox, msg, title, wx.OK | wx.ICON_ERROR)
+
+    def _save_settings_locked(self):
+        target = data_path("settings.json")
+        # Write to a temp file in the same directory, then atomically replace
+        # the real file. The old file is never observably partial, even if the
+        # process dies mid-write.
+        tmp = f"{target}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+        # Mirror install-wide keys to global/app.json so other accounts see the
+        # change (plan Zad 2.3b). Best-effort; never blocks the save.
+        self._persist_global_settings()
 
     def _schedule_save_settings(self):
         """Debounce save_settings: coalesce rapid calls into one write after 2 s.

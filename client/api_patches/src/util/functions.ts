@@ -62,17 +62,20 @@ export function contactToArray(
   // without touching genuine JSON callers, which already send real
   // booleans and still compare equal here.
   const wantsGroup = isGroup === true || (isGroup as any) === 'true';
-  const wantsNewsletter = isNewsletter === true || (isNewsletter as any) === 'true';
+  const wantsNewsletter =
+    isNewsletter === true || (isNewsletter as any) === 'true';
   const wantsLid = isLid === true || (isLid as any) === 'true';
   if (Array.isArray(number)) {
     for (let contact of number) {
-      const isLidContact = typeof contact === 'string' && contact.endsWith('@lid');
+      const isLidContact =
+        typeof contact === 'string' && contact.endsWith('@lid');
       wantsGroup || wantsNewsletter
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
       if (contact !== '')
         if (wantsGroup) (localArr as any).push(`${contact}@g.us`);
-        else if (wantsNewsletter) (localArr as any).push(`${contact}@newsletter`);
+        else if (wantsNewsletter)
+          (localArr as any).push(`${contact}@newsletter`);
         else if (wantsLid || isLidContact)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);
@@ -86,13 +89,15 @@ export function contactToArray(
         ? number.split(/\s*[,;]\s*/g)
         : [String(number ?? '')];
     for (let contact of arrContacts) {
-      const isLidContact = typeof contact === 'string' && contact.endsWith('@lid');
+      const isLidContact =
+        typeof contact === 'string' && contact.endsWith('@lid');
       wantsGroup || wantsNewsletter
         ? (contact = contact.split('@')[0])
         : (contact = contact.split('@')[0]?.replace(/[^\w ]/g, ''));
       if (contact !== '')
         if (wantsGroup) (localArr as any).push(`${contact}@g.us`);
-        else if (wantsNewsletter) (localArr as any).push(`${contact}@newsletter`);
+        else if (wantsNewsletter)
+          (localArr as any).push(`${contact}@newsletter`);
         else if (wantsLid || isLidContact)
           (localArr as any).push(`${contact}@lid`);
         else (localArr as any).push(`${contact}@c.us`);

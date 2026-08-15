@@ -686,7 +686,11 @@ class Connect:
                 f":{self.main_window.wpp_port}/api/{self.main_window.token}/status-session"
             )
             try:
-                response = requests.get(url, headers=self._wpp_headers())
+                response = requests.get(
+                    url,
+                    headers=self._wpp_headers(),
+                    timeout=5,
+                )
                 response_data = response.json()
                 # `urlcode` is deliberately NOT accepted here: it is the QR's
                 # raw payload string ("2@abc…"), not an image. Feeding it to
@@ -1456,4 +1460,3 @@ class Connect:
 
         self._close_active_session(sync=True)
         sys.exit()
-
