@@ -496,6 +496,46 @@ def _message_ts(msg: dict) -> int:
         return 0
 
 
+def unread_after_history_sync(
+    server_unread: int,
+    local_unread: int,
+    fetched: list,
+    local_records: list,
+) -> int:
+    """Reconcile unread state when history sync discovers offline arrivals.
+
+    The remote chat summary can still report zero while get-messages already
+    contains newer messages. Infer only genuinely new incoming content after the
+    newest locally known message; never count old backfill or our own messages.
+    """
+    baseline = max(0, int(server_unread or 0), int(local_unread or 0))
+    if not fetched or not local_records:
+        return baseline
+
+    newest_local_ts = max((_message_ts(message) for message in local_records), default=0)
+    if newest_local_ts <= 0:
+        return baseline
+
+    local_ids = {
+        (message.get("key") or {}).get("id")
+        for message in local_records
+        if isinstance(message, dict)
+    }
+    inferred = 0
+    for message in fetched:
+        if not isinstance(message, dict) or _message_ts(message) <= newest_local_ts:
+            continue
+        key = message.get("key") or {}
+        message_id = key.get("id")
+        if message_id and message_id in local_ids:
+            continue
+        if key.get("fromMe") or not is_countable_message(message):
+            continue
+        inferred += 1
+
+    return max(baseline, max(0, int(local_unread or 0)) + inferred)
+
+
 def history_gap_detected(fetched: list, local_records: list, page_size: int) -> bool:
     """True when a freshly fetched page cannot be joined onto stored history.
 
@@ -10639,6 +10679,28 @@ class MainWindow(wx.Frame):
             last_msg  = chat.get("lastMessage")
             unread    = int(chat.get("unreadCount", 0) or 0)
             is_pinned = jid in pinned
+
+            # Old versions persisted phantom one-to-one chats whose only record
+            # is WhatsApp's encryption-key maintenance notification. Hide those
+            # records too, so upgrading fixes existing databases without deleting
+            # any real conversation or user data.
+            technical_types = {"e2e_notification", "notification"}
+            only_technical_records = bool(records) and all(
+                isinstance(record, dict)
+                and record.get("type") in technical_types
+                and record.get("subtype") in ("encrypt", None, "")
+                and not record.get("body")
+                for record in records
+            )
+            if (
+                not jid.endswith("@g.us")
+                and only_technical_records
+                and not chat.get("t")
+                and unread <= 0
+                and not is_pinned
+            ):
+                continue
+
             # Skip chats with absolutely no content AND no identity.
             # We do NOT skip based on missing messages alone: during and just
             # after sync many valid chats have empty records but still carry a
@@ -11561,11 +11623,14 @@ class MainWindow(wx.Frame):
                 or self._find_alt_jid_from_messages(chat)
                 or ""
             )
+            # A phone-number contact is the canonical address-book entry.
+            # The parallel LID record may retain an older WhatsApp/profile name,
+            # so consulting it first can hide a freshly renamed phone contact.
             resolved = (
-                _try(remoteJid)
-                or (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
-                or _ppm(remoteJid)
+                (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
+                or _try(remoteJid)
                 or (phone and _ppm(phone))
+                or _ppm(remoteJid)
             )
         else:
             resolved = _try(remoteJid)
@@ -12681,6 +12746,14 @@ class MainWindow(wx.Frame):
         local_records = (local_chat.get("messages", {})
                          .get("messages", {})
                          .get("records", []))
+        if api_ok and all_messages and local_records:
+            chat["unreadCount"] = unread_after_history_sync(
+                chat.get("unreadCount", 0),
+                local_chat.get("unreadCount", 0),
+                all_messages,
+                local_records,
+            )
+
         if local_records:
             api_ids = {r.get("key", {}).get("id") for r in all_messages}
             extra   = [r for r in local_records

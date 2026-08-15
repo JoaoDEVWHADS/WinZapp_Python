@@ -3,7 +3,7 @@
 setup.py — Main environment orchestrator & WPPConnect Server API builder for WinZapp.
 
 Executes all setup steps required for both local development (Dev) and CI/CD (GitHub Actions):
-1. Ensures Portable Node.js (v24.15.0) is in client/node/ (downloads if missing).
+1. Ensures the configured Portable Node.js is in client/node/ (downloads if missing).
 2. Ensures Portable MinGit (v2.44.0) is in client/git/ (downloads if missing).
 3. Invokes setup_api.py to clone WPPConnect Server v2.10.0 and apply all custom WinZapp patches.
 4. Runs `npm install` inside client/api/ (triggers postinstall Chrome download into .cache/).
@@ -23,8 +23,12 @@ NODE_DIR = os.path.join(CLIENT_DIR, "node")
 GIT_DIR = os.path.join(CLIENT_DIR, "git")
 API_DIR = os.path.join(CLIENT_DIR, "api")
 
-NODE_VERSION = "24.15.0"
-NODE_ZIP_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-win-x64.zip"
+if CLIENT_DIR not in sys.path:
+    sys.path.insert(0, CLIENT_DIR)
+
+from node_download_config import NODE_TOP_DIR, NODE_URL, NODE_VERSION
+
+NODE_ZIP_URL = NODE_URL
 
 MINGIT_VERSION = "2.44.0"
 MINGIT_ZIP_URL = f"https://github.com/git-for-windows/git/releases/download/v{MINGIT_VERSION}.windows.1/MinGit-{MINGIT_VERSION}-64-bit.zip"
@@ -88,7 +92,7 @@ def ensure_node_portable() -> str:
             return node_bin_nix if os.path.isfile(node_bin_nix) else os.path.join(NODE_DIR, "node")
     
     _log("Portable Node.js not found in client/node/. Starting download...")
-    _download_and_extract(NODE_ZIP_URL, NODE_DIR, top_folder_to_strip=f"node-v{NODE_VERSION}-win-x64")
+    _download_and_extract(NODE_ZIP_URL, NODE_DIR, top_folder_to_strip=NODE_TOP_DIR)
     return node_exe_win if sys.platform == "win32" else shutil.which("node") or "node"
 
 

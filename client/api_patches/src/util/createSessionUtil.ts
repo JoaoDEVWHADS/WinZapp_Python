@@ -185,6 +185,92 @@ async function restoreMsgKeySerialized(
 }
 
 /**
+ * Adapt WA-JS's status sender to WhatsApp Web's current object argument.
+ *
+ * WA-JS still calls encryptAndSendStatusMsg(msg, proto, reporters), while the
+ * current WhatsApp module expects { sendMsgRecord, msgProtobuf,
+ * metricsReporter }. The old call throws inside the page, WA-JS swallows it,
+ * and the API only sees messageSendResult=ERROR_UNKNOWN.
+ */
+async function restoreStatusSender(page: any, logger: any, session: string) {
+  if (!page) return;
+  try {
+    const result = await page.evaluate(() => {
+      const install = () => {
+        const wpp = (window as any).WPP;
+        if (!wpp?.loader?.moduleRequire) return false;
+        if ((window as any).__winzappStatusSenderInstalled) return true;
+
+        try {
+          const sendModule = wpp.loader.moduleRequire('WAWebSendMsgJob');
+          const statusModule = wpp.loader.moduleRequire(
+            'WAWebEncryptAndSendStatusMsg'
+          );
+          const protoModule = wpp.loader.moduleRequire(
+            'WAWebE2EProtoGenerator'
+          );
+          const original = sendModule?.encryptAndSendMsg;
+          const sendStatus = statusModule?.encryptAndSendStatusMsg;
+
+          // The legacy function accepts positional arguments and needs no shim.
+          if (
+            typeof original !== 'function' ||
+            typeof sendStatus !== 'function' ||
+            typeof protoModule?.createMsgProtobuf !== 'function' ||
+            sendStatus.length !== 1
+          ) {
+            return false;
+          }
+
+          sendModule.encryptAndSendMsg = async function (
+            sendMsgRecord: any,
+            metricsReporter: any
+          ) {
+            if (
+              sendMsgRecord?.data?.to?.toString?.() !== 'status@broadcast'
+            ) {
+              return original.apply(this, arguments as any);
+            }
+
+            await sendStatus({
+              sendMsgRecord,
+              msgProtobuf: protoModule.createMsgProtobuf(sendMsgRecord.data),
+              metricsReporter,
+            });
+
+            return {
+              t: sendMsgRecord.data.t,
+              sync: null,
+              phash: null,
+              addressingMode: null,
+              count: null,
+              error: null,
+            };
+          };
+
+          (window as any).__winzappStatusSenderInstalled = true;
+          return true;
+        } catch (e) {
+          return false;
+        }
+      };
+
+      if (install()) return 'installed';
+      let tries = 0;
+      const timer = setInterval(() => {
+        if (install() || ++tries > 60) clearInterval(timer);
+      }, 500);
+      return 'scheduled (WhatsApp modules not ready yet)';
+    });
+    logger.info(`[${session}] status sender shim: ${result}`);
+  } catch (e: any) {
+    logger.error(
+      `[${session}] Failed to install status sender shim: ${e?.message || e}`
+    );
+  }
+}
+
+/**
  * Give WhatsApp Web a durable storage bucket.
  *
  * In a headless, freshly-created Chrome profile the persistent-storage
@@ -493,12 +579,14 @@ export default class CreateSessionUtil {
         // silently brings the id-less messages back.
         client.page.on('load', () => {
           restoreMsgKeySerialized(client.page, req.logger, session);
+          restoreStatusSender(client.page, req.logger, session);
           // The permission grant survives a navigation (it is stored on the
           // browser context), but the bucket request does not — persist() has
           // to be asked again by the new document, so re-run the whole thing.
           grantPersistentStorage(client.page, req.logger, session);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
+        await restoreStatusSender(client.page, req.logger, session);
         await grantPersistentStorage(client.page, req.logger, session);
       }
       await this.start(req, client);

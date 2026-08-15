@@ -250,8 +250,25 @@ export async function listChats(req: Request, res: Response) {
       options.ignoreGroupMetadata = ignoreGroupMetadata;
 
     const response = await req.client.listChats(options);
+    const chats = Array.isArray(response) ? response : [];
 
-    res.status(200).json(response || []);
+    // WhatsApp Web creates one-to-one ChatStore entries for group participants
+    // when it receives only an encryption-key notification from them. These are
+    // not conversations: they have no activity timestamp, were never opened,
+    // have no unread count, and do not belong to an address-book contact.
+    const visibleChats = chats.filter((chat: any) => {
+      const jid = chat?.id?._serialized || chat?.id || '';
+      if (!jid || jid.endsWith('@g.us')) return true;
+      const hasActivity =
+        Boolean(chat?.t) ||
+        Boolean(chat?.lastMessage) ||
+        Number(chat?.unreadCount || 0) > 0;
+      const isKnownConversation =
+        chat?.hasChatBeenOpened === true || chat?.contact?.isMyContact === true;
+      return hasActivity || isKnownConversation;
+    });
+
+    res.status(200).json(visibleChats);
   } catch (e) {
     req.logger.error(e);
     res

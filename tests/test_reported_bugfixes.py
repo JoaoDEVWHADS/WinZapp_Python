@@ -126,6 +126,23 @@ class TestOfficialWhatsAppAccountName:
         # returns None, same as before this fix for any ordinary contact.
         assert mw._resolve_contact_name({"remoteJid": "5511999999999@s.whatsapp.net"}) is None
 
+    def test_phonebook_name_wins_over_stale_lid_name(self):
+        lid = "83069516128367@lid"
+        phone = "557791074215@s.whatsapp.net"
+        contacts = {
+            lid: {"name": "Joao"},
+            phone: {"name": "Smart JmS"},
+        }
+        mw = _MainWindowStub(
+            _lid_to_phone={lid: phone},
+            _phone_to_lid={phone: lid},
+            _presence_pushname_map={},
+        )
+        mw._get_contact_tolerant = contacts.get
+        mw._is_bad_contact_name = lambda value: not bool(value and value.strip())
+
+        assert mw._resolve_contact_name({"remoteJid": lid}) == "Smart JmS"
+
 
 class TestBinaryBlobNeverShownAsMessageText:
     def test_looks_like_binary_blob_detects_the_reported_payload(self):
