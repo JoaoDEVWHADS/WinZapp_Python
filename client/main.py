@@ -10687,7 +10687,7 @@ class MainWindow(wx.Frame):
             technical_types = {"e2e_notification", "notification"}
             only_technical_records = bool(records) and all(
                 isinstance(record, dict)
-                and record.get("type") in technical_types
+                and (record.get("messageType") or record.get("type")) in technical_types
                 and record.get("subtype") in ("encrypt", None, "")
                 and not record.get("body")
                 for record in records
