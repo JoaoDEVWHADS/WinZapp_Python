@@ -16693,6 +16693,7 @@ class MainWindow(wx.Frame):
         is_lid_target = remote_jid.endswith("@lid")
         logging.info("[send_media] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
         import mimetypes
+        from core.audio_transcode import prepare_audio_for_whatsapp
         try:
             file_size = os.path.getsize(file_path)
         except Exception as exc:
@@ -16700,6 +16701,21 @@ class MainWindow(wx.Frame):
             return False
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         filename = os.path.basename(file_path)
+        upload_path = file_path
+        converted_audio_path = None
+        if media_type == "audio":
+            prepared = prepare_audio_for_whatsapp(self._find_api_ffmpeg(), file_path)
+            if prepared is None:
+                return {
+                    "ok": False,
+                    "error": "Não foi possível converter o áudio OGG para Opus.",
+                    "retry": False,
+                }
+            upload_path, mime = prepared
+            if upload_path != file_path:
+                converted_audio_path = upload_path
+                filename = os.path.basename(upload_path)
+                file_size = os.path.getsize(upload_path)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
         # Authorization only — Content-Type is set automatically by requests
         # when using files= (multipart/form-data with correct boundary).
@@ -16750,7 +16766,7 @@ class MainWindow(wx.Frame):
                 post_data["isGroup"] = "true"
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
-            with open(file_path, "rb") as fh:
+            with open(upload_path, "rb") as fh:
                 return requests.post(
                     url,
                     headers=headers,
@@ -16829,6 +16845,12 @@ class MainWindow(wx.Frame):
             return {"ok": False, "error": err, "retry": retryable}
         except Exception as exc:
             return self._classify_send_exception(exc, "send_media")
+        finally:
+            if converted_audio_path:
+                try:
+                    os.unlink(converted_audio_path)
+                except OSError:
+                    pass
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
