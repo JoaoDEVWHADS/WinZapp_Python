@@ -85,7 +85,8 @@ export function initServer(serverOptions: Partial<ServerOptions>): {
           const parsed = JSON.parse(data);
           if (parsed && typeof parsed === 'object') {
             data = parsed;
-            if (!data.session) data.session = req.client ? req.client.session : '';
+            if (!data.session)
+              data.session = req.client ? req.client.session : '';
             if (data.mapper && req.serverOptions.mapper.enable) {
               data.response = await convert(
                 req.serverOptions.mapper.prefix,

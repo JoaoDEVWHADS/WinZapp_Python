@@ -15,6 +15,10 @@ from sound_lib.main import bass_call
 import sound_lib.main as _bass_main
 
 from core.audio_devices import find_output_device_index, find_default_output_device_index
+from core.alert_tones import (
+    ALERT_TONE_COUNT, alert_tone_choice_keys, discover_alert_tone_choices,
+    resolve_alert_tone_path,
+)
 
 
 # ── Import plugin modules (early, so their symbols are available) ─────────────
@@ -380,17 +384,6 @@ SOUND_EVENTS: list[tuple[str, str]] = [
     ("audio_transition_end", "audio_transition_end.ogg"),
 ]
 
-# ── Alert tone registry (background notification sound choices) ────────────
-# Shared by the Settings > Alert Tones tab (private/group defaults) and the
-# per-conversation notification-sound picker in the conversation data dialog.
-ALERT_TONE_COUNT = 10   # client/sounds/alerts/Alert-01.ogg .. Alert-10.ogg
-
-
-def alert_tone_choice_keys() -> list[str]:
-    """Ordered internal choice keys: 'default', 'alert_1'..'alert_N', 'custom'."""
-    return ["default"] + [f"alert_{i}" for i in range(1, ALERT_TONE_COUNT + 1)] + ["custom"]
-
-
 # ── Soundpacks ───────────────────────────────────────────────────────────────
 # A soundpack is a subfolder of client/sounds/ containing a *.pack.json
 # manifest ({"name": ..., "events": {event_key: relative_path}, "alerts":
@@ -460,7 +453,14 @@ def _pack_relative_file(pack: dict, rel_path) -> str:
     rather than trusted."""
     if not rel_path or not isinstance(rel_path, str) or os.path.isabs(rel_path):
         return ""
-    return os.path.join(pack["dir"], rel_path)
+    pack_dir = os.path.abspath(pack["dir"])
+    candidate = os.path.abspath(os.path.join(pack_dir, rel_path))
+    try:
+        if os.path.commonpath((pack_dir, candidate)) != pack_dir:
+            return ""
+    except ValueError:
+        return ""
+    return candidate
 
 
 def resolve_sound_event_path(active_pack, default_pack, event_key: str, override_path: str = "") -> str:
@@ -483,24 +483,6 @@ def resolve_sound_event_path(active_pack, default_pack, event_key: str, override
             return p
     if default_pack and default_pack is not active_pack:
         p = _pack_relative_file(default_pack, default_pack.get("events", {}).get(event_key, ""))
-        if p and os.path.isfile(p):
-            return p
-    return ""
-
-
-def resolve_alert_tone_path(active_pack, default_pack, choice: str, custom_path: str = "") -> str:
-    """Resolve an alert-tone choice key ('default' / 'alert_N' / 'custom') to
-    an absolute path, going through the active soundpack with the same
-    fallback-to-default-pack chain as resolve_sound_event_path.
-    """
-    if choice == "custom":
-        return custom_path or ""
-    key = "message_background" if choice == "default" else choice
-    for pack in (active_pack, default_pack if default_pack is not active_pack else None):
-        if not pack:
-            continue
-        source = pack.get("events", {}) if key == "message_background" else pack.get("alerts", {})
-        p = _pack_relative_file(pack, source.get(key, ""))
         if p and os.path.isfile(p):
             return p
     return ""

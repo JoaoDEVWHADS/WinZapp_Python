@@ -761,13 +761,13 @@ class WebSocketClient:
             updates = info.get("data", [])
             if not isinstance(updates, list):
                 updates = [updates]
-            
+
             for update in updates:
                 if not isinstance(update, dict):
                     continue
                 jid = update.get("id", "")
                 subject = update.get("subject")
-                
+
                 if jid and subject is not None:
                     remote_jid = self.main_window._normalize_jid(self._clean_jid(jid))
                     wx.CallAfter(self.main_window.on_group_subject_updated, remote_jid, subject)

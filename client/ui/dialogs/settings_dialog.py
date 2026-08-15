@@ -3,7 +3,7 @@ import os
 import wx
 from core.i18n import LANGUAGE_NAMES
 from core.sound_system import (
-    SOUND_EVENTS, ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path,
+    SOUND_EVENTS, discover_alert_tone_choices, resolve_alert_tone_path,
     DEFAULT_PACK_ID, import_soundpack, AlertPreviewController,
 )
 from core.audio_devices import (
@@ -566,10 +566,8 @@ class SettingsDialog(wx.Dialog):
         self._alert_page = wx.Panel(self._notebook)
         alert_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self._alert_choice_keys = alert_tone_choice_keys()
-        alert_choice_labels = [i18n.t("alert_tone_default")] + [
-            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
-        ] + [i18n.t("alert_tone_custom")]
+        self._alert_choice_keys = ["default", "custom"]
+        alert_choice_labels = [i18n.t("alert_tone_default"), i18n.t("alert_tone_custom")]
 
         self._alert_private_label = wx.StaticText(
             self._alert_page, label=i18n.t("alert_tone_private_label")
@@ -844,6 +842,7 @@ class SettingsDialog(wx.Dialog):
 
         # Alert tones
         tones = self.main_window.settings.get("alert_tones", {})
+        self._reload_alert_tone_choices()
         self._set_alert_combo(self._alert_private_combo, tones.get("private", "default"))
         self._alert_private_custom_field.SetValue(tones.get("private_custom_path", ""))
         self._set_alert_combo(self._alert_group_combo, tones.get("group", "default"))
@@ -862,6 +861,28 @@ class SettingsDialog(wx.Dialog):
         except ValueError:
             idx = 0
         combo.SetSelection(idx)
+
+    def _reload_alert_tone_choices(self):
+        """Populate both alert lists from the selected pack or its fallback."""
+        i18n = self.main_window.i18n
+        private_key = self._selected_alert_key(self._alert_private_combo)
+        group_key = self._selected_alert_key(self._alert_group_combo)
+        pack = self.main_window._sound_packs.get(getattr(self, "_current_pack_id", ""))
+        discovered = discover_alert_tone_choices(pack, self.main_window._default_sound_pack)
+        self._alert_choice_keys = ["default"] + [key for key, _label in discovered] + ["custom"]
+        labels = [i18n.t("alert_tone_default")] + [label for _key, label in discovered] + [
+            i18n.t("alert_tone_custom")
+        ]
+        self._alert_private_combo.Set(labels)
+        self._alert_group_combo.Set(labels)
+        self._set_alert_combo(self._alert_private_combo, private_key)
+        self._set_alert_combo(self._alert_group_combo, group_key)
+
+    def _selected_alert_key(self, combo) -> str:
+        idx = combo.GetSelection()
+        if idx != wx.NOT_FOUND and idx < len(self._alert_choice_keys):
+            return self._alert_choice_keys[idx]
+        return "default"
 
     # ── Audio Devices tab ────────────────────────────────────────────────────
 
@@ -974,6 +995,7 @@ class SettingsDialog(wx.Dialog):
         self._current_pack_id = target
         self._sound_pack_combo.SetSelection(self._sound_pack_ids.index(target))
         self._load_sound_events_display(target)
+        self._reload_alert_tone_choices()
 
     def _sound_event_label(self, key: str, enabled: bool) -> str:
         """Item label spelling out the on/off state in text (', Ativado' /
@@ -1023,6 +1045,7 @@ class SettingsDialog(wx.Dialog):
             return
         self._current_pack_id = self._sound_pack_ids[idx]
         self._load_sound_events_display(self._current_pack_id)
+        self._reload_alert_tone_choices()
 
     def _on_import_sound_pack_folder(self, event):
         i18n = self.main_window.i18n
@@ -1771,15 +1794,7 @@ class SettingsDialog(wx.Dialog):
         self._alert_group_label.SetLabel(i18n.t("alert_tone_group_label"))
         self._alert_private_custom_label.SetLabel(i18n.t("alert_tone_custom_path_label"))
         self._alert_group_custom_label.SetLabel(i18n.t("alert_tone_custom_path_label"))
-        alert_choice_labels = [i18n.t("alert_tone_default")] + [
-            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
-        ] + [i18n.t("alert_tone_custom")]
-        priv_sel = self._alert_private_combo.GetSelection()
-        self._alert_private_combo.Set(alert_choice_labels)
-        self._alert_private_combo.SetSelection(priv_sel if priv_sel != wx.NOT_FOUND else 0)
-        grp_sel = self._alert_group_combo.GetSelection()
-        self._alert_group_combo.Set(alert_choice_labels)
-        self._alert_group_combo.SetSelection(grp_sel if grp_sel != wx.NOT_FOUND else 0)
+        self._reload_alert_tone_choices()
 
         # Storage tab
         self._auto_download_media_check.SetLabel(i18n.t("auto_download_media_label"))
