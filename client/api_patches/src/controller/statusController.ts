@@ -122,8 +122,10 @@ export async function sendTextStorie(req: Request, res: Response) {
     const results: any = [];
     const posted = await req.client.sendTextStatus(text, statusOptions);
     req.logger.info(
-      `[sendTextStorie] result for text=${JSON.stringify(text).slice(0, 80)}: ` +
-        JSON.stringify(posted)?.slice(0, 300)
+      `[sendTextStorie] result for text=${JSON.stringify(text).slice(
+        0,
+        80
+      )}: ` + JSON.stringify(posted)?.slice(0, 300)
     );
     // The status.layer.js async patch makes WPP.status.sendTextStatus resolve
     // with the REAL post result instead of undefined. A resolved value whose
@@ -345,14 +347,18 @@ export async function getStatuses(req: Request, res: Response) {
           rawModels = store.getUnexpired();
         }
 
-        console.log(`[getStatuses] StatusV3Store rawModels count=${rawModels.length}`);
+        console.log(
+          `[getStatuses] StatusV3Store rawModels count=${rawModels.length}`
+        );
 
         const me = WPP.conn?.getMyUserWid?.()?.toString?.() ?? '';
         for (const model of rawModels) {
           try {
             const author = model?.id?._serialized || model?.id || '';
             if (!author || author === me) continue; // own status handled above
-            let msgs = model?.getAllMsgs ? model.getAllMsgs() : (model?.msgs?._models || model?.msgs || []);
+            const msgs = model?.getAllMsgs
+              ? model.getAllMsgs()
+              : model?.msgs?._models || model?.msgs || [];
             if (!msgs || !msgs.length) continue;
             out.contacts.push({
               jid: author,
@@ -362,7 +368,9 @@ export async function getStatuses(req: Request, res: Response) {
             console.error('[getStatuses] error processing model:', e);
           }
         }
-        console.log(`[getStatuses] Returning ${out.contacts.length} contact status entries`);
+        console.log(
+          `[getStatuses] Returning ${out.contacts.length} contact status entries`
+        );
       } catch (e) {
         // Store not reachable — contacts stay empty
       }
