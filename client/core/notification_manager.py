@@ -247,7 +247,7 @@ def format_notification_body(msg: dict, main_window, i18n) -> str:
         contact = msg_obj.get("contactMessage") or {}
         name = contact.get("displayName") or ""
         vcard = contact.get("vcard") or ""
-        
+
         if not name or "BEGIN:VCARD" in name:
             vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
             parsed_name = ""

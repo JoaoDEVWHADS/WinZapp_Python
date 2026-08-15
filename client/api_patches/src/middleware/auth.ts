@@ -38,9 +38,7 @@ const verifyToken = (req: Request, res: Response, next: NextFunction): any => {
       sessionDecrypt = session.split(':')[0];
       const part1 = session.split(':')[1];
       if (!part1) throw new Error('No token signature in session parameter');
-      tokenDecrypt = part1
-        .replace(/_/g, '/')
-        .replace(/-/g, '+');
+      tokenDecrypt = part1.replace(/_/g, '/').replace(/-/g, '+');
     } catch (error) {
       try {
         if (token && token !== '' && token.split(' ').length > 0) {

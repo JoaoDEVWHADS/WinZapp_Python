@@ -22,6 +22,13 @@ import requests
 import wx
 
 from app_paths import resource_path
+from node_download_config import (
+    NODE_FILENAME,
+    NODE_SHASUMS_URL,
+    NODE_TOP_DIR,
+    NODE_URL,
+    NODE_VERSION,
+)
 
 log = logging.getLogger(__name__)
 
@@ -43,15 +50,15 @@ log = logging.getLogger(__name__)
 # wppconnect-server's own exact `engines.node` value on purpose — this only
 # needs to clear the real floor (sharp's >=20.9.0), not chase whatever exact
 # string wppconnect-server happens to declare on its next release.
-_NODE_VERSION = "22.22.2"
-_NODE_FILENAME = f"node-v{_NODE_VERSION}-win-x64.zip"
-_NODE_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/{_NODE_FILENAME}"
+_NODE_VERSION = NODE_VERSION
+_NODE_FILENAME = NODE_FILENAME
+_NODE_URL = NODE_URL
 # nodejs.org publishes a checksum manifest for every release — verify the
 # download against it before ever extracting/running anything from it,
 # rather than trusting an unauthenticated HTTP download outright.
-_NODE_SHASUMS_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/SHASUMS256.txt"
+_NODE_SHASUMS_URL = NODE_SHASUMS_URL
 
-_TOP_DIR = f"node-v{_NODE_VERSION}-win-x64"
+_TOP_DIR = NODE_TOP_DIR
 
 
 class NodeDownloadDialog(wx.Dialog):

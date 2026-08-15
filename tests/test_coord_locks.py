@@ -11,9 +11,11 @@ import time
 import pytest
 
 from coord_locks import (
+    app_settings_lock,
     LockTimeout,
     NamedLock,
     node_lock,
+    node_port_lock,
     registry_lock,
     sessions_lock,
     updater_lock,
@@ -132,6 +134,19 @@ def test_factory_names_differ(tmp_path):
     assert sessions_lock(gd).name != registry_lock(gd).name
     assert sessions_lock(gd).name != node_lock(gd).name
     assert sessions_lock(gd).name != updater_lock(gd).name
+    assert app_settings_lock(gd).name not in {
+        registry_lock(gd).name,
+        node_lock(gd).name,
+        updater_lock(gd).name,
+        sessions_lock(gd).name,
+        node_port_lock(gd).name,
+    }
+    assert node_port_lock(gd).name not in {
+        registry_lock(gd).name,
+        node_lock(gd).name,
+        updater_lock(gd).name,
+        sessions_lock(gd).name,
+    }
 
 
 def test_same_global_dir_same_name(tmp_path):

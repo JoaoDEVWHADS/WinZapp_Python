@@ -3,7 +3,7 @@ Cross-process coordination locks for WinZapp multi-account support
 (client/coord_locks.py)
 ====================================================================
 
-Three SEPARATE named locks guard the three independent global critical
+Separate named locks guard independent global critical
 sections of multi-account mode, so a long-held lock in one area never blocks
 the others (see plan Zadanie 1.1 / section E):
 
@@ -289,6 +289,26 @@ def registry_lock(global_dir: str, timeout: float = 10.0) -> NamedLock:
     return NamedLock(
         f"WinZappRegistry_{h}",
         os.path.join(global_dir, "registry.lock"),
+        timeout=timeout,
+    )
+
+
+def app_settings_lock(global_dir: str, timeout: float = 10.0) -> NamedLock:
+    """Guards read-modify-write operations on the shared global/app.json."""
+    h = _hash_dir(global_dir)
+    return NamedLock(
+        f"WinZAppSettings_{h}",
+        os.path.join(global_dir, "app_settings.lock"),
+        timeout=timeout,
+    )
+
+
+def node_port_lock(global_dir: str, timeout: float = 10.0) -> NamedLock:
+    """Serializes per-account Node port discovery and persistence."""
+    h = _hash_dir(global_dir)
+    return NamedLock(
+        f"WinZappNodePort_{h}",
+        os.path.join(global_dir, "node_ports.lock"),
         timeout=timeout,
     )
 

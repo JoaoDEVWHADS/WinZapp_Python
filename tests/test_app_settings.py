@@ -55,11 +55,10 @@ def test_first_run_flags_are_global(tmp_path):
     assert s2.get("api_type_first_run_asked") is True
 
 
-def test_connection_is_global(tmp_path):
-    gd = _gd(tmp_path)
-    s = aset.AppSettings(gd)
-    s.set("wpp_port", 6301)
-    assert aset.AppSettings(gd).get("wpp_port") == 6301
+def test_wpp_port_is_per_account(tmp_path):
+    s = aset.AppSettings(_gd(tmp_path))
+    with pytest.raises(KeyError):
+        s.set("wpp_port", 6301)
 
 
 def test_corrupt_file_falls_back_to_defaults(tmp_path):
@@ -81,9 +80,10 @@ def test_split_global_from_legacy():
     assert glob["language"] == "pl"
     assert glob["updates_enabled"] is False
     assert glob["show_tray_icon"] is False
-    assert glob["wpp_port"] == 6300
+    assert "wpp_port" not in glob
     # per-account keys retained, global ones removed from per-account general
     assert per["general"]["notifications_enabled"] is True
+    assert per["connection"] == {"wpp_port": 6300}
     assert "language" not in per["general"]
     assert "updates_enabled" not in per["general"]
     assert per["status"]["messages_set_completed"] is True

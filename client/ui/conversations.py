@@ -5531,7 +5531,7 @@ class ConversationsPanel(wx.Panel):
             contact = msg_obj.get("contactMessage") or {}
             name    = contact.get("displayName") or ""
             vcard   = contact.get("vcard") or ""
-            
+
             if not name or "BEGIN:VCARD" in name:
                 vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
                 parsed_name = ""
@@ -5555,23 +5555,23 @@ class ConversationsPanel(wx.Panel):
         if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
             poll = msg_obj.get("pollCreationMessage") or msg_obj.get("pollCreationMessageV2") or msg_obj.get("pollCreationMessageV3") or {}
             name = poll.get("name") or ""
-            return f"📊 Enquete: {name}" if name else "📊 Enquete"
+            return i18n.t("notif_poll").format(name=name) if name else i18n.t("notif_poll_no_name")
 
         # ── Location ─────────────────────────────────────────────────────────
         if msg_type in ("locationMessage", "liveLocationMessage"):
-            return "📍 Localização"
+            return i18n.t("notif_location")
 
         # ── Template ─────────────────────────────────────────────────────────
         if msg_type == "templateMessage":
-            return "📝 Modelo"
+            return i18n.t("notif_template")
 
         # ── Revoked / Protocol Message ───────────────────────────────────────
         if msg_type == "protocolMessage":
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                return "Mensagem apagada"
-            return "⚙️ Mensagem do sistema"
+                return i18n.t("notif_deleted")
+            return i18n.t("notif_system_message")
 
         # ── Interactive / Button reply ───────────────────────────────────────
         if msg_type == "buttonsResponseMessage":
@@ -7240,7 +7240,7 @@ class ConversationsPanel(wx.Panel):
                 msg_inner = json.loads(msg_inner)
             except Exception:
                 msg_inner = {}
-        
+
         original_caption = ""
         for key in ["imageMessage", "videoMessage", "documentMessage"]:
             if key in msg_inner and isinstance(msg_inner[key], dict):
@@ -7426,7 +7426,7 @@ class ConversationsPanel(wx.Panel):
             return
 
         targets = list(zip(target_jids, target_names))
-        
+
         keep_caption = chk_keep_caption.GetValue() if chk_keep_caption else False
 
         def _do_forward():
@@ -7452,7 +7452,7 @@ class ConversationsPanel(wx.Panel):
         failed = []
         msg_key = msg.get("key", {}) or {}
         source_jid = msg_key.get("remoteJid") or ""
-        
+
         for jid, name in targets:
             if keep_caption:
                 success = mw.resend_media_message_with_caption(msg, jid)

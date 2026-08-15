@@ -48,11 +48,15 @@ function forceKillBrowserProcess(page: any, logger?: any): boolean {
     } else {
       process.kill(pid, 'SIGKILL');
     }
-    logger?.info?.(`[forceKillBrowserProcess] Killed browser process ${pid} and its tree`);
+    logger?.info?.(
+      `[forceKillBrowserProcess] Killed browser process ${pid} and its tree`
+    );
     return true;
   } catch (e: any) {
     logger?.warn?.(
-      `[forceKillBrowserProcess] Failed to kill browser process ${pid}: ${e?.message || e}`
+      `[forceKillBrowserProcess] Failed to kill browser process ${pid}: ${
+        e?.message || e
+      }`
     );
     return false;
   }
@@ -95,7 +99,9 @@ function forceKillByUserDataDir(userDataDir: string, logger?: any) {
       ['-NoProfile', '-NonInteractive', '-Command', script],
       (err) => {
         if (err) {
-          logger?.warn?.(`[forceKillByUserDataDir] PowerShell kill failed: ${err.message}`);
+          logger?.warn?.(
+            `[forceKillByUserDataDir] PowerShell kill failed: ${err.message}`
+          );
         }
       }
     );
@@ -179,6 +185,92 @@ async function restoreMsgKeySerialized(
 }
 
 /**
+ * Adapt WA-JS's status sender to WhatsApp Web's current object argument.
+ *
+ * WA-JS still calls encryptAndSendStatusMsg(msg, proto, reporters), while the
+ * current WhatsApp module expects { sendMsgRecord, msgProtobuf,
+ * metricsReporter }. The old call throws inside the page, WA-JS swallows it,
+ * and the API only sees messageSendResult=ERROR_UNKNOWN.
+ */
+async function restoreStatusSender(page: any, logger: any, session: string) {
+  if (!page) return;
+  try {
+    const result = await page.evaluate(() => {
+      const install = () => {
+        const wpp = (window as any).WPP;
+        if (!wpp?.loader?.moduleRequire) return false;
+        if ((window as any).__winzappStatusSenderInstalled) return true;
+
+        try {
+          const sendModule = wpp.loader.moduleRequire('WAWebSendMsgJob');
+          const statusModule = wpp.loader.moduleRequire(
+            'WAWebEncryptAndSendStatusMsg'
+          );
+          const protoModule = wpp.loader.moduleRequire(
+            'WAWebE2EProtoGenerator'
+          );
+          const original = sendModule?.encryptAndSendMsg;
+          const sendStatus = statusModule?.encryptAndSendStatusMsg;
+
+          // The legacy function accepts positional arguments and needs no shim.
+          if (
+            typeof original !== 'function' ||
+            typeof sendStatus !== 'function' ||
+            typeof protoModule?.createMsgProtobuf !== 'function' ||
+            sendStatus.length !== 1
+          ) {
+            return false;
+          }
+
+          sendModule.encryptAndSendMsg = async function (
+            sendMsgRecord: any,
+            metricsReporter: any
+          ) {
+            if (
+              sendMsgRecord?.data?.to?.toString?.() !== 'status@broadcast'
+            ) {
+              return original.apply(this, arguments as any);
+            }
+
+            await sendStatus({
+              sendMsgRecord,
+              msgProtobuf: protoModule.createMsgProtobuf(sendMsgRecord.data),
+              metricsReporter,
+            });
+
+            return {
+              t: sendMsgRecord.data.t,
+              sync: null,
+              phash: null,
+              addressingMode: null,
+              count: null,
+              error: null,
+            };
+          };
+
+          (window as any).__winzappStatusSenderInstalled = true;
+          return true;
+        } catch (e) {
+          return false;
+        }
+      };
+
+      if (install()) return 'installed';
+      let tries = 0;
+      const timer = setInterval(() => {
+        if (install() || ++tries > 60) clearInterval(timer);
+      }, 500);
+      return 'scheduled (WhatsApp modules not ready yet)';
+    });
+    logger.info(`[${session}] status sender shim: ${result}`);
+  } catch (e: any) {
+    logger.error(
+      `[${session}] Failed to install status sender shim: ${e?.message || e}`
+    );
+  }
+}
+
+/**
  * Give WhatsApp Web a durable storage bucket.
  *
  * In a headless, freshly-created Chrome profile the persistent-storage
@@ -252,9 +344,7 @@ async function grantPersistentStorage(page: any, logger: any, session: string) {
     });
     // Logged at info even on success: this single line is the fastest way to
     // tell a session that can ingest history from one that silently cannot.
-    logger?.info?.(
-      `[${session}] persistent storage: ${JSON.stringify(state)}`
-    );
+    logger?.info?.(`[${session}] persistent storage: ${JSON.stringify(state)}`);
     if (!state?.persistedAfter) {
       logger?.warn?.(
         `[${session}] WhatsApp Web did NOT get a persistent storage bucket — ` +
@@ -349,7 +439,8 @@ export default class CreateSessionUtil {
         try {
           killed = forceKillBrowserProcess(wppClient?.page, req.logger);
         } catch (e) {}
-        if (!killed) forceKillByUserDataDir(`userDataDir/${session}`, req.logger);
+        if (!killed)
+          forceKillByUserDataDir(`userDataDir/${session}`, req.logger);
       };
 
       const wppClient = await create(
@@ -383,7 +474,9 @@ export default class CreateSessionUtil {
                 : undefined,
             catchLinkCode: (code: string) => {
               if ((client as any).shouldClose) {
-                req.logger.info(`[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`);
+                req.logger.info(
+                  `[${session}] shouldClose detected in catchLinkCode. Force-killing browser.`
+                );
                 killBrowserOrFallback();
                 clientsArray[session] = undefined;
                 return;
@@ -397,7 +490,9 @@ export default class CreateSessionUtil {
               urlCode: string
             ) => {
               if ((client as any).shouldClose) {
-                req.logger.info(`[${session}] shouldClose detected in catchQR. Force-killing browser.`);
+                req.logger.info(
+                  `[${session}] shouldClose detected in catchQR. Force-killing browser.`
+                );
                 killBrowserOrFallback();
                 clientsArray[session] = undefined;
                 return;
@@ -410,7 +505,9 @@ export default class CreateSessionUtil {
             statusFind: (statusFind: StatusFind) => {
               try {
                 if ((client as any).shouldClose) {
-                  req.logger.info(`[${session}] shouldClose detected in statusFind. Force-killing browser.`);
+                  req.logger.info(
+                    `[${session}] shouldClose detected in statusFind. Force-killing browser.`
+                  );
                   killBrowserOrFallback();
                   clientsArray[session] = undefined;
                   return;
@@ -420,9 +517,7 @@ export default class CreateSessionUtil {
                   client,
                   statusFind
                 );
-                if (
-                  statusFind === StatusFind.autocloseCalled
-                ) {
+                if (statusFind === StatusFind.autocloseCalled) {
                   client.status = 'CLOSED';
                   client.qrcode = null;
                   client.close();
@@ -442,7 +537,9 @@ export default class CreateSessionUtil {
       // Poll every 2s: if shouldClose was set while create() is blocked, close browser immediately
       const shouldClosePoller = setInterval(() => {
         if ((client as any).shouldClose) {
-          req.logger.info(`[${session}] shouldClose detected by poller. Force-killing browser.`);
+          req.logger.info(
+            `[${session}] shouldClose detected by poller. Force-killing browser.`
+          );
           clearInterval(shouldClosePoller);
           killBrowserOrFallback();
           clientsArray[session] = undefined;
@@ -451,13 +548,18 @@ export default class CreateSessionUtil {
 
       if (clientsArray[session] && (clientsArray[session] as any).shouldClose) {
         clearInterval(shouldClosePoller);
-        req.logger.info(`[${session}] Session was closed during initialization. Terminating browser.`);
+        req.logger.info(
+          `[${session}] Session was closed during initialization. Terminating browser.`
+        );
         try {
           await wppClient.close();
         } catch (e) {}
         clientsArray[session] = undefined;
         if (res && !res.headersSent) {
-          res.status(200).json({ status: false, message: 'Session closed during initialization' });
+          res.status(200).json({
+            status: false,
+            message: 'Session closed during initialization',
+          });
         }
         return;
       }
@@ -477,12 +579,14 @@ export default class CreateSessionUtil {
         // silently brings the id-less messages back.
         client.page.on('load', () => {
           restoreMsgKeySerialized(client.page, req.logger, session);
+          restoreStatusSender(client.page, req.logger, session);
           // The permission grant survives a navigation (it is stored on the
           // browser context), but the bucket request does not — persist() has
           // to be asked again by the new document, so re-run the whole thing.
           grantPersistentStorage(client.page, req.logger, session);
         });
         await restoreMsgKeySerialized(client.page, req.logger, session);
+        await restoreStatusSender(client.page, req.logger, session);
         await grantPersistentStorage(client.page, req.logger, session);
       }
       await this.start(req, client);
@@ -616,7 +720,7 @@ export default class CreateSessionUtil {
     // and skip status=CONNECTED entirely, leaving the session stuck reporting
     // INITIALIZING forever even though it connected seconds later. Bounded retry
     // until wa-js answers, and only accept an explicit `true`.
-    const maxAttempts = 20;      // ~10s total; a warning, never a disconnect proof
+    const maxAttempts = 20; // ~10s total; a warning, never a disconnect proof
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const connected = await client.isConnected();
@@ -644,7 +748,7 @@ export default class CreateSessionUtil {
     // CONNECTED (or a terminal state) whenever WhatsApp Web reports it.
     req.logger.info(
       `[${client.session}] isConnected() did not confirm within retry window — ` +
-      `relying on onStateChange (session may still come up).`
+        `relying on onStateChange (session may still come up).`
     );
   }
 
@@ -709,7 +813,11 @@ export default class CreateSessionUtil {
       client.page
         .evaluate(() => {
           const WPP = (window as any).WPP;
-          if (!WPP || !WPP.on || (window as any).__winzappUnreadListenerInstalled) {
+          if (
+            !WPP ||
+            !WPP.on ||
+            (window as any).__winzappUnreadListenerInstalled
+          ) {
             return;
           }
           (window as any).__winzappUnreadListenerInstalled = true;
@@ -768,7 +876,11 @@ export default class CreateSessionUtil {
             }
           });
         })
-        .catch((e: any) => req.logger.warn(`[onUnreadCountChanged] install failed: ${e?.message || e}`));
+        .catch((e: any) =>
+          req.logger.warn(
+            `[onUnreadCountChanged] install failed: ${e?.message || e}`
+          )
+        );
     };
 
     // A page reload gets a fresh JS context (window.__winzappUnreadListenerInstalled
