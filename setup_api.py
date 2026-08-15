@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # ---------------------------------------------------------------------------
 
@@ -63,15 +64,6 @@ CUSTOM_SRC_FILES = [
     "src/routes/index.ts",
     "decrypt.js",
 ]
-
-_PATCHED_DEPENDENCY_KEYS = [
-    "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary via npm — WinZapp's
-                                  # own Python side shells out to it directly
-                                  # (main.py: _find_api_ffmpeg/_convert_wav_to_ogg)
-                                  # to encode voice messages to OGG/Opus; upstream
-                                  # wppconnect-server does not declare it at all.
-]
-
 
 def _load_env() -> dict:
     """Parse the root .env file and return a key→value dict."""
@@ -343,16 +335,12 @@ def _patch_wppconnect_welcome_layer(client_api_dir: str = None) -> bool:
         return False
 
 
-def _merge_package_json_dependencies():
-    """Apply WinZapp's specific dependency patches onto whatever
-    package.json the clone/checkout actually left on disk, instead of
-    overwriting the whole file. Only the keys in _PATCHED_DEPENDENCY_KEYS are
-    copied in from client/api_patches/package.json — "version", "name",
-    scripts, and every other dependency all come from the real checked-out
-    file, so WinZapp's own version-check (WppUpdateChecker /
-    _get_installed_wpp_version()) keeps reflecting whatever was genuinely
-    cloned/built rather than a value frozen in api_patches/ at some earlier
-    point in time.
+def _apply_central_package_manifest():
+    """Apply the tracked package.json as the sole dependency manifest.
+
+    Preserve only the downloaded WPPConnect version because the updater uses it
+    to identify the installed server. Dependencies, development dependencies,
+    scripts, overrides and engine requirements all come from api_patches.
     """
     pkg_path = os.path.join(CLIENT_API_DIR, "package.json")
     patch_path = os.path.join(API_PATCHES_DIR, "package.json")
@@ -366,17 +354,32 @@ def _merge_package_json_dependencies():
     except Exception as e:
         print(f"[WARNING] Failed to merge package.json dependency patches: {e}")
         return
-    patch_deps = patch.get("dependencies", {})
-    deps = pkg.setdefault("dependencies", {})
-    applied = 0
-    for key in _PATCHED_DEPENDENCY_KEYS:
-        if key in patch_deps:
-            deps[key] = patch_deps[key]
-            applied += 1
-    with open(pkg_path, "w", encoding="utf-8") as f:
-        json.dump(pkg, f, indent=2)
-        f.write("\n")
-    print(f"[INFO] Applied {applied} patched dependencies into package.json (version kept at {pkg.get('version', '?')})")
+    installed_version = pkg.get("version")
+    manifest = dict(patch)
+    if installed_version:
+        manifest["version"] = installed_version
+
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".package.", suffix=".tmp", dir=CLIENT_API_DIR
+    )
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, pkg_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+    print(
+        "[INFO] Applied central api_patches/package.json manifest "
+        f"(installed version kept at {manifest.get('version', '?')})"
+    )
 
 
 def main():
@@ -485,10 +488,8 @@ def main():
             f.write(content)
         print(f"[INFO] Synced custom patch: {rel_path}")
 
-    # Merge WinZapp's dependency patches (e.g. @ffmpeg-installer/ffmpeg) into
-    # whatever package.json the clone/checkout left on disk, instead of
-    # overwriting the whole file.
-    _merge_package_json_dependencies()
+    # package.json is the single source of dependency and script configuration.
+    _apply_central_package_manifest()
 
     # Save current commit SHA to client/api/.commit_sha for version checking
     try:
