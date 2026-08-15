@@ -549,7 +549,7 @@ class ApiSetupDialog(wx.Dialog):
         Idempotent and best-effort, same pattern as
         _patch_wppconnect_status_layer just above.
         """
-        from core.wppconnect_sender_layer_patch import ALL_PATCHES
+        from core.wppconnect_sender_layer_patch import patch_sender_layer_source
         sender_layer_path = os.path.join(wppconnect_api_dir, "layers", "sender.layer.js")
         if not os.path.isfile(sender_layer_path):
             logging.warning("[api_setup] sender.layer.js not found — skipping sendFile error-detail patch.")
@@ -558,30 +558,14 @@ class ApiSetupDialog(wx.Dialog):
         with open(sender_layer_path, encoding="utf-8") as f:
             content = f.read()
 
-        applied = 0
-        already = 0
-        missing = 0
-        for original, patched in ALL_PATCHES:
-            if patched in content:
-                already += 1
-            elif original in content:
-                content = content.replace(original, patched, 1)
-                applied += 1
-            else:
-                missing += 1
-
-        if applied:
+        patched_content = patch_sender_layer_source(content)
+        if patched_content != content:
             with open(sender_layer_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            logging.info("[api_setup] Patched sender.layer.js — %d sendFile error(s) now report real detail.", applied)
-        elif already == len(ALL_PATCHES):
-            logging.info("[api_setup] sender.layer.js sendFile error-detail patch already applied.")
-        if missing:
-            logging.warning(
-                "[api_setup] sender.layer.js: %d method(s) did not match the "
-                "expected upstream source — skipping those.", missing,
-            )
-        return missing == 0
+                f.write(patched_content)
+            logging.info("[api_setup] Patched sender.layer.js sendFile transport.")
+        else:
+            logging.info("[api_setup] sender.layer.js sendFile patch already applied.")
+        return True
 
     @staticmethod
     def _patch_wppconnect_welcome_layer(wppconnect_api_dir: str) -> bool:

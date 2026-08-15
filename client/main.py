@@ -16724,10 +16724,12 @@ class MainWindow(wx.Frame):
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
             if quoted_id:
                 data["quotedMessageId"] = quoted_id
-        # Scale timeout with file size: at least 1 s per 100 KB, min 120 s, max 30 min.
-        MAX_FILE_SIZE = 64 * 1024 * 1024  # 64 MB CDP browser limit
+        # WPPConnect accepts documents up to 1 GB. Its WinZapp patch moves large
+        # payloads into Chromium in bounded chunks instead of one oversized CDP
+        # argument. Non-document media remains capped by the UI at 70 MB.
+        MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024
         if file_size > MAX_FILE_SIZE:
-            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 64 MB browser upload limit."
+            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 1 GB WhatsApp document limit."
             logging.error("[send_media] %s", err_msg)
             return {"ok": False, "error": err_msg, "retry": False}
         timeout = max(120, file_size // (100 * 1024))
