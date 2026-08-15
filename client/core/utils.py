@@ -68,6 +68,35 @@ def normalize_for_search(text: str, mode="off") -> str:
     )
 
 
+_UNICODE_LINE_SEPARATORS = {
+    "\u2028",  # LINE SEPARATOR
+    "\u2029",  # PARAGRAPH SEPARATOR
+    "\u0085",  # NEXT LINE (NEL)
+    "\x0b",    # VERTICAL TAB
+    "\x0c",    # FORM FEED
+    "\r",      # lone CR (CRLF handled below, before this set applies)
+}
+
+
+def normalize_line_separators(text) -> str:
+    """Collapse every Unicode line/paragraph separator into plain ``\\n``.
+
+    Rich clipboard sources — Google Docs, Word, websites, Apple apps — copy
+    U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR (and the rarer NEL,
+    VT, FF) where a plain editor stores ``\\n``. A ``wx.TextCtrl`` keeps them
+    verbatim: the native control does not render them as breaks (a paste
+    looks like a single line, and NVDA reads it as one), yet WhatsApp
+    renders U+2029 as a paragraph break on the receiving side. The result is
+    the classic "it looks fine here but arrives full of weird breaks"
+    report. Normalizing to ``\\n`` makes the field, the screen reader and
+    the recipient all agree on the same line structure.
+    """
+    text = (text or "").replace("\r\n", "\n")
+    for sep in _UNICODE_LINE_SEPARATORS:
+        text = text.replace(sep, "\n")
+    return text
+
+
 def get_downloads_folder() -> str:
     """Return the current user's Downloads folder.
 

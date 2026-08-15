@@ -41,7 +41,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -576,6 +576,7 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT,       self.on_change_message_field)
         self.message_field.Bind(wx.EVT_TEXT_ENTER, self.on_send_message)
         self.message_field.Bind(wx.EVT_KEY_DOWN,   self._on_message_field_key_down)
+        self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_message_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
         self._cancel_edit_btn = wx.Button(
@@ -1391,7 +1392,7 @@ class ConversationsPanel(wx.Panel):
         If in edit mode, instead calls the edit API and updates the existing message."""
         if self.conversation is None:
             return
-        text = self.message_field.GetValue().strip()
+        text = normalize_line_separators(self.message_field.GetValue()).strip()
         if not text:
             return
         remote_jid = self.conversation.get("remoteJid", "")
@@ -3444,6 +3445,40 @@ class ConversationsPanel(wx.Panel):
             self.message_field.SetInsertionPoint(pos + 1)
             self.on_change_message_field(None)
             return  # consume — don't send and don't double-insert
+        event.Skip()
+
+    def _on_message_field_paste(self, event):
+        """Intercept pastes so Unicode line/paragraph separators become \n.
+
+        Rich clipboard sources — Google Docs, Word, websites, Apple apps —
+        put U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR where a plain
+        editor stores \n. A wx.TextCtrl keeps them verbatim: the native
+        control does not render them as breaks (a paste looks like a single
+        long line), yet WhatsApp renders U+2029 as a paragraph break on the
+        receiving side. The result is the "it looks fine here but arrives
+        with weird breaks" report. Normalizing the pasted text here makes the
+        field, the screen reader and the recipient all agree.
+        """
+        if not wx.TheClipboard.Open():
+            event.Skip()
+            return
+        try:
+            if not wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_UNICODETEXT)):
+                event.Skip()
+                return
+            data = wx.TextDataObject()
+            if not wx.TheClipboard.GetData(data):
+                event.Skip()
+                return
+            text = data.GetText()
+        finally:
+            wx.TheClipboard.Close()
+        normalized = normalize_line_separators(text)
+        if normalized != text:
+            # WriteText() replaces the current selection and fires EVT_TEXT,
+            # keeping the mention check / send-button logic in sync.
+            self.message_field.WriteText(normalized)
+            return  # consume — the native paste must not run on top of this
         event.Skip()
 
     def _on_mention_list_key_down(self, event):
