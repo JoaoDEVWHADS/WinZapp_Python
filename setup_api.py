@@ -155,7 +155,7 @@ from core.wppconnect_host_layer_patch import (
     PATCHED_CHECK_QR_CODE as _HOST_LAYER_PATCHED_CHECK_QR_CODE,
 )
 from core.wppconnect_status_layer_patch import ALL_PATCHES as _STATUS_LAYER_PATCHES
-from core.wppconnect_sender_layer_patch import ALL_PATCHES as _SENDER_LAYER_PATCHES
+from core.wppconnect_sender_layer_patch import patch_sender_layer_source
 from core.wppconnect_welcome_layer_patch import ALL_PATCHES as _WELCOME_LAYER_PATCHES
 
 
@@ -281,11 +281,9 @@ def _patch_wppconnect_sender_layer(client_api_dir: str = None) -> bool:
     except Exception as e:
         print(f"[WARNING] Could not read sender.layer.js: {e}")
         return False
-    changed = False
-    for original, patched in _SENDER_LAYER_PATCHES:
-        if original in src:
-            src = src.replace(original, patched)
-            changed = True
+    patched_src = patch_sender_layer_source(src)
+    changed = patched_src != src
+    src = patched_src
     if not changed:
         return True
     try:
