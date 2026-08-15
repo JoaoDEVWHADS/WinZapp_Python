@@ -106,6 +106,7 @@ class ShortcutsDialog(wx.Dialog):
             i18n.t("shortcut_shift_end_label"),
             i18n.t("shortcut_delete_label"),
             i18n.t("shortcut_ctrl_c_label"),
+            i18n.t("shortcut_ctrl_shift_c_label"),
             i18n.t("shortcut_alt_c_label"),
             i18n.t("shortcut_alt_e_label"),
             i18n.t("shortcut_alt_l_label"),
