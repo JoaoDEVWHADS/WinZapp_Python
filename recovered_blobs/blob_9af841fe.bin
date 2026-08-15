@@ -1,0 +1,382 @@
+"""Tests for StatusPanel's voice-status feature (client/status_panel.py):
+recording/posting a voice status, and picking an existing audio file from
+the status media chooser.
+
+Covers three bugs found while adapting this feature:
+
+1. _send_media_status_bg() (image/video status) posted its base64 payload
+   under a "base64" key. statusController.ts's real, unmodified upstream
+   sendImageStorie()/sendVideoStorie() (`const { path } = req.body`) only
+   ever reads a "path" field — a data:...;base64,... URI works there too
+   (sender.layer.js's sendImageStatus()/sendVideoStatus() special-case a
+   "data:" prefix) — but under the WRONG key it was simply never read,
+   so every status image/video post from the media picker silently failed.
+
+2. _send_all_media_statuses_bg() must route a picked AUDIO file (.mp3/
+   .ogg/.wav/.m4a/.aac) to the real voice-status path (_send_status_voice_bg,
+   which posts to /send-status-voice-base64) instead of the image/video
+   endpoint, which has no audio branch at all and would just error.
+
+3. _send_status_voice_bg() converts its input to OGG via
+   main_window._convert_wav_to_ogg() and then deletes the *original* file
+   — safe for a temp WAV this module recorded itself, but for a picked
+   audio FILE that "original" is the user's own file on disk (e.g. an MP3
+   from their music folder). Deleting it unconditionally would silently
+   destroy a file the user never asked to have removed. is_temp_file=True
+   is required explicitly by the recording call site; the media-picker
+   call site must never pass it.
+
+StatusPanel is a wx.Panel and cannot be instantiated without a running
+wx.App, so methods are bound onto a small stub — same approach as the rest
+of this test suite (test_status_panel.py).
+"""
+
+import os
+
+import status_panel as status_panel_module
+from status_panel import StatusPanel
+
+
+class _FakeI18n:
+    def t(self, key):
+        return key
+
+
+class _FakeWidget:
+    def __init__(self):
+        self.shown = False
+
+    def Show(self, show=True):
+        self.shown = bool(show)
+
+    def Hide(self):
+        self.shown = False
+
+<<<<<<< HEAD
+=======
+
+class _FakeVideoPlayer:
+    """Opening a post panel stops any status video that was playing."""
+
+    def __init__(self):
+        self.stop_calls = 0
+
+    def stop(self):
+        self.stop_calls += 1
+
+
+class _FakeLabel(_FakeWidget):
+    def __init__(self):
+        super().__init__()
+        self.label = ""
+
+    def SetLabel(self, text):
+        self.label = text
+
+
+class _FakeButton(_FakeLabel):
+    def __init__(self):
+        super().__init__()
+        self.enabled = True
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+    def Disable(self):
+        self.enabled = False
+
+>>>>>>> upstream/main
+    def SetFocus(self):
+        pass
+
+
+class _FakeMainWindow:
+    def __init__(self, convert_result="converted.ogg"):
+        self.i18n = _FakeI18n()
+        self.app_name = "WinZapp"
+        self.wpp_server = "http://127.0.0.1"
+        self.wpp_port = 6300
+        self.token = "test-token"
+        self.output_calls = []
+        self._convert_result = convert_result
+        self.convert_calls = []
+
+    def output(self, text, interrupt=False):
+        self.output_calls.append(text)
+
+    def _convert_wav_to_ogg(self, path):
+        self.convert_calls.append(path)
+        return self._convert_result
+
+
+class _Stub:
+    _on_choose_voice_status   = StatusPanel._on_choose_voice_status
+    _hide_post_panels         = StatusPanel._hide_post_panels
+<<<<<<< HEAD
+=======
+    _start_voice_recording    = StatusPanel._start_voice_recording
+>>>>>>> upstream/main
+    _send_media_status_bg     = StatusPanel._send_media_status_bg
+    _send_all_media_statuses_bg = StatusPanel._send_all_media_statuses_bg
+    _send_status_voice_bg     = StatusPanel._send_status_voice_bg
+
+    def __init__(self, convert_result="converted.ogg"):
+        self.main_window = _FakeMainWindow(convert_result=convert_result)
+        self._post_panel = _FakeWidget()
+        self._media_post_panel = _FakeWidget()
+        self._voice_post_panel = _FakeWidget()
+<<<<<<< HEAD
+=======
+        # Opening a post panel now also hides the status viewer and stops the
+        # in-app video player alongside the other panels; without these the
+        # method under test dies on an AttributeError before reaching anything
+        # this file actually asserts.
+        self._viewer_panel = _FakeWidget()
+        self._video_player = _FakeVideoPlayer()
+        # The panel is now prepared (buttons/label reset, any previous stream
+        # torn down) BEFORE the PyAudio availability check, so the stub has to
+        # survive that setup to reach the behaviour this class asserts.
+        self._recording_paused = False
+        self._is_recording = False
+        self._voice_status_lbl = _FakeLabel()
+        self._voice_start_btn = _FakeButton()
+        self._voice_pause_btn = _FakeButton()
+        self._voice_send_btn = _FakeButton()
+        self._voice_close_btn = _FakeButton()
+>>>>>>> upstream/main
+        self._recording_pa = None
+        self._recording_stream = None
+        self._recording_frames = []
+        self.status_sent_calls = 0
+        self.voice_calls = []
+        self.media_calls = []
+
+<<<<<<< HEAD
+=======
+    def _stop_recording_stream(self):
+        self._recording_stream = None
+        self._recording_pa = None
+
+    def Layout(self):
+        """StatusPanel is a wx.Panel; the prepare step relayouts it."""
+
+>>>>>>> upstream/main
+    def _on_status_sent(self):
+        self.status_sent_calls += 1
+
+    # Recorded so tests can assert routing without exercising the real
+    # network/ffmpeg call inside each method.
+    def _send_status_voice_bg_recorder(self, path, is_temp_file=False):
+        self.voice_calls.append((path, is_temp_file))
+
+
+def _touch(tmp_path, name):
+    p = tmp_path / name
+    p.write_bytes(b"fake-data")
+    return str(p)
+
+
+class TestSendMediaStatusUsesThePathField:
+    def test_image_status_posts_under_path_not_base64(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img = _touch(tmp_path, "photo.jpg")
+        posted = {}
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            posted["url"] = url
+            posted["json"] = json
+            return _Resp()
+
+        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_media_status_bg(img, "legenda")
+
+        assert posted["url"].endswith("/send-image-storie")
+        assert "path" in posted["json"]
+        assert "base64" not in posted["json"]
+        assert posted["json"]["path"].startswith("data:image/jpeg;base64,")
+        assert posted["json"]["caption"] == "legenda"
+        assert stub.status_sent_calls == 1
+
+    def test_video_status_posts_under_path_not_base64(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        vid = _touch(tmp_path, "clip.mp4")
+        posted = {}
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            posted["url"] = url
+            posted["json"] = json
+            return _Resp()
+
+        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_media_status_bg(vid, "")
+
+        assert posted["url"].endswith("/send-video-storie")
+        assert "path" in posted["json"]
+        assert "base64" not in posted["json"]
+
+    def test_unsupported_extension_reports_the_error(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        doc = _touch(tmp_path, "file.pdf")
+        monkeypatch.setattr(
+            status_panel_module.wx, "MessageBox",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_media_status_bg(doc, "")
+
+        assert stub.status_sent_calls == 0
+
+
+class TestAudioFilesAreRoutedToTheVoiceStatusPath:
+    def test_audio_extension_calls_send_status_voice_bg_not_media(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        audio = _touch(tmp_path, "note.mp3")
+        calls = []
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+
+        stub._send_all_media_statuses_bg([audio], "ignored caption")
+
+        assert calls == [("voice", audio)]
+
+    def test_non_audio_extension_still_goes_through_send_media_status_bg(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img = _touch(tmp_path, "pic.png")
+        calls = []
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+
+        stub._send_all_media_statuses_bg([img], "legenda")
+
+        assert calls == [("media", img)]
+
+    def test_mixed_selection_routes_each_file_independently(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        img   = _touch(tmp_path, "pic.png")
+        audio = _touch(tmp_path, "note.ogg")
+        calls = []
+        monkeypatch.setattr(stub, "_send_status_voice_bg", lambda path: calls.append(("voice", path)))
+        monkeypatch.setattr(stub, "_send_media_status_bg", lambda path, caption: calls.append(("media", path)))
+
+        stub._send_all_media_statuses_bg([img, audio], "")
+
+        assert calls == [("media", img), ("voice", audio)]
+
+
+class TestSendStatusVoiceBgNeverDeletesAUserFileByAccident:
+    def test_temp_file_is_deleted_after_conversion(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        wav = _touch(tmp_path, "recorded.wav")
+        ogg = _touch(tmp_path, "recorded.wav.ogg")
+        stub.main_window._convert_result = ogg
+        monkeypatch.setattr(status_panel_module.requests, "post",
+                             lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})())
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_status_voice_bg(wav, is_temp_file=True)
+
+        assert not os.path.exists(wav), "the temp WAV this module recorded must be cleaned up"
+
+    def test_a_picked_user_file_is_never_deleted(self, tmp_path, monkeypatch):
+        """The exact bug: is_temp_file defaults to False, so a picked audio
+        file from the user's own disk survives the send."""
+        stub = _Stub()
+        picked = _touch(tmp_path, "my_song.mp3")
+        ogg = _touch(tmp_path, "my_song.mp3.ogg")
+        stub.main_window._convert_result = ogg
+        monkeypatch.setattr(status_panel_module.requests, "post",
+                             lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})())
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_status_voice_bg(picked)  # is_temp_file not passed -> False
+
+        assert os.path.exists(picked), "picking a file from disk must never delete it"
+
+    def test_posts_base64_ptt_to_the_status_voice_endpoint(self, tmp_path, monkeypatch):
+        stub = _Stub()
+        wav = _touch(tmp_path, "recorded.wav")
+        ogg = _touch(tmp_path, "recorded.wav.ogg")
+        stub.main_window._convert_result = ogg
+        posted = {}
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            posted["url"] = url
+            posted["json"] = json
+            return _Resp()
+
+        monkeypatch.setattr(status_panel_module.requests, "post", fake_post)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_status_voice_bg(wav, is_temp_file=True)
+
+        assert posted["url"].endswith("/send-status-voice-base64")
+        assert posted["json"]["base64Ptt"].startswith("data:audio/ogg;codecs=opus;base64,")
+        assert stub.status_sent_calls == 1
+
+    def test_conversion_failure_reports_the_error_and_does_not_post(self, tmp_path, monkeypatch):
+        stub = _Stub(convert_result=None)  # ffmpeg missing/failed
+        wav = _touch(tmp_path, "recorded.wav")
+        posted = []
+        monkeypatch.setattr(status_panel_module.requests, "post", lambda *a, **k: posted.append(1))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox", lambda *a, **kw: None)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter", lambda fn, *a, **kw: fn(*a, **kw))
+
+        stub._send_status_voice_bg(wav, is_temp_file=True)
+
+        assert posted == []
+        assert stub.status_sent_calls == 0
+
+
+class TestChooseVoiceStatusDegradesGracefullyWithoutPyaudio:
+    """Same PyAudio-missing regression covered for ConversationsPanel in
+    tests/test_voice_recording_unavailable.py, mirrored here since
+    StatusPanel does its own independent PyAudio open."""
+
+    def test_reports_unavailable_message_when_pyaudio_missing(self, monkeypatch):
+<<<<<<< HEAD
+=======
+        """The check moved with the behaviour: _on_choose_voice_status() now
+        only *prepares* the panel ("NOT recording yet" — the user then presses
+        Record or Ctrl+R), so the PyAudio availability test lives at the point
+        recording actually starts. Asserting it on the open action instead
+        tested a step that no longer decides anything."""
+        monkeypatch.setattr(status_panel_module, "pyaudio", None)
+        stub = _Stub()
+
+        stub._start_voice_recording()
+
+        assert stub.main_window.output_calls == ["voice_recording_unavailable"]
+        assert stub._recording_stream is None
+
+    def test_opening_the_panel_no_longer_reports_anything(self, monkeypatch):
+        """Preparing the panel is silent even with no PyAudio — the user has
+        not asked to record yet."""
+>>>>>>> upstream/main
+        monkeypatch.setattr(status_panel_module, "pyaudio", None)
+        stub = _Stub()
+
+        stub._on_choose_voice_status(None)
+
+<<<<<<< HEAD
+        assert stub.main_window.output_calls == ["voice_recording_unavailable"]
+=======
+        assert stub.main_window.output_calls == []
+>>>>>>> upstream/main
+        assert stub._recording_stream is None
