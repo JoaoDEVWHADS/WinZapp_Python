@@ -6,7 +6,11 @@ import tempfile
 import threading
 import wx
 import requests
-from ui.accessible import AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText, AccessibleSaveAs
+from ui.accessible import (
+    AccessibleStatusPrev, AccessibleStatusNext, AccessibleStatusCopyText, AccessibleSaveAs,
+    AccessibleRecordVoiceMessage, AccessibleDiscardVoiceMessage, AccessiblePauseResumeRecording,
+    AccessibleSendVoiceMessage,
+)
 from core.utils import format_number, get_downloads_folder
 from core.video_player import VideoPlayer
 from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
@@ -658,21 +662,25 @@ class StatusPanel(wx.Panel):
 
         voice_btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
+        self._voice_close_btn = wx.Button(self._voice_post_panel, label=i18n.t("discard_voice_message"))
+        self._voice_close_btn.SetAccessible(AccessibleDiscardVoiceMessage())
         self._voice_close_btn.Bind(wx.EVT_BUTTON, self._on_close_voice_panel)
         self._voice_close_btn.Hide()
         voice_btn_sizer.Add(self._voice_close_btn, 0, wx.RIGHT, 5)
 
-        self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message") + " (Ctrl+R)")
+        self._voice_start_btn = wx.Button(self._voice_post_panel, label=i18n.t("record_voice_message"))
+        self._voice_start_btn.SetAccessible(AccessibleRecordVoiceMessage("Ctrl+R"))
         self._voice_start_btn.Bind(wx.EVT_BUTTON, self._on_record_voice_button)
         voice_btn_sizer.Add(self._voice_start_btn, 0, wx.RIGHT, 5)
 
-        self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording") + " (Ctrl+Shift+P)")
+        self._voice_pause_btn = wx.Button(self._voice_post_panel, label=i18n.t("pause_recording"))
+        self._voice_pause_btn.SetAccessible(AccessiblePauseResumeRecording())
         self._voice_pause_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_voice_recording)
         self._voice_pause_btn.Hide()
         voice_btn_sizer.Add(self._voice_pause_btn, 0, wx.RIGHT, 5)
 
-        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("send_voice_message") + " (Ctrl+R)")
+        self._voice_send_btn = wx.Button(self._voice_post_panel, label=i18n.t("send_voice_message"))
+        self._voice_send_btn.SetAccessible(AccessibleSendVoiceMessage())
         self._voice_send_btn.Bind(wx.EVT_BUTTON, self._on_send_voice_status)
         self._voice_send_btn.Hide()
         voice_btn_sizer.Add(self._voice_send_btn, 0, wx.RIGHT, 5)
@@ -1805,7 +1813,7 @@ class StatusPanel(wx.Panel):
 
         i18n = self.main_window.i18n
         self._voice_status_lbl.SetLabel(i18n.t("voice_recording"))
-        self._voice_start_btn.SetLabel(i18n.t("record_voice_message") + " (Ctrl+R)")
+        self._voice_start_btn.SetLabel(i18n.t("record_voice_message"))
         self._voice_start_btn.Show()
         self._voice_pause_btn.Hide()
         self._voice_send_btn.Hide()
@@ -1903,12 +1911,12 @@ class StatusPanel(wx.Panel):
 
         i18n = self.main_window.i18n
         self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
-        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message") + " (Ctrl+Shift+D)")
+        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
         self._voice_close_btn.Show()
         self._voice_start_btn.Hide()
-        self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
+        self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
         self._voice_pause_btn.Show()
-        self._voice_send_btn.SetLabel(i18n.t("send_voice_message") + " (Ctrl+R)")
+        self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
         self._voice_send_btn.Show()
         self.Layout()
         self._voice_send_btn.SetFocus()
@@ -1924,10 +1932,10 @@ class StatusPanel(wx.Panel):
                 pass
         i18n = self.main_window.i18n
         if self._recording_paused:
-            self._voice_pause_btn.SetLabel(i18n.t("resume_recording") + " (Ctrl+Shift+P)")
+            self._voice_pause_btn.SetLabel(i18n.t("resume_recording"))
             self._voice_status_lbl.SetLabel(i18n.t("recording_paused"))
         else:
-            self._voice_pause_btn.SetLabel(i18n.t("pause_recording") + " (Ctrl+Shift+P)")
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
             self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
 
     def _stop_recording_stream(self):
