@@ -22,6 +22,7 @@ import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
+from core.audio_transcode import transcode_m4a_to_wav
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
@@ -4763,6 +4764,23 @@ class ConversationsPanel(wx.Panel):
             tmp.write(content)
             tmp.close()
             self._audio_temp_file = tmp.name
+            if actual_ext == ".m4a":
+                wav_path = transcode_m4a_to_wav(
+                    self.main_window._find_api_ffmpeg(),
+                    self._audio_temp_file,
+                )
+                if wav_path:
+                    os.unlink(self._audio_temp_file)
+                    self._audio_temp_file = wav_path
+                    logging.info(
+                        "[UI Audio Playback] Converted MP4/M4A audio to WAV: %s",
+                        wav_path,
+                    )
+                else:
+                    logging.warning(
+                        "[UI Audio Playback] MP4/M4A audio could not be converted; "
+                        "BASS playback may be unavailable"
+                    )
         except Exception as e:
             logging.exception(f"[UI Audio Playback] Error decrypting or creating temp audio file: {e}")
             self._stop_audio()
