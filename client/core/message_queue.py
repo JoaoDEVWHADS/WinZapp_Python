@@ -65,10 +65,21 @@ class MessageQueue:
         self.main_window = main_window
         self._pending: dict = {}          # local_id → PendingMessage
         self._lock   = threading.Lock()
-        self._event  = threading.Event()  # pulsed to wake worker early
         self._stop   = threading.Event()
-        self._worker = threading.Thread(target=self._run, daemon=True)
-        self._worker.start()
+        self._quick_event = threading.Event()
+        self._media_event = threading.Event()
+        self._workers = (
+            threading.Thread(
+                target=self._run, args=(False,), daemon=True,
+                name="winzapp-message-quick",
+            ),
+            threading.Thread(
+                target=self._run, args=(True,), daemon=True,
+                name="winzapp-message-media",
+            ),
+        )
+        for worker in self._workers:
+            worker.start()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -76,27 +87,36 @@ class MessageQueue:
         """Add *msg* to the queue and trigger an immediate send attempt."""
         with self._lock:
             self._pending[msg.local_id] = msg
-        self._event.set()
+        self._event_for(msg).set()
 
     def flush(self):
         """
         Wake the worker immediately (call when going back online so queued
         messages are retried without waiting the full 3-second interval).
         """
-        self._event.set()
+        self._quick_event.set()
+        self._media_event.set()
 
     def stop(self):
         """Signal the worker to exit cleanly (call at app shutdown)."""
         self._stop.set()
-        self._event.set()
+        self.flush()
 
     # ── Worker thread ─────────────────────────────────────────────────────────
 
-    def _run(self):
+    @staticmethod
+    def _is_media(msg: PendingMessage) -> bool:
+        return bool(msg.media_path)
+
+    def _event_for(self, msg: PendingMessage) -> threading.Event:
+        return self._media_event if self._is_media(msg) else self._quick_event
+
+    def _run(self, media_only: bool):
+        wake_event = self._media_event if media_only else self._quick_event
         while not self._stop.is_set():
             # Wait up to RETRY_INTERVAL seconds, or until woken early.
-            self._event.wait(timeout=self._RETRY_INTERVAL)
-            self._event.clear()
+            wake_event.wait(timeout=self._RETRY_INTERVAL)
+            wake_event.clear()
 
             if self._stop.is_set():
                 break
@@ -108,7 +128,10 @@ class MessageQueue:
                 continue
 
             with self._lock:
-                items = list(self._pending.values())
+                items = [
+                    msg for msg in self._pending.values()
+                    if self._is_media(msg) == media_only
+                ]
 
             for msg in items:
                 if self._stop.is_set():

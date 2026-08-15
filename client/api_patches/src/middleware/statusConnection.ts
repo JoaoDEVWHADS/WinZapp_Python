@@ -26,7 +26,11 @@ export default async function statusConnection(
   try {
     const numbers: any = [];
     if (req.client && req.client.isConnected) {
-      await req.client.isConnected();
+      const skipsConnectionProbe =
+        req.path.endsWith('/typing') ||
+        req.path.endsWith('/recording') ||
+        req.path.endsWith('/send-seen');
+      if (!skipsConnectionProbe) await req.client.isConnected();
 
       const localArr = contactToArray(
         req.body.phone || [],
