@@ -45,11 +45,11 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
-from app_paths import resource_path, data_path
+from app_paths import resource_path, data_path, accounts_root
 from core.message_queue import MessageQueue, PendingMessage
 import wx
 import wx.adv
@@ -440,6 +440,13 @@ class MediaExpiredError(Exception):
 # that after sync — trimming the oldest ones out of RAM (they're still on
 # disk in SQLite, just not resident).
 _MAX_RESIDENT_MESSAGES_PER_CHAT = 1000
+
+# Identifier for the Ctrl+Shift+0 Win32 hotkey (see
+# MainWindow._set_bookmark_zero_hotkey). ::RegisterHotKey() only accepts ids
+# in 0x0000-0xBFFF for an application, so this cannot be a wx.NewIdRef()
+# (those are negative) — it is a fixed constant instead, and doubles as the
+# wx.EVT_HOTKEY binding id.
+BOOKMARK_ZERO_HOTKEY_ID = 0xB000
 
 # Message types that are WhatsApp/system-generated rather than something a
 # person actually sent, even though they ARE worth showing as the chat-list
@@ -1505,6 +1512,22 @@ class MainWindow(wx.Frame):
             self.Bind(wx.EVT_CHAR_HOOK, self._on_bookmark_hotkey_char)
             self._bookmark_hotkey_hook_bound = True
 
+        # Ctrl+Shift+0 (remove bookmark 0) never reaches any of the paths
+        # above — see _set_bookmark_zero_hotkey() for why, and why it needs a
+        # Win32 hotkey registration to be reclaimed at all.
+        if (not getattr(self, "_bookmark_zero_hotkey_bound", False)
+                and hasattr(wx, "EVT_HOTKEY")):
+            self.Bind(wx.EVT_HOTKEY, self._on_bookmark_zero_hotkey,
+                      id=BOOKMARK_ZERO_HOTKEY_ID)
+            self._bookmark_zero_hotkey_bound = True
+            # EVT_ACTIVATE drives register/unregister from here on, but the
+            # window may already be the active one by the time the menu bar is
+            # built (no further activation event would follow).
+            try:
+                self._set_bookmark_zero_hotkey(bool(self.IsActive()))
+            except Exception:
+                logging.exception("[bookmarks] initial Ctrl+Shift+0 registration failed")
+
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
         help_menu.Append(
@@ -1601,6 +1624,93 @@ class MainWindow(wx.Frame):
         except Exception:
             logging.exception("[bookmarks] hotkey char handler failed")
         event.Skip()
+
+    # ── Ctrl+Shift+0: reclaimed from the Windows IME hotkey ─────────────────
+
+    def _bookmark_hotkey_panel(self):
+        """The ConversationsPanel iff its conversation view currently owns
+        focus — i.e. exactly the condition under which that panel's own
+        AcceleratorTable (Ctrl+Shift+1..9) would fire.
+
+        Needed only by the Ctrl+Shift+0 path below: a Win32 hotkey is
+        window-global and fires wherever focus sits inside this frame, so the
+        scope the accelerator table gives the other nine digits for free has
+        to be re-checked by hand here to keep all ten behaving identically.
+        """
+        panel = getattr(self, "conversations_panel", None)
+        conv = getattr(panel, "conversation_panel", None)
+        if conv is None or not conv.IsShown():
+            return None
+        focus = wx.Window.FindFocus()
+        while focus is not None:
+            if focus is conv:
+                return panel
+            focus = focus.GetParent()
+        return None
+
+    def _set_bookmark_zero_hotkey(self, active: bool):
+        """Register/unregister Ctrl+Shift+0 as a Win32 hotkey, following this
+        window's activation state.
+
+        Windows ships a default IME "direct switch" hotkey bound to exactly
+        Ctrl+Shift+0 (HKCU\\Control Panel\\Input Method\\Hot Keys\\00000104 —
+        the 0x100-0x11F id range is IME_HOTKEY_DSWITCH, "switch straight to
+        input method X": Virtual Key = 0x30 = VK_0, Key Modifiers = 0xC006 =
+        MOD_CONTROL | MOD_SHIFT | MOD_LEFT | MOD_RIGHT). Note the entry
+        survives even with its target input method not installed at all
+        (Target IME = 0xE0010411, the Japanese MS-IME, on a Preload holding
+        only pt-BR) — the switch is then a no-op, but the key is swallowed
+        all the same, which is why the symptom is total silence rather than a
+        visible layout change. No sibling entry exists for VK_1..VK_9, hence
+        digits 1-9 never had the problem. The OS consumes the combo in the
+        IMM/TSF layer before it is ever dispatched to a window, so the
+        WM_KEYDOWN for VK_0 never arrives: neither ConversationsPanel's
+        AcceleratorTable nor a frame-level EVT_CHAR_HOOK can see it, which is
+        why removing bookmark 0 silently did nothing while Ctrl+Shift+1..9
+        worked. ::RegisterHotKey() takes precedence over the IME hotkey and is
+        the only way to get the combo back.
+
+        That registration is system-global, though — while it is held, no
+        other application can receive Ctrl+Shift+0 either. So it is tied to
+        this window's focus (EVT_ACTIVATE): held only while WinZapp is the
+        active window, released the moment it isn't, which also matches the
+        scope the other nine digits already have.
+
+        A failed registration (another process holding the combo) is logged
+        and otherwise ignored — Ctrl+Shift+0 then simply stays unavailable,
+        exactly as it was before.
+        """
+        if not getattr(self, "_bookmark_zero_hotkey_bound", False):
+            return
+        if bool(active) == getattr(self, "_bookmark_zero_hotkey_on", False):
+            return
+        try:
+            if active:
+                ok = bool(self.RegisterHotKey(
+                    BOOKMARK_ZERO_HOTKEY_ID, wx.MOD_CONTROL | wx.MOD_SHIFT, ord("0")
+                ))
+                self._bookmark_zero_hotkey_on = ok
+                if not ok:
+                    logging.warning(
+                        "[bookmarks] Ctrl+Shift+0 hotkey registration refused "
+                        "(another application holds it) — bookmark 0 removal unavailable"
+                    )
+            else:
+                self.UnregisterHotKey(BOOKMARK_ZERO_HOTKEY_ID)
+                self._bookmark_zero_hotkey_on = False
+        except Exception:
+            logging.exception("[bookmarks] Ctrl+Shift+0 hotkey toggle failed")
+            self._bookmark_zero_hotkey_on = False
+
+    def _on_bookmark_zero_hotkey(self, event):
+        """WM_HOTKEY for Ctrl+Shift+0 → remove bookmark 0, mirroring what
+        ConversationsPanel's AcceleratorTable does for Ctrl+Shift+1..9."""
+        try:
+            panel = self._bookmark_hotkey_panel()
+            if panel is not None:
+                panel._on_bookmark_remove(0)
+        except Exception:
+            logging.exception("[bookmarks] Ctrl+Shift+0 hotkey handler failed")
 
     def _on_accounts_menu(self, action: dict):
         """Handle a click in the Accounts menu (plan Zad 4.2-4.5)."""
@@ -2176,6 +2286,24 @@ class MainWindow(wx.Frame):
         offline toggle's own feedback are unaffected).
         """
         return bool(self.settings.get("general", {}).get("announce_sync_events", True))
+
+    def _search_normalization_mode(self) -> str:
+        """Settings > Geral > "Normalização Unicode nas pesquisas": one of
+        "off" (default), "nfd" or "nfkd" — see normalize_for_search().
+
+        Off by default, so searching keeps matching exactly what it always
+        did unless the user asks otherwise. Read live on every search rather
+        than cached: changing it in Settings then takes effect on the next
+        keystroke, with no restart and nothing to invalidate.
+
+        Applies to both searches the user can type into — the conversation
+        list (Ctrl+F) and messages inside a conversation (Ctrl+Shift+F) —
+        because a single setting that only affected one of them would be its
+        own kind of surprise.
+        """
+        return search_normalization_mode(
+            self.settings.get("general", {}).get("search_normalization")
+        )
 
     def _on_power_suspended(self, event):
         logging.info("[power] System is suspending.")
@@ -3231,6 +3359,10 @@ class MainWindow(wx.Frame):
         presence POST. Only the state that's still current after a short
         quiet window gets sent, collapsing that flicker into a single request.
         """
+        # Not debounced and deliberately ahead of every early return below:
+        # holding a system-global hotkey is only acceptable while this window
+        # really is the active one (see _set_bookmark_zero_hotkey).
+        self._set_bookmark_zero_hotkey(bool(event.GetActive()))
         if self.background_mode:
             event.Skip()
             return
@@ -8074,6 +8206,50 @@ class MainWindow(wx.Frame):
             return max_attempts
         return attempt + 1 + confirm_attempts
 
+    # Ceiling for the deadline extensions below. _CHAT_RETRIES (6) x
+    # _CHAT_DELAY (5 s) gives the settle loop about 30 seconds, which is not
+    # enough for an account whose chat list WhatsApp Web is still streaming in
+    # from the phone — the loop ran out, the sync was declared incomplete, and
+    # the health checker started it over. Reported live as "it finished
+    # syncing, then a while later said it was syncing again", with no
+    # connection drop involved. 30 attempts x 5 s caps the wait at ~2.5
+    # minutes, past which something is wrong that waiting will not fix.
+    _CHAT_ABSOLUTE_MAX_ATTEMPTS = 30
+    # Attempts granted per extension: small enough that a list which settles
+    # right after the deadline costs one short extra wait, not a full round.
+    _CHAT_ATTEMPT_EXTENSION = 2
+    # Below this, a still-growing snapshot is too small to be worth keeping:
+    # accepting e.g. 4 chats as a finished sync is the exact failure the
+    # settle rule exists to prevent (see tests/test_chat_list_settled.py).
+    # Above it the snapshot is a real, if possibly incomplete, account — and
+    # the periodic chat poller plus live WebSocket events keep filling it in,
+    # which beats re-running the whole sync every time the health checker
+    # comes round.
+    _CHAT_MIN_ACCEPTABLE_SNAPSHOT = 10
+
+    @classmethod
+    def _settle_deadline_decision(cls, server_count: int, prev_server_count: int,
+                                  max_attempts: int) -> str:
+        """What to do when the settle loop reaches its last attempt without a
+        stable count: ``"extend"``, ``"accept"`` or ``"incomplete"``.
+
+        Still growing and there is budget left -> extend, because a list that
+        is visibly still arriving just needs more time. Otherwise a snapshot
+        big enough to be a real account is accepted (an incomplete sync gets
+        retried from scratch by the health checker, which is what users saw as
+        spontaneous re-syncing); anything smaller stays incomplete, since
+        accepting it would strand the account on a handful of conversations.
+
+        Pulled out of _run_sync()'s retry loop purely so it can be tested —
+        see tests/test_chat_list_settled.py.
+        """
+        is_growing = server_count > prev_server_count and server_count > 0
+        if is_growing and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
+            return "extend"
+        if server_count > cls._CHAT_MIN_ACCEPTABLE_SNAPSHOT:
+            return "accept"
+        return "incomplete"
+
     def _should_abort_sync_for_offline(self) -> bool:
         """True once offline mode (manual or auto-detected) has come on while
         this sync is still incomplete.
@@ -8246,10 +8422,31 @@ class MainWindow(wx.Frame):
                 chat_list_settled = True
                 break
             if attempt == max_attempts - 1:
-                # Still growing when we ran out of attempts: use what we have,
-                # but do NOT call this sync complete — it gets retried below.
+                # Out of attempts without two equal counts. See
+                # _settle_deadline_decision() for what each outcome means and
+                # why the thresholds are what they are.
+                decision = self._settle_deadline_decision(
+                    server_count, prev_server_count, max_attempts
+                )
+                if decision == "extend":
+                    max_attempts += self._CHAT_ATTEMPT_EXTENSION
+                    logging.info(
+                        "[start_sync] Chat list is still growing (%d -> %d), extending to %d attempts...",
+                        prev_server_count, server_count, max_attempts,
+                    )
+                    prev_server_count = server_count
+                    time.sleep(_CHAT_DELAY)
+                    continue
+                if decision == "accept":
+                    logging.warning(
+                        "[start_sync] Chat list never settled (last count: %d) but the extension "
+                        "budget is spent — accepting this snapshot rather than declaring the sync "
+                        "incomplete and having the health checker start it over.", server_count,
+                    )
+                    chat_list_settled = True
+                    break
                 logging.warning(
-                    "[start_sync] Chat list never settled (last count: %d) — "
+                    "[start_sync] Chat list never settled (last count: %d) and too small to accept — "
                     "treating this sync as incomplete.", server_count,
                 )
                 break
@@ -10147,6 +10344,9 @@ class MainWindow(wx.Frame):
                     if response.status_code not in (200, 201):
                         logging.error(f"[get_remote_contacts] API error {response.status_code}: {response.text[:200]}")
                         response_data = []
+                        if response.status_code >= 500:
+                            # Server is overloaded (e.g. syncing a huge contact list). Don't blindly retry 5 times and block startup.
+                            break
                     else:
                         try:
                             body = response.json()
@@ -12250,13 +12450,21 @@ class MainWindow(wx.Frame):
             logging.warning(f"[sync_chat_messages] Aborting sync for invalid JID: {remote_jid}")
             return
             
-        # Formata o JID corretamente para o WPPConnect
-        # Se houver mapeamento phone -> LID, usamos o LID.
+        # Formata o JID corretamente para o WPPConnect.
+        #
+        # Prefer the @lid when the cache knows one. Measured against a live
+        # session, get-messages on 12 private chats that exist under both
+        # forms: @lid answered 200 with messages 12/12, the phone form
+        # answered 401 12/12. Starting from the phone form does not lose
+        # anything — the alternate-JID fallback below recovers — but it spends
+        # one guaranteed-failing request per chat, which on an account with
+        # hundreds of private chats is hundreds of wasted round-trips in the
+        # very sync this is meant to make lighter.
         lid = getattr(self, "_phone_to_lid", {}).get(remote_jid, "")
         if lid:
             phone = lid
         elif remote_jid.endswith("@s.whatsapp.net"):
-            phone = remote_jid.split("@")[0] + "@c.us"
+            phone = remote_jid.replace("@s.whatsapp.net", "@c.us")
         else:
             phone = remote_jid
 
@@ -14244,8 +14452,52 @@ class MainWindow(wx.Frame):
         if conv_jid in self._presence_cache:
             panel._refresh_presence_note(conv_jid)
 
-    def on_chat_unread_update(self, jid: str, unread_count: int):
-        """Handle unread-count change from chats.update (e.g. read on another device)."""
+    @staticmethod
+    def _remote_read_confirmed(unread_count: int, previous_unread: int | None) -> bool:
+        """True when a chats-update's zero is a real read somewhere else.
+
+        WhatsApp Web reports unreadCount=0 for two completely different
+        things, and for a long time WinZapp could not tell them apart:
+
+        1. The user read the chat on their phone or another linked device —
+           the count genuinely fell from N to 0.
+        2. The chat was merely loaded into WhatsApp Web's own Store, which
+           announces 0 before the real value is populated. Nothing was read;
+           the event carries no information whatsoever.
+
+        Treating (2) as (1) is what erased locally counted arrivals and left
+        every notification announcing "1 mensagem não lida". Treating (1) as
+        (2) leaves a badge lit for messages the user already read elsewhere.
+        The difference is whether the count actually *fell*, which the page
+        knows and now forwards as previousUnreadCount.
+
+        Unknown (None) is deliberately read as "not confirmed": that is the
+        conservative side — the badge survives until the next full sync
+        reconciles it, rather than unread messages being silently dropped.
+
+        All three shapes were observed on a live session, on group chats —
+        which is where this was reported, and which the code used to claim
+        could not happen at all:
+
+            unreadCount=1/2/3, previous=0/1/2   messages arriving
+            unreadCount=0,     previous=0       the Store load, means nothing
+            unreadCount=0,     previous=2       a chat opened on the phone
+        """
+        if unread_count != 0:
+            return False
+        return isinstance(previous_unread, int) and previous_unread > 0
+
+    def on_chat_unread_update(self, jid: str, unread_count: int, previous_unread: int | None = None):
+        """Handle unread-count change from chats.update (e.g. read on another device).
+
+        *previous_unread* is what WhatsApp Web's own chat model held before
+        this change, when the page could tell us (None = unknown). A zero
+        that fell from a positive previous count is a genuine read somewhere
+        else — the phone, another linked device — and must clear the badge.
+        A zero whose previous count was also zero is the chat simply being
+        loaded into the Store with nothing behind it, which is the event that
+        used to wipe locally counted arrivals; see _remote_read_confirmed().
+        """
         normalized = self._normalize_jid(jid)
         chat = self.chats.get(normalized)
         if chat is None:
@@ -14296,13 +14548,40 @@ class MainWindow(wx.Frame):
             and cp.conversation.get("remoteJid") == normalized
         )
         read_at_t = getattr(self, "_locally_read_at", {}).get(normalized)
+        # A zero that fell from a positive count is somebody actually reading
+        # the chat elsewhere; a zero with no such drop behind it carries no
+        # information at all (see _remote_read_confirmed).
+        _remote_read = self._remote_read_confirmed(unread_count, previous_unread)
         if _open_now:
             # Chat is genuinely open. Keep a nonzero count only for messages
             # that arrived while the window was hidden/minimized (tracked in
             # _new_since_read); otherwise the open conversation is read.
+            #
+            # "Open" outlives the window: closing with Alt+F4 only hides to
+            # tray (see _on_close), so a conversation left open stays open
+            # with the window gone — which is precisely when this branch has
+            # to survive the spurious WA-JS zeros described in the branch
+            # below. A plain min() against those collapsed the count to 0
+            # after every message, so the next arrival counted up from zero
+            # again and its toast forever announced "1 mensagem não lida"
+            # while the conversation really held several. The `elif` guard
+            # below is unreachable here (this branch already matched), so the
+            # same protection has to be spelled out on this side too.
             local_new = getattr(self, "_new_since_read", {}).get(normalized, 0)
-            unread_count = min(unread_count, local_new) if local_new else 0
-        elif read_at_t is None and unread_count < old_count:
+            if not local_new:
+                unread_count = 0
+            elif unread_count == 0 and not _remote_read:
+                # Server says zero and nothing says it was a real read: trust
+                # ourselves, exactly as the read-ack branch below does for the
+                # same event.
+                unread_count = local_new
+            elif unread_count == 0:
+                # A confirmed read elsewhere — the messages we counted really
+                # have been read, so the badge goes with them.
+                self._new_since_read.pop(normalized, None)
+            else:
+                unread_count = min(unread_count, local_new)
+        elif read_at_t is None and unread_count < old_count and not _remote_read:
             # WA-JS fires chat.unread_count_changed (forwarded to us as
             # chats-update by createSessionUtil.ts) when a 1:1 chat is loaded
             # into the browser Store — often with unreadCount=0 BEFORE the real
@@ -14312,9 +14591,21 @@ class MainWindow(wx.Frame):
             # this session and not currently open must never have its locally
             # counted unread reduced by such a server event; the local counter
             # (incremented by on_new_message or set by get_remote_chats) is the
-            # authoritative source. Groups never hit this: the WA-JS event is
-            # 1:1 only, which is exactly why this bug only showed on private
-            # chats.
+            # authoritative source.
+            #
+            # This used to claim groups never hit this path because the WA-JS
+            # event was 1:1 only. That is false, and measured to be false:
+            # listening on the live Socket.IO stream shows @g.us chats
+            # emitting chats-update both with a climbing count and with a bare
+            # unreadCount=0, exactly like private chats. The claim mattered —
+            # it is why a report of this bug happening in groups looked
+            # inconsistent with the code.
+            #
+            # This guard used to swallow real reads too, because a load-time
+            # zero and a phone read looked identical from here: reading a chat
+            # on the phone left its badge lit in WinZapp until some later sync
+            # happened to correct it. With previousUnreadCount telling the two
+            # apart, only the uninformative kind is rejected.
             return
         elif read_at_t is not None:
             incoming_t = int(chat.get("t", 0) or 0)
@@ -17394,7 +17685,10 @@ class MainWindow(wx.Frame):
         always consistent.  Without this sync the user would open the wrong
         conversation when a search was active.
         """
-        search       = self.conversations_panel.search_field.GetValue().strip().lower()
+        _fold        = self._search_normalization_mode()
+        search       = normalize_for_search(
+            self.conversations_panel.search_field.GetValue().strip(), _fold
+        )
         conv_filter  = getattr(self.conversations_panel, '_conv_filter', 'all')
 
         # Used below to tell "the same filtered view just lost an item" (where
@@ -17470,7 +17764,7 @@ class MainWindow(wx.Frame):
                 continue
             if conv_filter == 'individual' and chat_jid.endswith("@g.us"):
                 continue
-            if search and search not in name.lower():
+            if search and search not in normalize_for_search(name, _fold):
                 continue
             displayed_chats.append(chat)
             displayed_names.append(name)

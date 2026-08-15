@@ -77,7 +77,7 @@ WhatsApp JIDs come in several forms and normalizing them wrong is the single mos
 ### Paths, config, i18n
 - `client/app_paths.py` abstracts dev-mode vs. frozen (PyInstaller onedir/onefile, and legacy Nuitka onefile) path resolution — always go through `resource_path()` (read-only bundled assets: sounds/, languages/, lib/) and `data_path()`/`log_path()` (writable runtime data next to the exe) rather than hardcoding paths.
 - `client/config.py` loads an optional `.env` next to the exe (or repo root in dev) for overrides like `WINZAPP_GITHUB_REPO` (used by the auto-updater).
-- `client/languages/{pt-BR,pt-PT,en-US,es-ES}.json` + `client/core/i18n.py` (`I18n.t(key)`) — pt-BR is the default/fallback locale. **When adding any user-facing string, add the key to all four files**, not just one.
+- `client/languages/{pt-BR,pt-PT,en-US,es-ES,pl}.json` + `client/core/i18n.py` (`I18n.t(key)`) — pt-BR is the locale the app *defaults* to, but it is **not** a per-key fallback: `I18n.t()` is `translations.get(key, key)`, so a key missing from the active language file renders as the raw key name (`about_license`) in the UI, not as its pt-BR text. **When adding any user-facing string, add the key to all five files**, not just one. The set of locales is data, not code: `languages/language_map.json` (`{ code: display name }`, order = order of the Settings combobox) is the source of truth, and adding a locale means dropping in `<code>.json` plus an entry there — no rebuild. All five locales are equal here: Polish is user-selectable exactly like the other four, and a key missing from it is as much a bug as one missing from en-US (`tests/test_language_files_in_sync.py` enforces this).
 - Runtime data (`data_path()`): `messages.db` (SQLite), `secret.key` (Fernet key), `settings.json` (seeded from `client/data/settings_default.json`), `voice_messages/`, `media/`.
 - `core/utils.get_downloads_folder()` resolves the user's real Windows Downloads folder via `SHGetKnownFolderPath`/`FOLDERID_Downloads` (falling back to `~/Downloads` off-Windows or on API failure) — used as the default `defaultDir` for every "Save As" dialog (message attachments, status media). Never assume `~/Downloads` directly; it's wrong whenever the user has redirected Downloads elsewhere.
 - `core/locale_format.py` reads the user's actual Windows "Regional format" (`GetLocaleInfoEx`) and translates it to `strftime` patterns for date/time display, instead of a format hardcoded per UI language — falls back to the language file's own `time_fmt`/`date_fmt`/`datetime_fmt` off-Windows or on API failure.
@@ -97,15 +97,16 @@ This is the app's core differentiator, not an afterthought: UI is built from pla
 
 ---
 
-## Apêndice — módulos exclusivos deste fork (João / multi-account)
+## Multi-conta (módulos ainda sem seção própria acima)
 
-Estes módulos são **extras deste repositório** que NÃO existem no upstream do Gabriel.
-Eles NÃO constam na documentação acima (que espelha o código do Gabriel). São preservados
-e evolvem aqui:
+O WinZapp roda **uma conta por processo** e coordena várias em paralelo: cada conta tem
+seu próprio processo Node, sua própria porta, sua própria sessão WPPConnect e sua própria
+janela. Os módulos abaixo sustentam isso e ainda não têm seção própria na documentação
+acima — a lista está aqui para que dê para saber que eles existem antes de reimplementar
+algo que já está pronto:
 
 - `client/accounts.py`, `client/account_ui.py`, `client/account_launcher.py`,
-  `client/account_bootstrap.py`, `client/account_migration.py` — gerenciador de contas
-  multi-account.
+  `client/account_bootstrap.py`, `client/account_migration.py` — gerenciador de contas.
 - `client/ipc.py` — IPC nível de conta (foreground/quit entre processos).
 - `client/node_coord.py`, `client/node_ports.py` — porta Node dedicada por conta.
 - `client/session_store.py` — registro/isolamento de sessões WPPConnect por conta.
@@ -113,5 +114,5 @@ e evolvem aqui:
 - `client/coord_locks.py` — locks de coordenação entre contas.
 - `client/app_settings.py`, `client/window_title.py`, `client/update_coord.py` —
   configuração compartilhada / título por conta / coordenação de updates.
-- `client/api_patches/src/middleware/auth.ts` — validação extra de token.
-- `client/languages/pl.json` — idioma polonês.
+- `client/api_patches/src/middleware/auth.ts` — validação extra de token (restaurado
+  como qualquer outro patch, via `setup_api.py`/`ApiSetupDialog`).

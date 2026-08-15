@@ -824,7 +824,21 @@ class WebSocketClient:
                     continue
                 unread = chat_update.get("unreadCount")
                 if unread is not None:
-                    wx.CallAfter(self.main_window.on_chat_unread_update, jid, int(unread))
+                    # What the chat held before this change, when the page was
+                    # able to tell us (see createSessionUtil.ts's
+                    # onUnreadCountChanged). It is what separates "the user
+                    # read this on their phone" (fell from N>0 to 0) from a
+                    # chat merely being loaded into WhatsApp Web's Store,
+                    # which reports 0 with nothing behind it. None = unknown.
+                    previous = chat_update.get("previousUnreadCount")
+                    try:
+                        previous = int(previous) if previous is not None else None
+                    except (TypeError, ValueError):
+                        previous = None
+                    wx.CallAfter(
+                        self.main_window.on_chat_unread_update,
+                        jid, int(unread), previous,
+                    )
                 
                 archive = chat_update.get("archive") if chat_update.get("archive") is not None else chat_update.get("archived")
                 if archive is not None:

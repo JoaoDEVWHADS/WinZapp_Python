@@ -110,10 +110,17 @@ export async function sendTextStorie(req: Request, res: Response) {
     return;
   }
 
-  // Ensure default options required by WhatsApp Web protocol for text status
+  // Ensure default options required by WhatsApp Web protocol for text status.
+  // waitForAck must stay true: per wa-js's own SendMessageReturn typing,
+  // sendMsgResult resolves as null unless the send was actually waited for —
+  // without this the messageSendResult check just below never sees anything
+  // to check (sendResult is always undefined) and a protocol-level rejection
+  // silently reports as success, exactly the bug this file's other comments
+  // describe fixing.
   const statusOptions = {
     backgroundColor: '#0275d8',
     font: 1,
+    waitForAck: true,
     ...options,
   };
 

@@ -21,10 +21,16 @@ about.
 
 import threading
 
+from main import MainWindow
 from ui.conversations import ConversationsPanel
 
 
 class _FakeMainWindow:
+    # The real lookup, not chats.get(): it falls back to the mapped
+    # @lid/phone variant, which is the whole reason the panel calls it.
+    # This stub already carries chats/_lid_to_phone/_phone_to_lid.
+    get_chat = MainWindow.get_chat
+
     def __init__(self):
         self.contacts = {}
         self.chats = {}

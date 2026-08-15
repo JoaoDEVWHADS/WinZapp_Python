@@ -57,6 +57,12 @@ def _msg(mid, from_me=False):
 class _Stub:
     on_incoming_message = ConversationsPanel.on_incoming_message
     _is_separator = ConversationsPanel._is_separator
+    # Bound from the real class rather than faked: on_incoming_message() calls
+    # these, and a hand-written stand-in would be free to drift from what the
+    # panel actually does. _FakeMessagesList already provides the DeleteItem
+    # the first one needs.
+    _clear_empty_placeholder = ConversationsPanel._clear_empty_placeholder
+    _recompute_unread_sep_idx = ConversationsPanel._recompute_unread_sep_idx
 
     def __init__(self):
         self.main_window = _FakeMainWindow()
