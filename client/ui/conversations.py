@@ -5490,23 +5490,23 @@ class ConversationsPanel(wx.Panel):
         if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
             poll = msg_obj.get("pollCreationMessage") or msg_obj.get("pollCreationMessageV2") or msg_obj.get("pollCreationMessageV3") or {}
             name = poll.get("name") or ""
-            return f"📊 Enquete: {name}" if name else "📊 Enquete"
+            return i18n.t("notif_poll").format(name=name) if name else i18n.t("notif_poll_no_name")
 
         # ── Location ─────────────────────────────────────────────────────────
         if msg_type in ("locationMessage", "liveLocationMessage"):
-            return "📍 Localização"
+            return i18n.t("notif_location")
 
         # ── Template ─────────────────────────────────────────────────────────
         if msg_type == "templateMessage":
-            return "📝 Modelo"
+            return i18n.t("notif_template")
 
         # ── Revoked / Protocol Message ───────────────────────────────────────
         if msg_type == "protocolMessage":
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                return "Mensagem apagada"
-            return "⚙️ Mensagem do sistema"
+                return i18n.t("notif_deleted")
+            return i18n.t("notif_system_message")
 
         # ── Interactive / Button reply ───────────────────────────────────────
         if msg_type == "buttonsResponseMessage":

@@ -17192,25 +17192,25 @@ class MainWindow(wx.Frame):
             arr = msg_obj.get("contactsArrayMessage") or {}
             contacts = arr.get("contacts") or []
             content = i18n.t("contacts_count").format(count=len(contacts))
-        elif msg_type == "locationMessage":
+        elif msg_type in ("locationMessage", "liveLocationMessage"):
             content = i18n.t("notif_location")
-        elif msg_type == "pollCreationMessage":
-            poll = msg_obj.get("pollCreationMessage") or {}
+        elif msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
+            poll = msg_obj.get("pollCreationMessage") or msg_obj.get("pollCreationMessageV2") or msg_obj.get("pollCreationMessageV3") or {}
             name = poll.get("name") or ""
-            content = f"📊 Enquete: {name}" if name else "📊 Enquete"
+            content = i18n.t("notif_poll").format(name=name) if name else i18n.t("notif_poll_no_name")
         elif msg_type == "buttonsMessage":
-            content = "🔘 Botão"
+            content = i18n.t("notif_button")
         elif msg_type == "listMessage":
-            content = "📋 Lista"
+            content = i18n.t("notif_list")
         elif msg_type == "templateMessage":
-            content = "📝 Modelo"
+            content = i18n.t("notif_template")
         elif msg_type == "protocolMessage":
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                content = "Mensagem apagada"
+                content = i18n.t("notif_deleted")
             else:
-                content = "⚙️ Mensagem do sistema"
+                content = i18n.t("notif_system_message")
         else:
             # Logged so a future report of a raw, untranslated messageType
             # showing up in the chat-list preview (e.g. "audioMessage" wraps
