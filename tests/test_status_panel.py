@@ -42,6 +42,7 @@ class _FakeI18n:
         "document": "Documento",
         "sticker": "Figurinha",
         "contact_message": "Contato: {name}",
+        "unknown_contact": "Contato sem nome",
         "notif_unsupported": "Mensagem não suportada",
         "status_recent_updates": "Recentes",
         "status_viewed_updates": "Vistos",
@@ -833,6 +834,25 @@ class TestStatusContentLabelHandlesEveryMessageType:
         msg_obj = {"contactMessage": {"displayName": "Ana"}}
         label = _status_content_label("contactMessage", msg_obj, self.i18n)
         assert label == "Contato: Ana"
+
+    def test_contact_status_falls_back_to_vcard_fn_when_display_name_missing(self):
+        """Issue #22: a contact status with no displayName used to show
+        "Contato: " (empty name) instead of parsing the vCard's FN: line."""
+        vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Bob Builder\nEND:VCARD"
+        msg_obj = {"contactMessage": {"displayName": "", "vcard": vcard}}
+        label = _status_content_label("contactMessage", msg_obj, self.i18n)
+        assert label == "Contato: Bob Builder"
+
+    def test_contact_status_falls_back_when_display_name_is_itself_a_vcard_blob(self):
+        vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Carol\nEND:VCARD"
+        msg_obj = {"contactMessage": {"displayName": vcard, "vcard": ""}}
+        label = _status_content_label("contactMessage", msg_obj, self.i18n)
+        assert label == "Contato: Carol"
+
+    def test_contact_status_unknown_when_no_name_available_anywhere(self):
+        msg_obj = {"contactMessage": {"displayName": "", "vcard": ""}}
+        label = _status_content_label("contactMessage", msg_obj, self.i18n)
+        assert label == "Contato: Contato sem nome"
 
     def test_unknown_type_falls_back_to_translated_generic_label(self):
         # Never the raw type string itself.

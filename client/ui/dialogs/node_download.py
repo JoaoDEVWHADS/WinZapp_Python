@@ -25,7 +25,25 @@ from app_paths import resource_path
 
 log = logging.getLogger(__name__)
 
-_NODE_VERSION = "18.20.4"
+# Node 18.20.4 (this constant's value until 2026-08-13) is EOL and, more
+# concretely, too old for real dependencies wppconnect-server pulls in:
+# `sharp` (image/sticker conversion, required eagerly by
+# @wppconnect-team/wppconnect's select-sticker helper) dropped Node 18
+# support going from sharp 0.34.5 (wppconnect-server 2.10.1) to 0.35.x
+# (wppconnect-server 2.10.4), now declaring `engines.node: ">=20.9.0"`.
+# `npm install` itself still exits 0 on Node 18 (npm's engine check is a
+# warning, not a hard failure — confirmed by testing both), so nothing
+# visibly fails during setup; sharp instead throws
+# "Could not load the sharp module using the win32-x64 runtime" the moment
+# something actually tries to use it (sending/receiving a sticker). This is
+# exactly what broke for users whose only Node was the one this dialog
+# downloads (client/node/node.exe already bundled by the installer is newer
+# and unaffected) after updating WPPConnect Server 2.10.1 -> 2.10.4 through
+# the in-app updater. Picking a current LTS here rather than pinning to
+# wppconnect-server's own exact `engines.node` value on purpose — this only
+# needs to clear the real floor (sharp's >=20.9.0), not chase whatever exact
+# string wppconnect-server happens to declare on its next release.
+_NODE_VERSION = "22.22.2"
 _NODE_FILENAME = f"node-v{_NODE_VERSION}-win-x64.zip"
 _NODE_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/{_NODE_FILENAME}"
 # nodejs.org publishes a checksum manifest for every release — verify the

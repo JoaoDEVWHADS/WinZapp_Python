@@ -218,6 +218,18 @@ class VideoPlayer:
         except Exception:
             pass
 
+    def seconds_to_bytes(self, seconds: float) -> int:
+        """Convert a seconds offset to the BASS byte units get/set_position()
+        use, for callers (relative seek shortcuts) that only know a delta in
+        seconds. 0 if nothing is open."""
+        ctrl = self._tempo_ctrl if self._tempo_ctrl is not None else self._audio_stream
+        if ctrl is None:
+            return 0
+        try:
+            return ctrl.seconds_to_bytes(seconds)
+        except Exception:
+            return 0
+
     def set_speed(self, speed: float):
         """Change playback speed live, same steps as ConversationsPanel's
         own audio speed button. Requires the Tempo FX wrapper _start_audio()

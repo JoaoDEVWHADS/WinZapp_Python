@@ -24,6 +24,7 @@ Pure/wx-free — imports connection_state only, so it runs everywhere (no wx /
 socketio / accessible_output2 needed, unlike tests that import main).
 """
 
+import os
 import threading
 import time
 import types
@@ -237,10 +238,21 @@ def test_empty_status_is_not_progress():
 # name must resolve to a direct child of the userDataDir root, or we refuse.
 
 
+def _expected_dir(root: str, name: str) -> str:
+    """What safe_session_dir_to_delete() returns for an accepted name.
+
+    Built the same way the function builds it (abspath of the join) instead of
+    hardcoding f"{root}/{name}": on Windows abspath adds the drive and uses
+    backslashes, so the literal form only ever matched on POSIX and these
+    assertions failed on the very platform WinZapp ships to.
+    """
+    return os.path.abspath(os.path.join(root, name))
+
+
 def test_safe_session_dir_accepts_plain_session_name():
     root = "/data/api/userDataDir"
     name = "a" * 32
-    assert cs.safe_session_dir_to_delete(root, name) == f"{root}/{name}"
+    assert cs.safe_session_dir_to_delete(root, name) == _expected_dir(root, name)
 
 
 def test_safe_session_dir_rejects_traversal_and_absolute():
@@ -257,7 +269,7 @@ def test_safe_session_dir_accepts_only_allowlisted_names():
     # Real WPPConnect session names: hex tokens, dashes, underscores.
     for good in ("a" * 32, "63d3fd5cf2aecaffb807a9ecb17af07d",
                  "sess_123-abc", "A1b2C3"):
-        assert cs.safe_session_dir_to_delete(root, good) == f"{root}/{good}"
+        assert cs.safe_session_dir_to_delete(root, good) == _expected_dir(root, good)
 
 
 def test_safe_session_dir_rejects_empty_root():

@@ -494,6 +494,16 @@ class DatabaseManager:
             await conn.execute("DELETE FROM chats WHERE jid=?", (jid,))
             await conn.commit()
 
+    async def delete_contact(self, jid: str) -> None:
+        """Remove a contact record — used to undo a locally-added contact
+        (NewContactDialog). A periodic WPPConnect contact sync repopulates
+        this row from scratch if *jid* also happens to be a real WhatsApp
+        contact independently of the local add."""
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            await conn.execute("DELETE FROM contacts WHERE jid=?", (jid,))
+            await conn.commit()
+
     async def merge_or_rename_chat(self, old_jid: str, new_jid: str) -> None:
         """Merge or rename a chat and its messages in the database.
 
@@ -802,6 +812,25 @@ class DatabaseManager:
             )
             await conn.commit()
 
+    async def delete_chat_messages_except(self, remote_jid: str, keep_message_ids) -> None:
+        """Remove all messages for a chat except *keep_message_ids* — used
+        by "clear chat" so starred messages survive it, same as WhatsApp's
+        own behavior (starring a message is meant to make it durable)."""
+        keep = [m for m in (keep_message_ids or []) if m]
+        async with self._write_lock:
+            conn = await self._ensure_conn()
+            if not keep:
+                await conn.execute(
+                    "DELETE FROM messages WHERE remote_jid=?", (remote_jid,)
+                )
+            else:
+                placeholders = ",".join("?" * len(keep))
+                await conn.execute(
+                    f"DELETE FROM messages WHERE remote_jid=? AND message_id NOT IN ({placeholders})",
+                    (remote_jid, *keep),
+                )
+            await conn.commit()
+
     # ── Contacts ────────────────────────────────────────────────────────────
 
     async def get_contacts(self) -> dict[str, dict]:
@@ -987,7 +1016,8 @@ class DatabaseManager:
 
     # ── Bulk Import / Export (for migration) ─────────────────────────────────
 
-    async def import_from_dict(self, data: dict, clear_first: bool = False) -> int:
+    async def import_from_dict(self, data: dict, clear_first: bool = False,
+                                clear_metadata: bool = True) -> int:
         """Populate the database from a messages.dat-shaped dict.
 
         Parameters
@@ -998,6 +1028,18 @@ class DatabaseManager:
             ``status_updates``).
         clear_first : bool
             If ``True``, delete all existing records before importing.
+        clear_metadata : bool
+            If ``True`` (default) and ``clear_first`` is also ``True``, also
+            wipes ``system_metadata`` — the key/value table backing
+            cleared_chats/deleted_chats/archived_chats/pinned_chats/
+            muted_chats/blocked_contacts and more. Pass ``False`` for a
+            resync-in-place (MainWindow.clear_local_data(), F5): the point
+            there is only to refetch chats/messages from WhatsApp, not to
+            discard the user's own local actions on top of them — an
+            account switch/logout (the only other clear_first=True caller)
+            still wants the full wipe, since leaving another account's
+            blocked-contacts list or archived state behind would leak
+            between accounts.
 
         Returns
         -------
@@ -1018,11 +1060,11 @@ class DatabaseManager:
                 await conn.execute("BEGIN")
 
                 if clear_first:
-                    for tbl in (
-                        "chats", "messages", "contacts",
-                        "lid_mappings", "unresolvable_lids", "status_updates",
-                        "system_metadata",
-                    ):
+                    tables = ["chats", "messages", "contacts",
+                              "lid_mappings", "unresolvable_lids", "status_updates"]
+                    if clear_metadata:
+                        tables.append("system_metadata")
+                    for tbl in tables:
                         await conn.execute(f"DELETE FROM {tbl}")
 
                 # ── Chats + messages ─────────────────────────────────────

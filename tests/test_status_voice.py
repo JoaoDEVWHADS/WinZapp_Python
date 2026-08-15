@@ -52,6 +52,37 @@ class _FakeWidget:
     def Hide(self):
         self.shown = False
 
+
+class _FakeVideoPlayer:
+    """Opening a post panel stops any status video that was playing."""
+
+    def __init__(self):
+        self.stop_calls = 0
+
+    def stop(self):
+        self.stop_calls += 1
+
+
+class _FakeLabel(_FakeWidget):
+    def __init__(self):
+        super().__init__()
+        self.label = ""
+
+    def SetLabel(self, text):
+        self.label = text
+
+
+class _FakeButton(_FakeLabel):
+    def __init__(self):
+        super().__init__()
+        self.enabled = True
+
+    def Enable(self, enable=True):
+        self.enabled = bool(enable)
+
+    def Disable(self):
+        self.enabled = False
+
     def SetFocus(self):
         pass
 
@@ -78,6 +109,7 @@ class _FakeMainWindow:
 class _Stub:
     _on_choose_voice_status   = StatusPanel._on_choose_voice_status
     _hide_post_panels         = StatusPanel._hide_post_panels
+    _start_voice_recording    = StatusPanel._start_voice_recording
     _send_media_status_bg     = StatusPanel._send_media_status_bg
     _send_all_media_statuses_bg = StatusPanel._send_all_media_statuses_bg
     _send_status_voice_bg     = StatusPanel._send_status_voice_bg
@@ -87,12 +119,35 @@ class _Stub:
         self._post_panel = _FakeWidget()
         self._media_post_panel = _FakeWidget()
         self._voice_post_panel = _FakeWidget()
+        # Opening a post panel now also hides the status viewer and stops the
+        # in-app video player alongside the other panels; without these the
+        # method under test dies on an AttributeError before reaching anything
+        # this file actually asserts.
+        self._viewer_panel = _FakeWidget()
+        self._video_player = _FakeVideoPlayer()
+        # The panel is now prepared (buttons/label reset, any previous stream
+        # torn down) BEFORE the PyAudio availability check, so the stub has to
+        # survive that setup to reach the behaviour this class asserts.
+        self._recording_paused = False
+        self._is_recording = False
+        self._voice_status_lbl = _FakeLabel()
+        self._voice_start_btn = _FakeButton()
+        self._voice_pause_btn = _FakeButton()
+        self._voice_send_btn = _FakeButton()
+        self._voice_close_btn = _FakeButton()
         self._recording_pa = None
         self._recording_stream = None
         self._recording_frames = []
         self.status_sent_calls = 0
         self.voice_calls = []
         self.media_calls = []
+
+    def _stop_recording_stream(self):
+        self._recording_stream = None
+        self._recording_pa = None
+
+    def Layout(self):
+        """StatusPanel is a wx.Panel; the prepare step relayouts it."""
 
     def _on_status_sent(self):
         self.status_sent_calls += 1
@@ -283,10 +338,26 @@ class TestChooseVoiceStatusDegradesGracefullyWithoutPyaudio:
     StatusPanel does its own independent PyAudio open."""
 
     def test_reports_unavailable_message_when_pyaudio_missing(self, monkeypatch):
+        """The check moved with the behaviour: _on_choose_voice_status() now
+        only *prepares* the panel ("NOT recording yet" — the user then presses
+        Record or Ctrl+R), so the PyAudio availability test lives at the point
+        recording actually starts. Asserting it on the open action instead
+        tested a step that no longer decides anything."""
+        monkeypatch.setattr(status_panel_module, "pyaudio", None)
+        stub = _Stub()
+
+        stub._start_voice_recording()
+
+        assert stub.main_window.output_calls == ["voice_recording_unavailable"]
+        assert stub._recording_stream is None
+
+    def test_opening_the_panel_no_longer_reports_anything(self, monkeypatch):
+        """Preparing the panel is silent even with no PyAudio — the user has
+        not asked to record yet."""
         monkeypatch.setattr(status_panel_module, "pyaudio", None)
         stub = _Stub()
 
         stub._on_choose_voice_status(None)
 
-        assert stub.main_window.output_calls == ["voice_recording_unavailable"]
+        assert stub.main_window.output_calls == []
         assert stub._recording_stream is None

@@ -207,6 +207,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._notifications_check, 0, wx.ALL, 8)
 
+        self._announce_sync_check = wx.CheckBox(
+            self._general_page, label=i18n.t("announce_sync_events_label")
+        )
+        gen_sizer.Add(self._announce_sync_check, 0, wx.ALL, 8)
+
         self._autostart_check = wx.CheckBox(
             self._general_page, label=i18n.t("autostart_label")
         )
@@ -394,6 +399,16 @@ class SettingsDialog(wx.Dialog):
             self._speech_page, label=i18n.t("speech_announce_recording_label")
         )
         speech_sizer.Add(self._announce_recording_check, 0, wx.ALL, 8)
+
+        self._speak_active_conv_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_speak_active_conv_label")
+        )
+        speech_sizer.Add(self._speak_active_conv_check, 0, wx.ALL, 8)
+
+        self._speak_other_conv_check = wx.CheckBox(
+            self._speech_page, label=i18n.t("speech_speak_other_conv_label")
+        )
+        speech_sizer.Add(self._speak_other_conv_check, 0, wx.ALL, 8)
 
         self._speech_page.SetSizer(speech_sizer)
         self._notebook.AddPage(self._speech_page, i18n.t("tab_speech_content"))
@@ -677,6 +692,9 @@ class SettingsDialog(wx.Dialog):
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
 
+        announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
+        self._announce_sync_check.SetValue(announce_sync)
+
         from autostart import is_autostart_enabled
         self._autostart_check.SetValue(is_autostart_enabled())
 
@@ -765,6 +783,8 @@ class SettingsDialog(wx.Dialog):
         speech = self.main_window.settings.get("speech_content", {})
         self._announce_typing_check.SetValue(speech.get("announce_typing", True))
         self._announce_recording_check.SetValue(speech.get("announce_recording", True))
+        self._speak_active_conv_check.SetValue(speech.get("speak_active_conv_messages", True))
+        self._speak_other_conv_check.SetValue(speech.get("speak_other_conv_messages", True))
 
         conn = self.main_window.settings.get("connection", {})
         custom_api = conn.get("wpp_custom_api", False)
@@ -1435,6 +1455,12 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("speech_content", {})[
             "announce_recording"
         ] = self._announce_recording_check.GetValue()
+        self.main_window.settings.setdefault("speech_content", {})[
+            "speak_active_conv_messages"
+        ] = self._speak_active_conv_check.GetValue()
+        self.main_window.settings.setdefault("speech_content", {})[
+            "speak_other_conv_messages"
+        ] = self._speak_other_conv_check.GetValue()
 
         # Connection settings
         custom_api = self._custom_api_check.GetValue()
@@ -1482,6 +1508,11 @@ class SettingsDialog(wx.Dialog):
         # Notifications
         self.main_window.settings.setdefault("general", {})["notifications_enabled"] = (
             self._notifications_check.GetValue()
+        )
+
+        # Sync/media/auto-offline announcements
+        self.main_window.settings.setdefault("general", {})["announce_sync_events"] = (
+            self._announce_sync_check.GetValue()
         )
 
         # Autostart
@@ -1636,6 +1667,7 @@ class SettingsDialog(wx.Dialog):
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
+        self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
@@ -1656,6 +1688,8 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
+        self._speak_active_conv_check.SetLabel(i18n.t("speech_speak_active_conv_label"))
+        self._speak_other_conv_check.SetLabel(i18n.t("speech_speak_other_conv_label"))
         self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetAccessibleName(i18n.t("global_hotkey_label"))
         self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))

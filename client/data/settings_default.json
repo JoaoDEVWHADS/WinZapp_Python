@@ -15,7 +15,8 @@
         "autostart": false,
         "show_tray_icon": true,
         "terms_alert_displayed": false,
-        "quick_tip_shown": false
+        "quick_tip_shown": false,
+        "announce_sync_events": true
     },
     "status": {
         "messages_set_completed": false
@@ -41,7 +42,9 @@
     },
     "speech_content": {
         "announce_typing": true,
-        "announce_recording": true
+        "announce_recording": true,
+        "speak_active_conv_messages": true,
+        "speak_other_conv_messages": true
     },
     "active_sound_pack": "default",
     "alert_tones": {

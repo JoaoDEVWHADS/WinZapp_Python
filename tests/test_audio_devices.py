@@ -9,6 +9,9 @@ exercised against a stub BASS `Output` object standing in for
 sound_lib.output.Output, since a real one needs an actual audio device.
 """
 
+import builtins
+import sys
+import types
 import ctypes
 
 import core.audio_devices as audio_devices_module
@@ -311,8 +314,37 @@ class TestPyAudioUnavailable:
     rather than failing outright. These paths must degrade gracefully
     instead of raising AttributeError on `pyaudio.PyAudio`."""
 
-    def test_enumerate_input_devices_returns_empty_list(self, monkeypatch):
+    def test_enumerate_input_devices_falls_back_to_sounddevice(self, monkeypatch):
+        """No longer "returns []": with no PyAudio the function now queries
+        sounddevice instead, because reporting zero input devices on Python
+        3.14 (where PyAudio has no wheel) would leave the user unable to pick
+        a microphone at all. It must return what sounddevice reports."""
         monkeypatch.setattr(audio_devices_module, "pyaudio", None)
+
+        fake_sd = types.SimpleNamespace(query_devices=lambda: [
+            {"name": "Mic A", "max_input_channels": 2},
+            {"name": "Speakers", "max_input_channels": 0},   # output-only
+            {"name": "Mic B", "max_input_channels": 1},
+        ])
+        monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+
+        assert enumerate_input_devices() == [(0, "Mic A"), (2, "Mic B")]
+
+    def test_enumerate_input_devices_returns_empty_when_nothing_is_available(self, monkeypatch):
+        """Both backends missing is the only case that still yields [] — and it
+        must not raise. This is what the old assertion was really protecting."""
+        monkeypatch.setattr(audio_devices_module, "pyaudio", None)
+
+        real_import = builtins.__import__
+
+        def _no_sounddevice(name, *a, **kw):
+            if name == "sounddevice":
+                raise ImportError("no sounddevice either")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+        monkeypatch.setattr(builtins, "__import__", _no_sounddevice)
+
         assert enumerate_input_devices() == []
 
     def test_test_input_device_returns_false(self, monkeypatch):

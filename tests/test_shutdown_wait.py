@@ -51,7 +51,20 @@ class TestRealExitDoesNotBlockTheMainThread:
         assert f"target={nested_name}" in src
         # Everything from the nested def onward is the background body.
         background_body = src[src.index(f"def {nested_name}("):]
-        assert "self._stop_wpp_server()" in background_body
+        # The blocking call may sit one level down: real_exit() was later split
+        # into _perform_shutdown() (reversible teardown, reused by the IPC quit
+        # handler) + _terminate_process(). What matters is not that the literal
+        # _stop_wpp_server() line lives in real_exit(), but that whatever the
+        # background thread runs is what eventually blocks — so follow the call
+        # one level instead of pinning the old shape.
+        blocking = "self._stop_wpp_server()"
+        if blocking not in background_body:
+            assert "self._perform_shutdown()" in background_body, (
+                "the background thread must run the teardown that blocks"
+            )
+            assert blocking in inspect.getsource(MainWindow._perform_shutdown), (
+                "_perform_shutdown() is supposed to be where the graceful stop happens"
+            )
 
     def test_the_window_is_hidden_before_the_background_wait_starts(self):
         """Instant visual feedback on click, independent of how long the

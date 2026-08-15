@@ -154,13 +154,14 @@ class ConversationsPanel(wx.Panel):
         self._editing_message_index: int = -1          # list row index
 
         # ── Message bookmarks (Ctrl+0..9 / Ctrl+Shift+0..9) ──────────────────
-        # digit (0-9) -> stable message identifier (key.id, or _local_id for a
-        # still-pending outgoing message). Identifiers, not raw list indices,
-        # so a bookmark keeps pointing at the same message even if the list
-        # is rebuilt/reordered (new message arriving, pagination, etc.)
-        # between setting it and jumping to it. Scoped to the open
-        # conversation only — cleared on close_conversation() and on every
-        # conversation switch in navigate_to_conversation(), never persisted.
+        # digit (0-9) -> (conversation JID, stable message identifier). The
+        # message id, not a raw list index, so a bookmark keeps pointing at
+        # the same message even if the list is rebuilt/reordered (new
+        # message arriving, pagination, etc.) between setting it and jumping
+        # to it. Bookmarks now span conversations rather than being scoped to
+        # the one they were set in: jumping to one set in a different
+        # conversation than the one currently open navigates there first.
+        # Not persisted across restarts.
         self._msg_bookmarks: dict = {}
 
         # ── Media download progress ─────────────────────────────────────────
@@ -685,7 +686,11 @@ class ConversationsPanel(wx.Panel):
             (AS,              ord("S"),         self.ID_MUTE_LIST),
             (CS,              ord("B"),         self.ID_BLOCK_LIST),
             (CS,              ord("L"),         self.ID_CLEAR_LIST),
-            (wx.ACCEL_CTRL,   ord("Q"),         self.ID_ARCHIVE_LIST),
+            # Ctrl+Shift+Q, not plain Ctrl+Q: archiving is destructive-ish
+            # (drops the conversation out of the main list) and Ctrl+Q sits
+            # right next to other single-Ctrl combos a user can easily
+            # fat-finger while just trying to navigate the list.
+            (CS,              ord("Q"),         self.ID_ARCHIVE_LIST),
             (wx.ACCEL_CTRL,   ord("P"),         self.ID_PIN_LIST),
             (wx.ACCEL_CTRL,   ord("W"),         self.ID_CLOSE_CONV_LIST),
         ])
@@ -920,7 +925,8 @@ class ConversationsPanel(wx.Panel):
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
-        self._msg_bookmarks = {}  # bookmarks are scoped to the conversation being left
+        # _msg_bookmarks is intentionally NOT reset here — bookmarks now span
+        # conversations (see the declaration in __init__).
         self._first_unread_msg_id = None
         self._first_unread_count = 0
         self._unread_sep_marked_read = False
@@ -2199,7 +2205,7 @@ class ConversationsPanel(wx.Panel):
             self._search_panel.Hide()
             self._search_open_btn.Show()
             self._search_field.SetValue("")
-        self._msg_bookmarks = {}
+        # _msg_bookmarks is intentionally NOT reset here — see __init__.
         closed_jid = self._last_open_jid
         self.conversation = None
         self.conversation_panel.Hide()
@@ -2340,10 +2346,10 @@ class ConversationsPanel(wx.Panel):
 
         # ── Archive / Unarchive ───────────────────────────────────────────
         if mw.is_chat_archived(jid):
-            ua_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
+            ua_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Shift+Q")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_unarchive(j), ua_item)
         else:
-            arch_item = menu.Append(wx.ID_ANY, f"{i18n.t('archive_chat')}\tCtrl+Q")
+            arch_item = menu.Append(wx.ID_ANY, f"{i18n.t('archive_chat')}\tCtrl+Shift+Q")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_archive(j), arch_item)
 
         # ── Pin / Unpin ───────────────────────────────────────────────────
@@ -3343,13 +3349,24 @@ class ConversationsPanel(wx.Panel):
             self._update_mention_suggestions(self._mention_query)
 
     def _on_message_field_key_down(self, event):
-        """↓ moves focus to the mention list when suggestions are visible."""
+        """↓ moves focus to the mention list when suggestions are visible.
+        Shift+Enter inserts a newline instead of sending — TE_PROCESS_ENTER
+        makes plain Enter fire EVT_TEXT_ENTER (send) on this control, and
+        wx's native multiline edit control only inserts a literal newline on
+        Ctrl+Enter, with no Shift+Enter equivalent of its own (issue #16)."""
         kc = event.GetKeyCode()
         if kc == wx.WXK_DOWN and self._mention_panel.IsShown():
             if self._mention_list.GetCount() > 0:
                 self._mention_list.SetFocus()
                 self._mention_list.SetSelection(0)
             return  # consume — don't let the field handle ↓
+        if kc in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and event.ShiftDown():
+            pos = self.message_field.GetInsertionPoint()
+            text = self.message_field.GetValue()
+            self.message_field.ChangeValue(text[:pos] + "\n" + text[pos:])
+            self.message_field.SetInsertionPoint(pos + 1)
+            self.on_change_message_field(None)
+            return  # consume — don't send and don't double-insert
         event.Skip()
 
     def _on_mention_list_key_down(self, event):
@@ -3934,6 +3951,29 @@ class ConversationsPanel(wx.Panel):
         except (ValueError, TypeError):
             step = 15
 
+        # Shift+arrow/PageUp/PageDown/Home/End seek the currently playing
+        # voice message or video instead of moving list focus (issue #17).
+        # Checked before the plain (unmodified) equivalents below, since
+        # Home/PageUp/PageDown already have their own unmodified meaning
+        # here (jump N messages / load older history).
+        if event.ShiftDown() and key in (
+            wx.WXK_LEFT, wx.WXK_NUMPAD_LEFT, wx.WXK_RIGHT, wx.WXK_NUMPAD_RIGHT,
+            wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN,
+            wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END,
+        ):
+            if key in (wx.WXK_LEFT, wx.WXK_NUMPAD_LEFT):
+                self.seek_active_playback_by(-5)
+            elif key in (wx.WXK_RIGHT, wx.WXK_NUMPAD_RIGHT):
+                self.seek_active_playback_by(5)
+            elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
+                self.seek_active_playback_by(-60)
+            elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
+                self.seek_active_playback_by(60)
+            elif key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME):
+                self.seek_active_playback_to_edge(to_end=False)
+            elif key in (wx.WXK_END, wx.WXK_NUMPAD_END):
+                self.seek_active_playback_to_edge(to_end=True)
+            return
         if key == wx.WXK_SPACE:
             if idx >= 0:
                 self._do_activate_message(idx)
@@ -3968,9 +4008,10 @@ class ConversationsPanel(wx.Panel):
 
     def _on_conv_list_key_down(self, event):
         """Make Space open the focused conversation (same as Enter).
-        Ctrl+P pins/unpins, Ctrl+Q archives/unarchives."""
-        key  = event.GetKeyCode()
-        ctrl = event.ControlDown()
+        Ctrl+P pins/unpins, Ctrl+Shift+Q archives/unarchives."""
+        key   = event.GetKeyCode()
+        ctrl  = event.ControlDown()
+        shift = event.ShiftDown()
 
         if key == wx.WXK_SPACE:
             idx = self.conversations_list.GetFocusedItem()
@@ -3990,7 +4031,11 @@ class ConversationsPanel(wx.Panel):
                         self._on_menu_unpin(jid)
                     else:
                         self._on_menu_pin(jid)
-        elif ctrl and key == ord("Q"):
+        # Ctrl+Shift+Q, not plain Ctrl+Q — archiving isn't reversible from a
+        # single accidental keystroke the way pinning is, and plain Ctrl+Q
+        # sits right next to other single-Ctrl combos a user can easily
+        # fat-finger while just navigating the list.
+        elif ctrl and shift and key == ord("Q"):
             idx = self.conversations_list.GetFocusedItem()
             if 0 <= idx < len(self.chats_list):
                 jid = self.chats_list[idx].get("remoteJid", "")
@@ -5020,11 +5065,86 @@ class ConversationsPanel(wx.Panel):
         if self._audio_stream is None:
             return
         try:
+            # Seek on the same control that's actually playing and that
+            # on_audio_timer() reads position back from — when Tempo FX is
+            # active, _audio_stream is a decode-only source with no direct
+            # audio output; playback runs through _audio_tempo_ctrl instead.
+            # Setting position on the raw decode stream still "worked" in
+            # that it eventually reached the new position, but only once
+            # Tempo's own already-decoded-ahead buffer finished draining
+            # first — reported live as audio taking a long time to resume
+            # after a slider seek.
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
             val   = self.audio_slider.GetValue()
-            total = self._audio_stream.get_length()
-            self._audio_stream.set_position(int(val / 1000 * total))
+            total = _ctrl.get_length()
+            _ctrl.set_position(int(val / 1000 * total))
         except Exception:
             pass
+
+    def _has_active_audio_or_video(self) -> bool:
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            return True
+        return self._audio_stream is not None
+
+    def seek_active_playback_by(self, delta_seconds: float) -> bool:
+        """Seek the currently playing voice message or video by *delta_seconds*
+        (negative = backward), clamped to [0, length]. Returns False when
+        nothing is playing, so callers (keyboard shortcuts) can fall through
+        to their normal behavior instead. Issue #17."""
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            try:
+                total = self._video_player.get_length()
+                if total <= 0:
+                    return False
+                pos = self._video_player.get_position()
+                delta_bytes = self._video_player.seconds_to_bytes(abs(delta_seconds))
+                if delta_seconds < 0:
+                    delta_bytes = -delta_bytes
+                new_pos = max(0, min(total, pos + delta_bytes))
+                self._video_player.set_position(new_pos)
+                return True
+            except Exception:
+                return False
+        if self._audio_stream is None:
+            return False
+        try:
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            total = _ctrl.get_length()
+            if total <= 0:
+                return False
+            pos = _ctrl.get_position()
+            delta_bytes = _ctrl.seconds_to_bytes(abs(delta_seconds))
+            if delta_seconds < 0:
+                delta_bytes = -delta_bytes
+            new_pos = max(0, min(total, pos + delta_bytes))
+            _ctrl.set_position(new_pos)
+            return True
+        except Exception:
+            return False
+
+    def seek_active_playback_to_edge(self, to_end: bool) -> bool:
+        """Seek the currently playing voice message or video to its very
+        start (to_end=False) or end (to_end=True). Issue #17."""
+        if self._current_video_msg_id is not None and self._video_player.is_playing:
+            try:
+                total = self._video_player.get_length()
+                if total <= 0:
+                    return False
+                self._video_player.set_position(total if to_end else 0)
+                return True
+            except Exception:
+                return False
+        if self._audio_stream is None:
+            return False
+        try:
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            total = _ctrl.get_length()
+            if total <= 0:
+                return False
+            _ctrl.set_position(total if to_end else 0)
+            return True
+        except Exception:
+            return False
 
     def _show_audio_controls(self):
         self.audio_speed_btn.Show()
@@ -5345,7 +5465,26 @@ class ConversationsPanel(wx.Panel):
         if msg_type == "contactMessage":
             contact = msg_obj.get("contactMessage") or {}
             name    = contact.get("displayName") or ""
+            vcard   = contact.get("vcard") or ""
+
+            if not name or "BEGIN:VCARD" in name:
+                vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
+                parsed_name = ""
+                for line in vcard_to_parse.splitlines():
+                    if line.startswith("FN:"):
+                        parsed_name = line[3:].strip()
+                        break
+                if parsed_name:
+                    name = parsed_name
+                else:
+                    name = i18n.t("unknown_contact")
+
             return i18n.t("contact_message").format(name=name)
+
+        if msg_type == "contactsArrayMessage":
+            arr = msg_obj.get("contactsArrayMessage") or {}
+            contacts = arr.get("contacts") or []
+            return i18n.t("contacts_count").format(count=len(contacts))
 
         # ── Poll ─────────────────────────────────────────────────────────────
         if msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
@@ -5639,6 +5778,69 @@ class ConversationsPanel(wx.Panel):
                 return i18n.t("status_sent")
         return ""
 
+    def _classify_status_entry(self, raw) -> str:
+        """Classify one raw MessageUpdate status value into a single stage
+        name, using the same string/numeric matching _map_status() applies
+        to the aggregate status. Returns "" when unrecognised."""
+        s = str(raw or "").upper()
+        if not s:
+            return ""
+        if "PLAYED" in s or s == "5":
+            return "played"
+        if s.startswith("-"):
+            return "failed"
+        if "READ" in s or s == "4":
+            return "read"
+        if "DELIVERED" in s or "DELIVERY_ACK" in s or s == "3":
+            return "delivered"
+        if "SENT" in s or "ACK" in s or s == "2":
+            return "sent"
+        return ""
+
+    def _status_history_lines(self, msg) -> list:
+        """Per-stage delivery/read/played timeline for a sent message, one
+        line per stage actually reached ("Enviada: 14:29", "Entregue: 14:30",
+        "Lida: 14:32", …), mirroring the official WhatsApp message-info
+        screen. Only stages carrying a real timestamp (recorded from live
+        messages.update events onward, see MainWindow.on_message_status_update)
+        are shown — messages whose status was only ever seen as a single
+        aggregate value (e.g. loaded from history sync) fall back to the
+        caller's plain "Status: X" line instead, since no per-stage time
+        exists for them."""
+        i18n = self.main_window.i18n
+        from_me = msg.get("key", {}).get("fromMe", False)
+        updates = msg.get("MessageUpdate")
+        if not isinstance(updates, list):
+            return []
+        stage_order = ["sent", "delivered", "read", "played"] if from_me else ["played"]
+        label_keys = {
+            "sent": "status_sent", "delivered": "status_delivered",
+            "read": "status_read", "played": "status_played",
+        }
+        first_ts = {}
+        failed_ts = None
+        for u in updates:
+            if not isinstance(u, dict):
+                continue
+            ts = u.get("ts")
+            if ts is None:
+                continue
+            stage = self._classify_status_entry(u.get("status"))
+            if stage == "failed":
+                if from_me:
+                    failed_ts = ts
+                continue
+            if stage in stage_order:
+                first_ts.setdefault(stage, ts)
+        lines = []
+        for stage in stage_order:
+            ts = first_ts.get(stage)
+            if ts is not None:
+                lines.append(f"{i18n.t(label_keys[stage])}: {self._format_date(ts)}")
+        if failed_ts is not None:
+            lines.append(f"{i18n.t('status_failed')}: {self._format_date(failed_ts)}")
+        return lines
+
     def _sender_label(self, msg) -> str:
         if msg.get("key", {}).get("fromMe"):
             return self.main_window.self_reference_label()
@@ -5880,6 +6082,35 @@ class ConversationsPanel(wx.Panel):
                     return ctx
         return None
 
+    def _is_message_forwarded(self, msg) -> bool:
+        """True when contextInfo.isForwarded is set — a real WhatsApp
+        protocol field present on any forwarded message, from anyone, not
+        only ones this app itself forwarded (WebSocketClient._normalize_wpp_message
+        threads it through from WPPConnect's own Message.isForwarded).
+        Deliberately does not reuse _get_context_info(): that helper only
+        ever returns contextInfo when it also carries a quote, and a
+        forwarded message is very often neither a reply nor a mention.
+        """
+        if not isinstance(msg, dict):
+            return False
+        top_ctx = msg.get("contextInfo")
+        if isinstance(top_ctx, dict) and top_ctx.get("isForwarded"):
+            return True
+        msg_obj = msg.get("message") or {}
+        if not isinstance(msg_obj, dict):
+            return False
+        for sub_key in (
+            "extendedTextMessage", "audioMessage", "imageMessage",
+            "videoMessage", "documentMessage", "stickerMessage",
+            "locationMessage", "contactMessage", "buttonsMessage",
+            "listMessage",
+        ):
+            sub = msg_obj.get(sub_key)
+            if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
+                if sub["contextInfo"].get("isForwarded"):
+                    return True
+        return False
+
     def _get_quoted_sender(self, ctx: dict, msg: dict) -> str:
         """Resolve the display name of the quoted message sender from contextInfo."""
         mw   = self.main_window
@@ -6020,6 +6251,8 @@ class ConversationsPanel(wx.Panel):
             pieces[-1] += f", {status}"
         if msg.get("_edited") and not self._is_system_event(msg):
             pieces[-1] += f", {i18n.t('status_edited')}"
+        if not self._is_system_event(msg) and self._is_message_forwarded(msg):
+            pieces[-1] += f", {i18n.t('status_forwarded')}"
 
         # Append quoted message preview (if this is a reply)
         if ctx:
@@ -6420,14 +6653,19 @@ class ConversationsPanel(wx.Panel):
         ts       = self._extract_timestamp(msg)
         time_str = self._format_date(ts) if ts else ""
         sender   = self._sender_label(msg)
-        status   = self._map_status(msg)
         content  = self._get_message_content(msg)
 
         lines = [f"{sender}: {content}"]
         if time_str:
             lines.append(time_str)
-        if status:
-            lines.append(f"Status: {status}")
+
+        history = self._status_history_lines(msg)
+        if history:
+            lines.extend(history)
+        else:
+            status = self._map_status(msg)
+            if status:
+                lines.append(f"{i18n.t('message_data_status_label')}: {status}")
 
         dlg = wx.Dialog(
             self.main_window, title=i18n.t("message_data"),
@@ -6861,6 +7099,28 @@ class ConversationsPanel(wx.Panel):
             self,
         )
 
+    @staticmethod
+    def _forward_target_chats(mw) -> tuple:
+        """All chats offerable as a forward target: the main (non-archived)
+        conversations_panel's own chats_list/chat_names, plus every archived
+        chat from the separate ArchivedConversationsPanel that isn't already
+        in that list. conversations_panel.chats_list alone only ever holds
+        non-archived chats, so forwarding used to silently exclude every
+        archived chat (not just groups) as a target."""
+        panel     = mw.conversations_panel
+        all_chats = list(panel.chats_list)
+        all_names = list(panel.chat_names)
+        seen_jids = {c.get("remoteJid", "") for c in all_chats}
+        arch_panel = getattr(mw, "archived_conversations_panel", None)
+        if arch_panel is not None:
+            for chat, name in zip(arch_panel.chats_list, arch_panel.chat_names):
+                jid = chat.get("remoteJid", "")
+                if jid and jid not in seen_jids:
+                    seen_jids.add(jid)
+                    all_chats.append(chat)
+                    all_names.append(name)
+        return all_chats, all_names
+
     def _on_menu_forward(self, msg: dict):
         """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
         import ctypes
@@ -6868,9 +7128,7 @@ class ConversationsPanel(wx.Panel):
         i18n = mw.i18n
 
         # ── Collect available conversations ───────────────────────────────────
-        panel       = mw.conversations_panel
-        all_chats   = list(getattr(panel, "_all_chats_list", panel.chats_list))
-        all_names   = list(getattr(panel, "_all_chat_names", panel.chat_names))
+        all_chats, all_names = self._forward_target_chats(mw)
         if not all_chats:
             return
 
@@ -6899,6 +7157,28 @@ class ConversationsPanel(wx.Panel):
             wx.StaticText(p, label=i18n.t("forward_multiselect_hint")),
             0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6,
         )
+
+        msg_inner = msg.get("message", {})
+        if isinstance(msg_inner, str):
+            import json
+            try:
+                msg_inner = json.loads(msg_inner)
+            except Exception:
+                msg_inner = {}
+
+        original_caption = ""
+        for key in ["imageMessage", "videoMessage", "documentMessage"]:
+            if key in msg_inner and isinstance(msg_inner[key], dict):
+                cap = msg_inner[key].get("caption", "").strip()
+                if cap:
+                    original_caption = cap
+                break
+
+        chk_keep_caption = None
+        if original_caption:
+            chk_keep_caption = wx.CheckBox(p, label=i18n.t("forward_keep_caption"))
+            chk_keep_caption.SetValue(True)
+            vsz.Add(chk_keep_caption, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         # ── Custom arrow/selection keyboard handling ────────────────────────
         # Native wx.LB_EXTENDED semantics: a plain Up/Down both moves focus
@@ -7072,8 +7352,10 @@ class ConversationsPanel(wx.Panel):
 
         targets = list(zip(target_jids, target_names))
 
+        keep_caption = chk_keep_caption.GetValue() if chk_keep_caption else False
+
         def _do_forward():
-            failed_names = self._forward_message_to_targets(source_jid, msg_key, targets)
+            failed_names = self._forward_message_to_targets(msg, targets, keep_caption=keep_caption)
             if failed_names:
                 wx.CallAfter(mw.error_sound.play)
                 if len(targets) == 1:
@@ -7086,18 +7368,24 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_do_forward, daemon=True).start()
 
-    def _forward_message_to_targets(self, source_jid: str, msg_key: dict, targets: list) -> list:
+    def _forward_message_to_targets(self, msg: dict, targets: list, keep_caption: bool = False) -> list:
         """Forward one message to each (jid, name) pair in *targets*, one at
         a time — so one failing recipient (e.g. a stale JID) doesn't abort
-        delivery to the rest, since each main_window.forward_message() call
-        already reports its own success/failure independently. Returns the
-        display names of whichever targets failed (empty if all succeeded).
+        delivery to the rest. If keep_caption is True, uses resend_media_message_with_caption.
         """
         mw = self.main_window
-        return [
-            name for jid, name in targets
-            if not mw.forward_message(source_jid, msg_key, jid)
-        ]
+        failed = []
+        msg_key = msg.get("key", {}) or {}
+        source_jid = msg_key.get("remoteJid") or ""
+
+        for jid, name in targets:
+            if keep_caption:
+                success = mw.resend_media_message_with_caption(msg, jid)
+            else:
+                success = mw.forward_message(source_jid, msg_key, jid)
+            if not success:
+                failed.append(name)
+        return failed
 
     def _on_menu_star(self, msg: dict):
         msg["starred"] = not msg.get("starred")
@@ -7824,9 +8112,10 @@ class ConversationsPanel(wx.Panel):
         # fires when Focus() is called above — no need to call it here again.
 
     # ── Ctrl+0..9 / Ctrl+Shift+0..9: message bookmarks ──────────────────────
-    # Scoped to the currently open conversation only (see _msg_bookmarks'
-    # declaration in __init__): cleared on close_conversation() and on every
-    # conversation switch in navigate_to_conversation().
+    # Bookmarks span conversations (see _msg_bookmarks' declaration in
+    # __init__): jumping to one set in a conversation other than the one
+    # currently open navigates there first, then focuses the bookmarked
+    # message — never cleared by closing/switching conversations.
 
     def _find_index_by_msg_id(self, msg_id: str) -> int:
         """Return the current _sorted_messages index for a message ID, or -1."""
@@ -7838,35 +8127,89 @@ class ConversationsPanel(wx.Panel):
                 return i
         return -1
 
+    def _conversation_position(self, jid: str) -> int:
+        """1-based position of *jid* in the currently displayed (non-archived)
+        conversation list, or 0 if it isn't currently shown there (archived,
+        filtered out by search/the active filter, etc.). Chats reorder
+        whenever new messages arrive, so this is always looked up live —
+        never cached alongside a bookmark."""
+        for i, chat in enumerate(self.chats_list):
+            if chat.get("remoteJid", "") == jid:
+                return i + 1
+        return 0
+
+    def _select_bookmarked_message(self, digit: int, jid: str, msg_id: str, i18n,
+                                    other_conversation: bool):
+        """Focus/select *msg_id* in the (already-open) conversation's message
+        list and announce the jump. Shared by the same-conversation and
+        just-navigated-to-a-different-conversation cases below — the only
+        difference is which text explains where the message ended up."""
+        idx = self._find_index_by_msg_id(msg_id)
+        if idx < 0:
+            self._msg_bookmarks.pop(digit, None)
+            self.main_window.output(
+                i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        self.messages_list.Focus(idx)
+        self.messages_list.Select(idx, True)
+        self.messages_list.EnsureVisible(idx)
+        self.messages_list.SetFocus()
+        if not other_conversation:
+            self.main_window.output(
+                i18n.t("bookmark_jumped").format(position=idx + 1, digit=digit),
+                interrupt=True,
+            )
+            return
+        conv_position = self._conversation_position(jid)
+        conv_name = self.conversation_name or jid
+        if conv_position:
+            text = i18n.t("bookmark_jumped_other_conversation").format(
+                position=idx + 1, digit=digit, conv_position=conv_position, conv_name=conv_name,
+            )
+        else:
+            text = i18n.t("bookmark_jumped_other_conversation_no_position").format(
+                position=idx + 1, digit=digit, conv_name=conv_name,
+            )
+        self.main_window.output(text, interrupt=True)
+
     def _on_bookmark_set_or_jump(self, digit: int):
         """Ctrl+<digit>: bookmark the focused message, or — if <digit> already
-        has a bookmark — move focus/selection to it instead.
+        has a bookmark — move focus/selection to it instead, navigating to
+        the bookmark's own conversation first if it's not the one currently
+        open.
 
-        Bookmarks store the message's stable key.id rather than a raw list
-        index, so a bookmark still finds the right message even if the list
-        was rebuilt (e.g. a new message arrived) between setting it and
-        jumping to it.
+        Bookmarks store (conversation JID, message key.id) rather than a raw
+        list index/position, so a bookmark still finds the right message
+        even if either list was rebuilt/reordered (a new message arriving,
+        pagination, etc.) between setting it and jumping to it.
         """
         i18n = self.main_window.i18n
-        existing_id = self._msg_bookmarks.get(digit)
-        if existing_id is not None:
-            idx = self._find_index_by_msg_id(existing_id)
-            if idx < 0:
-                # The bookmarked message is no longer in the loaded list
-                # (deleted, paged out, etc.) — drop the stale bookmark
-                # instead of silently doing nothing.
+        existing = self._msg_bookmarks.get(digit)
+        if existing is not None:
+            bm_jid, existing_id = existing
+            current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+            if bm_jid == current_jid:
+                self._select_bookmarked_message(digit, bm_jid, existing_id, i18n, other_conversation=False)
+                return
+            target_chat = self.main_window.chats.get(bm_jid)
+            if target_chat is None:
+                # The whole conversation is gone (chat deleted) — nothing
+                # left to jump to.
                 del self._msg_bookmarks[digit]
                 self.main_window.output(
                     i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
                 )
                 return
-            self.messages_list.Focus(idx)
-            self.messages_list.Select(idx, True)
-            self.messages_list.EnsureVisible(idx)
-            self.messages_list.SetFocus()
-            self.main_window.output(
-                i18n.t("bookmark_jumped").format(position=idx + 1, digit=digit),
-                interrupt=True,
+            self.navigate_to_conversation(target_chat)
+            # navigate_to_conversation() queues its own focus (message field
+            # or messages list, per the "focus_on_open" setting) via
+            # wx.CallAfter — ours must be queued AFTER that call returns so
+            # it runs last and wins, same ordering this file already relies
+            # on elsewhere (see navigate_to_conversation()'s own comment
+            # about focus-CallAfter ordering).
+            wx.CallAfter(
+                self._select_bookmarked_message, digit, bm_jid, existing_id, i18n, True
             )
             return
 
@@ -7879,21 +8222,40 @@ class ConversationsPanel(wx.Panel):
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id:
             return
-        self._msg_bookmarks[digit] = msg_id
-        self.main_window.output(
-            i18n.t("bookmark_set").format(
-                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx)
-            ),
-            interrupt=True,
-        )
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if not jid:
+            return
+        self._msg_bookmarks[digit] = (jid, msg_id)
+        conv_position = self._conversation_position(jid)
+        if conv_position:
+            text = i18n.t("bookmark_set").format(
+                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx),
+                conv_position=conv_position,
+            )
+        else:
+            text = i18n.t("bookmark_set_no_position").format(
+                digit=digit, position=idx + 1, text=self.messages_list.GetItemText(idx),
+            )
+        self.main_window.output(text, interrupt=True)
 
     def _on_bookmark_remove(self, digit: int):
         """Ctrl+Shift+<digit>: remove the bookmark at that digit, if any."""
         i18n = self.main_window.i18n
-        existing_id = self._msg_bookmarks.pop(digit, None)
-        if existing_id is None:
+        existing = self._msg_bookmarks.pop(digit, None)
+        if existing is None:
             self.main_window.output(
                 i18n.t("bookmark_not_found").format(digit=digit), interrupt=True
+            )
+            return
+        bm_jid, existing_id = existing
+        current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if bm_jid != current_jid:
+            # Can't cheaply confirm a bookmark set in another (possibly
+            # unloaded) conversation still points at a real message without
+            # loading that conversation's messages just to check — trust it
+            # and confirm the removal without a position.
+            self.main_window.output(
+                i18n.t("bookmark_removed_other_conversation").format(digit=digit), interrupt=True
             )
             return
         idx = self._find_index_by_msg_id(existing_id)
@@ -7902,10 +8264,16 @@ class ConversationsPanel(wx.Panel):
                 i18n.t("bookmark_removed_stale").format(digit=digit), interrupt=True
             )
             return
-        self.main_window.output(
-            i18n.t("bookmark_removed").format(digit=digit, position=idx + 1),
-            interrupt=True,
-        )
+        conv_position = self._conversation_position(bm_jid)
+        if conv_position:
+            text = i18n.t("bookmark_removed").format(
+                digit=digit, position=idx + 1, conv_position=conv_position,
+            )
+        else:
+            text = i18n.t("bookmark_removed_no_position").format(
+                digit=digit, position=idx + 1,
+            )
+        self.main_window.output(text, interrupt=True)
 
     # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
 
@@ -9293,9 +9661,9 @@ class ArchivedConversationsPanel(wx.Panel):
         missing everything except unarchive/clear/delete. Ctrl+F (search) and
         Ctrl+N (new conversation) are left out: this panel has no search field
         of its own, and Ctrl+W (close conversation) doesn't apply — there is no
-        split conversation view to close from this list. Ctrl+Q always means
-        "unarchive" here rather than toggling, since every row is archived by
-        definition.
+        split conversation view to close from this list. Ctrl+Shift+Q always
+        means "unarchive" here rather than toggling, since every row is
+        archived by definition.
         """
         self.ID_DELETE_CONV      = wx.NewIdRef()
         self.ID_ALT_SHIFT_C_LIST = wx.NewIdRef()
@@ -9316,7 +9684,7 @@ class ArchivedConversationsPanel(wx.Panel):
             (AS,              ord("S"),      self.ID_MUTE_LIST),
             (CS,              ord("B"),      self.ID_BLOCK_LIST),
             (CS,              ord("L"),      self.ID_CLEAR_LIST),
-            (wx.ACCEL_CTRL,   ord("Q"),      self.ID_UNARCHIVE_LIST),
+            (CS,              ord("Q"),      self.ID_UNARCHIVE_LIST),
             (wx.ACCEL_CTRL,   ord("P"),      self.ID_PIN_LIST),
         ])
         self.SetAcceleratorTable(accel_tbl)
@@ -9543,7 +9911,7 @@ class ArchivedConversationsPanel(wx.Panel):
         menu.AppendSeparator()
 
         # ── Unarchive — always, every row here is already archived ─────────
-        unarch_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Q")
+        unarch_item = menu.Append(wx.ID_ANY, f"{i18n.t('unarchive_chat')}\tCtrl+Shift+Q")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_unarchive(j), unarch_item)
 
         # ── Pin / Unpin ───────────────────────────────────────────────────

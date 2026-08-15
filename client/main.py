@@ -608,31 +608,6 @@ class MainWindow(wx.Frame):
         except Exception as _me:
             logging.warning("[UPDATER_STATUS] Error checking update marker: %s", _me)
         logging.info("[STARTUP] ==================================================")
-
-        # ── Update-in-progress guard ───────────────────────────────────────────
-        # The batch installer drops update_in_progress.marker in the install
-        # root BEFORE it starts copying and deletes it when it relaunches the
-        # app. If we get here while that marker is still present, the previous
-        # instance was closed by the updater but the copy is NOT finished yet
-        # (or is still waiting for the old process to fully exit) — opening
-        # now would lock files mid-xcopy and leave the old version installed.
-        # So wait until the marker disappears (batch finished) before booting.
-        try:
-            from updater import _outer_exe_dir
-            _in_progress = os.path.join(_outer_exe_dir(), "update_in_progress.marker")
-            if os.path.exists(_in_progress):
-                logging.warning("[UPDATER_STATUS] update_in_progress.marker found — previous update not finished. Waiting for batch installer to complete...")
-                _waited = 0
-                while os.path.exists(_in_progress) and _waited < 180:
-                    time.sleep(1.0)
-                    _waited += 1
-                if os.path.exists(_in_progress):
-                    logging.error("[UPDATER_STATUS] update_in_progress.marker still present after 180s — continuing anyway.")
-                else:
-                    logging.info("[UPDATER_STATUS] Batch installer finished (marker removed after %ds).", _waited)
-        except Exception as _we:
-            logging.warning("[UPDATER_STATUS] Error waiting for update_in_progress.marker: %s", _we)
-        logging.info("[STARTUP] ==================================================")
         super().__init__(None)
         # Multi-account context (plan Zad 2.2). account_id is None only in
         # legacy/single-account fallback; new startup always passes it.
@@ -1494,7 +1469,7 @@ class MainWindow(wx.Frame):
                     self.Bind(wx.EVT_MENU,
                               lambda e, a=action: self._on_accounts_menu(a), id=int(wid))
                 menubar.Append(accounts_menu, self.i18n.t("acc_menu_title"))
-                # Ctrl+Shift+1..9 → switch to the n-th paired account. Menu-label
+                # Ctrl+Alt+1..9 → switch to the n-th paired account. Menu-label
                 # accelerators alone don't fire reliably here: focused child
                 # panels (conversation list, message field, …) install their own
                 # wx.AcceleratorTable, which swallows the keystroke before the
@@ -1514,6 +1489,21 @@ class MainWindow(wx.Frame):
                     self._account_hotkey_hook_bound = True
             except Exception:
                 logging.exception("[menu] building Accounts menu failed (non-fatal)")
+
+        # Frame-level Ctrl+0..9 → jump to an existing message bookmark,
+        # regardless of which control currently has focus — bound
+        # unconditionally (not just in multi-account context, unlike the
+        # Ctrl+Alt+1..9 account-switch hook above). Jumping to a bookmark
+        # can open a DIFFERENT conversation entirely (see
+        # ConversationsPanel._on_bookmark_set_or_jump), so it must not
+        # require the messages list to already be focused. Setting a NEW
+        # bookmark still needs a focused message, so this only ever handles
+        # the jump case; event.Skip() when there's no bookmark for that
+        # digit lets it fall through to ConversationsPanel's own
+        # AcceleratorTable (Ctrl+0..9 there does both set and jump).
+        if not getattr(self, "_bookmark_hotkey_hook_bound", False):
+            self.Bind(wx.EVT_CHAR_HOOK, self._on_bookmark_hotkey_char)
+            self._bookmark_hotkey_hook_bound = True
 
         # ── Ajuda ─────────────────────────────────────────────────────────────
         help_menu = wx.Menu()
@@ -1544,7 +1534,17 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_about,         id=self._ID_ABOUT)
 
     def _on_account_hotkey_char(self, event):
-        """Frame-level Ctrl+Shift+1..9 → switch to the n-th paired account.
+        """Frame-level Ctrl+Alt+1..9 → switch to the n-th paired account.
+
+        Was Ctrl+Shift+1..9 — moved to Ctrl+Alt to stop colliding with the
+        pre-existing, non-multi-account message-bookmark-removal shortcut
+        (ConversationsPanel._on_bookmark_remove, Ctrl+Shift+0..9): this
+        handler's EVT_CHAR_HOOK intercepts its combo before it can ever
+        reach that panel's own AcceleratorTable, so sharing Ctrl+Shift+
+        <digit> silently broke bookmark removal for any account count below
+        9 (i.e. almost every install). Ctrl+Alt was deliberately avoided at
+        first because AltGr reports as Ctrl+Alt on a PL keyboard — kept as
+        a known tradeoff by deliberate choice, not an oversight.
 
         Bound via EVT_CHAR_HOOK so it fires no matter which child control holds
         focus (child panels' own AcceleratorTables would otherwise swallow the
@@ -1552,16 +1552,54 @@ class MainWindow(wx.Frame):
         through untouched with event.Skip().
         """
         try:
-            if (event.GetModifiers() == (wx.MOD_CONTROL | wx.MOD_SHIFT)):
+            if (event.GetModifiers() == (wx.MOD_CONTROL | wx.MOD_ALT)):
                 code = event.GetKeyCode()
                 if ord("1") <= code <= ord("9"):
                     slot = code - ord("0")
                     target = getattr(self, "_account_hotkey_slots", {}).get(slot)
-                    if target and target != getattr(self, "account_id", None):
-                        self._switch_to_account(target)
-                    return  # consume the combo (even a no-op self-switch)
+                    if target:
+                        if target != getattr(self, "account_id", None):
+                            self._switch_to_account(target)
+                        return  # consume the combo (even a no-op self-switch)
+                    # No paired account at this slot (e.g. a single-account
+                    # install, or fewer than <slot> paired accounts) — there
+                    # is nothing to switch to, so this combo isn't actually
+                    # ours; fall through to event.Skip() below.
         except Exception:
             logging.exception("[accounts] hotkey char handler failed")
+        event.Skip()
+
+    def _on_bookmark_hotkey_char(self, event):
+        """Frame-level Ctrl+0..9 → jump to an existing message bookmark, no
+        matter which control currently has focus.
+
+        Bound via EVT_CHAR_HOOK for the same reason _on_account_hotkey_char()
+        is: a focused child panel's own AcceleratorTable would otherwise
+        require focus to already be inside it for Ctrl+<digit> to fire at
+        all — but jumping to a bookmark can open a DIFFERENT conversation
+        entirely (ConversationsPanel._on_bookmark_set_or_jump), so it needs
+        to work from the conversation list, the navigation panel, or
+        anywhere else in the window, not only once already inside the
+        messages list.
+
+        Only ever handles the JUMP case — setting a NEW bookmark still
+        requires a focused message, which only makes sense with the
+        messages list itself focused, so that continues to go through
+        ConversationsPanel's own Ctrl+0..9 AcceleratorTable entry
+        unchanged. Anything that isn't our exact combo, or a digit with no
+        bookmark set, is passed through untouched with event.Skip().
+        """
+        try:
+            if event.GetModifiers() == wx.MOD_CONTROL:
+                code = event.GetKeyCode()
+                if ord("0") <= code <= ord("9"):
+                    digit = code - ord("0")
+                    panel = getattr(self, "conversations_panel", None)
+                    if panel is not None and digit in getattr(panel, "_msg_bookmarks", {}):
+                        panel._on_bookmark_set_or_jump(digit)
+                        return  # consume — this was a jump to an existing bookmark
+        except Exception:
+            logging.exception("[bookmarks] hotkey char handler failed")
         event.Skip()
 
     def _on_accounts_menu(self, action: dict):
@@ -2081,8 +2119,11 @@ class MainWindow(wx.Frame):
         elif self._auto_offline:
             # Turning the manual switch off does not put us back online when
             # the connection itself is down — say so instead of announcing a
-            # state change that did not happen.
-            self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=True)
+            # state change that did not happen. This is the automatic-offline
+            # warning, so it respects the announce_sync_events master mute for
+            # the SPEECH; the sound above is the manual toggle's own feedback.
+            if self._announce_sync_events_enabled():
+                self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=True)
         else:
             self.output(self.i18n.t("offline_mode_disabled"), interrupt=True)
         self._apply_offline_state()
@@ -2124,6 +2165,17 @@ class MainWindow(wx.Frame):
             _ui()
         else:
             wx.CallAfter(_ui)
+
+    def _announce_sync_events_enabled(self) -> bool:
+        """Master mute for the sync/media/auto-offline spoken+sound warnings.
+
+        Settings > Geral > "Anunciar sincronização, download de mídias e modo
+        offline automático" (on by default). When unchecked, the synchronizing /
+        sync-complete / media-download / automatic-offline announcements must
+        not fire — no speech, no event sound (status text and the manual
+        offline toggle's own feedback are unaffected).
+        """
+        return bool(self.settings.get("general", {}).get("announce_sync_events", True))
 
     def _on_power_suspended(self, event):
         logging.info("[power] System is suspending.")
@@ -2760,16 +2812,29 @@ class MainWindow(wx.Frame):
             self._auto_offline = False
             self._apply_offline_state()
             logging.info("[connection] WhatsApp connection is up (%s)", reason or "checked")
-            if not self._wa_connect_announced:
+            first_ever_connect = not self._wa_connect_announced
+            if first_ever_connect:
                 self._wa_connect_announced = True
                 if not self.background_mode:
                     self.connected_sound.play()
             elif announce and not self.background_mode:
                 self.output(self.i18n.t("connection_restored"), interrupt=False)
-            # Clear only the transient "connecting"/"disconnected" text — a
-            # sync running in parallel owns the status line otherwise
-            # ("sincronizando", "baixando mídias").
-            if self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
+            if first_ever_connect and not self.background_mode:
+                # The "Conectando..."/tray_connecting title must hold until
+                # this exact moment — the sound firing IS the signal that the
+                # connection is real, so the status advancing any earlier (as
+                # it briefly did: prepare_sync() set "preparing_to_sync"
+                # synchronously during __init__, well before the connection
+                # was actually confirmed and this branch got to run) made the
+                # title claim progress the app hadn't made yet.
+                # wait_messages_set() no longer sets this status itself —
+                # this is the one place that does, in lockstep with the sound.
+                wx.CallAfter(self._set_status, self.i18n.t("preparing_to_sync"))
+            elif self._tray_status in (self.i18n.t("tray_wa_disconnected"), self.i18n.t("tray_connecting")):
+                # Reconnect (not the first-ever connect, handled above) —
+                # clear only the transient "connecting"/"disconnected" text; a
+                # sync running in parallel owns the status line otherwise
+                # ("sincronizando", "baixando mídias").
                 wx.CallAfter(self._set_status, "")
             self._sync_retry_count = 0
             if was_offline:
@@ -2850,7 +2915,7 @@ class MainWindow(wx.Frame):
         # — it only reaches here on an actual state change — so this is safe
         # to fire unconditionally, matching the manual toggle's own behaviour
         # (offline_mode_sound + speech) exactly.
-        if announce and not self.background_mode:
+        if announce and not self.background_mode and self._announce_sync_events_enabled():
             self.offline_mode_sound.play()
             self.output(self.i18n.t("offline_mode_auto_enabled"), interrupt=False)
 
@@ -2870,16 +2935,16 @@ class MainWindow(wx.Frame):
                 logging.info("[_on_menu_sync_media] Aborting media sync: offline mode active.")
                 return
             wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-            if not self.background_mode:
+            if not self.background_mode and self._announce_sync_events_enabled():
                 wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
             self._media_sync_running = True
             try:
                 self.sync_media_for_all_chats()
-                if not self.background_mode:
+                if not self.background_mode and self._announce_sync_events_enabled():
                     wx.CallAfter(self.output, self.i18n.t("sync_media_completed"))
             except Exception as exc:
                 logging.exception("[_on_menu_sync_media] Erro ao baixar mídias: %s", exc)
-                if not self.background_mode:
+                if not self.background_mode and self._announce_sync_events_enabled():
                     wx.CallAfter(self.output, self.i18n.t("sync_media_failed"))
             finally:
                 self._media_sync_running = False
@@ -2956,7 +3021,11 @@ class MainWindow(wx.Frame):
             # A user-requested resync gets a fresh automatic-retry budget, even if
             # earlier syncs this session already burned through it.
             self._sync_retry_count = 0
-            self.clear_local_data()
+            # F5 resyncs the chat/message set from WhatsApp again — it must
+            # not also discard cleared/deleted/archived/muted/blocked-contact
+            # state the user set locally on top of them (see
+            # clear_local_data()'s own docstring).
+            self.clear_local_data(wipe_metadata=False)
             try:
                 media_failed_path = data_path("media_failed.json")
                 if os.path.isfile(media_failed_path):
@@ -3184,7 +3253,7 @@ class MainWindow(wx.Frame):
             # process paired / changed state after this menu was built (or its
             # process was still coming up), this window's menu goes stale and an
             # account "disappears" from it until 'Switch account' is opened.
-            # Rebuilding on focus-gain keeps the menu (and the Ctrl+Shift+1..9
+            # Rebuilding on focus-gain keeps the menu (and the Ctrl+Alt+1..9
             # hotkey slot map, rebuilt inside _build_menubar) in sync with the
             # live registry — this is the moment the user returns to the window.
             self._refresh_accounts_menu_if_stale()
@@ -3358,9 +3427,34 @@ class MainWindow(wx.Frame):
         flush, stop Node, close DB) and _terminate_process() (the terminal
         os._exit). The IPC quit handler needs the teardown WITHOUT the immediate
         os._exit so it can flag `released` and reply to the initiating account
-        before the process vanishes (see _ipc_quit)."""
-        self._perform_shutdown()
-        self._terminate_process()
+        before the process vanishes (see _ipc_quit).
+
+        The teardown runs on a background thread, and that is not incidental:
+        _perform_shutdown() calls _stop_wpp_server(), which waits out the
+        graceful-stop budget (an HTTP request to close WhatsApp Web cleanly
+        rather than taskkill'ing Chrome and risking its LevelDB credentials).
+        Running that on the wx main thread stops the message loop from pumping,
+        and Windows tags any window whose loop goes quiet for a few seconds as
+        "Not Responding" — reported live as "Sair" leaving a frozen window on
+        screen for tens of seconds. The window is hidden first so quitting
+        still *looks* instant while the teardown finishes behind it.
+
+        _ipc_quit() keeps calling _perform_shutdown() directly: it is already
+        off the UI thread and needs the teardown to complete before it replies.
+        See tests/test_shutdown_wait.py.
+        """
+        try:
+            self.Hide()
+        except Exception:
+            pass
+
+        def _teardown():
+            try:
+                self._perform_shutdown()
+            finally:
+                self._terminate_process()
+
+        threading.Thread(target=_teardown, daemon=True, name="winzapp-shutdown").start()
 
     def _perform_shutdown(self):
         """Reversible shutdown: stop timers/threads, gracefully close the WPP
@@ -4071,8 +4165,6 @@ class MainWindow(wx.Frame):
             return
         if self.is_chat_archived(remote_jid):
             return
-        if not self.settings.get("general", {}).get("notifications_enabled", True):
-            return
 
         from core.notification_manager import (
             format_notification_title, format_notification_body,
@@ -4090,6 +4182,7 @@ class MainWindow(wx.Frame):
         )
 
         if window_active:
+            speech = self.settings.get("speech_content", {})
             # Determine if the incoming message is for the currently-open conversation
             cp = getattr(self, "conversations_panel", None)
             current_jid = (
@@ -4101,10 +4194,14 @@ class MainWindow(wx.Frame):
 
             if is_current_conv:
                 # Scenario 1: message in the ACTIVE conversation
-                # Play current-conversation sound, speak "Sender: body" via AO2
+                # Play current-conversation sound (always), speak "Sender: body"
+                # via AO2 only when speak_active_conv_messages is on. Neither of
+                # these is the background toast this function's general.
+                # notifications_enabled setting is meant to gate — see below.
                 self.message_current_sound.play()
-                sender = format_foreground_sender(msg, self, self.i18n)
-                self.output(f"{sender}: {body}")
+                if speech.get("speak_active_conv_messages", True):
+                    sender = format_foreground_sender(msg, self, self.i18n)
+                    self.output(f"{sender}: {body}")
                 # Mark the active conversation as read immediately, but only if the
                 # window has been focused for at least 5 seconds (to prevent marking
                 # startup/offline messages as read automatically).
@@ -4117,14 +4214,23 @@ class MainWindow(wx.Frame):
                     ).start()
             else:
                 # Scenario 2: message in a DIFFERENT conversation (window active)
-                # Play foreground sound, speak "Nova mensagem de X: body" via AO2
+                # Play foreground sound (always), speak "Nova mensagem de X: body"
+                # via AO2 only when speak_other_conv_messages is on.
                 self.message_foreground_sound.play()
-                title = format_notification_title(msg, self, self.i18n)
-                spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
-                self.output(spoken)
+                if speech.get("speak_other_conv_messages", True):
+                    title = format_notification_title(msg, self, self.i18n)
+                    spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+                    self.output(spoken)
             return  # never send system toast when window is active
 
-        # Window is not focused → send system toast notification
+        # Window is not focused → send system toast notification. This is the
+        # ONLY thing general.notifications_enabled controls — it used to gate
+        # the whole function above this point too, silently killing the
+        # foreground sounds/announcements above (and, when a burst of
+        # messages included one in a muted/archived chat before this point,
+        # nothing else) whenever the user turned it off.
+        if not self.settings.get("general", {}).get("notifications_enabled", True):
+            return
         if not self.settings.get("general", {}).get("show_tray_icon", True):
             return
         title = format_notification_title(msg, self, self.i18n)
@@ -4476,8 +4582,6 @@ class MainWindow(wx.Frame):
 
             if self.is_chat_muted(remote_jid) or self.is_chat_archived(remote_jid):
                 return
-            if not self.settings.get("general", {}).get("notifications_enabled", True):
-                return
 
             from core.notification_manager import format_notification_title
 
@@ -4497,6 +4601,10 @@ class MainWindow(wx.Frame):
             if window_active:
                 self.message_foreground_sound.play()
                 self.output(f"{title}: {body}")
+                return
+            # general.notifications_enabled only ever gates the background
+            # toast below — see the matching comment in on_new_message().
+            if not self.settings.get("general", {}).get("notifications_enabled", True):
                 return
             if not self.settings.get("general", {}).get("show_tray_icon", True):
                 return
@@ -4822,20 +4930,29 @@ class MainWindow(wx.Frame):
                 logging.error("[ensure_api_modules_installed] Failed to remove legacy node_modules: %s", e)
 
         # ── Check for new required packages in an existing node_modules ──────
-        # When we add a new npm dependency (e.g. @babel/runtime) the
+        # When we add a new npm dependency (e.g. @ffmpeg-installer/ffmpeg) the
         # user's node_modules is already installed from a previous run, so the
         # normal "node_modules absent" gate never fires. We compare a list of
         # required package markers and run `npm install` silently in the
         # background if any are missing — no dialog needed.
-        # NOTE: ffmpeg is deliberately NOT auto-installed here anymore. If the
-        # binary is missing, _find_api_ffmpeg() returns None, _convert_wav_to_ogg()
-        # falls back to raw WAV and the video player plays audio-only — ffmpeg
-        # must be provided by the bundle, bundled lib/ or the system PATH.
+        # Resolved rather than just probed for a directory: @ffmpeg-installer
+        # unpacks its binary under a platform-specific subfolder, and WinZapp
+        # also accepts a bundled lib/ copy or one on PATH — so "is the package
+        # folder there?" is the wrong question, "can we actually find an
+        # ffmpeg to run?" is the right one.
+        ffmpeg_bin = self._find_api_ffmpeg()
         _REQUIRED_MARKERS = [
             os.path.join(node_modules, "@babel", "runtime"),
         ]
         if os.path.isfile(dist_server) and os.path.isdir(node_modules):
             missing = [m for m in _REQUIRED_MARKERS if not os.path.isdir(m)]
+            # Without ffmpeg, _convert_wav_to_ogg() returns None and voice
+            # messages go out as raw WAV, which WhatsApp often rejects — a core
+            # accessibility feature degrading silently, with only a warning in
+            # the log. node_modules existing is not evidence this specific
+            # package inside it does, so it gets its own check.
+            if not ffmpeg_bin:
+                missing.append(os.path.join(node_modules, "@ffmpeg-installer", "ffmpeg"))
             if missing:
                 logging.info(
                     "[ensure_api_modules_installed] Missing packages detected: %s — running npm install",
@@ -7987,9 +8104,10 @@ class MainWindow(wx.Frame):
         # land in the same UI-thread tick.
         def _announce_synchronizing():
             self._set_status(self.i18n.t("synchronizing"))
-            self.synchronizing_sound.play()
-            if not self.background_mode:
-                self.output(self.i18n.t("synchronization_started"), interrupt=True)
+            if self._announce_sync_events_enabled():
+                self.synchronizing_sound.play()
+                if not self.background_mode:
+                    self.output(self.i18n.t("synchronization_started"), interrupt=True)
         wx.CallAfter(_announce_synchronizing)
 
         # After first pairing the API may need a few seconds to populate chats.
@@ -8249,9 +8367,10 @@ class MainWindow(wx.Frame):
             # 3-or-4-conversations failure look like a success, right before
             # the sync restarted itself.
             if chat_list_ok and chat_list_settled:
-                self.sync_complete_sound.play()
-                if not self.background_mode:
-                    self.output(self.i18n.t("sync_complete"))
+                if self._announce_sync_events_enabled():
+                    self.sync_complete_sound.play()
+                    if not self.background_mode:
+                        self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(_announce_messages_synced)
 
         # Mark sync as done for this session so late-arriving messages.set
@@ -8357,7 +8476,7 @@ class MainWindow(wx.Frame):
                 )
                 if has_media:
                     wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-                    if not self.background_mode:
+                    if not self.background_mode and self._announce_sync_events_enabled():
                         announced = True
                         wx.CallAfter(self.output, self.i18n.t("sync_media_started"))
 
@@ -8391,7 +8510,13 @@ class MainWindow(wx.Frame):
         # _initial_sync_running is reset by start_sync()'s finally block.
 
     def wait_messages_set(self):
-        self._set_status(self.i18n.t("preparing_to_sync"))
+        # _set_wa_connected() is what sets "preparing_to_sync" now, exactly
+        # when the connected sound plays — not here. This function runs
+        # (from prepare_sync(), synchronously during __init__, before the
+        # window/tray even exist) well before the connection is actually
+        # confirmed; setting the status here made the title claim progress
+        # the app hadn't made yet, decoupled from the sound that's supposed
+        # to mark the same milestone.
         # Fallback: WPPConnect does not emit a messages.set WebSocket event.
         # Poll the API every 5 s for up to 60 s and start sync as soon as it
         # responds.  If the API never responds within the window, start sync
@@ -8493,8 +8618,19 @@ class MainWindow(wx.Frame):
         except Exception:
             pass
 
-    def clear_local_data(self):
-        """Wipe all cached chats, contacts, messages, media, and mapping caches to avoid cross-account leakage."""
+    def clear_local_data(self, wipe_metadata: bool = True):
+        """Wipe all cached chats, contacts, messages, media, and mapping caches.
+
+        wipe_metadata=True (default, used for a confirmed logout/account
+        switch via _on_disconnect) also wipes system_metadata — cleared_chats,
+        deleted_chats, archived_chats, pinned_chats, muted_chats,
+        blocked_contacts and more — so nothing leaks into whatever account
+        pairs next. wipe_metadata=False (used by _resync_all_worker(), F5)
+        keeps that table intact: the point of a resync is only to refetch
+        chats/messages from WhatsApp again, not to also discard every local
+        action (a cleared/deleted/archived/muted/blocked chat) the user took
+        on top of them — resyncing used to silently undo all of those too.
+        """
         logging.info("[clear_local_data] Clearing all local caches, media, and database...")
         self.chats = {}
         self.contacts = {}
@@ -8522,7 +8658,7 @@ class MainWindow(wx.Frame):
             
         try:
             if hasattr(self, "db") and self.db is not None:
-                self.db.save_full_state({"chats": {}, "contacts": {}})
+                self.db.save_full_state({"chats": {}, "contacts": {}}, clear_metadata=wipe_metadata)
                 logging.info("[clear_local_data] Database cleared successfully.")
         except Exception as e:
             logging.error(f"[clear_local_data] Failed to clear database: {e}")
@@ -9677,6 +9813,29 @@ class MainWindow(wx.Frame):
         chat["name"] = new_name
         self._group_name_cache = getattr(self, "_group_name_cache", {})
         self._group_name_cache[remote_jid] = new_name
+
+    def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
+        """
+        Handle a live group subject update received via the groups.update websocket event.
+        """
+        if remote_jid not in self.chats:
+            return
+
+        new_name = new_subject.strip()
+        if not new_name:
+            return
+
+        chat = self.chats[remote_jid]
+        if chat.get("name") == new_name:
+            return
+
+        logging.info(f"[on_group_subject_updated] Updating group {remote_jid} name to {new_name}")
+        chat["name"] = new_name
+        self._group_name_cache = getattr(self, "_group_name_cache", {})
+        self._group_name_cache[remote_jid] = new_name
+
+        self._schedule_save(dirty_jid=remote_jid)
+        self._schedule_set_chats()
 
     def _resolve_missing_group_names(self):
         """Retry group-info lookups for groups still unnamed after sync.
@@ -13664,7 +13823,7 @@ class MainWindow(wx.Frame):
             )
             for msg in records:
                 if msg.get("key", {}).get("id") == msg_id:
-                    msg.setdefault("MessageUpdate", []).append({"status": status})
+                    msg.setdefault("MessageUpdate", []).append({"status": status, "ts": time.time()})
                     found_msg = msg
                     found_chat_jid = chat_jid
                     logging.info(f"[on_message_status_update] Updated status to {status} for msg_id={msg_id} in records of chat={chat_jid}")
@@ -13689,7 +13848,7 @@ class MainWindow(wx.Frame):
                 )
                 for msg in recs:
                     if msg.get("key", {}).get("id") == msg_id:
-                        msg.setdefault("MessageUpdate", []).append({"status": status})
+                        msg.setdefault("MessageUpdate", []).append({"status": status, "ts": time.time()})
                         found_msg = msg
                         found_chat_jid = jid
                         logging.info(
@@ -14143,15 +14302,25 @@ class MainWindow(wx.Frame):
             if incoming_t <= read_at_t:
                 unread_count = 0
             else:
-                # A genuinely new message arrived after the local
-                # read-ack. Ensure unread_count is at least 1 (or preserves local_new / unread_count)
+                # A genuinely new message arrived after the local read-ack.
+                # The server reports an ABSOLUTE total that can still be
+                # counting messages already read locally, so it is clamped
+                # DOWN to what we counted ourselves since the read — min(),
+                # not max(). Flipping this to max() reinstated the exact bug
+                # this whole path exists to prevent: one new message with a
+                # stale server total of 4 showed a badge of 4 instead of 1.
+                #
+                # The zero case is handled first rather than in an elif, so it
+                # survives whether or not local tracking has an entry: a
+                # server-sent 0 must never wipe a badge for messages that
+                # arrived after the read-ack (1:1 WA-JS
+                # chat.unread_count_changed does exactly that), and with
+                # local_new set the old elif could never be reached at all.
                 local_new = getattr(self, "_new_since_read", {}).get(normalized)
-                if local_new:
-                    unread_count = max(unread_count, local_new)
-                elif unread_count == 0 and old_count > 0:
-                    # Prevent 1:1 WA-JS chat.unread_count_changed from force-zeroing a chat
-                    # when new messages arrived after read_at_t.
-                    unread_count = old_count
+                if unread_count == 0 and old_count > 0:
+                    unread_count = local_new or old_count
+                elif local_new:
+                    unread_count = min(unread_count, local_new)
                 self._locally_read_at.pop(normalized, None)
                 if hasattr(self, "_new_since_read"):
                     self._new_since_read.pop(normalized, None)
@@ -15303,20 +15472,26 @@ class MainWindow(wx.Frame):
         return local.split(":", 1)[0]
 
     def is_contact_blocked(self, jid: str) -> bool:
+        # getattr, not a bare attribute access: add_chats_to_ui() can render
+        # a cached/offline chat list before prepare_sync() has reached the
+        # point where it restores _blocked_contacts from the database (e.g.
+        # a re-pairing flow after a stale token), which crashed here with
+        # AttributeError and left the chat list stuck empty.
+        blocked_contacts = getattr(self, "_blocked_contacts", None) or set()
         digits = self._bare_phone_digits(jid)
         if not digits:
             return False
-        if digits in self._blocked_contacts:
+        if digits in blocked_contacts:
             return True
         # Brazilian mobile 8/9-digit interchangeable form — a contact can be
         # blocked under either digit count depending on how WhatsApp/the
         # phone reported it, same tolerance _get_contact_tolerant() applies.
         if digits.startswith("55"):
             if len(digits) == 13 and digits[4] == "9":
-                if (digits[:4] + digits[5:]) in self._blocked_contacts:
+                if (digits[:4] + digits[5:]) in blocked_contacts:
                     return True
             elif len(digits) == 12:
-                if (digits[:4] + "9" + digits[4:]) in self._blocked_contacts:
+                if (digits[:4] + "9" + digits[4:]) in blocked_contacts:
                     return True
         return False
 
@@ -15723,6 +15898,9 @@ class MainWindow(wx.Frame):
 
         Clearing removes the messages and the last-message preview — it must
         NOT remove the conversation itself; that is what "delete chat" does.
+        Starred messages are the one exception — starring is meant to make a
+        message durable, so clearing a chat must not wipe them, matching
+        WhatsApp's own behavior.
         `record_cutoff` is False when we are only mirroring a clear that already
         happened on the phone (no new cutoff to remember, the server is the
         source of truth).
@@ -15730,17 +15908,24 @@ class MainWindow(wx.Frame):
         chat = self.chats.get(jid)
         if not chat:
             return
-        chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
-        chat["lastMessage"] = None
+        records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        starred = [m for m in records if isinstance(m, dict) and m.get("starred")]
+        chat.setdefault("messages", {}).setdefault("messages", {})["records"] = starred
         chat["unreadCount"] = 0
         if record_cutoff:
             self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
             self.save_settings()
         self._schedule_save(dirty_jid=jid)
+        # Recomputes lastMessage/t from the survivors (a kept starred message,
+        # or None/0 if there aren't any) and persists the chat row itself.
+        self._recompute_chat_last_message(jid)
         if hasattr(self, "db") and self.db is not None:
             try:
-                self.db.delete_chat_messages(jid)
-                self.db.upsert_chat(jid, chat)
+                keep_ids = [
+                    m.get("key", {}).get("id", "") for m in starred
+                    if m.get("key", {}).get("id")
+                ]
+                self.db.delete_chat_messages_except(jid, keep_ids)
             except Exception as exc:
                 logging.warning("[clear_chat_messages_local] DB clear failed for %s: %s", jid, exc)
 
@@ -16503,6 +16688,90 @@ class MainWindow(wx.Frame):
             logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
             return False
 
+    def resend_media_message_with_caption(self, msg: dict, target_jid: str) -> bool:
+        """Forward a media message by re-sending it as a new file upload,
+        in order to preserve its caption which WPPConnect's native forward drops.
+        """
+        import os
+        import json
+        from core.utils import decrypt_bytes
+
+        msg_key = msg.get("key", {}) or {}
+        msg_id = msg_key.get("id", "")
+        if not msg_id:
+            return False
+
+        if "_" in msg_id:
+            parts = msg_id.split("_")
+            msg_id = parts[2] if len(parts) > 2 else parts[-1]
+
+        msg_inner = msg.get("message", {})
+        if isinstance(msg_inner, str):
+            try:
+                msg_inner = json.loads(msg_inner)
+            except Exception:
+                msg_inner = {}
+
+        original_caption = ""
+        media_type = ""
+        for key in ["imageMessage", "videoMessage", "documentMessage"]:
+            if key in msg_inner and isinstance(msg_inner[key], dict):
+                original_caption = msg_inner[key].get("caption", "").strip()
+                if key == "imageMessage": media_type = "image"
+                elif key == "videoMessage": media_type = "video"
+                elif key == "documentMessage": media_type = "document"
+                break
+
+        if not media_type:
+            return self.forward_message(msg_key.get("remoteJid", ""), msg_key, target_jid)
+
+        media_path = data_path("media", f"{msg_id}.wzmedia")
+        if not os.path.isfile(media_path):
+            self.output(self.i18n.t("downloading_media"))
+            success = self.handle_media_message(msg)
+            if not success and not os.path.isfile(media_path):
+                logging.error(f"[resend_media] Failed to download media for {msg_id}")
+                return False
+
+        try:
+            with open(media_path, "rb") as f:
+                encrypted_data = f.read()
+            decrypted_data = decrypt_bytes(encrypted_data, self.key)
+
+            import mimetypes as _mimetypes
+            ext = ".bin"
+            if media_type == "document":
+                fname = msg_inner.get("documentMessage", {}).get("fileName", "")
+                if fname:
+                    _, ext2 = os.path.splitext(fname)
+                    if ext2:
+                        ext = ext2
+            else:
+                mime = msg_inner.get(f"{media_type}Message", {}).get("mimetype", "")
+                guessed = _mimetypes.guess_extension(mime.split(";")[0].strip()) if mime else None
+                if guessed:
+                    ext = guessed
+                elif media_type == "image":
+                    ext = ".jpg"
+                elif media_type == "video":
+                    ext = ".mp4"
+
+            temp_path = data_path("media", f"temp_{msg_id}{ext}")
+            with open(temp_path, "wb") as f:
+                f.write(decrypted_data)
+
+            success = self.send_media_attachment(target_jid, temp_path, media_type, caption=original_caption)
+
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+            return success
+        except Exception as exc:
+            logging.error(f"[resend_media] Error decrypting or sending {msg_id}: {exc}")
+            return False
+
     def mark_audio_message_played(self, msg: dict):
         """Mark a received voice message as played, both locally (the
         status icon in the message list, same as a "played" receipt
@@ -16903,9 +17172,26 @@ class MainWindow(wx.Frame):
             content = i18n.t("sticker")
         elif msg_type == "contactMessage":
             contact = msg_obj.get("contactMessage") or {}
-            content = i18n.t("contact_message").format(
-                name=contact.get("displayName") or ""
-            )
+            name = contact.get("displayName") or ""
+            vcard = contact.get("vcard") or ""
+
+            if not name or "BEGIN:VCARD" in name:
+                vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
+                parsed_name = ""
+                for line in vcard_to_parse.splitlines():
+                    if line.startswith("FN:"):
+                        parsed_name = line[3:].strip()
+                        break
+                if parsed_name:
+                    name = parsed_name
+                else:
+                    name = i18n.t("unknown_contact")
+
+            content = i18n.t("contact_message").format(name=name)
+        elif msg_type == "contactsArrayMessage":
+            arr = msg_obj.get("contactsArrayMessage") or {}
+            contacts = arr.get("contacts") or []
+            content = i18n.t("contacts_count").format(count=len(contacts))
         elif msg_type == "locationMessage":
             content = i18n.t("notif_location")
         elif msg_type == "pollCreationMessage":

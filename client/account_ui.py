@@ -22,7 +22,15 @@ import logging
 
 # ── pure helpers (unit-tested, no wx) ────────────────────────────────────────
 
-# Ctrl+Shift+1..9 (NOT Ctrl+Alt — that clashes with AltGr on a PL keyboard).
+# Ctrl+Alt+1..9. Was Ctrl+Shift+1..9 (chosen specifically to avoid Ctrl+Alt,
+# which AltGr reports as on a PL keyboard) until that combo turned out to
+# collide with the pre-existing, non-multi-account message-bookmark-removal
+# shortcut (ConversationsPanel._on_bookmark_remove, Ctrl+Shift+0..9) — the
+# frame-level EVT_CHAR_HOOK this feature needs to work from anywhere in the
+# window (see _on_account_hotkey_char in main.py) intercepts the combo
+# before it can ever reach that panel's own AcceleratorTable, silently
+# breaking bookmark removal for any account count below 9. Moved to
+# Ctrl+Alt+1..9 by deliberate choice despite the AltGr caveat above.
 _MAX_HOTKEY_SLOTS = 9
 
 
@@ -120,6 +128,23 @@ def _wx():
     return wx
 
 
+def _relabel_stock_buttons(dlg, i18n):
+    """wx.TextEntryDialog (and other stock wx.GenericValidationDialog-style
+    dialogs) build their own OK/Cancel buttons internally with no way to pass
+    a label at construction time — they always show wx's own built-in stock
+    string, which is English regardless of WinZapp's own language setting.
+    Re-labels them in place after construction, same fix applied to the
+    plain wx.Button(..., wx.ID_CANCEL)/wx.ID_CLOSE instances elsewhere in
+    this module."""
+    wx = _wx()
+    ok_btn = dlg.FindWindow(wx.ID_OK)
+    if ok_btn is not None:
+        ok_btn.SetLabel(i18n.t("ok"))
+    cancel_btn = dlg.FindWindow(wx.ID_CANCEL)
+    if cancel_btn is not None:
+        cancel_btn.SetLabel(i18n.t("cancel"))
+
+
 class SwitchAccountDialog:
     """Accessible 'Switch account' chooser (plan Zad 4.3).
 
@@ -150,8 +175,10 @@ class SwitchAccountDialog:
         # not the dialog — mixing parents trips wxAssertionError
         # CheckExpectedParentIs and the dialog silently fails to open.
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_ok = wx.Button(panel, wx.ID_OK)
-        self.btn_cancel = wx.Button(panel, wx.ID_CANCEL)
+        # Explicit labels: a stock id with no label= falls back to wx's own
+        # (always-English) stock string regardless of WinZapp's language.
+        self.btn_ok = wx.Button(panel, wx.ID_OK, label=i18n.t("ok"))
+        self.btn_cancel = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
         btns.Add(self.btn_ok, 0, wx.ALL, 4)
         btns.Add(self.btn_cancel, 0, wx.ALL, 4)
         vbox.Add(btns, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
@@ -291,7 +318,7 @@ def build_accounts_menu(menu, accounts, current_account_id, i18n, id_factory):
     id_map: dict = {}
     for slot, acc in accelerator_slots(switchable_accounts(accounts)):
         item_id = id_factory()
-        label = f"&{slot} {acc.get('name', acc['id'])}\tCtrl+Shift+{slot}"
+        label = f"&{slot} {acc.get('name', acc['id'])}\tCtrl+Alt+{slot}"
         item = menu.AppendRadioItem(item_id, label)
         if acc.get("id") == current_account_id:
             item.Check(True)
@@ -335,7 +362,7 @@ class AccountManagerDialog:
         vbox.Add(self.lst, 1, wx.EXPAND | wx.ALL, 8)
         # buttons
         hbox = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_open = wx.Button(panel, label=i18n.t("acc_btn_open") if hasattr(i18n, 't') and i18n.t("acc_btn_open") != "acc_btn_open" else "Abrir")
+        self.btn_open = wx.Button(panel, label=i18n.t("acc_btn_open"))
         self.btn_add = wx.Button(panel, label=i18n.t("acc_btn_add"))
         self.btn_pair = wx.Button(panel, label=i18n.t("acc_btn_pair"))
         self.btn_rename = wx.Button(panel, label=i18n.t("acc_btn_rename"))
@@ -349,7 +376,10 @@ class AccountManagerDialog:
         # Close button parented to the SAME panel as the sizer (wx requires the
         # sizer's managed widgets to share the sizer's window as parent, else
         # wxAssertionError CheckExpectedParentIs and the dialog never shows).
-        self.btn_close = wx.Button(panel, wx.ID_CLOSE)
+        # Explicit label+mnemonic: wx.ID_CLOSE with no label= falls back to wx's
+        # own stock string, which is always English ("Close") regardless of
+        # WinZapp's own language setting.
+        self.btn_close = wx.Button(panel, wx.ID_CLOSE, label=i18n.t("close"))
         vbox.Add(self.btn_close, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         panel.SetSizer(vbox)
         # Panel fills the dialog.
@@ -368,6 +398,8 @@ class AccountManagerDialog:
         self.btn_restore.Bind(wx.EVT_BUTTON, self._on_restore)
         self.btn_delete.Bind(wx.EVT_BUTTON, self._on_delete)
         self.lst.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_open)
+        self.lst.Bind(wx.EVT_LIST_ITEM_SELECTED, lambda e: self._update_button_visibility())
+        self.lst.Bind(wx.EVT_LIST_ITEM_DESELECTED, lambda e: self._update_button_visibility())
         self._reload()
         self.lst.SetFocus()
 
@@ -383,12 +415,33 @@ class AccountManagerDialog:
         if self.lst.GetItemCount():
             self.lst.Select(0)
             self.lst.Focus(0)
+        self._update_button_visibility()
 
     def _selected(self):
         i = self.lst.GetFirstSelected()
         if i < 0 or i >= len(self._rows):
             return None
         return self._rows[i]
+
+    def _update_button_visibility(self):
+        """Show only the actions that actually apply to the selected account
+        — "Abrir"/"Conectar" never make sense for the account already running
+        this process, "Arquivar" never for an already-archived account, and
+        "Restaurar" only ever for one. Reuses the same can_open/can_pair/
+        can_archive guards _on_open/_on_pair/_on_archive already validate
+        against, so a button visible here is guaranteed to actually work
+        instead of popping an error dialog after the click.
+        """
+        acc = self._selected()
+        if acc is None:
+            for b in (self.btn_open, self.btn_pair, self.btn_archive, self.btn_restore):
+                b.Show(False)
+        else:
+            self.btn_open.Show(can_open(acc, self.current)[0])
+            self.btn_pair.Show(can_pair(acc, self.current)[0])
+            self.btn_archive.Show(can_archive(acc, self.current)[0])
+            self.btn_restore.Show(acc.get("state") == "archived")
+        self.btn_open.GetContainingSizer().Layout()
 
     # ── actions ──────────────────────────────────────────────────────────
     def _on_open(self, _e):
@@ -406,7 +459,8 @@ class AccountManagerDialog:
     def _on_add(self, _e):
         wx = _wx()
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_add_prompt"),
-                                 self.i18n.t("acc_btn_add"))
+                                 self.i18n.t("acc_btn_add").replace("&", ""))
+        _relabel_stock_buttons(dlg, self.i18n)
         try:
             if dlg.ShowModal() == wx.ID_OK:
                 name = dlg.GetValue().strip()
@@ -418,7 +472,7 @@ class AccountManagerDialog:
                     # (a pending account is not in the switch list by design).
                     if self._pair_cb and wx.MessageBox(
                             self.i18n.t("acc_pair_now_prompt").format(name=name),
-                            self.i18n.t("acc_btn_pair"),
+                            self.i18n.t("acc_btn_pair").replace("&", ""),
                             wx.YES_NO | wx.ICON_QUESTION) == wx.YES:
                         self._pair_cb(acc["id"])
                         self.dlg.EndModal(wx.ID_CLOSE)
@@ -443,7 +497,8 @@ class AccountManagerDialog:
         if not acc:
             return
         dlg = wx.TextEntryDialog(self.dlg, self.i18n.t("acc_rename_prompt"),
-                                 self.i18n.t("acc_btn_rename"), acc.get("name", ""))
+                                 self.i18n.t("acc_btn_rename").replace("&", ""), acc.get("name", ""))
+        _relabel_stock_buttons(dlg, self.i18n)
         try:
             if dlg.ShowModal() == wx.ID_OK:
                 name = dlg.GetValue().strip()
@@ -485,7 +540,7 @@ class AccountManagerDialog:
             self._error(reason)
             return
         if wx.MessageBox(self.i18n.t("acc_delete_confirm").format(name=acc.get("name", "")),
-                         self.i18n.t("acc_btn_delete"),
+                         self.i18n.t("acc_btn_delete").replace("&", ""),
                          wx.YES_NO | wx.ICON_WARNING) != wx.YES:
             return
         try:

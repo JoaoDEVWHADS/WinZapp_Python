@@ -718,6 +718,57 @@ class TestBulkImportExport:
             count = await in_memory_db.get_message_count(jid)
             assert count == orig_count
 
+    async def test_clear_first_wipes_metadata_by_default(self, in_memory_db, sample_data):
+        """clear_metadata defaults to True — an account switch/logout must
+        not leak cleared/deleted/archived/muted/blocked state into the next
+        account paired."""
+        await in_memory_db.set_metadata_json("deleted_chats", ["a@s.whatsapp.net"])
+        await in_memory_db.import_from_dict(sample_data, clear_first=True)
+
+        assert await in_memory_db.get_metadata_json("deleted_chats", None) is None
+
+    async def test_clear_first_with_clear_metadata_false_preserves_metadata(
+        self, in_memory_db, sample_data
+    ):
+        """Reported live: F5 (resync) reused the same clear_first=True wipe
+        as logout and silently discarded every cleared/deleted/archived/
+        muted/blocked-contact action the user had taken — clear_metadata=
+        False is what MainWindow.clear_local_data(wipe_metadata=False) (the
+        resync path) now passes through to keep that table intact while
+        still wiping chats/messages/contacts for the actual resync."""
+        await in_memory_db.set_metadata_json("deleted_chats", ["a@s.whatsapp.net"])
+        await in_memory_db.set_metadata_json("archived_chats", ["b@s.whatsapp.net"])
+        await in_memory_db.set_metadata_json("blocked_contacts", ["5511999999999"])
+
+        await in_memory_db.import_from_dict(
+            sample_data, clear_first=True, clear_metadata=False
+        )
+
+        assert await in_memory_db.get_metadata_json("deleted_chats", None) == ["a@s.whatsapp.net"]
+        assert await in_memory_db.get_metadata_json("archived_chats", None) == ["b@s.whatsapp.net"]
+        assert await in_memory_db.get_metadata_json("blocked_contacts", None) == ["5511999999999"]
+        # The actual point of the resync still happened — chats/contacts
+        # really were replaced with the freshly imported set.
+        chats = await in_memory_db.get_chats()
+        assert len(chats) == len(sample_data["chats"])
+
+    async def test_clear_metadata_false_still_wipes_chats_and_messages(
+        self, in_memory_db, sample_data
+    ):
+        """clear_metadata only carves out system_metadata — everything else
+        clear_first normally wipes must still be wiped."""
+        await in_memory_db.import_from_dict(sample_data)  # seed with data first
+        other_data = {"chats": {}, "contacts": {}}
+
+        await in_memory_db.import_from_dict(
+            other_data, clear_first=True, clear_metadata=False
+        )
+
+        chats = await in_memory_db.get_chats()
+        assert chats == {}
+        contacts = await in_memory_db.get_contacts()
+        assert contacts == {}
+
 
 # =============================================================================
 #  Structured Concurrency (replaces old thread-safety tests)

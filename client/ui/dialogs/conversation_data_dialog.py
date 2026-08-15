@@ -189,12 +189,17 @@ class ConversationDataDialog(wx.Dialog):
         )
         outer.Add(self._info_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # "Add contact" — always shown for non-group chats.
+        # "Add contact local" / "Edit contact" + "Delete contact" — shown for
+        # non-group chats only. Which pair depends on whether a local
+        # contact (NewContactDialog, isSaved=True) already exists for this
+        # number: showing "Add contact" again over an existing local entry
+        # invited re-creating it from scratch instead of editing/removing it.
+        self._contact_panel = panel
+        self._contact_action_sizer = wx.BoxSizer(wx.VERTICAL)
         jid = self._jid
         if not jid.endswith("@g.us"):
-            add_contact_btn = wx.Button(panel, label=self._i18n.t("add_contact"))
-            add_contact_btn.Bind(wx.EVT_BUTTON, self._on_add_contact)
-            outer.Add(add_contact_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            outer.Add(self._contact_action_sizer, 0, wx.EXPAND)
+            self._populate_contact_action_buttons()
 
         add_to_group_btn = wx.Button(panel, label=self._i18n.t("select_group"))
         add_to_group_btn.Bind(wx.EVT_BUTTON, self._on_add_to_group)
@@ -653,6 +658,50 @@ class ConversationDataDialog(wx.Dialog):
         dlg.ShowModal()
         dlg.Destroy()
 
+    def _resolve_contact_phone_jid(self) -> str:
+        """This chat's JID resolved to its phone form, even when the chat
+        itself is indexed by @lid — main_window.contacts (and the contacts
+        table) is keyed by phone JID, not @lid."""
+        jid = self._jid
+        lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
+        if jid.endswith("@lid") and jid in lid_to_phone:
+            jid = lid_to_phone[jid]
+        return jid
+
+    def _local_contact_entry(self) -> dict | None:
+        """The locally-added contact record (NewContactDialog, isSaved=True)
+        for this chat's number, or None if there isn't one yet."""
+        contact = self._mw.contacts.get(self._resolve_contact_phone_jid())
+        if contact and contact.get("isSaved"):
+            return contact
+        return None
+
+    def _populate_contact_action_buttons(self):
+        """(Re)build the Add/Edit/Delete local-contact button(s) for the
+        current state — called on dialog build and again after any action
+        that adds, edits, or removes the local contact for this number, so
+        the buttons switch immediately without closing/reopening the dialog.
+        """
+        sizer = self._contact_action_sizer
+        sizer.Clear(delete_windows=True)
+        panel = self._contact_panel
+        i18n  = self._i18n
+
+        if self._local_contact_entry() is not None:
+            edit_btn = wx.Button(panel, label=i18n.t("edit_contact_local"))
+            edit_btn.Bind(wx.EVT_BUTTON, self._on_edit_contact)
+            sizer.Add(edit_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+            delete_btn = wx.Button(panel, label=i18n.t("delete_contact_local"))
+            delete_btn.Bind(wx.EVT_BUTTON, self._on_delete_contact)
+            sizer.Add(delete_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        else:
+            add_btn = wx.Button(panel, label=i18n.t("add_contact"))
+            add_btn.Bind(wx.EVT_BUTTON, self._on_add_contact)
+            sizer.Add(add_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        panel.Layout()
+
     def _on_add_contact(self, event):
         """Open NewContactDialog pre-filled with phone and name from this chat."""
         from ui.dialogs.new_contact import NewContactDialog
@@ -660,11 +709,7 @@ class ConversationDataDialog(wx.Dialog):
         parts   = self._name.split(None, 1) if self._name else []
         p_name  = parts[0] if parts else ""
         p_sur   = parts[1] if len(parts) > 1 else ""
-        # Resolve phone: use the phone JID even if this chat is indexed by LID.
-        jid = self._jid
-        lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
-        if jid.endswith("@lid") and jid in lid_to_phone:
-            jid = lid_to_phone[jid]
+        jid = self._resolve_contact_phone_jid()
         dlg = NewContactDialog(
             self._mw, self,
             prefill_phone=format_number(jid),
@@ -674,8 +719,53 @@ class ConversationDataDialog(wx.Dialog):
         result = dlg.ShowModal()
         dlg.Destroy()
         if result == wx.ID_OK:
+            self._populate_contact_action_buttons()
             # Refresh the info panel so the new name is visible.
             threading.Thread(target=self._fetch_data, daemon=True).start()
+
+    def _on_edit_contact(self, event):
+        """Open NewContactDialog pre-filled with the existing local contact's
+        own stored name/surname/phone (not this chat's resolved display
+        name, which can differ once the contact has been edited)."""
+        from ui.dialogs.new_contact import NewContactDialog
+        contact = self._local_contact_entry() or {}
+        stored_name = (contact.get("name") or self._name or "").strip()
+        parts  = stored_name.split(None, 1) if stored_name else []
+        p_name = parts[0] if parts else ""
+        p_sur  = parts[1] if len(parts) > 1 else ""
+        jid = self._resolve_contact_phone_jid()
+        dlg = NewContactDialog(
+            self._mw, self,
+            prefill_phone=format_number(jid),
+            prefill_name=p_name,
+            prefill_surname=p_sur,
+        )
+        dlg.SetTitle(self._i18n.t("edit_contact_local").replace("&", ""))
+        result = dlg.ShowModal()
+        dlg.Destroy()
+        if result == wx.ID_OK:
+            self._populate_contact_action_buttons()
+            threading.Thread(target=self._fetch_data, daemon=True).start()
+
+    def _on_delete_contact(self, event):
+        """Remove the local contact entry for this number (confirmation
+        first — this can't be undone from here)."""
+        i18n = self._i18n
+        if wx.MessageBox(
+            i18n.t("delete_contact_local_confirm_msg").format(name=self._name),
+            i18n.t("delete_contact_local").replace("&", ""),
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            self,
+        ) != wx.YES:
+            return
+        jid = self._resolve_contact_phone_jid()
+        self._mw.contacts.pop(jid, None)
+        try:
+            self._mw.db.delete_contact(jid)
+        except Exception:
+            logging.exception("[conversation_data] Failed to delete local contact")
+        self._populate_contact_action_buttons()
+        threading.Thread(target=self._fetch_data, daemon=True).start()
 
     def _on_add_to_group(self, event):
         """Open SelectGroupDialog to pick a group to add this contact to."""
