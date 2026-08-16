@@ -29,6 +29,7 @@ class PendingMessage:
                  media_path: str = None,
                  media_type: str = None,
                  caption: str = None,
+                 progress_callback=None,
                  contact_info: dict = None,
                  quoted: dict = None,
                  mentioned_jids: list = None):
@@ -42,6 +43,7 @@ class PendingMessage:
         self.media_path    = media_path     # path to attached file (image/video/doc/audio)
         self.media_type    = media_type     # "image"|"video"|"audio"|"document"
         self.caption       = caption or ""  # optional caption for media
+        self.progress_callback = progress_callback
         self.contact_info  = contact_info   # dict for contact attachment
         self.quoted        = quoted         # quoted/replied-to message dict
         self.mentioned_jids = mentioned_jids or []  # JIDs @mentioned in text
@@ -149,7 +151,7 @@ class MessageQueue:
                     elif msg.media_path:
                         real_id = self.main_window.send_media_attachment(
                             msg.jid, msg.media_path, msg.media_type, msg.caption,
-                            quoted=msg.quoted,
+                            quoted=msg.quoted, progress_callback=msg.progress_callback,
                         )
                     elif msg.contact_info:
                         real_id = self.main_window.send_contact_attachment(

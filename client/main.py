@@ -24,6 +24,7 @@ if sys.platform == 'win32':
 
 import shutil
 import socket as _socket
+import io
 
 import subprocess
 import threading
@@ -71,6 +72,23 @@ import logging
 _http_session = requests.Session()
 _orig_get = requests.get
 _orig_post = requests.post
+
+
+class _UploadProgressFile(io.BufferedReader):
+    """File wrapper that reports multipart upload progress as it is read."""
+
+    def __init__(self, raw, size: int, callback):
+        super().__init__(raw)
+        self._size = max(size, 1)
+        self._callback = callback
+        self._uploaded = 0
+
+    def read(self, size=-1):
+        chunk = super().read(size)
+        if chunk:
+            self._uploaded += len(chunk)
+            self._callback(min(self._uploaded / self._size, 1.0))
+        return chunk
 
 def _patched_get(*args, **kwargs):
     return _http_session.get(*args, **kwargs)
@@ -16679,7 +16697,8 @@ class MainWindow(wx.Frame):
 
     def send_media_attachment(
         self, remote_jid: str, file_path: str,
-        media_type: str, caption: str = "", quoted: dict = None
+        media_type: str, caption: str = "", quoted: dict = None,
+        progress_callback=None,
     ) -> bool:
         """
         Upload a file as a media message via multipart/form-data.
@@ -16766,7 +16785,11 @@ class MainWindow(wx.Frame):
                 post_data["isGroup"] = "true"
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
-            with open(upload_path, "rb") as fh:
+            with open(upload_path, "rb") as raw_file:
+                fh = (
+                    _UploadProgressFile(raw_file, file_size, progress_callback)
+                    if progress_callback else raw_file
+                )
                 return requests.post(
                     url,
                     headers=headers,
