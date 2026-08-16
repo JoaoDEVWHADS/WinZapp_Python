@@ -50,6 +50,41 @@ async function returnSucess(res: any, data: any) {
   res.status(201).json({ status: 'success', response: data, mapper: 'return' });
 }
 
+async function watchMediaUpload(req: Request, uploadId: string, contact: string) {
+  if (!uploadId) return;
+  const client: any = req.client;
+  const page = client.page;
+  client.__winzappProgressIo = req.io;
+  if (!client.__winzappProgressBridge) {
+    await page.exposeFunction('__winzappMediaProgress', (payload: any) => {
+      client.__winzappProgressIo?.emit('media-upload-progress', {
+        ...payload,
+        session: client.session,
+      });
+    });
+    client.__winzappProgressBridge = true;
+  }
+  await page.evaluate(({ uploadId, contact }: any) => {
+    const onMessage = (message: any) => {
+      if (!message?.isSentByMe || message?.to?.toString?.() !== contact) return;
+      const report = () => {
+        const stage = message.mediaData?.progressiveStage;
+        const numeric = Number(stage);
+        if (Number.isFinite(numeric)) {
+          (window as any).__winzappMediaProgress({
+            uploadId,
+            progress: numeric > 1 ? Math.min(numeric, 100) / 100 : numeric,
+          });
+        }
+      };
+      message.on('change:mediaData.progressiveStage', report);
+      report();
+      (window as any).WPP.whatsapp.MsgStore.off('add', onMessage);
+    };
+    (window as any).WPP.whatsapp.MsgStore.on('add', onMessage);
+  }, { uploadId, contact });
+}
+
 export async function sendMessage(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Messages"]
@@ -226,6 +261,7 @@ export async function sendFile(req: Request, res: Response) {
     caption,
     quotedMessageId,
     type,
+    uploadId,
   } = req.body;
 
   const options = req.body.options || {};
@@ -241,6 +277,7 @@ export async function sendFile(req: Request, res: Response) {
   try {
     const results: any = [];
     for (const contact of phone) {
+      await watchMediaUpload(req, uploadId, contact);
       results.push(
         await req.client.sendFile(contact, pathFile, {
           filename: filename,
