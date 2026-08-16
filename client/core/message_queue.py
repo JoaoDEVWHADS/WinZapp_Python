@@ -151,7 +151,7 @@ class MessageQueue:
                     elif msg.media_path:
                         real_id = self.main_window.send_media_attachment(
                             msg.jid, msg.media_path, msg.media_type, msg.caption,
-                            quoted=msg.quoted, progress_callback=msg.progress_callback,
+                            quoted=msg.quoted, upload_id=msg.local_id,
                         )
                     elif msg.contact_info:
                         real_id = self.main_window.send_contact_attachment(

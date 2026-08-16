@@ -118,6 +118,7 @@ class WebSocketClient:
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
         self.sio.on("incomingcall", self.on_wpp_incoming_call)
+        self.sio.on("media-upload-progress", self.on_media_upload_progress)
         # These two handlers existed but were never registered — contact
         # name/photo updates and presence changes only ever reached the app
         # through onpresencechanged and the 5-minute contacts poll, so a
@@ -1396,6 +1397,17 @@ class WebSocketClient:
             # diagnosable from the logs instead of a message just vanishing
             # with no trace of why.
             logging.exception("[WebSocketClient] on_wpp_message_received error")
+
+    def on_media_upload_progress(self, data):
+        if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            return
+        try:
+            upload_id = str(data.get("uploadId") or "")
+            progress = float(data.get("progress"))
+            if upload_id and 0 <= progress <= 1:
+                wx.CallAfter(self.main_window.on_media_upload_progress, upload_id, progress)
+        except (TypeError, ValueError):
+            return
 
     def on_wpp_reaction(self, data):
         try:

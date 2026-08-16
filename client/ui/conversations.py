@@ -7528,6 +7528,10 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 break
 
+    def update_media_upload_progress(self, upload_id: str, progress: float):
+        if any(msg.get("_local_id") == upload_id for msg in self._sorted_messages):
+            self._update_media_transfer_gauge(progress)
+
     def _show_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge is None:
