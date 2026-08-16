@@ -17076,18 +17076,26 @@ class MainWindow(wx.Frame):
 
     @staticmethod
     def media_duration_of(msg: dict):
-        """Length in seconds of an audio/video message, or None if unknown."""
+        """Length in seconds of an audio/video message, or None if unknown.
+
+        0 is a real answer, not a missing one: a voice note under a second
+        reports 0 and WhatsApp shows "0:00" for it. Only an absent or
+        unparseable value is None, so forwarding one of those very short
+        notes carries its 0 across instead of leaving the copy blank.
+        """
         if not isinstance(msg, dict):
             return None
         body = msg.get("message") or {}
         for key in ("audioMessage", "videoMessage"):
             part = body.get(key)
             if isinstance(part, dict):
+                raw = part.get("seconds")
+                if raw is None or raw == "":
+                    return None
                 try:
-                    seconds = int(part.get("seconds") or 0)
+                    return int(raw)
                 except (TypeError, ValueError):
                     return None
-                return seconds or None
         return None
 
     @staticmethod
@@ -17133,8 +17141,8 @@ class MainWindow(wx.Frame):
         with the real length, so it is remembered against the new message's
         id and applied when the echo shows up.
         """
-        if not seconds:
-            return
+        if seconds is None:
+            return          # 0 is worth remembering; "unknown" is not
         store = getattr(self, "_forwarded_media_seconds", None)
         if store is None:
             store = self._forwarded_media_seconds = {}
@@ -17152,11 +17160,14 @@ class MainWindow(wx.Frame):
             return False
         msg_id = (msg.get("key") or {}).get("id", "")
         seconds = store.pop(msg_id, None) if msg_id else None
-        if not seconds:
+        if seconds is None:
             return False
         body = msg.get("message") or {}
         for key in ("audioMessage", "videoMessage"):
             part = body.get(key)
+            # Applied whenever the echo has no usable length of its own. The
+            # value comes from the very same media, so it cannot contradict
+            # a real one — and a stored 0 from before this fix gets repaired.
             if isinstance(part, dict) and not part.get("seconds"):
                 part["seconds"] = seconds
                 return True

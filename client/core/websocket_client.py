@@ -48,6 +48,30 @@ def ack_to_status(wpp_ack):
     return _ACK_TO_STATUS.get(wpp_ack)
 
 
+def _media_seconds(wpp_msg: dict):
+    """Duration in whole seconds, or None when the payload never stated one.
+
+    None and 0 are different answers and must stay that way. A voice note
+    shorter than a second legitimately reports 0 — WhatsApp itself shows
+    "0:00" for those — while a message whose duration simply never arrived
+    (a forwarded media message echoed over the live socket, issue #43) has
+    no duration at all. Writing 0 for both made the second case look like
+    the first, so the UI stated a length that was certainly wrong instead of
+    staying quiet about one it did not know.
+    """
+    dur = wpp_msg.get("duration")
+    if dur is None:
+        dur = wpp_msg.get("seconds")
+    if dur is None and isinstance(wpp_msg.get("mediaData"), dict):
+        dur = wpp_msg["mediaData"].get("duration")
+    if dur is None or dur == "":
+        return None
+    try:
+        return int(float(dur))
+    except (TypeError, ValueError):
+        return None
+
+
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
@@ -1449,13 +1473,7 @@ class WebSocketClient:
                 }
             }
         elif msg_type in ("audio", "ptt"):
-            dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
-            if not dur and isinstance(wpp_msg.get("mediaData"), dict):
-                dur = wpp_msg.get("mediaData", {}).get("duration")
-            try:
-                seconds_val = int(float(dur)) if dur else 0
-            except Exception:
-                seconds_val = 0
+            seconds_val = _media_seconds(wpp_msg)
             message_content = {
                 "audioMessage": {
                     "url": wpp_msg.get("clientUrl", ""),
@@ -1494,13 +1512,7 @@ class WebSocketClient:
                 }
             }
         elif msg_type == "video":
-            dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
-            if not dur and isinstance(wpp_msg.get("mediaData"), dict):
-                dur = wpp_msg.get("mediaData", {}).get("duration")
-            try:
-                seconds_val = int(float(dur)) if dur else 0
-            except Exception:
-                seconds_val = 0
+            seconds_val = _media_seconds(wpp_msg)
             vid_caption = wpp_msg.get("caption", "") or ""
             if looks_like_binary_blob(vid_caption):
                 vid_caption = ""

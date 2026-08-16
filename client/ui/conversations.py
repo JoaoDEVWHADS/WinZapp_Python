@@ -5386,12 +5386,15 @@ class ConversationsPanel(wx.Panel):
     def _format_duration(self, seconds):
         """Human-readable length, or "" when it isn't known.
 
-        Zero counts as unknown, not as a real length: no voice note, audio
-        file or video is genuinely 0 seconds long, so a 0 here always means
-        the sender's metadata never reached us (issue #43: a forwarded media
-        message arrives over the live socket without its duration). Callers
-        treat "" as "omit the duration clause", which is far better than
-        stating a length that is certainly wrong.
+        None means "never told us" — a forwarded media message arrives over
+        the live socket with no duration on it (issue #43) — and callers
+        treat "" as "omit the duration clause", which beats stating a length
+        that is certainly wrong.
+
+        Zero is NOT that case: a voice note shorter than a second really does
+        report 0, and WhatsApp itself shows "0:00" for those. It is formatted
+        like any other length. Only a negative value, which no medium has, is
+        folded back into "unknown".
         """
         if seconds is None:
             return ""
@@ -5399,7 +5402,7 @@ class ConversationsPanel(wx.Panel):
             seconds = int(seconds)
         except (ValueError, TypeError):
             return ""
-        if seconds <= 0:
+        if seconds < 0:
             return ""
         i18n = self.main_window.i18n
         if seconds < 60:

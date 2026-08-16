@@ -16,9 +16,10 @@ Fixed from both ends:
 * the length is taken from the source message (which is in memory, correct,
   at the moment of forwarding) and grafted onto the copy when its echo
   arrives, keyed by the id the forward API reports;
-* a duration of 0 stops being rendered at all. No voice note, audio or video
-  is genuinely zero seconds long, so a 0 always means "we were never told",
-  and omitting the clause beats stating a length that is certainly wrong.
+* "we were never told" stops being written down as 0. A voice note under a
+  second really does report 0 — WhatsApp shows "0:00" for those — so the two
+  answers are kept apart: the normalizer leaves the field absent when the
+  payload stated nothing, and only an absent value omits the duration clause.
   That second half also covers any media whose echo the id matching misses.
 
 MainWindow/ConversationsPanel are wx classes and cannot be instantiated
@@ -61,11 +62,17 @@ class TestReadingTheSourceDuration:
         {"message": {}},
         {"message": {"conversation": "oi"}},
         {"message": {"audioMessage": {}}},
-        {"message": {"audioMessage": {"seconds": 0}}},
+        {"message": {"audioMessage": {"seconds": None}}},
+        {"message": {"audioMessage": {"seconds": ""}}},
         {"message": {"audioMessage": {"seconds": "abc"}}},
     ])
     def test_unknown_length_is_none(self, msg):
         assert MainWindow.media_duration_of(msg) is None
+
+    def test_a_sub_second_voice_note_reports_a_real_zero(self):
+        """Those very quick voice notes: 0 is the length, not a missing
+        value, and it has to survive the forward like any other."""
+        assert MainWindow.media_duration_of(_audio(seconds=0)) == 0
 
 
 class TestReadingTheForwardResponse:
@@ -202,9 +209,14 @@ class _Panel:
         self.main_window = type("MW", (), {"i18n": _FakeI18n()})()
 
 
-class TestAZeroDurationIsNeverStated:
-    def test_zero_formats_as_unknown(self):
-        assert _Panel()._format_duration(0) == ""
+class TestUnknownAndZeroAreDifferentAnswers:
+    def test_zero_is_a_real_length(self):
+        """A voice note shorter than a second — WhatsApp shows "0:00"; the
+        duration must be stated, not swallowed."""
+        assert _Panel()._format_duration(0) == "0 segundos"
+
+    def test_none_is_unknown_and_omits_the_clause(self):
+        assert _Panel()._format_duration(None) == ""
 
     def test_negative_formats_as_unknown(self):
         assert _Panel()._format_duration(-5) == ""
@@ -219,3 +231,48 @@ class TestAZeroDurationIsNeverStated:
     @pytest.mark.parametrize("value", [None, "", "abc", [], {}])
     def test_unusable_values_stay_unknown(self, value):
         assert _Panel()._format_duration(value) == ""
+
+
+class TestTheNormalizerKeepsTheTwoAnswersApart:
+    """core.websocket_client._media_seconds — where the distinction is made.
+
+    It used to write 0 whenever it could not find a duration, which is what
+    turned "nobody told us" into a stated length of zero. Now an absent value
+    stays absent, and a stated 0 stays 0.
+    """
+
+    reads = staticmethod(__import__("core.websocket_client", fromlist=["_media_seconds"])._media_seconds)
+
+    @pytest.mark.parametrize("payload,expected", [
+        ({"duration": 67}, 67),
+        ({"duration": "67"}, 67),
+        ({"duration": 67.9}, 67),
+        ({"seconds": 42}, 42),
+        ({"mediaData": {"duration": 15}}, 15),
+    ])
+    def test_a_stated_length_is_read(self, payload, expected):
+        assert self.reads(payload) == expected
+
+    @pytest.mark.parametrize("payload", [
+        {"duration": 0},
+        {"seconds": 0},
+        {"mediaData": {"duration": 0}},
+    ])
+    def test_a_stated_zero_survives_as_zero(self, payload):
+        """The sub-second voice note. Before, `or` treated this exactly like
+        a missing field and it came out as 0-meaning-unknown."""
+        assert self.reads(payload) == 0
+
+    @pytest.mark.parametrize("payload", [
+        {},
+        {"duration": None},
+        {"duration": ""},
+        {"duration": "abc"},
+        {"mediaData": "not a dict"},
+    ])
+    def test_a_missing_or_unusable_length_is_none(self, payload):
+        assert self.reads(payload) is None
+
+    def test_the_forwarded_echo_shape_yields_none(self):
+        """Issue #43's payload: a media message with no duration anywhere."""
+        assert self.reads({"clientUrl": "https://x", "mimetype": "audio/ogg"}) is None
