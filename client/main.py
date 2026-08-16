@@ -16698,7 +16698,7 @@ class MainWindow(wx.Frame):
     def send_media_attachment(
         self, remote_jid: str, file_path: str,
         media_type: str, caption: str = "", quoted: dict = None,
-        progress_callback=None,
+        progress_callback=None, upload_id: str = "",
     ) -> bool:
         """
         Upload a file as a media message via multipart/form-data.
@@ -16754,6 +16754,7 @@ class MainWindow(wx.Frame):
             "filename": filename,
             "caption":  caption,
             "type":     _wpp_type,
+            "uploadId": upload_id,
         }
         if quoted:
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
@@ -16874,6 +16875,10 @@ class MainWindow(wx.Frame):
                     os.unlink(converted_audio_path)
                 except OSError:
                     pass
+
+    def on_media_upload_progress(self, upload_id: str, progress: float):
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel.update_media_upload_progress(upload_id, progress)
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
