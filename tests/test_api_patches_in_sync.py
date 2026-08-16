@@ -127,22 +127,34 @@ def test_the_in_app_installer_restores_the_same_patches():
         assert f'"{rel_path}"' in src, f"ApiSetupDialog does not restore {rel_path}"
 
 
-def test_installers_do_not_hardcode_dependency_names():
-    """All package selection belongs to api_patches/package.json."""
+def test_both_installers_patch_the_same_dependencies():
+    """package.json is merged, not copied, by both flows — but only setup_api.py
+    used to do it at all, so every end-user install ran npm install against the
+    vanilla upstream file and never got the ffmpeg dependency it actually needs."""
     setup = (ROOT / "setup_api.py").read_text(encoding="utf-8")
     dialog = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-    for dependency in ("@ffmpeg-installer/ffmpeg", "express", "sharp", "release-it"):
-        assert dependency not in setup
-        assert dependency not in dialog
+    assert '"@ffmpeg-installer/ffmpeg"' in setup
+    assert '"@ffmpeg-installer/ffmpeg"' in dialog, "ApiSetupDialog does not patch @ffmpeg-installer/ffmpeg"
 
 
-def test_dependency_versions_exist_only_in_the_central_manifest():
+def test_wppconnect_itself_is_no_longer_pinned():
+    """@wppconnect-team/wppconnect used to be forced to an exact version here,
+    and that went stale within days: this dependency releases multiple times a
+    week, and wppconnect-server's own package.json had already moved on to a
+    newer requirement than what WinZapp had frozen — silently running an
+    incompatible pairing with no error anywhere. Neither installer may
+    reintroduce that pin; upstream's own declared range must win, exactly like
+    every other dependency this file does not name."""
     setup = (ROOT / "setup_api.py").read_text(encoding="utf-8")
     dialog = (ROOT / "client" / "ui" / "dialogs" / "api_setup.py").read_text(encoding="utf-8")
-    assert "_PATCHED_DEPENDENCY_KEYS" not in setup
-    assert "_PATCHED_DEPENDENCY_KEYS" not in dialog
-    manifest = json.loads((PATCHES / "package.json").read_text(encoding="utf-8"))
-    assert "@wppconnect-team/wppconnect" in manifest["dependencies"]
+
+    def _patched_keys(src: str, list_name: str) -> str:
+        start = src.index(f"{list_name} = [")
+        end = src.index("]", start)
+        return src[start:end]
+
+    assert "@wppconnect-team/wppconnect" not in _patched_keys(setup, "_PATCHED_DEPENDENCY_KEYS")
+    assert "@wppconnect-team/wppconnect" not in _patched_keys(dialog, "_PATCHED_DEPENDENCY_KEYS")
 
 
 def test_fluent_ffmpeg_is_gone_everywhere():
@@ -287,7 +299,12 @@ class TestPackageJsonMerge:
         out = json.loads((api / "package.json").read_text(encoding="utf-8"))
         assert out["dependencies"]["@ffmpeg-installer/ffmpeg"] == "^1.1.0"
 
-    def test_wppconnect_comes_from_the_central_manifest(self, tmp_path):
+    def test_wppconnect_itself_is_never_touched_by_the_merge(self, tmp_path):
+        """The whole point of unpinning it: whatever range the real download
+        declared must survive completely untouched, even if api_patches/
+        package.json still happens to mention the key (e.g. as a leftover
+        reference) — it must not be in _PATCHED_DEPENDENCY_KEYS, so the merge
+        never looks at it."""
         api, patches = self._setup_dirs(
             tmp_path,
             {"version": "2.10.1", "dependencies": {"@wppconnect-team/wppconnect": "^2.2.6"}},
@@ -295,7 +312,10 @@ class TestPackageJsonMerge:
         )
         self._dialog()._merge_package_json_dependencies(str(api), str(patches))
         out = json.loads((api / "package.json").read_text(encoding="utf-8"))
-        assert out["dependencies"]["@wppconnect-team/wppconnect"] == "2.2.4"
+        assert out["dependencies"]["@wppconnect-team/wppconnect"] == "^2.2.6", (
+            "the merge must never override @wppconnect-team/wppconnect — "
+            "it is not (and must not become) a patched key"
+        )
 
     def test_the_downloaded_version_field_is_never_overwritten(self, tmp_path):
         """WppUpdateChecker compares this against the latest GitHub release — it
@@ -309,7 +329,9 @@ class TestPackageJsonMerge:
         self._dialog()._merge_package_json_dependencies(str(api), str(patches))
         assert json.loads((api / "package.json").read_text(encoding="utf-8"))["version"] == "2.10.1"
 
-    def test_all_dependencies_come_from_the_central_manifest(self, tmp_path):
+    def test_other_upstream_dependencies_are_left_alone(self, tmp_path):
+        """A wholesale copy would roll every unrelated dependency back to
+        whatever api_patches/ happened to freeze."""
         api, patches = self._setup_dirs(
             tmp_path,
             {"version": "2.10.1", "dependencies": {"express": "4.22.1", "axios": "^1.14.0"}},
@@ -317,8 +339,8 @@ class TestPackageJsonMerge:
         )
         self._dialog()._merge_package_json_dependencies(str(api), str(patches))
         deps = json.loads((api / "package.json").read_text(encoding="utf-8"))["dependencies"]
-        assert deps["express"] == "4.0.0"
-        assert "axios" not in deps
+        assert deps["express"] == "4.22.1", "express is not a patched key"
+        assert deps["axios"] == "^1.14.0"
 
     def test_a_missing_package_json_is_not_fatal(self, tmp_path):
         api = tmp_path / "api"
@@ -346,7 +368,10 @@ class TestPackageJsonMerge:
         out = json.loads((api / "package.json").read_text(encoding="utf-8"))
         assert out["version"] == "9.9.9"
         assert "@ffmpeg-installer/ffmpeg" in out["dependencies"]
-        assert "@wppconnect-team/wppconnect" in out["dependencies"]
+        assert "@wppconnect-team/wppconnect" not in out["dependencies"], (
+            "the real api_patches/package.json must not (re-)declare this key, "
+            "or a future _PATCHED_DEPENDENCY_KEYS edit could start pinning it again"
+        )
 
 
 def test_patched_dependencies_are_present_in_the_live_package_json():
@@ -366,14 +391,20 @@ def test_patched_dependencies_are_present_in_the_live_package_json():
     )
 
 
-def test_live_wppconnect_matches_the_central_manifest():
-    """The installed WPPConnect source must match the central manifest."""
+def test_wppconnect_is_not_frozen_in_the_live_package_json():
+    """Regression guard for the original bug report: client/api/package.json
+    must track whatever range wppconnect-server's own upstream package.json
+    declares, not a value someone hardcoded here at some point in the past.
+    This can't assert a specific version (upstream releases constantly), only
+    that it's a caret range rather than the old exact pin."""
     live = API / "package.json"
     if not live.exists():
         pytest.skip("client/api/package.json not present")
-    live_deps = json.loads(live.read_text(encoding="utf-8"))["dependencies"]
-    central_deps = json.loads(
-        (PATCHES / "package.json").read_text(encoding="utf-8")
-    )["dependencies"]
-    key = "@wppconnect-team/wppconnect"
-    assert live_deps[key] == central_deps[key]
+    deps = json.loads(live.read_text(encoding="utf-8")).get("dependencies", {})
+    version = deps.get("@wppconnect-team/wppconnect", "")
+    assert version.startswith("^"), (
+        f"@wppconnect-team/wppconnect is pinned to an exact version ({version!r}) "
+        f"in client/api/package.json — this is exactly the bug that made a real "
+        f"clone of wppconnect-server 2.10.1 (which wants ^2.2.6) run against a "
+        f"stale, incompatible 2.2.4. Let it float on upstream's own range."
+    )
