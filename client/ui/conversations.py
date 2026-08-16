@@ -9152,7 +9152,7 @@ class ConversationsPanel(wx.Panel):
         remote_jid = self.conversation.get("remoteJid", "")
         if not remote_jid:
             return
-        caption = self._caption_field.GetValue().strip()
+        caption = self._consume_attachment_caption()
 
         _VTYPE = {
             "image":    "imageMessage",
@@ -9253,6 +9253,12 @@ class ConversationsPanel(wx.Panel):
         self.main_window._schedule_set_chats()
 
     # ── Contact message helpers ──────────────────────────────────────────────
+
+    def _consume_attachment_caption(self) -> str:
+        """Return the staged caption and clear it for the next attachment."""
+        caption = self._caption_field.GetValue().strip()
+        self._caption_field.Clear()
+        return caption
 
     def _jid_from_vcard(self, vcard: str) -> str | None:
         """Extract the WhatsApp JID from a vCard string."""
