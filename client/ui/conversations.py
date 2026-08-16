@@ -534,6 +534,17 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._media_bitmap, 0, wx.ALIGN_LEFT | wx.LEFT | wx.BOTTOM, 5)
         self._media_bitmap.Hide()
 
+        self._media_transfer_gauge = wx.Gauge(
+            self.conversation_panel, range=100, style=wx.GA_HORIZONTAL
+        )
+        conv_sizer.Add(
+            self._media_transfer_gauge, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
+        )
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge:
+            gauge.Hide()
+
         # ── Action buttons (document / image / video) ───────────────────────
         self._action_open_btn = wx.Button(
             self.conversation_panel, label=i18n.t("open")
@@ -1805,6 +1816,7 @@ class ConversationsPanel(wx.Panel):
         message's reply contextInfo is dropped so the row stops reading as a
         reply — the quote never actually reached the recipient.
         """
+        self._hide_media_transfer_gauge()
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)
@@ -1889,6 +1901,7 @@ class ConversationsPanel(wx.Panel):
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
+        self._hide_media_transfer_gauge()
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
@@ -1907,6 +1920,7 @@ class ConversationsPanel(wx.Panel):
         as "sending" forever before, which reads as success once the spinner
         stops meaning anything.
         """
+        self._hide_media_transfer_gauge()
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"]     = False
@@ -3191,6 +3205,9 @@ class ConversationsPanel(wx.Panel):
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
         self._action_download_btn.Hide()
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge:
+            gauge.Hide()
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
         self._contact_msg_jid = None
@@ -5447,18 +5464,30 @@ class ConversationsPanel(wx.Panel):
 
         mw.output(i18n.t("downloading"))
         self._action_download_btn.Disable()
+        self._show_media_transfer_gauge()
+
+        last_percent = -1
+
+        def _update_download_progress(progress):
+            nonlocal last_percent
+            percent = int(progress * 100)
+            if percent == last_percent:
+                return
+            last_percent = percent
+            wx.CallAfter(self.update_message_download_progress, msg_id, progress)
 
         def _run():
             try:
                 if msg_type == "audioMessage":
                     mw.handle_audio_message(msg)
                 else:
-                    mw.handle_media_message(msg)
+                    mw.handle_media_message(msg, progress_callback=_update_download_progress)
             except Exception:
                 pass
 
             def _done():
                 self._action_download_btn.Enable()
+                self._hide_media_transfer_gauge()
                 if os.path.isfile(media_path) and os.path.getsize(media_path) > 0:
                     # File ready — swap Download for Open + Save As
                     self._action_download_btn.Hide()
@@ -7489,10 +7518,35 @@ class ConversationsPanel(wx.Panel):
         download progress changes.  Refreshes the relevant row in the list.
         """
         self._download_progress[msg_id] = progress
+        self._update_media_transfer_gauge(progress)
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 break
+
+    def _show_media_transfer_gauge(self):
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.SetValue(0)
+        gauge.Show()
+        self.conversation_panel.Layout()
+
+    def _update_media_transfer_gauge(self, progress: float):
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.SetValue(max(0, min(100, round(progress * 100))))
+        if not gauge.IsShown():
+            gauge.Show()
+            self.conversation_panel.Layout()
+
+    def _hide_media_transfer_gauge(self):
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.Hide()
+        self.conversation_panel.Layout()
 
     # ── Ctrl+Shift+D / Ctrl+Shift+P dispatch ────────────────────────────────
 
@@ -10651,10 +10705,13 @@ class ConversationsPanel(wx.Panel):
             last = self.messages_list.GetItemCount() - 1
             if last >= 0:
                 self.messages_list.EnsureVisible(last)
+            def _update_upload_progress(progress, local_id=local_id):
+                wx.CallAfter(self._update_media_transfer_gauge, progress)
+
             pm = PendingMessage(
                 local_id, remote_jid,
                 media_path=path, media_type=media_type, caption=caption,
-                quoted=quoted,
+                quoted=quoted, progress_callback=_update_upload_progress,
             )
             self._register_virtual_msg(virtual_msg)
 
@@ -10669,6 +10726,8 @@ class ConversationsPanel(wx.Panel):
                 self.main_window.message_queue.enqueue(pm)
 
             threading.Thread(target=_cache_then_enqueue, daemon=True).start()
+
+            self._show_media_transfer_gauge()
 
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
