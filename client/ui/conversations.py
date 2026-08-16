@@ -5384,11 +5384,22 @@ class ConversationsPanel(wx.Panel):
         return None
 
     def _format_duration(self, seconds):
+        """Human-readable length, or "" when it isn't known.
+
+        Zero counts as unknown, not as a real length: no voice note, audio
+        file or video is genuinely 0 seconds long, so a 0 here always means
+        the sender's metadata never reached us (issue #43: a forwarded media
+        message arrives over the live socket without its duration). Callers
+        treat "" as "omit the duration clause", which is far better than
+        stating a length that is certainly wrong.
+        """
         if seconds is None:
             return ""
         try:
             seconds = int(seconds)
         except (ValueError, TypeError):
+            return ""
+        if seconds <= 0:
             return ""
         i18n = self.main_window.i18n
         if seconds < 60:
@@ -5558,7 +5569,9 @@ class ConversationsPanel(wx.Panel):
                 # Animated GIF — treat identically to sticker
                 return i18n.t("sticker")
             dur = self._format_duration(video.get("seconds"))
-            base = f"{i18n.t('video')}, {i18n.t('duration')}: {dur}"
+            # Same as the audio branch: an unknown length omits the clause
+            # instead of reading "duração: " with nothing after the colon.
+            base = f"{i18n.t('video')}, {i18n.t('duration')}: {dur}" if dur else i18n.t("video")
             caption = (video.get("caption") or "").strip()
             return f"{base}, {caption}" if caption else base
 
@@ -7525,7 +7538,7 @@ class ConversationsPanel(wx.Panel):
             if keep_caption:
                 success = mw.resend_media_message_with_caption(msg, jid)
             else:
-                success = mw.forward_message(source_jid, msg_key, jid)
+                success = mw.forward_message(source_jid, msg_key, jid, source_msg=msg)
             if not success:
                 failed.append(name)
         return failed

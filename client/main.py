@@ -4258,6 +4258,11 @@ class MainWindow(wx.Frame):
         if self._is_cleared_message(remote_jid, msg):
             return
 
+        # A message we just forwarded arrives here with no duration on it —
+        # graft back the length taken from the source before it is stored or
+        # rendered (see _remember_forwarded_duration).
+        self.apply_forwarded_duration(msg)
+
         # Slim any bloated quoted-message payload before persisting.
         prune_message_record(msg)
         records.append(msg)
@@ -17065,7 +17070,100 @@ class MainWindow(wx.Frame):
             logging.error("[delete_for_me] exception for %s: %s", full_id, exc)
             return False
 
-    def forward_message(self, source_jid: str, msg_key: dict, target_jid: str) -> bool:
+    # Media duration WhatsApp's own forward does not echo back, keyed by the
+    # id of the message it created. See _remember_forwarded_duration().
+    _MAX_FORWARDED_DURATIONS = 64
+
+    @staticmethod
+    def media_duration_of(msg: dict):
+        """Length in seconds of an audio/video message, or None if unknown."""
+        if not isinstance(msg, dict):
+            return None
+        body = msg.get("message") or {}
+        for key in ("audioMessage", "videoMessage"):
+            part = body.get(key)
+            if isinstance(part, dict):
+                try:
+                    seconds = int(part.get("seconds") or 0)
+                except (TypeError, ValueError):
+                    return None
+                return seconds or None
+        return None
+
+    @staticmethod
+    def forwarded_message_ids(response_body) -> list:
+        """Bare message ids out of a /forward-messages response.
+
+        forwardMessagesV2 answers with the messages it created, but its
+        wrapper types them as Array<any> and the id shows up either as a
+        serialized "true_<chat>_<ID>" string or as {"id": {"_serialized":
+        ...}}. Both shapes are read here, and anything unrecognised yields
+        no ids at all — the caller then simply learns nothing, which is the
+        behaviour that existed before.
+        """
+        items = response_body
+        if isinstance(items, dict):
+            items = items.get("response", items)
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            return []
+        ids = []
+        for item in items:
+            raw = item
+            if isinstance(item, dict):
+                raw = item.get("id") or item.get("messageId") or ""
+            if isinstance(raw, dict):
+                raw = raw.get("_serialized") or raw.get("id") or ""
+            if not isinstance(raw, str) or not raw:
+                continue
+            # "true_<chat>_<ID>[_<participant>]" -> "<ID>"
+            parts = raw.split("_")
+            ids.append(parts[2] if len(parts) > 2 else parts[-1])
+        return [i for i in ids if i]
+
+    def _remember_forwarded_duration(self, response_body, seconds: int):
+        """Record the duration to graft onto the forwarded copy's echo.
+
+        WhatsApp's own forward is done server-side, so the copy in the
+        destination chat reaches WinZapp as a plain live message — and that
+        live payload arrives with no duration on it (issue #43: the message
+        showed "0 segundos" until a full resync replaced it with the
+        server's correct value). The source message is right here in memory
+        with the real length, so it is remembered against the new message's
+        id and applied when the echo shows up.
+        """
+        if not seconds:
+            return
+        store = getattr(self, "_forwarded_media_seconds", None)
+        if store is None:
+            store = self._forwarded_media_seconds = {}
+        for msg_id in self.forwarded_message_ids(response_body):
+            store[msg_id] = seconds
+        # Bounded: an id whose echo never arrives must not pin memory for the
+        # rest of the session.
+        while len(store) > self._MAX_FORWARDED_DURATIONS:
+            store.pop(next(iter(store)))
+
+    def apply_forwarded_duration(self, msg: dict) -> bool:
+        """Fill in a forwarded media message's missing duration. True if applied."""
+        store = getattr(self, "_forwarded_media_seconds", None)
+        if not store or not isinstance(msg, dict):
+            return False
+        msg_id = (msg.get("key") or {}).get("id", "")
+        seconds = store.pop(msg_id, None) if msg_id else None
+        if not seconds:
+            return False
+        body = msg.get("message") or {}
+        for key in ("audioMessage", "videoMessage"):
+            part = body.get(key)
+            if isinstance(part, dict) and not part.get("seconds"):
+                part["seconds"] = seconds
+                return True
+        return False
+
+    def forward_message(self, source_jid: str, msg_key: dict, target_jid: str,
+                        source_msg: dict = None) -> bool:
         """Forward a message of any type (text, media, document, …) via
         POST /api/session/forward-messages, which wraps WPP.chat.forwardMessagesV2
         — the real WhatsApp forward, so it carries over media/captions/etc.
@@ -17098,6 +17196,14 @@ class MainWindow(wx.Frame):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
             if r.status_code in (200, 201):
+                try:
+                    self._remember_forwarded_duration(
+                        r.json(), self.media_duration_of(source_msg)
+                    )
+                except Exception:
+                    # Learning the duration is a bonus, never a reason to
+                    # report a delivered forward as failed.
+                    logging.debug("[forward_message] could not read forwarded ids", exc_info=True)
                 return True
             logging.error("[forward_message] HTTP %s for %s -> %s: %s",
                           r.status_code, full_id, target_phone, r.text[:300])
