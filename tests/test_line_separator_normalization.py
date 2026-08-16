@@ -10,7 +10,7 @@ recipient. So the same text looks fine (or collapses to one line) in the
 field and arrives on the other side full of weird breaks.
 
 The fix normalizes these to plain \n in two places: when pasting into the
-message field (_on_message_field_paste) and again at send time
+message field (_on_text_field_paste) and again at send time
 (on_send_message) as a safety net for text that reaches the field by any
 other route. normalize_line_separators() in core/utils.py does the actual
 mapping; the paste handler is exercised with a real wx.TextCtrl (WriteText
@@ -73,11 +73,19 @@ class TestSendPathCallsNormalization:
 
 
 class _FakeKeyEvent:
-    def __init__(self):
+    """The handler now works off the control that raised the event, so the
+    fake has to carry one — that is what lets a single handler serve the
+    message field and the attachment caption."""
+
+    def __init__(self, target=None):
         self.skipped = False
+        self._target = target
 
     def Skip(self):
         self.skipped = True
+
+    def GetEventObject(self):
+        return self._target
 
 
 class _FakeMentionPanel:
@@ -86,12 +94,13 @@ class _FakeMentionPanel:
 
 
 class _Stub:
-    _on_message_field_paste = ConversationsPanel._on_message_field_paste
+    _on_text_field_paste = ConversationsPanel._on_text_field_paste
 
     def __init__(self, frame):
         self.message_field = wx.TextCtrl(
             frame, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP
         )
+        self._caption_field = wx.TextCtrl(frame, style=wx.TE_PROCESS_ENTER)
 
 
 class TestPasteNormalization:
@@ -105,7 +114,7 @@ class TestPasteNormalization:
             else:
                 pytest.skip("clipboard unavailable")
 
-            stub._on_message_field_paste(_FakeKeyEvent())
+            stub._on_text_field_paste(_FakeKeyEvent(stub.message_field))
 
             assert stub.message_field.GetValue() == "A\nB\nC"
             assert stub.message_field.GetNumberOfLines() == 3
@@ -122,8 +131,8 @@ class TestPasteNormalization:
             else:
                 pytest.skip("clipboard unavailable")
 
-            event = _FakeKeyEvent()
-            stub._on_message_field_paste(event)
+            event = _FakeKeyEvent(stub.message_field)
+            stub._on_text_field_paste(event)
 
             # Plain text is delegated to the native paste (Skip), which the
             # handler must not itself touch — the assertion is the delegation
@@ -132,3 +141,73 @@ class TestPasteNormalization:
             assert stub.message_field.GetValue() == ""
         finally:
             frame.Destroy()
+
+
+class TestEveryOtherFieldThatReachesWhatsApp:
+    """The message field was only the first of five.
+
+    Anything typed or pasted into these also arrives on someone else's
+    WhatsApp, so a caption or a status pasted from Word reproduced the exact
+    same report the message field had. Checked at source level because
+    driving these whole needs a live wx.App and a WhatsApp session.
+    """
+
+    @pytest.mark.parametrize("module,method,expression", [
+        ("ui.conversations", "ConversationsPanel._on_send_attachment",
+         "normalize_line_separators(self._caption_field.GetValue())"),
+        ("status_panel", "StatusPanel._on_send_status_reply",
+         "normalize_line_separators(self._reply_field.GetValue())"),
+        ("status_panel", "StatusPanel._on_send_text_status",
+         "normalize_line_separators(self._post_text_field.GetValue())"),
+        ("status_panel", "StatusPanel._on_send_text_status",
+         "normalize_line_separators(self._caption_field.GetValue())"),
+    ])
+    def test_send_path_normalizes_before_sending(self, module, method, expression):
+        import importlib
+        import inspect
+
+        cls_name, attr = method.split(".")
+        cls = getattr(importlib.import_module(module), cls_name)
+        src = inspect.getsource(getattr(cls, attr))
+        assert expression in src, (
+            f"{method} reads a field that ends up on WhatsApp without "
+            f"normalizing Unicode line/paragraph separators first"
+        )
+
+    def test_media_status_caption_is_normalized_too(self):
+        import inspect
+        from status_panel import StatusPanel
+
+        src = inspect.getsource(StatusPanel)
+        assert "normalize_line_separators(self._media_caption_field.GetValue())" in src
+
+
+class TestPasteHandlerIsGeneric:
+    def test_it_writes_to_the_control_that_raised_the_event(self, wx_app):
+        """The generalization that lets one handler serve every field: the
+        text goes to the control the paste came from, not to a hardcoded
+        message_field."""
+        frame = wx.Frame(None)
+        try:
+            stub = _Stub(frame)
+            if wx.TheClipboard.Open():
+                wx.TheClipboard.SetData(wx.TextDataObject("A\u2029B"))
+                wx.TheClipboard.Close()
+            else:
+                pytest.skip("clipboard unavailable")
+
+            stub._on_text_field_paste(_FakeKeyEvent(stub._caption_field))
+
+            assert stub._caption_field.GetValue() == "A\nB"
+            assert stub.message_field.GetValue() == "", "escreveu no campo errado"
+        finally:
+            frame.Destroy()
+
+    def test_the_caption_field_is_bound_to_the_handler(self):
+        """Binding is what makes the fix reach the field at paste time; the
+        send path alone would fix the recipient but still show (and read
+        aloud) a single run-on line while composing."""
+        import inspect
+
+        src = inspect.getsource(ConversationsPanel)
+        assert "self._caption_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)" in src
