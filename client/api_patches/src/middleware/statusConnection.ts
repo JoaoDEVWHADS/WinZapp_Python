@@ -26,7 +26,11 @@ export default async function statusConnection(
   try {
     const numbers: any = [];
     if (req.client && req.client.isConnected) {
-      await req.client.isConnected();
+      const skipsConnectionProbe =
+        req.path.endsWith('/typing') ||
+        req.path.endsWith('/recording') ||
+        req.path.endsWith('/send-seen');
+      if (!skipsConnectionProbe) await req.client.isConnected();
 
       const localArr = contactToArray(
         req.body.phone || [],
@@ -39,8 +43,10 @@ export default async function statusConnection(
       // (util/functions.ts) — req.body.isGroup arrives as the literal
       // string "false" for any multipart/form-data call, which is truthy
       // in a bare `||` check.
-      const wantsGroup = req.body.isGroup === true || req.body.isGroup === 'true';
-      const wantsNewsletter = req.body.isNewsletter === true || req.body.isNewsletter === 'true';
+      const wantsGroup =
+        req.body.isGroup === true || req.body.isGroup === 'true';
+      const wantsNewsletter =
+        req.body.isNewsletter === true || req.body.isNewsletter === 'true';
       const wantsLid = req.body.isLid === true || req.body.isLid === 'true';
       for (const contact of localArr) {
         if (

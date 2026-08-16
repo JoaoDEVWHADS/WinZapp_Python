@@ -25,7 +25,7 @@ from core.utils import format_number
 from core.locale_format import get_datetime_format
 from app_paths import data_path
 from core.sound_system import (
-    ALERT_TONE_COUNT, alert_tone_choice_keys, resolve_alert_tone_path, AlertPreviewController,
+    discover_alert_tone_choices, resolve_alert_tone_path, AlertPreviewController,
 )
 
 
@@ -218,9 +218,11 @@ class ConversationDataDialog(wx.Dialog):
         self._sound_label = wx.StaticText(panel, label=i18n.t("conversation_sound_label"))
         sizer.Add(self._sound_label, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
 
-        self._sound_choice_keys = alert_tone_choice_keys()
+        active_pack = self._mw.get_active_sound_pack()
+        discovered = discover_alert_tone_choices(active_pack, self._mw._default_sound_pack)
+        self._sound_choice_keys = ["default"] + [key for key, _label in discovered] + ["custom"]
         sound_choice_labels = [i18n.t("alert_tone_default")] + [
-            i18n.t("alert_tone_item").format(n=n) for n in range(1, ALERT_TONE_COUNT + 1)
+            label for _key, label in discovered
         ] + [i18n.t("alert_tone_custom")]
         self._sound_combo = wx.ComboBox(
             panel, style=wx.CB_READONLY, choices=sound_choice_labels

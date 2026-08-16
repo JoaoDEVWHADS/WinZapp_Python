@@ -1,0 +1,10 @@
+/build.py merge=ours
+/client/updater.py merge=ours
+/client/config.py merge=ours
+/client/version.py merge=ours
+/setup_api.py merge=ours
+/client/api_patches/package.json merge=ours
+/client/ui/dialogs/api_setup.py merge=ours
+/README.md merge=ours
+/CHANGELOG.md merge=ours
+/.github/workflows/release.yml merge=ours

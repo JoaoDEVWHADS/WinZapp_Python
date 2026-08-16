@@ -496,6 +496,46 @@ def _message_ts(msg: dict) -> int:
         return 0
 
 
+def unread_after_history_sync(
+    server_unread: int,
+    local_unread: int,
+    fetched: list,
+    local_records: list,
+) -> int:
+    """Reconcile unread state when history sync discovers offline arrivals.
+
+    The remote chat summary can still report zero while get-messages already
+    contains newer messages. Infer only genuinely new incoming content after the
+    newest locally known message; never count old backfill or our own messages.
+    """
+    baseline = max(0, int(server_unread or 0), int(local_unread or 0))
+    if not fetched or not local_records:
+        return baseline
+
+    newest_local_ts = max((_message_ts(message) for message in local_records), default=0)
+    if newest_local_ts <= 0:
+        return baseline
+
+    local_ids = {
+        (message.get("key") or {}).get("id")
+        for message in local_records
+        if isinstance(message, dict)
+    }
+    inferred = 0
+    for message in fetched:
+        if not isinstance(message, dict) or _message_ts(message) <= newest_local_ts:
+            continue
+        key = message.get("key") or {}
+        message_id = key.get("id")
+        if message_id and message_id in local_ids:
+            continue
+        if key.get("fromMe") or not is_countable_message(message):
+            continue
+        inferred += 1
+
+    return max(baseline, max(0, int(local_unread or 0)) + inferred)
+
+
 def history_gap_detected(fetched: list, local_records: list, page_size: int) -> bool:
     """True when a freshly fetched page cannot be joined onto stored history.
 
@@ -5368,20 +5408,31 @@ class MainWindow(wx.Frame):
         def _is_free(port: int) -> bool:
             try:
                 with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                    s.settimeout(0.3)
-                    return s.connect_ex(("127.0.0.1", port)) != 0
+                    s.bind(("127.0.0.1", port))
+                    return True
             except OSError:
-                return True
+                return False
 
-        port = node_ports.resolve_account_port(
-            self.account_id, conn.get("wpp_port"), self._peer_node_ports(), is_free=_is_free)
-        # Persist so the choice is stable next launch.
-        if conn.get("wpp_port") != port:
-            self.settings.setdefault("connection", {})["wpp_port"] = port
-            try:
-                self.save_settings()
-            except Exception:
-                logging.exception("[node-port] persisting resolved port failed (non-fatal)")
+        # Two accounts can start simultaneously. Keep peer discovery, free-port
+        # selection and persistence in one cross-process critical section so
+        # they cannot both claim the same port.
+        from coord_locks import node_port_lock
+        with node_port_lock(self.global_dir):
+            port = node_ports.resolve_account_port(
+                self.account_id,
+                conn.get("wpp_port"),
+                self._peer_node_ports(),
+                is_free=_is_free,
+            )
+            # Persist so the choice is stable next launch.
+            if conn.get("wpp_port") != port:
+                self.settings.setdefault("connection", {})["wpp_port"] = port
+                try:
+                    self.save_settings()
+                except Exception:
+                    logging.exception(
+                        "[node-port] persisting resolved port failed (non-fatal)"
+                    )
         logging.info("[node-port] account %s → WPPConnect port %s",
                      getattr(self, "account_id", None), port)
         return port
@@ -6666,25 +6717,11 @@ class MainWindow(wx.Frame):
 
     def save_settings(self):
         try:
-            target = data_path("settings.json")
-            # Write to a temp file in the same directory, then atomically
-            # replace the real file. Writing settings.json in place used to
-            # truncate it immediately on open("w") — a crash, forced
-            # shutdown, or antivirus lock mid-write (this fires often, via
-            # the debounced timer below, e.g. on every presence-update burst)
-            # left a truncated/corrupt file. load_settings() has no recovery
-            # for that: it shows an error and calls sys.exit(), so a
-            # corrupted settings.json bricked the app until the user found
-            # and deleted/fixed the file by hand. os.replace() is atomic on
-            # both Windows and POSIX — the old file is never observably
-            # partial, even if the process dies mid-write.
-            tmp = f"{target}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.settings, f, indent=4)
-            os.replace(tmp, target)
-            # Mirror install-wide keys to global/app.json so other accounts see
-            # the change (plan Zad 2.3b). Best-effort; never blocks the save.
-            self._persist_global_settings()
+            # WebSocket handlers and the debounce timer can save concurrently.
+            # Serialize the entire write so they cannot replace the same temp
+            # file or overwrite a newer snapshot with an older one.
+            with self._save_lock:
+                self._save_settings_locked()
         except Exception:
             self.error_sound.play()
             # save_settings() is called from many places, including several
@@ -6694,6 +6731,28 @@ class MainWindow(wx.Frame):
             msg   = f"{self.i18n.t('settings_save_failed')} {format_exc()}"
             title = self.i18n.t("error").format(app_name=self.app_name)
             wx.CallAfter(wx.MessageBox, msg, title, wx.OK | wx.ICON_ERROR)
+
+    def _save_settings_locked(self):
+        target = data_path("settings.json")
+        # Write to a temp file in the same directory, then atomically replace
+        # the real file. The old file is never observably partial, even if the
+        # process dies mid-write.
+        tmp = f"{target}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+        # Mirror install-wide keys to global/app.json so other accounts see the
+        # change (plan Zad 2.3b). Best-effort; never blocks the save.
+        self._persist_global_settings()
 
     def _schedule_save_settings(self):
         """Debounce save_settings: coalesce rapid calls into one write after 2 s.
@@ -10030,7 +10089,7 @@ class MainWindow(wx.Frame):
         chat["name"] = new_name
         self._group_name_cache = getattr(self, "_group_name_cache", {})
         self._group_name_cache[remote_jid] = new_name
-        
+
         self._schedule_save(dirty_jid=remote_jid)
         self._schedule_set_chats()
 
@@ -10620,6 +10679,28 @@ class MainWindow(wx.Frame):
             last_msg  = chat.get("lastMessage")
             unread    = int(chat.get("unreadCount", 0) or 0)
             is_pinned = jid in pinned
+
+            # Old versions persisted phantom one-to-one chats whose only record
+            # is WhatsApp's encryption-key maintenance notification. Hide those
+            # records too, so upgrading fixes existing databases without deleting
+            # any real conversation or user data.
+            technical_types = {"e2e_notification", "notification"}
+            only_technical_records = bool(records) and all(
+                isinstance(record, dict)
+                and (record.get("messageType") or record.get("type")) in technical_types
+                and record.get("subtype") in ("encrypt", None, "")
+                and not record.get("body")
+                for record in records
+            )
+            if (
+                not jid.endswith("@g.us")
+                and only_technical_records
+                and not chat.get("t")
+                and unread <= 0
+                and not is_pinned
+            ):
+                continue
+
             # Skip chats with absolutely no content AND no identity.
             # We do NOT skip based on missing messages alone: during and just
             # after sync many valid chats have empty records but still carry a
@@ -11542,11 +11623,14 @@ class MainWindow(wx.Frame):
                 or self._find_alt_jid_from_messages(chat)
                 or ""
             )
+            # A phone-number contact is the canonical address-book entry.
+            # The parallel LID record may retain an older WhatsApp/profile name,
+            # so consulting it first can hide a freshly renamed phone contact.
             resolved = (
-                _try(remoteJid)
-                or (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
-                or _ppm(remoteJid)
+                (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
+                or _try(remoteJid)
                 or (phone and _ppm(phone))
+                or _ppm(remoteJid)
             )
         else:
             resolved = _try(remoteJid)
@@ -12662,6 +12746,14 @@ class MainWindow(wx.Frame):
         local_records = (local_chat.get("messages", {})
                          .get("messages", {})
                          .get("records", []))
+        if api_ok and all_messages and local_records:
+            chat["unreadCount"] = unread_after_history_sync(
+                chat.get("unreadCount", 0),
+                local_chat.get("unreadCount", 0),
+                all_messages,
+                local_records,
+            )
+
         if local_records:
             api_ids = {r.get("key", {}).get("id") for r in all_messages}
             extra   = [r for r in local_records
@@ -16601,6 +16693,7 @@ class MainWindow(wx.Frame):
         is_lid_target = remote_jid.endswith("@lid")
         logging.info("[send_media] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
         import mimetypes
+        from core.audio_transcode import prepare_audio_for_whatsapp
         try:
             file_size = os.path.getsize(file_path)
         except Exception as exc:
@@ -16608,6 +16701,21 @@ class MainWindow(wx.Frame):
             return False
         mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
         filename = os.path.basename(file_path)
+        upload_path = file_path
+        converted_audio_path = None
+        if media_type == "audio":
+            prepared = prepare_audio_for_whatsapp(self._find_api_ffmpeg(), file_path)
+            if prepared is None:
+                return {
+                    "ok": False,
+                    "error": "Não foi possível converter o áudio OGG para Opus.",
+                    "retry": False,
+                }
+            upload_path, mime = prepared
+            if upload_path != file_path:
+                converted_audio_path = upload_path
+                filename = os.path.basename(upload_path)
+                file_size = os.path.getsize(upload_path)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
         # Authorization only — Content-Type is set automatically by requests
         # when using files= (multipart/form-data with correct boundary).
@@ -16632,10 +16740,12 @@ class MainWindow(wx.Frame):
             quoted_id = self._serialize_quoted_id(quoted, fallback_jid=remote_jid)
             if quoted_id:
                 data["quotedMessageId"] = quoted_id
-        # Scale timeout with file size: at least 1 s per 100 KB, min 120 s, max 30 min.
-        MAX_FILE_SIZE = 64 * 1024 * 1024  # 64 MB CDP browser limit
+        # WPPConnect accepts documents up to 1 GB. Its WinZapp patch moves large
+        # payloads into Chromium in bounded chunks instead of one oversized CDP
+        # argument. Non-document media remains capped by the UI at 70 MB.
+        MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024
         if file_size > MAX_FILE_SIZE:
-            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 64 MB browser upload limit."
+            err_msg = f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 1 GB WhatsApp document limit."
             logging.error("[send_media] %s", err_msg)
             return {"ok": False, "error": err_msg, "retry": False}
         timeout = max(120, file_size // (100 * 1024))
@@ -16656,7 +16766,7 @@ class MainWindow(wx.Frame):
                 post_data["isGroup"] = "true"
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
-            with open(file_path, "rb") as fh:
+            with open(upload_path, "rb") as fh:
                 return requests.post(
                     url,
                     headers=headers,
@@ -16735,6 +16845,12 @@ class MainWindow(wx.Frame):
             return {"ok": False, "error": err, "retry": retryable}
         except Exception as exc:
             return self._classify_send_exception(exc, "send_media")
+        finally:
+            if converted_audio_path:
+                try:
+                    os.unlink(converted_audio_path)
+                except OSError:
+                    pass
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
@@ -16980,29 +17096,29 @@ class MainWindow(wx.Frame):
             return False
 
     def resend_media_message_with_caption(self, msg: dict, target_jid: str) -> bool:
-        """Forward a media message by re-sending it as a new file upload, 
+        """Forward a media message by re-sending it as a new file upload,
         in order to preserve its caption which WPPConnect's native forward drops.
         """
         import os
         import json
         from core.utils import decrypt_bytes
-        
+
         msg_key = msg.get("key", {}) or {}
         msg_id = msg_key.get("id", "")
         if not msg_id:
             return False
-        
+
         if "_" in msg_id:
             parts = msg_id.split("_")
             msg_id = parts[2] if len(parts) > 2 else parts[-1]
-            
+
         msg_inner = msg.get("message", {})
         if isinstance(msg_inner, str):
             try:
                 msg_inner = json.loads(msg_inner)
             except Exception:
                 msg_inner = {}
-                
+
         original_caption = ""
         media_type = ""
         for key in ["imageMessage", "videoMessage", "documentMessage"]:
@@ -17012,7 +17128,7 @@ class MainWindow(wx.Frame):
                 elif key == "videoMessage": media_type = "video"
                 elif key == "documentMessage": media_type = "document"
                 break
-                
+
         if not media_type:
             return self.forward_message(msg_key.get("remoteJid", ""), msg_key, target_jid)
 
@@ -17028,7 +17144,7 @@ class MainWindow(wx.Frame):
             with open(media_path, "rb") as f:
                 encrypted_data = f.read()
             decrypted_data = decrypt_bytes(encrypted_data, self.key)
-            
+
             import mimetypes as _mimetypes
             ext = ".bin"
             if media_type == "document":
@@ -17046,18 +17162,18 @@ class MainWindow(wx.Frame):
                     ext = ".jpg"
                 elif media_type == "video":
                     ext = ".mp4"
-            
+
             temp_path = data_path("media", f"temp_{msg_id}{ext}")
             with open(temp_path, "wb") as f:
                 f.write(decrypted_data)
-                
+
             success = self.send_media_attachment(target_jid, temp_path, media_type, caption=original_caption)
-            
+
             try:
                 os.remove(temp_path)
             except Exception:
                 pass
-                
+
             return success
         except Exception as exc:
             logging.error(f"[resend_media] Error decrypting or sending {msg_id}: {exc}")
@@ -17465,7 +17581,7 @@ class MainWindow(wx.Frame):
             contact = msg_obj.get("contactMessage") or {}
             name = contact.get("displayName") or ""
             vcard = contact.get("vcard") or ""
-            
+
             if not name or "BEGIN:VCARD" in name:
                 vcard_to_parse = name if "BEGIN:VCARD" in name else vcard
                 parsed_name = ""
@@ -17483,25 +17599,25 @@ class MainWindow(wx.Frame):
             arr = msg_obj.get("contactsArrayMessage") or {}
             contacts = arr.get("contacts") or []
             content = i18n.t("contacts_count").format(count=len(contacts))
-        elif msg_type == "locationMessage":
+        elif msg_type in ("locationMessage", "liveLocationMessage"):
             content = i18n.t("notif_location")
-        elif msg_type == "pollCreationMessage":
-            poll = msg_obj.get("pollCreationMessage") or {}
+        elif msg_type in ("pollCreationMessage", "pollCreationMessageV2", "pollCreationMessageV3", "pollUpdateMessage"):
+            poll = msg_obj.get("pollCreationMessage") or msg_obj.get("pollCreationMessageV2") or msg_obj.get("pollCreationMessageV3") or {}
             name = poll.get("name") or ""
-            content = f"📊 Enquete: {name}" if name else "📊 Enquete"
+            content = i18n.t("notif_poll").format(name=name) if name else i18n.t("notif_poll_no_name")
         elif msg_type == "buttonsMessage":
-            content = "🔘 Botão"
+            content = i18n.t("notif_button")
         elif msg_type == "listMessage":
-            content = "📋 Lista"
+            content = i18n.t("notif_list")
         elif msg_type == "templateMessage":
-            content = "📝 Modelo"
+            content = i18n.t("notif_template")
         elif msg_type == "protocolMessage":
             protocol = msg_obj.get("protocolMessage") or {}
             p_type = protocol.get("type")
             if p_type in (3, "REVOKE", "revoke"):
-                content = "Mensagem apagada"
+                content = i18n.t("notif_deleted")
             else:
-                content = "⚙️ Mensagem do sistema"
+                content = i18n.t("notif_system_message")
         else:
             # Logged so a future report of a raw, untranslated messageType
             # showing up in the chat-list preview (e.g. "audioMessage" wraps
