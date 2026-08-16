@@ -400,6 +400,18 @@ class SettingsDialog(wx.Dialog):
 
         ui_sizer.Add(self_ref_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
+        self._show_delivery_status_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_delivery_status_in_chat_list")
+        )
+        ui_sizer.Add(self._show_delivery_status_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        self._preserve_typed_caption_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_preserve_typed_text_as_caption")
+        )
+        ui_sizer.Add(
+            self._preserve_typed_caption_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -784,6 +796,16 @@ class SettingsDialog(wx.Dialog):
             "show_listbox_item_count", False
         )
         self._show_listbox_count_cb.SetValue(bool(show_listbox_count))
+
+        show_delivery_status = self.main_window.settings.get("user_interface", {}).get(
+            "show_delivery_status_in_chat_list", True
+        )
+        self._show_delivery_status_cb.SetValue(bool(show_delivery_status))
+
+        preserve_typed_caption = self.main_window.settings.get("user_interface", {}).get(
+            "preserve_typed_text_as_attachment_caption", True
+        )
+        self._preserve_typed_caption_cb.SetValue(bool(preserve_typed_caption))
 
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
@@ -1472,6 +1494,12 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "show_listbox_item_count"
         ] = self._show_listbox_count_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_delivery_status_in_chat_list"
+        ] = self._show_delivery_status_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "preserve_typed_text_as_attachment_caption"
+        ] = self._preserve_typed_caption_cb.GetValue()
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -1748,6 +1776,8 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
         self._self_ref_other_rb.SetLabel(i18n.t("ui_self_reference_other"))
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
+        self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
+        self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._speak_active_conv_check.SetLabel(i18n.t("speech_speak_active_conv_label"))

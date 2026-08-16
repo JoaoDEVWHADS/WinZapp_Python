@@ -3435,7 +3435,9 @@ class ConversationsPanel(wx.Panel):
         event.Skip()
 
     def _on_text_field_paste(self, event):
-        """Intercept pastes so Unicode line/paragraph separators become \n.
+        """Intercept pastes: non-text clipboard content becomes an
+        attachment (see _paste_clipboard_as_attachment()); otherwise, Unicode
+        line/paragraph separators become \n.
 
         Bound to every field here whose text ends up on WhatsApp — the
         message field and the attachment caption — and works off the control
@@ -3454,6 +3456,8 @@ class ConversationsPanel(wx.Panel):
             event.Skip()
             return
         try:
+            if self._paste_clipboard_as_attachment():
+                return
             if not wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_UNICODETEXT)):
                 event.Skip()
                 return
@@ -3472,6 +3476,52 @@ class ConversationsPanel(wx.Panel):
             target.WriteText(normalized)
             return  # consume — the native paste must not run on top of this
         event.Skip()
+
+    def _paste_clipboard_as_attachment(self) -> bool:
+        """Ctrl+V of non-text clipboard content (files copied in Explorer, or
+        an image copied from a browser/screenshot tool) attaches it directly
+        — same shortcut the official WhatsApp client offers — instead of
+        doing nothing useful in a plain wx.TextCtrl. Files skip the picker
+        dialog entirely and land straight in the attachment panel with the
+        caption field focused, exactly like choosing them there would.
+
+        Must be called with the clipboard already open (the caller,
+        _on_text_field_paste, holds it for its own checks too — nested
+        wx.TheClipboard.Open() calls fail). Returns True when it staged
+        something, so the caller must not also run the native/text paste.
+        """
+        if self.conversation is None:
+            return False
+
+        if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_FILENAME)):
+            data = wx.FileDataObject()
+            if wx.TheClipboard.GetData(data):
+                paths = [p for p in data.GetFilenames() if os.path.isfile(p)]
+                if paths:
+                    for path in paths:
+                        ext = os.path.splitext(path)[1].lower()
+                        media_type = self._EXT_TYPE_MAP.get(ext, "document")
+                        self._staged_attachments.append(
+                            {"path": path, "media_type": media_type}
+                        )
+                    self._show_attachment_panel()
+                    return True
+
+        if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_BITMAP)):
+            data = wx.BitmapDataObject()
+            if wx.TheClipboard.GetData(data):
+                bitmap = data.GetBitmap()
+                if bitmap.IsOk():
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    tmp.close()
+                    if bitmap.SaveFile(tmp.name, wx.BITMAP_TYPE_PNG):
+                        self._staged_attachments.append(
+                            {"path": tmp.name, "media_type": "image"}
+                        )
+                        self._show_attachment_panel()
+                        return True
+
+        return False
 
     def _on_mention_list_key_down(self, event):
         """Keyboard navigation inside the mention suggestion list."""
@@ -9169,7 +9219,29 @@ class ConversationsPanel(wx.Panel):
         self._add_attachment_btn.Hide()
         self._attachment_panel.Show()
         self.conversation_panel.Layout()
+        self._apply_typed_text_as_caption()
         self._caption_field.SetFocus()
+
+    def _apply_typed_text_as_caption(self):
+        """Move whatever was already typed in message_field into the
+        attachment caption field, matching the official WhatsApp client.
+
+        Only fires when the caption is still empty (never clobbers a caption
+        the user already typed for a previous batch of staged attachments)
+        and the setting is enabled. The text is moved, not copied — left in
+        message_field it would still be sitting there, ready to be sent as a
+        separate message, once the attachment panel closes.
+        """
+        preserve = self.main_window.settings.get("user_interface", {}).get(
+            "preserve_typed_text_as_attachment_caption", True
+        )
+        if not preserve or self._caption_field.GetValue():
+            return
+        typed = normalize_line_separators(self.message_field.GetValue()).strip()
+        if not typed:
+            return
+        self._caption_field.SetValue(typed)
+        self.message_field.SetValue("")
 
     def _rebuild_attachment_list(self):
         """Rebuild the per-file remove-buttons to match _staged_attachments."""

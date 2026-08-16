@@ -6136,6 +6136,7 @@ class MainWindow(wx.Frame):
         self.ID_ALT_NAV    = wx.NewIdRef()
         self.ID_CTRL_COMMA = wx.NewIdRef()
         self.ID_F1         = wx.NewIdRef()
+        self.ID_ALT_T      = wx.NewIdRef()
 
         # navigation_panel's "&Navegação principal" label mnemonic is meant
         # to redirect Alt+N to nav_list, but that native StaticText-mnemonic
@@ -6161,6 +6162,7 @@ class MainWindow(wx.Frame):
             (wx.ACCEL_ALT,    ord(nav_letter), self.ID_ALT_NAV),
             (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
             (wx.ACCEL_NORMAL, wx.WXK_F1,  self.ID_F1),
+            (wx.ACCEL_ALT,    ord('T'),    self.ID_ALT_T),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_alt_1,       id=self.ID_ALT_1)
@@ -6171,6 +6173,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_alt_nav,    id=self.ID_ALT_NAV)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
         self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
+        self.Bind(wx.EVT_MENU, self._on_global_alt_t, id=self.ID_ALT_T)
 
     def _on_alt_nav(self, event):
         """Alt+N (or the localized equivalent): focus the main navigation list."""
@@ -14311,6 +14314,68 @@ class MainWindow(wx.Frame):
                 )
         return action_label
 
+    def _presence_announcement_for_chat(self, chat: dict) -> str:
+        """Build the text Alt+T speaks for `chat`: typing/recording if
+        currently happening, else online/last-seen from the presence cache
+        (populated live by on_presence_update() — subscribe_presence() is
+        called whenever a conversation is opened), else "no info".
+
+        Deliberately never makes a network call here (get_last_seen() can
+        take up to 10s) — Alt+T must announce instantly from whatever
+        WhatsApp has already pushed us, same as the chat-list typing label.
+        """
+        jid = chat.get("remoteJid", "")
+        is_group = jid.endswith("@g.us")
+        chat_jid_norm = self._normalize_jid(jid)
+        if chat_jid_norm.endswith("@lid"):
+            chat_jid_norm = getattr(self, "_lid_to_phone", {}).get(chat_jid_norm, chat_jid_norm)
+
+        label = self._presence_label_for_chat(chat_jid_norm, is_group)
+        if label:
+            return label
+
+        if is_group:
+            return self.i18n.t("presence_unavailable")
+
+        presence = getattr(self, "_presence_cache", {}).get(chat_jid_norm, {})
+        lkp = presence.get("lastKnownPresence", "")
+        if lkp == "available":
+            return self.i18n.t("presence_online")
+
+        last_seen = presence.get("lastSeen")
+        if last_seen:
+            try:
+                from datetime import datetime as _dt
+                ts = int(last_seen)
+                if ts > 1_000_000_000_000:
+                    ts //= 1000
+                dt = _dt.fromtimestamp(ts)
+                if dt.date() == _dt.now().date():
+                    time_str = dt.strftime(get_time_format(self.i18n.t("time_fmt")))
+                else:
+                    time_str = dt.strftime(get_datetime_format(self.i18n.t("datetime_fmt")))
+                return self.i18n.t("presence_last_seen").format(time=time_str)
+            except Exception:
+                pass
+
+        return self.i18n.t("presence_unavailable")
+
+    def _on_global_alt_t(self, event):
+        """Alt+T: announce the current/selected conversation's presence
+        (typing/recording, online, or last seen) — works with the chat list
+        focused (uses the selected row) or a conversation already open (uses
+        that conversation), from anywhere in the window.
+        """
+        cp = getattr(self, "conversations_panel", None)
+        if cp is None:
+            return
+        chat = cp.conversation
+        if chat is None and hasattr(cp, "_selected_chat_from_list"):
+            chat = cp._selected_chat_from_list()
+        if not chat:
+            return
+        self.output(self._presence_announcement_for_chat(chat))
+
     def _refresh_chat_row_in_list(self, chat_jid_norm: str):
         """Update only the chat-list row for chat_jid_norm via SetItem(), in
         whichever panel (main or archived) currently displays it.
@@ -16357,7 +16422,22 @@ class MainWindow(wx.Frame):
         self._schedule_save(dirty_jid=jid)
         # Recomputes lastMessage/t from the survivors (a kept starred message,
         # or None/0 if there aren't any) and persists the chat row itself.
+        previous_t = chat.get("t")
         self._recompute_chat_last_message(jid)
+        if not starred and not chat.get("t"):
+            # No survivors means _recompute_chat_last_message() just zeroed
+            # chat["t"], which _chat_last_ts() treats as ts=1 — sorting the
+            # cleared chat to the very bottom of the list. Clearing must keep
+            # the conversation at its current position (only the preview goes
+            # away), so restore the pre-clear timestamp for sort purposes.
+            chat["t"] = previous_t
+            if hasattr(self, "db") and self.db is not None:
+                try:
+                    self.db.upsert_chat(jid, chat)
+                except Exception as exc:
+                    logging.warning(
+                        "[clear_chat_messages_local] DB upsert failed for %s: %s", jid, exc
+                    )
         if hasattr(self, "db") and self.db is not None:
             try:
                 keep_ids = [
@@ -17846,6 +17926,17 @@ class MainWindow(wx.Frame):
         parts = [f"{sender_prefix}{content}"]
         if time_str:
             parts.append(time_str)
+        if getattr(self, "settings", {}).get("user_interface", {}).get(
+            "show_delivery_status_in_chat_list", True
+        ):
+            panel = getattr(self, "conversations_panel", None)
+            if panel is not None:
+                try:
+                    status_text = panel._map_status(last)
+                except Exception:
+                    status_text = ""
+                if status_text:
+                    parts.append(status_text)
         return " ".join(parts)
 
     def _refresh_archived_chats_in_ui(self, arch_focused_jid: "str | None" = None):

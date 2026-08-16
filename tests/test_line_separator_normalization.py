@@ -95,12 +95,19 @@ class _FakeMentionPanel:
 
 class _Stub:
     _on_text_field_paste = ConversationsPanel._on_text_field_paste
+    _paste_clipboard_as_attachment = ConversationsPanel._paste_clipboard_as_attachment
+    _EXT_TYPE_MAP = ConversationsPanel._EXT_TYPE_MAP
 
     def __init__(self, frame):
         self.message_field = wx.TextCtrl(
             frame, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP
         )
         self._caption_field = wx.TextCtrl(frame, style=wx.TE_PROCESS_ENTER)
+        # No open conversation — _paste_clipboard_as_attachment() short-circuits
+        # to False so these pre-existing text-paste tests keep exercising only
+        # the Unicode-separator normalization path they're named for.
+        self.conversation = None
+        self._staged_attachments = []
 
 
 class TestPasteNormalization:

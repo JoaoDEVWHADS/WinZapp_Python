@@ -60,6 +60,7 @@ def _chat_with(records):
         "remoteJid": "jid1",
         "messages": {"messages": {"records": records}},
         "lastMessage": records[-1] if records else None,
+        "t": records[-1]["messageTimestamp"] if records else 0,
         "unreadCount": 5,
     }
 
@@ -115,7 +116,9 @@ class TestClearChatKeepsStarredMessages:
         stub.clear_chat_messages_local("jid1")
 
         assert chat["lastMessage"] is None
-        assert chat["t"] == 0
+        # "t" keeps its pre-clear value (not reset to 0) so the chat stays at
+        # its current position in the list instead of sorting to the bottom.
+        assert chat["t"] == 200
 
     def test_unread_count_is_always_reset(self):
         chat = _chat_with([_msg("a", 100, starred=True)])
