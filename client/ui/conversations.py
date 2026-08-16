@@ -465,8 +465,11 @@ class ConversationsPanel(wx.Panel):
         self._media_bitmap.Hide()
 
         self._media_transfer_gauge = wx.Gauge(
-            self.conversation_panel, range=100, style=wx.GA_HORIZONTAL
+            self.conversation_panel,
+            range=100,
+            style=wx.GA_HORIZONTAL | wx.GA_SMOOTH,
         )
+        self._media_transfer_gauge.SetMinSize((-1, 24))
         conv_sizer.Add(
             self._media_transfer_gauge, 0,
             wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
@@ -6439,6 +6442,8 @@ class ConversationsPanel(wx.Panel):
         gauge.SetValue(0)
         gauge.Show()
         self.conversation_panel.Layout()
+        gauge.SetFocus()
+        gauge.Pulse()
 
     def _update_media_transfer_gauge(self, progress: float):
         gauge = getattr(self, "_media_transfer_gauge", None)
@@ -6448,6 +6453,7 @@ class ConversationsPanel(wx.Panel):
         if not gauge.IsShown():
             gauge.Show()
             self.conversation_panel.Layout()
+            gauge.SetFocus()
 
     def _hide_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
