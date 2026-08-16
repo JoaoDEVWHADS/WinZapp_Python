@@ -32,7 +32,12 @@ function returnError(req: Request, res: Response, error: any) {
   // deviceController.ts counterpart.
   const detail =
     error instanceof Error
-      ? { ...error, name: error.name, message: error.message, stack: error.stack }
+      ? {
+          ...error,
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        }
       : error;
   res.status(500).json({
     status: 'Error',
@@ -377,7 +382,15 @@ export async function sendVoice64(req: Request, res: Response) {
     // channel as a JSON argument on every page.evaluate() call.
     const tempVar = `__wz_ptt_${Date.now()}`;
     await page.evaluate(
-      ({ varName, base64, quotedMsg }: { varName: string; base64: string; quotedMsg: string | undefined }) => {
+      ({
+        varName,
+        base64,
+        quotedMsg,
+      }: {
+        varName: string;
+        base64: string;
+        quotedMsg: string | undefined;
+      }) => {
         (window as any)[varName] = { base64, quotedMsg };
       },
       { varName: tempVar, base64: base64Ptt, quotedMsg: quotedMessageId }
@@ -394,18 +407,32 @@ export async function sendVoice64(req: Request, res: Response) {
         await page.evaluate(
           ({ to, varName }: { to: string; varName: string }) => {
             try {
-              const { base64, quotedMsg } = (window as any)[varName] as { base64: string; quotedMsg: string | undefined };
-              return (window as any).WPP.chat.sendFileMessage(to, base64, {
-                type: 'audio',
-                isPtt: true,
-                filename: 'Voice Audio',
-                caption: '',
-                quotedMsg,
-                waitForAck: false,
-              }).then((result: any) => ({ id: result?.id?.toString?.() ?? null, ack: result?.ack ?? 0 }))
-                .catch((err: any) => ({ error: err?.message || String(err), ack: -1 }));
+              const { base64, quotedMsg } = (window as any)[varName] as {
+                base64: string;
+                quotedMsg: string | undefined;
+              };
+              return (window as any).WPP.chat
+                .sendFileMessage(to, base64, {
+                  type: 'audio',
+                  isPtt: true,
+                  filename: 'Voice Audio',
+                  caption: '',
+                  quotedMsg,
+                  waitForAck: false,
+                })
+                .then((result: any) => ({
+                  id: result?.id?.toString?.() ?? null,
+                  ack: result?.ack ?? 0,
+                }))
+                .catch((err: any) => ({
+                  error: err?.message || String(err),
+                  ack: -1,
+                }));
             } catch (err: any) {
-              return Promise.resolve({ error: err?.message || String(err), ack: -1 });
+              return Promise.resolve({
+                error: err?.message || String(err),
+                ack: -1,
+              });
             }
           },
           { to: contato, varName: tempVar }
@@ -414,7 +441,12 @@ export async function sendVoice64(req: Request, res: Response) {
     }
 
     // Clean up the temporary global so it doesn't linger in the page context.
-    await page.evaluate(({ varName }: { varName: string }) => { delete (window as any)[varName]; }, { varName: tempVar });
+    await page.evaluate(
+      ({ varName }: { varName: string }) => {
+        delete (window as any)[varName];
+      },
+      { varName: tempVar }
+    );
 
     if (results.length === 0) res.status(400).json('Error sending message');
     returnSucess(res, results);
@@ -930,21 +962,38 @@ export async function sendStatusVoice64(req: Request, res: Response) {
       ({ varName }: { varName: string }) => {
         try {
           const base64 = (window as any)[varName] as string;
-          return (window as any).WPP.chat.sendFileMessage('status@broadcast', base64, {
-            type: 'audio',
-            isPtt: true,
-            filename: 'Voice Status',
-            waitForAck: true,
-          }).then((r: any) => ({ ok: true, id: r?.id?.toString?.() ?? null, ack: r?.ack ?? 0 }))
-            .catch((err: any) => ({ ok: false, error: err?.message || String(err) }));
+          return (window as any).WPP.chat
+            .sendFileMessage('status@broadcast', base64, {
+              type: 'audio',
+              isPtt: true,
+              filename: 'Voice Status',
+              waitForAck: true,
+            })
+            .then((r: any) => ({
+              ok: true,
+              id: r?.id?.toString?.() ?? null,
+              ack: r?.ack ?? 0,
+            }))
+            .catch((err: any) => ({
+              ok: false,
+              error: err?.message || String(err),
+            }));
         } catch (err: any) {
-          return Promise.resolve({ ok: false, error: err?.message || String(err) });
+          return Promise.resolve({
+            ok: false,
+            error: err?.message || String(err),
+          });
         }
       },
       { varName: tempVar }
     );
 
-    await page.evaluate(({ varName }: { varName: string }) => { delete (window as any)[varName]; }, { varName: tempVar });
+    await page.evaluate(
+      ({ varName }: { varName: string }) => {
+        delete (window as any)[varName];
+      },
+      { varName: tempVar }
+    );
 
     if (!result || !result.ok) {
       return res.status(500).json({

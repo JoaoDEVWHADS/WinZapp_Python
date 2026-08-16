@@ -129,8 +129,10 @@ export async function sendTextStorie(req: Request, res: Response) {
     const results: any = [];
     const posted = await req.client.sendTextStatus(text, statusOptions);
     req.logger.info(
-      `[sendTextStorie] result for text=${JSON.stringify(text).slice(0, 80)}: ` +
-        JSON.stringify(posted)?.slice(0, 300)
+      `[sendTextStorie] result for text=${JSON.stringify(text).slice(
+        0,
+        80
+      )}: ` + JSON.stringify(posted)?.slice(0, 300)
     );
     // The status.layer.js async patch makes WPP.status.sendTextStatus resolve
     // with the REAL post result instead of undefined. A resolved value whose
@@ -304,9 +306,27 @@ export async function getStatuses(req: Request, res: Response) {
         }
       };
 
+      const loadAllMessages = async (model: any) => {
+        if (!model || typeof model.loadMore !== 'function') return;
+        for (let i = 0; i < 40 && !model.noEarlierMsgs; i++) {
+          const before = model.msgsLength ?? model.msgs?.length ?? 0;
+          try {
+            await model.loadMore();
+          } catch (e) {
+            break;
+          }
+          const after = model.msgsLength ?? model.msgs?.length ?? 0;
+          if (after <= before && !model.isLoading) break;
+        }
+      };
+
+      let ownStatusJid = '';
+
       // Own posted statuses, straight from the account.
       try {
         const my = await WPP.status.getMyStatus();
+        ownStatusJid = my?.id?._serialized || my?.id?.toString?.() || '';
+        await loadAllMessages(my);
         const msgs = my?.getAllMsgs ? my.getAllMsgs() : [];
         out.myStatus = (msgs || []).map(serialize).filter(Boolean);
       } catch (e) {
@@ -326,19 +346,6 @@ export async function getStatuses(req: Request, res: Response) {
             // ignore — read whatever is already in the store
           }
         }
-        // WhatsApp Web pages the status list (infinite scroll): sync() only
-        // fetches the first batch, and the rest arrive via loadMore() as the
-        // user scrolls. Pull several pages so the whole list shows, not just
-        // the first few contacts.
-        if (store?.loadMore) {
-          for (let i = 0; i < 40; i++) {
-            try {
-              await store.loadMore();
-            } catch (e) {
-              break;
-            }
-          }
-        }
         // Read ALL status models (unread, read/viewed, and muted statuses).
         // Try store.getModels(), store._models, store.models, and store.getUnexpired()
         let rawModels: any[] = [];
@@ -352,14 +359,22 @@ export async function getStatuses(req: Request, res: Response) {
           rawModels = store.getUnexpired();
         }
 
-        console.log(`[getStatuses] StatusV3Store rawModels count=${rawModels.length}`);
+        // Pagination belongs to each Status model, not to StatusV3Store.
+        // Load earlier messages for every author before serializing the list.
+        await Promise.all(rawModels.map(loadAllMessages));
+
+        console.log(
+          `[getStatuses] StatusV3Store rawModels count=${rawModels.length}`
+        );
 
         const me = WPP.conn?.getMyUserWid?.()?.toString?.() ?? '';
         for (const model of rawModels) {
           try {
             const author = model?.id?._serialized || model?.id || '';
-            if (!author || author === me) continue; // own status handled above
-            let msgs = model?.getAllMsgs ? model.getAllMsgs() : (model?.msgs?._models || model?.msgs || []);
+            if (!author || author === me || author === ownStatusJid) continue;
+            const msgs = model?.getAllMsgs
+              ? model.getAllMsgs()
+              : model?.msgs?._models || model?.msgs || [];
             if (!msgs || !msgs.length) continue;
             out.contacts.push({
               jid: author,
@@ -369,7 +384,9 @@ export async function getStatuses(req: Request, res: Response) {
             console.error('[getStatuses] error processing model:', e);
           }
         }
-        console.log(`[getStatuses] Returning ${out.contacts.length} contact status entries`);
+        console.log(
+          `[getStatuses] Returning ${out.contacts.length} contact status entries`
+        );
       } catch (e) {
         // Store not reachable — contacts stay empty
       }

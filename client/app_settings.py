@@ -4,7 +4,8 @@ Global (cross-account) settings for WinZapp multi-account (client/app_settings.p
 
 A handful of settings are install-wide, not per-account (plan Zad 2.3): the UI
 language, the auto-updater toggle, the tray-icon toggle, Windows autostart, and
-the single local WPPConnect connection (one Node server serves every account).
+the shared WPPConnect host configuration.  The Node port is per-account because
+each account process owns a separate local Node server.
 These live in ``global/app.json`` so every account process reads/writes the SAME
 value; everything else stays in each account's own settings.json.
 
@@ -23,6 +24,8 @@ import os
 import uuid
 from typing import Any
 
+from coord_locks import app_settings_lock
+
 _FILE = "app.json"
 
 # Global keys and their defaults. 'general.*' names are flattened here; the
@@ -38,9 +41,8 @@ _DEFAULTS: dict[str, Any] = {
     "hotkey_first_run_asked": False,
     "api_type_first_run_asked": False,
     "switch_behavior": "single",  # "single" (ocultar para a bandeja) ou "keep_open" (manter ambas abertas)
-    # single shared WPPConnect connection
+    # Shared WPPConnect host configuration. The port remains per-account.
     "wpp_server": "http://127.0.0.1",
-    "wpp_port": 6300,
     "wpp_ws_server": "ws://127.0.0.1",
     # Same default as client/core/utils.py DEFAULT_SETTINGS / settings_default.json
     # — a blank key makes /api/<token>//generate-token (double slash) → HTTP 404
@@ -53,7 +55,7 @@ _DEFAULTS: dict[str, Any] = {
 _GENERAL_GLOBAL = ("language", "updates_enabled", "show_tray_icon", "autostart",
                    "first_run", "hotkey_first_run_asked", "api_type_first_run_asked",
                    "switch_behavior")
-_CONNECTION_GLOBAL = ("wpp_server", "wpp_port", "wpp_ws_server", "wpp_api_key", "wpp_custom_api")
+_CONNECTION_GLOBAL = ("wpp_server", "wpp_ws_server", "wpp_api_key", "wpp_custom_api")
 
 
 class AppSettings:
@@ -62,7 +64,7 @@ class AppSettings:
         self._path = os.path.join(self.global_dir, _FILE)
         os.makedirs(self.global_dir, exist_ok=True)
 
-    def _read(self) -> dict:
+    def _read_unlocked(self) -> dict:
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -71,6 +73,10 @@ class AppSettings:
         except (OSError, ValueError):
             pass
         return {}
+
+    def _read(self) -> dict:
+        with app_settings_lock(self.global_dir):
+            return self._read_unlocked()
 
     def _write(self, data: dict) -> None:
         tmp = f"{self._path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
@@ -94,9 +100,10 @@ class AppSettings:
     def set(self, key: str, value: Any) -> None:
         if key not in _DEFAULTS:
             raise KeyError(f"{key!r} is not a global setting")
-        data = self._read()
-        data[key] = value
-        self._write(data)
+        with app_settings_lock(self.global_dir):
+            data = self._read_unlocked()
+            data[key] = value
+            self._write(data)
 
     def all(self) -> dict:
         merged = dict(_DEFAULTS)
@@ -126,8 +133,9 @@ def split_legacy_settings(legacy: dict) -> tuple[dict, dict]:
     connection = per.get("connection", {})
     for k in _CONNECTION_GLOBAL:
         if k in connection:
-            glob[k] = connection[k]
-    # Connection is purely global — drop it from the per-account copy.
-    per.pop("connection", None)
+            glob[k] = connection.pop(k)
+    # Keep account-specific connection values such as wpp_port.
+    if not connection:
+        per.pop("connection", None)
 
     return glob, per
