@@ -148,7 +148,7 @@ export async function callWebHook(
   data: any
 ) {
   const webhook =
-    client?.config?.webhook || req?.serverOptions?.webhook?.url || false;
+    client?.config.webhook || req.serverOptions.webhook.url || false;
   if (webhook) {
     if (
       req.serverOptions.webhook?.ignore &&

@@ -42,7 +42,6 @@ import os
 import queue
 import subprocess
 import sys
-import tempfile
 import threading
 
 import wx
@@ -63,7 +62,7 @@ _TEMPO_MAP = {1.0: 0, 1.5: 50, 2.0: 100}
 # Frames are capped small and slow on purpose: this runs on the same machine
 # as the rest of a screen-reader-focused desktop app, and the goal is "see
 # what's happening", not full-fidelity playback.
-_FRAME_WIDTH  = 1280
+_FRAME_WIDTH  = 480
 _FRAME_FPS    = 12
 _FRAME_MAX_QUEUE = 8
 
@@ -131,7 +130,6 @@ class VideoPlayer:
         bitmap_ctrl.Bind(wx.EVT_TIMER, self._on_timer, self._timer)
 
         self._video_path = None
-        self._audio_wav_path = None
         self._is_active  = False
         self.is_paused   = False
         # Set by _read_frames() once ffmpeg's output ends; consumed by
@@ -265,12 +263,6 @@ class VideoPlayer:
                 pass
             self._audio_stream = None
         self._kill_ffmpeg()
-        if self._audio_wav_path:
-            try:
-                os.unlink(self._audio_wav_path)
-            except OSError:
-                pass
-            self._audio_wav_path = None
         # Drain anything left in the queue so a stale frame can't render
         # after a subsequent load_and_play() starts a new video.
         while True:
@@ -280,45 +272,6 @@ class VideoPlayer:
                 break
         self.is_playing = False
         self.is_paused  = False
-
-    # ── Internals: FFmpeg decode pipeline ────────────────────────────────
-
-    def _start_media_pipeline(self, speed: float):
-        """Decode the source with FFmpeg before starting audio and video."""
-        fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="winzapp-video-")
-        os.close(fd)
-        ffmpeg = self._ffmpeg_bin()
-        if not ffmpeg or not os.path.isfile(ffmpeg):
-            logging.warning("[video_player] ffmpeg not found — cannot play video.")
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
-            return
-        cmd = [
-            ffmpeg, "-y", "-i", self._video_path, "-vn", "-ac", "2",
-            "-ar", "48000", "-c:a", "pcm_s16le", wav_path,
-        ]
-        try:
-            result = subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"FFmpeg audio decode failed ({result.returncode})")
-            if self._stop_event.is_set():
-                os.unlink(wav_path)
-                return
-            self._audio_wav_path = wav_path
-            self._start_audio(wav_path, speed)
-            self._start_video_pipe()
-        except Exception as exc:
-            logging.warning("[video_player] FFmpeg media decode failed: %s", exc)
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
 
     # ── Internals: audio (BASS, directly on the video file) ─────────────
 
@@ -491,13 +444,6 @@ class VideoPlayer:
         try:
             img = wx.Image(io.BytesIO(frame_bytes), wx.BITMAP_TYPE_JPEG)
             if img.IsOk():
-                width, height = self.bitmap_ctrl.GetClientSize()
-                if width > 0 and height > 0:
-                    scale = min(width / img.GetWidth(), height / img.GetHeight())
-                    if scale > 0:
-                        target = (max(1, int(img.GetWidth() * scale)),
-                                  max(1, int(img.GetHeight() * scale)))
-                        img = img.Scale(*target, wx.IMAGE_QUALITY_HIGH)
                 self.bitmap_ctrl.SetBitmap(wx.Bitmap(img))
                 self.bitmap_ctrl.Refresh()
         except Exception:

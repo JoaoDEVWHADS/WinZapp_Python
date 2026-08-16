@@ -461,7 +461,7 @@ class ConversationsPanel(wx.Panel):
         self._media_bitmap = wx.StaticBitmap(
             self.conversation_panel, bitmap=wx.NullBitmap
         )
-        conv_sizer.Add(self._media_bitmap, 1, wx.EXPAND | wx.ALL, 5)
+        conv_sizer.Add(self._media_bitmap, 0, wx.ALIGN_LEFT | wx.LEFT | wx.BOTTOM, 5)
         self._media_bitmap.Hide()
 
         # ── Action buttons (document / image / video) ───────────────────────
