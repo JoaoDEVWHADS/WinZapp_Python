@@ -4260,7 +4260,7 @@ class MainWindow(wx.Frame):
 
         # A message we just forwarded arrives here with no duration on it —
         # graft back the length taken from the source before it is stored or
-        # rendered (see _remember_forwarded_duration).
+        # rendered (see _expect_forwarded_duration).
         self.apply_forwarded_duration(msg)
 
         # Slim any bloated quoted-message payload before persisting.
@@ -17070,9 +17070,21 @@ class MainWindow(wx.Frame):
             logging.error("[delete_for_me] exception for %s: %s", full_id, exc)
             return False
 
-    # Media duration WhatsApp's own forward does not echo back, keyed by the
-    # id of the message it created. See _remember_forwarded_duration().
+    # Media duration the forwarded copy arrives without, waiting to be grafted
+    # on. Keyed by (destination chat, kind of media) — see
+    # _expect_forwarded_duration() for why not by message id.
     _MAX_FORWARDED_DURATIONS = 64
+
+    @staticmethod
+    def media_kind_of(msg: dict):
+        """"audioMessage"/"videoMessage" for a message that has a duration."""
+        if not isinstance(msg, dict):
+            return None
+        body = msg.get("message") or {}
+        for key in ("audioMessage", "videoMessage"):
+            if isinstance(body.get(key), dict):
+                return key
+        return None
 
     @staticmethod
     def media_duration_of(msg: dict):
@@ -17098,80 +17110,76 @@ class MainWindow(wx.Frame):
                     return None
         return None
 
-    @staticmethod
-    def forwarded_message_ids(response_body) -> list:
-        """Bare message ids out of a /forward-messages response.
+    def _expect_forwarded_duration(self, target_jid: str, msg: dict):
+        """Record, BEFORE the forward is requested, the length its copy will
+        arrive without. Returns a token to hand to _forget_forwarded_duration.
 
-        forwardMessagesV2 answers with the messages it created, but its
-        wrapper types them as Array<any> and the id shows up either as a
-        serialized "true_<chat>_<ID>" string or as {"id": {"_serialized":
-        ...}}. Both shapes are read here, and anything unrecognised yields
-        no ids at all — the caller then simply learns nothing, which is the
-        behaviour that existed before.
+        WhatsApp's forward happens server-side, so the copy shows up in the
+        destination chat as a plain live message — and that live payload
+        carries no duration (issue #43). The length is right here in the
+        source message, so it is put aside now and grafted onto the copy when
+        it arrives.
+
+        Registered before the HTTP call, not after it, because the socket
+        echo routinely beats the HTTP response back: WhatsApp Web creates
+        (and announces) the message before WPPConnect answers our POST.
+        Keying this on the id the response reports therefore lost the race
+        and the duration never got applied — which is exactly how the first
+        attempt at this fix failed in testing.
+
+        That means matching on (chat, kind of media) instead of an id.
+        Entries are queued per key and consumed in order, so forwarding two
+        audios to the same chat keeps their lengths in the order they were
+        sent, and each entry is used at most once.
         """
-        items = response_body
-        if isinstance(items, dict):
-            items = items.get("response", items)
-        if isinstance(items, dict):
-            items = [items]
-        if not isinstance(items, list):
-            return []
-        ids = []
-        for item in items:
-            raw = item
-            if isinstance(item, dict):
-                raw = item.get("id") or item.get("messageId") or ""
-            if isinstance(raw, dict):
-                raw = raw.get("_serialized") or raw.get("id") or ""
-            if not isinstance(raw, str) or not raw:
-                continue
-            # "true_<chat>_<ID>[_<participant>]" -> "<ID>"
-            parts = raw.split("_")
-            ids.append(parts[2] if len(parts) > 2 else parts[-1])
-        return [i for i in ids if i]
-
-    def _remember_forwarded_duration(self, response_body, seconds: int):
-        """Record the duration to graft onto the forwarded copy's echo.
-
-        WhatsApp's own forward is done server-side, so the copy in the
-        destination chat reaches WinZapp as a plain live message — and that
-        live payload arrives with no duration on it (issue #43: the message
-        showed "0 segundos" until a full resync replaced it with the
-        server's correct value). The source message is right here in memory
-        with the real length, so it is remembered against the new message's
-        id and applied when the echo shows up.
-        """
-        if seconds is None:
-            return          # 0 is worth remembering; "unknown" is not
+        seconds = self.media_duration_of(msg)
+        kind = self.media_kind_of(msg)
+        if seconds is None or not kind or not target_jid:
+            return None
         store = getattr(self, "_forwarded_media_seconds", None)
         if store is None:
             store = self._forwarded_media_seconds = {}
-        for msg_id in self.forwarded_message_ids(response_body):
-            store[msg_id] = seconds
-        # Bounded: an id whose echo never arrives must not pin memory for the
-        # rest of the session.
-        while len(store) > self._MAX_FORWARDED_DURATIONS:
-            store.pop(next(iter(store)))
+        key = (self._normalize_jid(target_jid), kind)
+        store.setdefault(key, []).append(seconds)
+        # Bounded: a forward whose echo never arrives (send failed, app closed
+        # mid-flight) must not pin memory for the rest of the session.
+        total = sum(len(q) for q in store.values())
+        while total > self._MAX_FORWARDED_DURATIONS:
+            oldest = next(iter(store))
+            store[oldest].pop(0)
+            if not store[oldest]:
+                store.pop(oldest)
+            total -= 1
+        return key
+
+    def _forget_forwarded_duration(self, token):
+        """Drop an expectation whose forward turned out to fail."""
+        store = getattr(self, "_forwarded_media_seconds", None)
+        if not store or token not in store:
+            return
+        store[token].pop() if store[token] else None
+        if not store[token]:
+            store.pop(token, None)
 
     def apply_forwarded_duration(self, msg: dict) -> bool:
         """Fill in a forwarded media message's missing duration. True if applied."""
         store = getattr(self, "_forwarded_media_seconds", None)
         if not store or not isinstance(msg, dict):
             return False
-        msg_id = (msg.get("key") or {}).get("id", "")
-        seconds = store.pop(msg_id, None) if msg_id else None
-        if seconds is None:
+        if not (msg.get("key") or {}).get("fromMe"):
+            return False        # only our own forwards are being waited on
+        kind = self.media_kind_of(msg)
+        part = (msg.get("message") or {}).get(kind) if kind else None
+        if not isinstance(part, dict) or part.get("seconds") is not None:
+            return False        # nothing to fill, or the echo brought its own
+        jid = self._normalize_jid((msg.get("key") or {}).get("remoteJid", ""))
+        queue = store.get((jid, kind))
+        if not queue:
             return False
-        body = msg.get("message") or {}
-        for key in ("audioMessage", "videoMessage"):
-            part = body.get(key)
-            # Applied whenever the echo has no usable length of its own. The
-            # value comes from the very same media, so it cannot contradict
-            # a real one — and a stored 0 from before this fix gets repaired.
-            if isinstance(part, dict) and not part.get("seconds"):
-                part["seconds"] = seconds
-                return True
-        return False
+        part["seconds"] = queue.pop(0)
+        if not queue:
+            store.pop((jid, kind), None)
+        return True
 
     def forward_message(self, source_jid: str, msg_key: dict, target_jid: str,
                         source_msg: dict = None) -> bool:
@@ -17204,23 +17212,24 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+        # Put the source's duration aside BEFORE asking for the forward: the
+        # copy's socket echo regularly arrives before this POST answers, and
+        # it is the echo that gets stored and rendered (see
+        # _expect_forwarded_duration).
+        duration_token = self._expect_forwarded_duration(target_jid, source_msg)
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
             if r.status_code in (200, 201):
-                try:
-                    self._remember_forwarded_duration(
-                        r.json(), self.media_duration_of(source_msg)
-                    )
-                except Exception:
-                    # Learning the duration is a bonus, never a reason to
-                    # report a delivered forward as failed.
-                    logging.debug("[forward_message] could not read forwarded ids", exc_info=True)
+                logging.info("[forward_message] forwarded %s -> %s (duration expected: %s)",
+                             full_id, target_phone, duration_token is not None)
                 return True
             logging.error("[forward_message] HTTP %s for %s -> %s: %s",
                           r.status_code, full_id, target_phone, r.text[:300])
+            self._forget_forwarded_duration(duration_token)
             return False
         except Exception as exc:
             logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
+            self._forget_forwarded_duration(duration_token)
             return False
 
     def resend_media_message_with_caption(self, msg: dict, target_jid: str) -> bool:

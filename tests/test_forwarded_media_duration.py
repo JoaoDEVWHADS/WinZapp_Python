@@ -75,119 +75,168 @@ class TestReadingTheSourceDuration:
         assert MainWindow.media_duration_of(_audio(seconds=0)) == 0
 
 
-class TestReadingTheForwardResponse:
-    """forwardMessagesV2 is typed Array<any>, so the id turns up in more than
-    one shape — and anything unrecognised must simply teach us nothing."""
-
-    def test_serialized_string_id(self):
-        body = {"response": [{"id": "true_120363000000000001@g.us_3EB0ABC"}]}
-        assert MainWindow.forwarded_message_ids(body) == ["3EB0ABC"]
-
-    def test_nested_serialized_id(self):
-        body = {"response": [{"id": {"_serialized": "true_5511999999999@c.us_3EB0XYZ"}}]}
-        assert MainWindow.forwarded_message_ids(body) == ["3EB0XYZ"]
-
-    def test_bare_string_items(self):
-        body = {"response": ["true_5511999999999@c.us_AAA", "true_5511999999999@c.us_BBB"]}
-        assert MainWindow.forwarded_message_ids(body) == ["AAA", "BBB"]
-
-    def test_a_single_object_is_accepted(self):
-        assert MainWindow.forwarded_message_ids({"id": "false_x@c.us_ZZZ"}) == ["ZZZ"]
-
-    def test_a_bare_id_without_prefixes(self):
-        assert MainWindow.forwarded_message_ids({"response": ["3EB0PLAIN"]}) == ["3EB0PLAIN"]
-
-    @pytest.mark.parametrize("body", [None, "", 42, {}, {"response": None}, {"response": [{}]},
-                                      {"response": [{"id": ""}]}])
-    def test_unreadable_shapes_yield_nothing(self, body):
-        assert MainWindow.forwarded_message_ids(body) == []
-
-
 class _Stub:
     _MAX_FORWARDED_DURATIONS = MainWindow._MAX_FORWARDED_DURATIONS
+    media_kind_of = staticmethod(MainWindow.media_kind_of)
     media_duration_of = staticmethod(MainWindow.media_duration_of)
-    forwarded_message_ids = staticmethod(MainWindow.forwarded_message_ids)
-    _remember_forwarded_duration = MainWindow._remember_forwarded_duration
+    _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _expect_forwarded_duration = MainWindow._expect_forwarded_duration
+    _forget_forwarded_duration = MainWindow._forget_forwarded_duration
     apply_forwarded_duration = MainWindow.apply_forwarded_duration
 
 
-def _response(msg_id):
-    return {"status": "success", "response": [{"id": f"true_120363000000000001@g.us_{msg_id}"}]}
+CHAT = "120363000000000001@g.us"
+
+
+def _echo(kind="audioMessage", jid=CHAT, from_me=True, seconds=None):
+    """The copy as it arrives over the socket: no duration on it at all."""
+    body = {} if seconds is None else {"seconds": seconds}
+    return {"key": {"id": "3EB0NEW", "remoteJid": jid, "fromMe": from_me},
+            "messageType": kind, "message": {kind: body}}
 
 
 class TestGraftingTheDurationOntoTheEcho:
     def test_the_reported_bug_end_to_end(self):
-        """Forward a 67-second voice message; its echo arrives with no
+        """Forward a 67-second voice message; its copy arrives with no
         duration and must come out reading 67 again."""
         mw = _Stub()
-        mw._remember_forwarded_duration(_response("3EB0NEW"), mw.media_duration_of(_audio(seconds=67)))
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
 
-        echo = {"key": {"id": "3EB0NEW", "fromMe": True},
-                "messageType": "audioMessage",
-                "message": {"audioMessage": {"seconds": 0, "ptt": True}}}
-        applied = mw.apply_forwarded_duration(echo)
-
-        assert applied is True
+        echo = _echo()
+        assert mw.apply_forwarded_duration(echo) is True
         assert echo["message"]["audioMessage"]["seconds"] == 67
 
     def test_it_works_for_video_too(self):
         mw = _Stub()
-        mw._remember_forwarded_duration(_response("VID1"), mw.media_duration_of(_video(seconds=42)))
+        mw._expect_forwarded_duration(CHAT, _video(seconds=42))
 
-        echo = {"key": {"id": "VID1"}, "message": {"videoMessage": {"seconds": 0}}}
-
+        echo = _echo(kind="videoMessage")
         assert mw.apply_forwarded_duration(echo) is True
         assert echo["message"]["videoMessage"]["seconds"] == 42
 
-    def test_a_duration_that_did_arrive_is_never_overwritten(self):
-        """If the echo does carry a length, it is the authoritative one."""
+    def test_a_sub_second_note_carries_its_zero_across(self):
         mw = _Stub()
-        mw._remember_forwarded_duration(_response("X1"), 67)
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=0))
 
-        echo = {"key": {"id": "X1"}, "message": {"audioMessage": {"seconds": 12}}}
+        echo = _echo()
+        assert mw.apply_forwarded_duration(echo) is True
+        assert echo["message"]["audioMessage"]["seconds"] == 0
 
+    def test_the_expectation_is_recorded_before_any_response_exists(self):
+        """The whole point of the rewrite: nothing about the HTTP answer is
+        needed, because the echo routinely arrives first."""
+        mw = _Stub()
+        token = mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+
+        assert token == (CHAT, "audioMessage")
+        assert mw._forwarded_media_seconds[token] == [67]
+
+    def test_a_duration_that_did_arrive_is_never_overwritten(self):
+        mw = _Stub()
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+
+        echo = _echo(seconds=12)
         assert mw.apply_forwarded_duration(echo) is False
         assert echo["message"]["audioMessage"]["seconds"] == 12
 
-    def test_an_unrelated_message_is_untouched(self):
+    def test_another_chat_is_untouched(self):
         mw = _Stub()
-        mw._remember_forwarded_duration(_response("X1"), 67)
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
 
-        other = {"key": {"id": "SOMETHING_ELSE"}, "message": {"audioMessage": {"seconds": 0}}}
+        echo = _echo(jid="5511999999999@s.whatsapp.net")
+        assert mw.apply_forwarded_duration(echo) is False
 
-        assert mw.apply_forwarded_duration(other) is False
-        assert other["message"]["audioMessage"]["seconds"] == 0
-
-    def test_each_forward_is_consumed_once(self):
-        """The echo arrives once; keeping the entry would let a later message
-        that happens to reuse the id inherit a stale length."""
+    def test_another_kind_of_media_is_untouched(self):
         mw = _Stub()
-        mw._remember_forwarded_duration(_response("X1"), 67)
-        echo = {"key": {"id": "X1"}, "message": {"audioMessage": {"seconds": 0}}}
-        mw.apply_forwarded_duration(echo)
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
 
-        again = {"key": {"id": "X1"}, "message": {"audioMessage": {"seconds": 0}}}
-        assert mw.apply_forwarded_duration(again) is False
+        assert mw.apply_forwarded_duration(_echo(kind="videoMessage")) is False
+
+    def test_someone_elses_message_is_untouched(self):
+        """Only our own forwards are being waited on; an incoming audio from
+        the other side must never inherit a length we put aside."""
+        mw = _Stub()
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+
+        assert mw.apply_forwarded_duration(_echo(from_me=False)) is False
+
+    def test_each_expectation_is_consumed_once(self):
+        mw = _Stub()
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+        mw.apply_forwarded_duration(_echo())
+
+        assert mw.apply_forwarded_duration(_echo()) is False
+
+    def test_two_forwards_to_the_same_chat_keep_their_order(self):
+        """Queued, not overwritten: forwarding a 67s then a 12s audio to the
+        same chat must not swap their lengths."""
+        mw = _Stub()
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=12))
+
+        first, second = _echo(), _echo()
+        mw.apply_forwarded_duration(first)
+        mw.apply_forwarded_duration(second)
+
+        assert first["message"]["audioMessage"]["seconds"] == 67
+        assert second["message"]["audioMessage"]["seconds"] == 12
 
     def test_forwarding_text_records_nothing(self):
         mw = _Stub()
-        mw._remember_forwarded_duration(_response("T1"), mw.media_duration_of(
-            {"message": {"conversation": "oi"}}))
+        assert mw._expect_forwarded_duration(CHAT, {"message": {"conversation": "oi"}}) is None
+        assert mw.apply_forwarded_duration(_echo()) is False
 
-        echo = {"key": {"id": "T1"}, "message": {"audioMessage": {"seconds": 0}}}
-        assert mw.apply_forwarded_duration(echo) is False
+    def test_a_media_without_a_known_length_records_nothing(self):
+        mw = _Stub()
+        assert mw._expect_forwarded_duration(CHAT, _echo()) is None
+
+    def test_a_failed_forward_drops_its_expectation(self):
+        """Otherwise the next media message in that chat would inherit the
+        length of something that was never delivered."""
+        mw = _Stub()
+        token = mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+        mw._forget_forwarded_duration(token)
+
+        assert mw.apply_forwarded_duration(_echo()) is False
+
+    def test_forgetting_removes_only_the_last_expectation(self):
+        mw = _Stub()
+        mw._expect_forwarded_duration(CHAT, _audio(seconds=67))
+        token = mw._expect_forwarded_duration(CHAT, _audio(seconds=12))
+        mw._forget_forwarded_duration(token)
+
+        echo = _echo()
+        assert mw.apply_forwarded_duration(echo) is True
+        assert echo["message"]["audioMessage"]["seconds"] == 67
+
+    def test_forgetting_nothing_is_safe(self):
+        mw = _Stub()
+        mw._forget_forwarded_duration(None)          # forward of a text message
+        assert mw.apply_forwarded_duration(_echo()) is False
 
     def test_applying_with_nothing_recorded_is_safe(self):
-        mw = _Stub()
-        assert mw.apply_forwarded_duration({"key": {"id": "X"}, "message": {}}) is False
+        assert _Stub().apply_forwarded_duration(_echo()) is False
 
     def test_the_store_stays_bounded(self):
         """An echo that never arrives must not pin memory for the session."""
         mw = _Stub()
         for i in range(MainWindow._MAX_FORWARDED_DURATIONS * 2):
-            mw._remember_forwarded_duration(_response(f"ID{i}"), 30)
+            mw._expect_forwarded_duration(f"{i}@g.us", _audio(seconds=30))
 
-        assert len(mw._forwarded_media_seconds) <= MainWindow._MAX_FORWARDED_DURATIONS
+        total = sum(len(q) for q in mw._forwarded_media_seconds.values())
+        assert total <= MainWindow._MAX_FORWARDED_DURATIONS
+
+
+class TestReadingTheMediaKind:
+    def test_audio(self):
+        assert MainWindow.media_kind_of(_audio()) == "audioMessage"
+
+    def test_video(self):
+        assert MainWindow.media_kind_of(_video()) == "videoMessage"
+
+    @pytest.mark.parametrize("msg", [None, {}, {"message": {}}, {"message": {"conversation": "oi"}}])
+    def test_anything_else_has_no_kind(self, msg):
+        assert MainWindow.media_kind_of(msg) is None
 
 
 class _FakeI18n:
@@ -276,3 +325,45 @@ class TestTheNormalizerKeepsTheTwoAnswersApart:
     def test_the_forwarded_echo_shape_yields_none(self):
         """Issue #43's payload: a media message with no duration anywhere."""
         assert self.reads({"clientUrl": "https://x", "mimetype": "audio/ogg"}) is None
+
+
+class TestTheWiringInsideForwardMessage:
+    """The half that failed in real use.
+
+    The first attempt registered the duration from the forward's HTTP
+    response — and the socket echo arrived first, so the copy was already
+    stored without a duration by the time the answer came back. Nothing in
+    the tests noticed, because they exercised the helpers directly. These
+    read the source of forward_message() itself: driving it whole would need
+    a live WhatsApp session.
+    """
+
+    @staticmethod
+    def _source():
+        import inspect
+        return inspect.getsource(MainWindow.forward_message)
+
+    def test_the_expectation_is_registered_at_all(self):
+        assert "_expect_forwarded_duration(" in self._source()
+
+    def test_it_is_registered_before_the_request_goes_out(self):
+        src = self._source()
+        registered = src.index("_expect_forwarded_duration(")
+        requested = src.index("requests.post(")
+        assert registered < requested, (
+            "the duration is put aside only after the forward request — the "
+            "socket echo beats the HTTP answer back, so the copy gets stored "
+            "before the length is known (this is exactly how issue #43's "
+            "first fix failed)"
+        )
+
+    def test_a_failed_forward_gives_the_expectation_back(self):
+        """Two exits — a non-2xx answer and a raised exception — and both must
+        drop it, or the next media message in that chat inherits a length
+        from something that never arrived."""
+        assert self._source().count("_forget_forwarded_duration(") >= 2
+
+    def test_the_echo_path_applies_it(self):
+        import inspect
+
+        assert "self.apply_forwarded_duration(msg)" in inspect.getsource(MainWindow.on_new_message)
