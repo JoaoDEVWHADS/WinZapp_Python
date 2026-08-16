@@ -6442,7 +6442,6 @@ class ConversationsPanel(wx.Panel):
         gauge.SetValue(0)
         gauge.Show()
         self.conversation_panel.Layout()
-        gauge.SetFocus()
         gauge.Pulse()
 
     def _update_media_transfer_gauge(self, progress: float):
@@ -6453,7 +6452,6 @@ class ConversationsPanel(wx.Panel):
         if not gauge.IsShown():
             gauge.Show()
             self.conversation_panel.Layout()
-            gauge.SetFocus()
 
     def _hide_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
@@ -9313,8 +9311,7 @@ class ConversationsPanel(wx.Panel):
         self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
         self.main_window._schedule_set_chats()
-        if not self._media_transfer_gauge.IsShown():
-            self.message_field.SetFocus()
+        self.message_field.SetFocus()
 
         # Refresh conversation list preview to show the last sent attachment.
         self.main_window._schedule_set_chats()
