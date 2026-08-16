@@ -9313,7 +9313,8 @@ class ConversationsPanel(wx.Panel):
         self.main_window.mark_conversation_as_read(remote_jid)
         self._hide_attachment_panel()
         self.main_window._schedule_set_chats()
-        self.message_field.SetFocus()
+        if not self._media_transfer_gauge.IsShown():
+            self.message_field.SetFocus()
 
         # Refresh conversation list preview to show the last sent attachment.
         self.main_window._schedule_set_chats()
