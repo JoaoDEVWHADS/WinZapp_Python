@@ -255,8 +255,8 @@ class MyStatusDialog(wx.Dialog):
 
             # In-app video/audio playback — same VideoPlayer (BASS + ffmpeg)
             # StatusPanel's own viewer uses; see _on_play_pause_video() below.
-            self._video_bitmap = wx.StaticBitmap(panel, size=(320, 240))
-            sizer.Add(self._video_bitmap, 0, wx.LEFT | wx.BOTTOM, 8)
+            self._video_bitmap = wx.StaticBitmap(panel)
+            sizer.Add(self._video_bitmap, 1, wx.EXPAND | wx.ALL, 8)
             self._video_bitmap.Hide()
 
             self._play_pause_btn = wx.Button(panel, label=i18n.t("status_play_pause"))
@@ -542,8 +542,8 @@ class StatusPanel(wx.Panel):
         # capped-rate JPEG frame sequence and drawn into this bitmap — see
         # core/video_player.py's module docstring for why (BASS alone can't
         # decode WhatsApp's AAC track or render video at all).
-        self._video_bitmap = wx.StaticBitmap(self._viewer_panel, size=(320, 240))
-        viewer_sizer.Add(self._video_bitmap, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._video_bitmap = wx.StaticBitmap(self._viewer_panel)
+        viewer_sizer.Add(self._video_bitmap, 1, wx.EXPAND | wx.ALL, 5)
         self._video_bitmap.Hide()
 
         self._play_pause_btn = wx.Button(self._viewer_panel, label=i18n.t("status_play_pause"))
