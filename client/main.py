@@ -1125,6 +1125,16 @@ class MainWindow(wx.Frame):
             logging.info("[post_ui_init] *** THREAD STARTED ***")
             try:
                 logging.info("[post_ui_init] STEP 1 — checking background_mode=%s", self.background_mode)
+                if self.background_mode and not self.wpp_custom_api:
+                    logging.info("[post_ui_init] Waiting for local WPPConnect API readiness...")
+                    deadline = time.time() + 300
+                    while time.time() < deadline:
+                        if self._is_wpp_running():
+                            logging.info("[post_ui_init] Local WPPConnect API is ready.")
+                            break
+                        time.sleep(1)
+                    else:
+                        raise RuntimeError("Local WPPConnect API did not become ready within 300 seconds")
                 if not self.background_mode:
                     logging.info("[post_ui_init] STEP 1a — calling check_connection_status()...")
                     _connected = self.connect.check_connection_status()
