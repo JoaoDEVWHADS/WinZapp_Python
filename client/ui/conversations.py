@@ -6964,6 +6964,15 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_reply(self, msg: dict):
         """Enter reply mode: change field label, store quoted message, focus field."""
+        if self._is_system_event(msg):
+            # System events ("Fulano tornou Sicrano administrador do grupo",
+            # joins/leaves, revokes) carry no quotable content — WhatsApp
+            # rejects a quoted reply to them (HTTP 500), so entering reply
+            # mode then watching the quote fall back on send is confusing.
+            # Announce the same message the send path already uses for a
+            # lost quote and stay out of reply mode entirely.
+            self.main_window.output(self.main_window.i18n.t("reply_quote_lost"))
+            return
         self._quoted_message = msg
         i18n      = self.main_window.i18n
         sender    = self._sender_label(msg)
@@ -7099,6 +7108,12 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
+        if self._is_system_event(msg):
+            # Same guard as _on_menu_reply: a system event has no quotable
+            # content, and navigating away from the group to a private chat
+            # to quote it would leave the user stranded on the wrong chat.
+            self.main_window.output(self.main_window.i18n.t("reply_quote_lost"))
+            return
         mw = self.main_window
         chat = mw.get_chat(participant_jid)
         if chat is None:
