@@ -562,7 +562,7 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT,       self.on_change_message_field)
         self.message_field.Bind(wx.EVT_TEXT_ENTER, self.on_send_message)
         self.message_field.Bind(wx.EVT_KEY_DOWN,   self._on_message_field_key_down)
-        self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_message_field_paste)
+        self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
         self._cancel_edit_btn = wx.Button(
@@ -638,6 +638,7 @@ class ConversationsPanel(wx.Panel):
             style=wx.TE_DONTWRAP | wx.TE_PROCESS_ENTER,
         )
         self._caption_field.SetHint(i18n.t("attachment_caption_hint"))
+        self._caption_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         self._caption_field.Bind(wx.EVT_TEXT_ENTER, self._on_send_attachment)
         attach_sizer.Add(self._caption_field, 0, wx.EXPAND | wx.ALL, 5)
 
@@ -3424,8 +3425,12 @@ class ConversationsPanel(wx.Panel):
             return  # consume — don't send and don't double-insert
         event.Skip()
 
-    def _on_message_field_paste(self, event):
+    def _on_text_field_paste(self, event):
         """Intercept pastes so Unicode line/paragraph separators become \n.
+
+        Bound to every field here whose text ends up on WhatsApp — the
+        message field and the attachment caption — and works off the control
+        that raised the event, so adding another one is a single Bind().
 
         Rich clipboard sources — Google Docs, Word, websites, Apple apps —
         put U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR where a plain
@@ -3451,10 +3456,11 @@ class ConversationsPanel(wx.Panel):
         finally:
             wx.TheClipboard.Close()
         normalized = normalize_line_separators(text)
-        if normalized != text:
+        target = event.GetEventObject()
+        if normalized != text and target is not None:
             # WriteText() replaces the current selection and fires EVT_TEXT,
             # keeping the mention check / send-button logic in sync.
-            self.message_field.WriteText(normalized)
+            target.WriteText(normalized)
             return  # consume — the native paste must not run on top of this
         event.Skip()
 
@@ -9187,7 +9193,10 @@ class ConversationsPanel(wx.Panel):
         remote_jid = self.conversation.get("remoteJid", "")
         if not remote_jid:
             return
-        caption = self._caption_field.GetValue().strip()
+        # Same reason as on_send_message(): a caption pasted from a rich
+        # source carries U+2028/U+2029, which look like nothing here and
+        # arrive as paragraph breaks on the recipient's side.
+        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
 
         _VTYPE = {
             "image":    "imageMessage",

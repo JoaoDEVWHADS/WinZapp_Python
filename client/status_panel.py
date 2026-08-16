@@ -11,7 +11,7 @@ from ui.accessible import (
     AccessibleRecordVoiceMessage, AccessibleDiscardVoiceMessage, AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
 )
-from core.utils import format_number, get_downloads_folder
+from core.utils import format_number, get_downloads_folder, normalize_line_separators
 from core.video_player import VideoPlayer
 from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
 
@@ -1680,7 +1680,7 @@ class StatusPanel(wx.Panel):
             return
         if status.get("key", {}).get("fromMe"):
             return  # no reply UI for own statuses — see _show_current_status()
-        text = self._reply_field.GetValue().strip()
+        text = normalize_line_separators(self._reply_field.GetValue()).strip()
         if not text:
             return
         poster_jid = entry.get("jid", "")
@@ -2067,8 +2067,8 @@ class StatusPanel(wx.Panel):
     # ── Send text status ─────────────────────────────────────────────────────
 
     def _on_send_text_status(self, event):
-        text    = self._post_text_field.GetValue().strip()
-        caption = self._caption_field.GetValue().strip()
+        text    = normalize_line_separators(self._post_text_field.GetValue()).strip()
+        caption = normalize_line_separators(self._caption_field.GetValue()).strip()
         if not text and not caption:
             return
         content = text or caption
@@ -2189,7 +2189,7 @@ class StatusPanel(wx.Panel):
     def _on_send_media_status(self, event):
         if not self._selected_media_paths:
             return
-        caption = self._media_caption_field.GetValue().strip()
+        caption = normalize_line_separators(self._media_caption_field.GetValue()).strip()
         paths = list(self._selected_media_paths)
         threading.Thread(
             target=self._send_all_media_statuses_bg,
