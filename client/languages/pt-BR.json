@@ -92,6 +92,7 @@
     "media_download_failed": "Não foi possível baixar este arquivo de mídia. O link pode ter expirado ou o WPPConnect está indisponível.",
     "media_download_offline": "Não é possível baixar arquivos de mídia enquanto o WhatsApp estiver desconectado ou conectando. Aguarde a conexão ser restabelecida e tente novamente.",
     "reply_quote_lost": "Não foi possível citar a mensagem original; enviando como mensagem normal.",
+    "system_event_action_unavailable": "Esta ação não está disponível para avisos do grupo.",
     "decimal_separator": ",",
     "audio_progress_label": "Progresso do áudio",
     "of": "de",

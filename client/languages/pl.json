@@ -92,6 +92,7 @@
     "media_download_failed": "Nie udało się pobrać tego pliku multimedialnego. Link mógł wygasnąć lub WPPConnect jest niedostępny.",
     "media_download_offline": "Nie można pobierać plików multimedialnych, gdy WhatsApp jest rozłączony lub się łączy. Poczekaj na przywrócenie połączenia i spróbuj ponownie.",
     "reply_quote_lost": "Nie udało się zacytować oryginalnej wiadomości; zostanie wysłana jako zwykła wiadomość.",
+    "system_event_action_unavailable": "Ta czynność nie jest dostępna dla powiadomień grupowych.",
     "decimal_separator": ",",
     "audio_progress_label": "Postęp odtwarzania audio",
     "of": "z",
