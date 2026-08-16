@@ -1638,7 +1638,7 @@ class ConversationsPanel(wx.Panel):
         if msg_ts > current_t:
             chat["t"] = msg_ts
 
-    def _mark_message_sent(self, local_id: str, real_id: str = None):
+    def _mark_message_sent(self, local_id: str, real_id: str = None, quote_lost: bool = False):
         """
         Called on the main thread when a queued message is successfully delivered.
         Clears the _local_pending flag, refreshes the list item, plays the
@@ -1646,6 +1646,10 @@ class ConversationsPanel(wx.Panel):
         real_id (the WhatsApp message ID returned by the API) replaces the local
         UUID in the virtual message's key so that media playback can later look
         up the message in the WPPConnect API database.
+        quote_lost=True means the quoted send failed server-side and the message
+        went out as a plain send (send_text_message's fallback): the virtual
+        message's reply contextInfo is dropped so the row stops reading as a
+        reply — the quote never actually reached the recipient.
         """
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
@@ -1665,6 +1669,11 @@ class ConversationsPanel(wx.Panel):
                     return  # Already marked sent on the UI, ignore to prevent duplicate sound and actions
                 msg["_ui_sent"] = True
                 msg["_local_pending"] = False
+                # The quoted send failed and the message went out as a plain
+                # send: drop the reply contextInfo so the row no longer reads
+                # as "respondendo a …". The quote never reached the recipient.
+                if quote_lost:
+                    msg.pop("contextInfo", None)
                 # Replace the local UUID with the real WhatsApp message ID so
                 # get_base64_from_media can find the message in the DB later.
                 if real_id and isinstance(real_id, str):

@@ -13469,6 +13469,7 @@ class MainWindow(wx.Frame):
         }
 
         quoted_id = None
+        quote_stripped = False
 
         if mentioned_jids:
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-mentioned"
@@ -13583,6 +13584,7 @@ class MainWindow(wx.Frame):
                     logging.warning("[send_text_message] Quoted send failed (HTTP %s). Retrying without quote on %s...",
                                     response.status_code, active_dest)
                     wx.CallAfter(self.output, self.i18n.t("reply_quote_lost"))
+                    quote_stripped = True
                     url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-message"
                     payload = {
                         "phone": [active_dest],
@@ -13622,9 +13624,15 @@ class MainWindow(wx.Frame):
                         msg_id = msg_id.get("_serialized", "")
                     parts = msg_id.split("_") if msg_id else []
                     clean_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                    if quote_stripped:
+                        return {"ok": True, "id": clean_id, "quote_lost": True}
                     return clean_id or True
+                if quote_stripped:
+                    return {"ok": True, "quote_lost": True}
                 return True
             except Exception:
+                if quote_stripped:
+                    return {"ok": True, "quote_lost": True}
                 return True
         except Exception as exc:
             return self._classify_send_exception(exc, "send_text_message")
@@ -13990,12 +13998,15 @@ class MainWindow(wx.Frame):
             logging.error("[pin_message] exception: %s", exc)
             return False
 
-    def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None, remote_jid: str = None):
+    def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None, remote_jid: str = None, quote_lost: bool = False):
         """
         Called on the main thread after a queued message is successfully sent.
         Updates the UI status label and cleans up any temporary audio file.
         real_id is the WhatsApp message ID returned by the API; it replaces the
         local UUID in the virtual message so playback can find the message in the DB.
+        quote_lost is True when the original send-with-quote failed and the message
+        went out as a plain send instead (see send_text_message's fallback) — the
+        UI must then drop the reply contextInfo so the row stops reading as a reply.
         """
         import time as _time
         logging.info("[VOICE_TIMING] _on_message_sent — message LEFT pending state. local_id=%s real_id=%s",
@@ -14043,7 +14054,7 @@ class MainWindow(wx.Frame):
             self.message_sent_sound.play()
 
         if hasattr(self, "conversations_panel"):
-            self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
+            self.conversations_panel._mark_message_sent(local_id, real_id=real_id, quote_lost=quote_lost)
 
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
