@@ -4612,8 +4612,9 @@ class ConversationsPanel(wx.Panel):
             return
 
         mw.output(i18n.t("downloading"))
-        self._action_download_btn.Disable()
+        self._action_download_btn.Hide()
         self._show_media_transfer_gauge()
+        self.conversation_panel.Layout()
 
         last_percent = -1
 
@@ -4635,15 +4636,15 @@ class ConversationsPanel(wx.Panel):
                 pass
 
             def _done():
-                self._action_download_btn.Enable()
                 self._hide_media_transfer_gauge()
                 if os.path.isfile(media_path) and os.path.getsize(media_path) > 0:
                     # File ready — swap Download for Open + Save As
-                    self._action_download_btn.Hide()
                     self._action_open_btn.SetLabel(i18n.t("open"))
                     self._action_open_btn.Show()
                     self._action_save_as_btn.Show()
-                    self.conversation_panel.Layout()
+                else:
+                    self._action_download_btn.Show()
+                self.conversation_panel.Layout()
 
             wx.CallAfter(_done)
 
