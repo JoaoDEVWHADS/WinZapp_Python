@@ -486,6 +486,33 @@ def is_countable_message(msg: dict) -> bool:
     return msg.get("messageType") not in _PREVIEW_ONLY_MESSAGE_TYPES
 
 
+def _discount_non_countable_unread(records: list, unread_count: int) -> int:
+    """Discount from a server-reported unread count the tail messages that
+    must never count toward the badge: our own (fromMe) sends — WhatsApp Web
+    sometimes counts those — and system events (groupNotification,
+    protocolMessage, e2e_notification, ...) that is_countable_message()
+    excludes.
+
+    This is the mirror of the app's own counting rule: on_new_message()
+    only ever increments the badge for countable messages, so a server that
+    counts a promote/join/leave (or any other system event) toward unread
+    would otherwise mint a phantom badge on a chat that has no real unread
+    message in it — observed live with a group promote that appeared as "1
+    não lida" while the conversation held nothing new. The tail inspected is
+    the locally-stored record list, which keeps the exact shape the
+    on_new_message() increment logic itself saw.
+    """
+    if unread_count <= 0 or not records:
+        return unread_count
+    tail = records[-unread_count:] if unread_count <= len(records) else records
+    discount = sum(
+        1 for m in tail
+        if (isinstance(m, dict) and (m.get("key") or {}).get("fromMe"))
+        or not is_countable_message(m)
+    )
+    return max(0, unread_count - discount)
+
+
 def _message_ts(msg: dict) -> int:
     """The timestamp of a message record, whichever key it arrived under."""
     if not isinstance(msg, dict):
@@ -9375,6 +9402,20 @@ class MainWindow(wx.Frame):
                             if k == "unreadCount":
                                 server_val = int(v or 0)
                                 local_val = int(chats[jid].get("unreadCount") or 0)
+                                # The server counts system events (promote/join/leave
+                                # group notifications, protocolMessage revokes) and
+                                # sometimes own (fromMe) sends toward unread. Discount
+                                # the same tail is_countable_message() excludes in
+                                # on_new_message(), so a snapshot that reports e.g.
+                                # "1 unread" for a chat whose only new record is a
+                                # group promote doesn't mint a phantom badge here
+                                # either. Same correction as on_chat_unread_update().
+                                server_val = _discount_non_countable_unread(
+                                    (chats[jid].get("messages") or {})
+                                    .get("messages", {})
+                                    .get("records", []),
+                                    server_val,
+                                )
                                 # Never resurrect unread count for the conversation the
                                 # user has open right now — mark_conversation_as_read()
                                 # already set it to 0 locally, and this snapshot can be
@@ -14604,8 +14645,9 @@ class MainWindow(wx.Frame):
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
             return  # no actual change — skip expensive rebuild + save
-        # The server sometimes counts own (fromMe) messages as unread. Correct
-        # for that by inspecting the tail of the locally-stored message list.
+        # The server sometimes counts own (fromMe) messages — and system events
+        # (group promotes, joins/leaves, revokes) — as unread. Correct for both
+        # by inspecting the tail of the locally-stored message list.
         if unread_count > 0:
             records = (
                 (chat.get("messages") or {})
@@ -14613,9 +14655,7 @@ class MainWindow(wx.Frame):
                 .get("records", [])
             )
             if records:
-                tail = records[-unread_count:] if unread_count <= len(records) else records
-                own_count = sum(1 for m in tail if (m.get("key") or {}).get("fromMe"))
-                unread_count = max(0, unread_count - own_count)
+                unread_count = _discount_non_countable_unread(records, unread_count)
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
             return
