@@ -139,6 +139,7 @@
     "options": "opciones",
     "open": "Abrir",
     "open_image": "Abrir imagen",
+    "open_location": "Abrir ubicación",
     "save_as": "Guardar como...",
     "save_audio_as": "Guardar audio como...",
     "save_as_nothing_to_save": "Este mensaje no tiene ningún archivo que guardar",

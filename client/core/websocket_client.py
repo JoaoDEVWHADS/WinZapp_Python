@@ -73,6 +73,17 @@ def _media_seconds(wpp_msg: dict):
 
 
 class WebSocketClient:
+    # How long on_disconnect() waits, with the socket still down, before
+    # declaring the app auto-offline. Was 5.0s — too short to ride out an
+    # ordinary Wi-Fi power-save/NAT-rebind blip or a brief hiccup against the
+    # local WPPConnect server (reported live as flipping to "modo offline"
+    # far more often than any real WhatsApp outage would). python-socketio's
+    # own reconnection backoff above (2s, doubling up to 60s) gets through
+    # several attempts within this window before the app gives up and
+    # believes it — a genuine outage is still caught either by this (a
+    # little later) or by the 30-second HTTP health check regardless.
+    _DISCONNECT_CONFIRM_SECONDS = 20.0
+
     def __init__(self, main_window, connect, instance_name):
         self.main_window = main_window
         self.connect = connect
@@ -191,10 +202,10 @@ class WebSocketClient:
         # _recheck_connection_after_connect() saw the reconnect, force a full
         # resync every time — even though WhatsApp itself never actually went
         # down and outgoing sends (which go over the REST API, not this
-        # socket) were never actually blocked. Wait a few seconds and only
-        # declare it if the socket is STILL down by then; a genuine outage is
-        # still caught either by this (a little later) or by the 30-second
-        # health check regardless.
+        # socket) were never actually blocked. Wait _DISCONNECT_CONFIRM_SECONDS
+        # and only declare it if the socket is STILL down by then; a genuine
+        # outage is still caught either by this (a little later) or by the
+        # 30-second health check regardless.
         if self._disconnect_timer is not None:
             self._disconnect_timer.cancel()
 
@@ -203,7 +214,7 @@ class WebSocketClient:
                 self.main_window._set_wa_connected(False, "socket disconnected", False)
 
         self._disconnect_timer = threading.Timer(
-            5.0, lambda: wx.CallAfter(_confirm_still_disconnected)
+            self._DISCONNECT_CONFIRM_SECONDS, lambda: wx.CallAfter(_confirm_still_disconnected)
         )
         self._disconnect_timer.daemon = True
         self._disconnect_timer.start()

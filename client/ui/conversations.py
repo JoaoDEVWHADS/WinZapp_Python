@@ -2540,6 +2540,12 @@ class ConversationsPanel(wx.Panel):
                 self._contact_converse_btn.Show()
                 self.conversation_panel.Layout()
 
+        elif msg_type in ("locationMessage", "liveLocationMessage"):
+            if self._location_maps_url(msg):
+                self._action_open_btn.SetLabel(self.main_window.i18n.t("open_location"))
+                self._action_open_btn.Show()
+                self.conversation_panel.Layout()
+
         # ── Link detection ────────────────────────────────────────────────
         # Always check the rendered text for URLs (regardless of msg_type).
         # Must use _render_message_line(msg) — the full, untruncated text —
@@ -2607,8 +2613,8 @@ class ConversationsPanel(wx.Panel):
                 return  # GIFs have no audio track to play
             self._play_toggle_video_message(msg)
 
-        elif msg_type in ("imageMessage", "documentMessage"):
-            # Enter on an image or document → open in default app
+        elif msg_type in ("imageMessage", "documentMessage", "locationMessage", "liveLocationMessage"):
+            # Enter on an image, document, or location → open in default app
             self._on_action_open(None, index=index)
 
     def on_messages_context_menu(self, event):
@@ -4328,6 +4334,14 @@ class ConversationsPanel(wx.Panel):
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
+
+        if msg_type in ("locationMessage", "liveLocationMessage"):
+            # No download/cache involved — hand the coordinates straight to
+            # the system's default map/browser handler.
+            url = self._location_maps_url(msg)
+            if url:
+                self._open_file_safely(url)
+            return
 
         if msg_type == "documentMessage":
             filename = (msg_obj.get("documentMessage") or {}).get(
@@ -9411,6 +9425,30 @@ class ConversationsPanel(wx.Panel):
         self.main_window._schedule_set_chats()
 
     # ── Contact message helpers ──────────────────────────────────────────────
+
+    def _location_maps_url(self, msg: dict) -> str | None:
+        """Build an openable Google Maps URL from a locationMessage/
+        liveLocationMessage's coordinates, or None if it carries none.
+
+        WinZapp has no in-app map view — unlike the phone client, which
+        renders the location inline — so "opening" a location here means
+        handing its coordinates to the system's default map/browser handler,
+        the same way an image or document opens in its associated app.
+        """
+        msg_type = msg.get("messageType", "")
+        inner = (msg.get("message") or {}).get(msg_type)
+        if not isinstance(inner, dict):
+            return None
+        lat = inner.get("degreesLatitude")
+        lng = inner.get("degreesLongitude")
+        if lat is None or lng is None:
+            return None
+        try:
+            lat = float(lat)
+            lng = float(lng)
+        except (TypeError, ValueError):
+            return None
+        return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
 
     def _jid_from_vcard(self, vcard: str) -> str | None:
         """Extract the WhatsApp JID from a vCard string."""
