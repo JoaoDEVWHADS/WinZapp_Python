@@ -359,54 +359,6 @@ async function grantPersistentStorage(page: any, logger: any, session: string) {
   }
 }
 
-/**
- * Warm WhatsApp Web's status pipeline before the user's first post.
- *
- * The StatusV3Store and the status@broadcast chat are lazily initialized by
- * WhatsApp Web: the first status post after a fresh session pays the full
- * cold-start cost (status store sync + status chat registration), which can
- * run well past the client's HTTP timeout and surface as a false failure even
- * though the post itself succeeds. Pre-syncing the store at session start
- * moves that one-time cost off the first post. Best-effort throughout: WA may
- * not be ready yet, in which case the per-post warm-up in statusController
- * still runs and covers it.
- */
-async function prewarmStatusStore(page: any, logger: any, session: string) {
-  if (!page) return;
-  try {
-    const state = await page.evaluate(async () => {
-      const WPP = (window as any).WPP;
-      const store = WPP?.whatsapp?.StatusV3Store;
-      let synced = false;
-      if (store?.sync) {
-        try {
-          await store.sync();
-          synced = true;
-        } catch (e) {
-          // store not ready yet — the retries / per-post warm-up cover it
-        }
-      }
-      let chatFound = false;
-      if (WPP?.chat?.find) {
-        try {
-          await WPP.chat.find('status@broadcast');
-          chatFound = true;
-        } catch (e) {
-          // the virtual status chat may not exist yet on some WA versions
-        }
-      }
-      return { synced, chatFound };
-    });
-    logger?.info?.(
-      `[${session}] status store prewarm: ${JSON.stringify(state)}`
-    );
-  } catch (e: any) {
-    logger?.warn?.(
-      `[${session}] status store prewarm failed: ${e?.message || e}`
-    );
-  }
-}
-
 export default class CreateSessionUtil {
   forceKillSession(session: string, logger?: any) {
     const client: any = clientsArray[session];
@@ -628,7 +580,6 @@ export default class CreateSessionUtil {
         client.page.on('load', () => {
           restoreMsgKeySerialized(client.page, req.logger, session);
           restoreStatusSender(client.page, req.logger, session);
-          prewarmStatusStore(client.page, req.logger, session);
           // The permission grant survives a navigation (it is stored on the
           // browser context), but the bucket request does not — persist() has
           // to be asked again by the new document, so re-run the whole thing.
@@ -639,18 +590,6 @@ export default class CreateSessionUtil {
         await grantPersistentStorage(client.page, req.logger, session);
       }
       await this.start(req, client);
-
-      // Warm the status pipeline now that the session is up, plus a couple of
-      // retries in case WhatsApp Web is still initializing the status store.
-      prewarmStatusStore(client.page, req.logger, session);
-      setTimeout(
-        () => prewarmStatusStore(client.page, req.logger, session),
-        10000
-      );
-      setTimeout(
-        () => prewarmStatusStore(client.page, req.logger, session),
-        30000
-      );
 
       if (req.serverOptions.webhook.onParticipantsChanged) {
         await this.onParticipantsChanged(req, client);
