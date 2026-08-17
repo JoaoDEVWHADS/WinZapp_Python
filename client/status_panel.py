@@ -2091,7 +2091,7 @@ class StatusPanel(wx.Panel):
             }
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
             logging.info(
                 "[status_post] POST %s -> HTTP %s, body=%.300s",
