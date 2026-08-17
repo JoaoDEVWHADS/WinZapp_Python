@@ -6435,6 +6435,32 @@ class ConversationsPanel(wx.Panel):
             return False
         return msg.get("messageType") == "groupNotification"
 
+    def _reject_system_event_action(self, msg) -> bool:
+        """Announce and refuse a message action that cannot apply to a system event.
+
+        WhatsApp's own group notices (joins/leaves, promotes, name/settings
+        changes) are not addressable messages: the server resolves their id
+        only sometimes, so forwarding, pinning or reacting to one either
+        fails outright or acts on nothing. The purely local actions (star)
+        are harmless but equally pointless, and offering them anyway makes a
+        screen reader announce a state change that no other client will ever
+        show — so everything is refused uniformly.
+
+        The guard lives here, in the _on_menu_* handlers, rather than in the
+        context menu: the accelerators (Ctrl+Shift+E/R/O/P, Delete) call
+        those handlers directly and would bypass a menu-only gate. That is
+        exactly how Ctrl+Shift+S once opened a Save As dialog for a text
+        message the menu had already hidden the item for.
+
+        Returns True when the caller must not proceed.
+        """
+        if not self._is_system_event(msg):
+            return False
+        self.main_window.output(
+            self.main_window.i18n.t("system_event_action_unavailable")
+        )
+        return True
+
     def _render_message_line(self, msg, index: int | None = None, total: int | None = None) -> str:
         """Produce the full display string for a single message row."""
         if isinstance(msg, dict) and msg.get("_type") == "empty_placeholder":
@@ -7363,6 +7389,8 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_forward(self, msg: dict):
         """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
+        if self._reject_system_event_action(msg):
+            return
         import ctypes
         mw   = self.main_window
         i18n = mw.i18n
@@ -7628,6 +7656,8 @@ class ConversationsPanel(wx.Panel):
         return failed
 
     def _on_menu_star(self, msg: dict):
+        if self._reject_system_event_action(msg):
+            return
         msg["starred"] = not msg.get("starred")
         jid = self.conversation.get("remoteJid", "")
         if jid:
@@ -7642,6 +7672,8 @@ class ConversationsPanel(wx.Panel):
         — applied optimistically like conversation pin/unpin
         (_sync_pin_to_server), and rolled back if the server rejects it.
         """
+        if self._reject_system_event_action(msg):
+            return
         jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if not jid:
             return
@@ -7683,9 +7715,15 @@ class ConversationsPanel(wx.Panel):
 
         msg_key = msg.get("key", {})
         from_me = msg_key.get("fromMe", False)
-        can_delete_for_all = from_me
+        # Deleting a group notice locally is legitimate (it just hides the row),
+        # so this is the one action system events keep. "For everyone" is not:
+        # WhatsApp has no revoke for its own notices, so the request would only
+        # fail after the row already looked deleted. Both the fromMe path and
+        # the group-admin path below are excluded.
+        is_system = self._is_system_event(msg)
+        can_delete_for_all = from_me and not is_system
 
-        if not can_delete_for_all and self.conversation:
+        if not can_delete_for_all and not is_system and self.conversation:
             conv_jid = self.conversation.get("remoteJid", "")
             if conv_jid.endswith("@g.us"):
                 group_meta = self.conversation.get("groupMetadata", {})
@@ -8834,6 +8872,8 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_react(self, msg: dict):
         """Open the emoji picker dialog to react to a message."""
+        if self._reject_system_event_action(msg):
+            return
         i18n = self.main_window.i18n
         EMOJIS = [
             ("❤️", "❤️"),

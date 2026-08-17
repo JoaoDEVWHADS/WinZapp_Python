@@ -22,6 +22,7 @@ class _FakeI18n:
         "pin_message": "Fixar mensagem",
         "pin_message_failed": "Não foi possível fixar esta mensagem.",
         "unpin_message_failed": "Não foi possível desafixar esta mensagem.",
+        "system_event_action_unavailable": "Esta ação não está disponível para avisos do grupo.",
     }
 
     def t(self, key):
@@ -34,6 +35,10 @@ class _FakeMainWindow:
         self.pin_result = pin_result
         self.pin_calls = []
         self.save_calls = 0
+        self.announced = []
+
+    def output(self, text):
+        self.announced.append(text)
 
     def pin_message(self, jid, msg_key, pin):
         self.pin_calls.append((jid, dict(msg_key), pin))
@@ -46,6 +51,10 @@ class _FakeMainWindow:
 class _Stub:
     _on_menu_pin_message = ConversationsPanel._on_menu_pin_message
     _on_pin_message_failed = ConversationsPanel._on_pin_message_failed
+    # _is_system_event is a staticmethod on the real class and attribute
+    # access unwraps it, so it has to be re-wrapped here.
+    _is_system_event = staticmethod(ConversationsPanel._is_system_event)
+    _reject_system_event_action = ConversationsPanel._reject_system_event_action
 
     def __init__(self, main_window):
         self.main_window = main_window
@@ -116,6 +125,22 @@ class TestPinMessage:
         s._on_menu_pin_message(msg)
 
         assert msg["pinInChat"] is False, "rollback must undo the optimistic pin"
+
+    def test_a_group_notice_is_never_pinned(self):
+        """Pinning is visible to every participant, so a group notice reaching
+        it would broadcast a pin the server cannot honour. The accelerator
+        (Ctrl+Shift+P) calls this handler directly, so the guard has to be
+        here rather than on the context menu item."""
+        mw = _FakeMainWindow(pin_result=True)
+        s = _Stub(mw)
+        msg = {"key": {"id": "a", "fromMe": False}, "messageType": "groupNotification"}
+
+        s._on_menu_pin_message(msg)
+
+        assert "pinInChat" not in msg
+        assert mw.pin_calls == []
+        assert mw.save_calls == 0
+        assert mw.announced == [_FakeI18n._STRINGS["system_event_action_unavailable"]]
 
     def test_no_open_conversation_is_a_no_op(self):
         mw = _FakeMainWindow(pin_result=True)
