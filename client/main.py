@@ -13911,13 +13911,6 @@ class MainWindow(wx.Frame):
                 return lid
             return jid.replace("@s.whatsapp.net", "@c.us")
 
-        def _format_1on1_chat(jid: str) -> str:
-            if not jid:
-                return jid
-            if jid.endswith("@s.whatsapp.net"):
-                return jid.replace("@s.whatsapp.net", "@c.us")
-            return jid
-
         msg_id = msg_key.get("id", "")
         if not msg_id:
             return ""
@@ -13930,12 +13923,31 @@ class MainWindow(wx.Frame):
             return msg_id
         from_me = bool(msg_key.get("fromMe", False))
         prefix = "true" if from_me else "false"
-        
+
         raw_remote = remote_jid or msg_key.get("remoteJid", "") or (full_msg.get("from") if isinstance(full_msg, dict) else "") or ""
         if raw_remote.endswith("@g.us"):
             chat = raw_remote
         else:
-            chat = _format_1on1_chat(raw_remote)
+            # Own 1-on-1 messages sent through WinZapp are built from
+            # self.conversation["remoteJid"] at compose time, which can still
+            # be the phone/@c.us form even though _resolve_jid_for_send()
+            # (send_text_message() et al.) prefers @lid for the actual send
+            # whenever the cache knows one — WhatsApp Web indexes every
+            # message of a @lid-addressed chat, including our own outgoing
+            # ones, under that @lid in its internal Store. Building the
+            # quoted-id's chat segment from the phone form here then no
+            # longer matches what Store actually has, and the quote silently
+            # fails with a lookup miss (reported as "não foi possível citar
+            # a mensagem" — private chats only; groups keep their own
+            # canonical @g.us address and never hit this). A message just
+            # RECEIVED from the other party doesn't have this problem: its
+            # remoteJid, as reported live for an already-@lid chat, already
+            # arrives in @lid form. Preferring the cached @lid here — same
+            # policy as the group "participant" segment below and as
+            # _resolve_jid_for_send() itself — keeps quoting an own private
+            # message pointed at whatever address WhatsApp Web actually
+            # filed it under.
+            chat = _resolve_to_lid_if_available(raw_remote)
 
         # Group messages — and status updates (status@broadcast is a shared
         # "chat" the same way a group is: WPPConnect/Baileys need the actual

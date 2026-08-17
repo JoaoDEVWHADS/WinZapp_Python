@@ -4524,9 +4524,11 @@ class ConversationsPanel(wx.Panel):
             msg_ts //= 1000
         time_str = datetime.fromtimestamp(msg_ts).strftime("%Y%m%d_%H%M%S") if msg_ts > 0 else ""
 
+        i18n = self.main_window.i18n
+
         if msg_type == "audioMessage" and is_ptt:
             # Recorded voice messages: default to .ogg
-            default_file = f"mensagem_de_voz_{time_str or msg_id}.ogg"
+            default_file = f"{i18n.t('default_filename_voice_message')}_{time_str or msg_id}.ogg"
         elif file_name:
             # Preserve original filename and extension
             if "." in file_name and not file_name.endswith("."):
@@ -4537,19 +4539,19 @@ class ConversationsPanel(wx.Panel):
                 default_file = file_name
         elif msg_type == "documentMessage":
             ext = guessed_ext or ".bin"
-            default_file = f"documento_{time_str or msg_id}{ext}"
+            default_file = f"{i18n.t('default_filename_document')}_{time_str or msg_id}{ext}"
         elif msg_type == "imageMessage":
             ext = guessed_ext or ".jpg"
-            default_file = f"imagem_{time_str or msg_id}{ext}"
+            default_file = f"{i18n.t('default_filename_image')}_{time_str or msg_id}{ext}"
         elif msg_type == "videoMessage":
             ext = guessed_ext or ".mp4"
-            default_file = f"video_{time_str or msg_id}{ext}"
+            default_file = f"{i18n.t('default_filename_video')}_{time_str or msg_id}{ext}"
         elif msg_type == "audioMessage":
             ext = guessed_ext or ".mp3"
-            default_file = f"audio_{time_str or msg_id}{ext}"
+            default_file = f"{i18n.t('default_filename_audio')}_{time_str or msg_id}{ext}"
         else:
             ext = guessed_ext or ".bin"
-            default_file = f"arquivo_{time_str or msg_id}{ext}"
+            default_file = f"{i18n.t('default_filename_generic')}_{time_str or msg_id}{ext}"
 
         # Sanitize OS filename invalid characters (Windows: \ / : * ? " < > |)
         return re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()

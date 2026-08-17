@@ -546,19 +546,28 @@ def format_number(string_number):
 
     local = digits[len(cc):]
 
-    if cc == "55":
+    # A Brazilian mobile/landline number is always DDD(2) + 8 or 9 digits —
+    # 10 or 11 digits total after the country code. E.164 codes are
+    # prefix-free (no other country's code starts with "55"), so a genuine
+    # phone number matching "55" here really is Brazilian — but a
+    # non-standard-length id (e.g. a WhatsApp internal identifier that
+    # slipped past the @lid/length guard above, or a malformed contact
+    # entry) can still coincidentally start with "55" digits without being
+    # a real Brazilian number. Forcing the DDD/dash split on it produced a
+    # string that *looked* like a valid Brazilian number even though it
+    # wasn't one — reported live for shared contacts whose actual country
+    # was something else entirely (issue #35). Only apply the Brazil-
+    # specific shape when the length actually fits; anything else falls
+    # through to the plain "+55 <digits>" international format below,
+    # which at least never fabricates a fake area code/dash grouping.
+    if cc == "55" and len(local) in (10, 11):
         ddd = local[:2]
         rest = local[2:]
-        if not ddd:
-            return f"+{cc}"
-        if not rest:
-            return f"+{cc} {ddd}"
         if len(rest) == 9:
             return f"+{cc} {ddd} {rest[:5]}-{rest[5:]}"
-        split = max(len(rest) - 4, 1)
-        return f"+{cc} {ddd} {rest[:split]}-{rest[split:]}"
+        return f"+{cc} {ddd} {rest[:4]}-{rest[4:]}"
 
-    # Generic international
+    # Generic international (also covers "55" matches of the wrong length)
     return f"+{cc} {local}" if local else f"+{cc}"
 
 def parse_bool_flag(value):
