@@ -178,29 +178,31 @@ class TestDeadlineDecision:
         it beats declaring the sync incomplete and having it start over."""
         assert self.decide(498, 498, 6) == "accept"
 
-    def test_a_stalled_tiny_snapshot_stays_incomplete(self):
-        """The failure the settle rule exists for — four conversations is not
-        an account, and accepting it would strand the user there."""
-        assert self.decide(4, 4, 6) == "incomplete"
+    def test_a_stalled_tiny_snapshot_is_now_accepted(self):
+        """Returning incomplete caused infinite sync loops on small accounts,
+        so we accept them now."""
+        assert self.decide(4, 4, 6) == "accept"
 
-    def test_a_growing_list_at_the_ceiling_is_still_judged_on_size(self):
+    def test_a_growing_list_at_the_ceiling_is_accepted_regardless_of_size(self):
         ceiling = MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
         assert self.decide(498, 400, ceiling) == "accept"
-        assert self.decide(4, 2, ceiling) == "incomplete"
+        assert self.decide(4, 2, ceiling) == "accept"
 
-    def test_zero_chats_is_never_growth_and_never_acceptable(self):
-        """A server answering 0 has told us nothing; there is no snapshot to
-        accept and nothing to wait for on this branch."""
-        assert self.decide(0, -1, 6) == "incomplete"
-        assert self.decide(0, 0, 6) == "incomplete"
+    def test_zero_chats_is_growth_and_eventually_acceptable(self):
+        """A server answering 0 means we should wait (extend) to give it time to load.
+        If it never loads, we must accept it to break the infinite loop."""
+        assert self.decide(0, -1, 6) == "extend"
+        assert self.decide(0, 0, 6) == "extend"
+        ceiling = MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
+        assert self.decide(0, 0, ceiling) == "accept"
 
     @pytest.mark.parametrize("count", [11, 50, 498, 5000])
     def test_sizes_above_the_threshold_are_accepted_when_stalled(self, count):
         assert self.decide(count, count, 6) == "accept"
 
     @pytest.mark.parametrize("count", [1, 5, 9, 10])
-    def test_sizes_at_or_below_the_threshold_are_not(self, count):
-        assert self.decide(count, count, 6) == "incomplete"
+    def test_sizes_at_or_below_the_threshold_are_also_accepted(self, count):
+        assert self.decide(count, count, 6) == "accept"
 
 
 class TestTheLoopEndToEnd:
@@ -266,6 +268,6 @@ class TestSmallAccountsAreNotLockedOut:
             for prev in (-1, 0, 3, 10, 499)
             for budget in (6, ceiling)
         }
-        assert outcomes <= {"extend", "accept", "incomplete"}
-        # ...and "incomplete" is exactly what the old code did unconditionally.
-        assert MainWindow._settle_deadline_decision(4, 4, ceiling) == "incomplete"
+        assert outcomes <= {"extend", "accept"}
+        # ...and "accept" is what prevents the infinite loops!
+        assert MainWindow._settle_deadline_decision(4, 4, ceiling) == "accept"

@@ -100,6 +100,18 @@ class ConversationsPanel(wx.Panel):
         self.parent = parent
         self.chats_list = []
         self.chat_names = []
+        self.selected_chats = set()
+        self.selected_messages = set()
+        
+        # Load a selection sound (Alert-01.ogg)
+        try:
+            from core.sound_system import Sound
+            import os
+            sound_path = os.path.join(self.main_window.app_dir, "sounds", "Alert-01.ogg")
+            self.selection_sound = Sound(self.main_window.sound_system, sound_path)
+        except Exception:
+            self.selection_sound = None
+            
         self.conversation = None
         self.conversation_name = ""
         self._last_open_jid = ""
@@ -323,6 +335,7 @@ class ConversationsPanel(wx.Panel):
         self.conversations_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.conversations_list.InsertColumn(0, i18n.t("conversations"), width=200)
         self.conversations_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_conversation_selected)
+        self.conversations_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_conversation_focused)
         self.conversations_list.Bind(wx.EVT_CONTEXT_MENU, self.on_conversations_context_menu)
         self.conversations_list.Bind(wx.EVT_KEY_DOWN, self._on_conv_list_key_down)
         outer_sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
@@ -778,7 +791,8 @@ class ConversationsPanel(wx.Panel):
         self.ID_TEMP_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Alt+Shift+0..9)
         self.ID_TEMP_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Alt+Shift+0..9)
         # ── Group actions ────────────────────────────────────────────────────
-        self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
+        self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # recent reactions        (Alt+Shift+R)
+        self.ID_ALT_SHIFT_M     = wx.NewIdRef()  # mentions                (Alt+Shift+M)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
         self.ID_ALT_SHIFT_V     = wx.NewIdRef()  # converse with           (Alt+Shift+V)
         self.ID_ALT_SHIFT_Q     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+Q)
@@ -853,6 +867,7 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_CTRL,    ord("L"),          self.ID_ALT_U),
             (wx.ACCEL_CTRL,    ord("l"),          self.ID_ALT_U),
             (AS,               ord("R"),          self.ID_ALT_SHIFT_R),
+            (AS,               ord("M"),          self.ID_ALT_SHIFT_M),
             (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
             (AS,               ord("Q"),          self.ID_ALT_SHIFT_Q),
@@ -903,7 +918,8 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_open_search,         id=self.ID_CTRL_SHIFT_F)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_3)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_U)
-        self.Bind(wx.EVT_MENU, self._on_accel_reply_private,       id=self.ID_ALT_SHIFT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_recent_reactions,    id=self.ID_ALT_SHIFT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_mentions,            id=self.ID_ALT_SHIFT_M)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_number_speak,   id=self.ID_ALT_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
         self.Bind(wx.EVT_MENU, self._on_accel_goto_quoted,         id=self.ID_ALT_SHIFT_Q)
@@ -919,6 +935,14 @@ class ConversationsPanel(wx.Panel):
 
     # ── Conversations list events ───────────────────────────────────────────
 
+    def _on_conversation_focused(self, event):
+        idx = event.GetIndex()
+        if 0 <= idx < len(self.chats_list):
+            chat = self.chats_list[idx]
+            jid = chat.get("remoteJid", "")
+            if getattr(self, "selection_sound", None) and jid and jid in self.selected_chats:
+                self.selection_sound.play()
+                
     def on_conversation_selected(self, event):
         self.on_conversation_selected_by_index(event.GetIndex())
 
@@ -939,6 +963,33 @@ class ConversationsPanel(wx.Panel):
             jid = self.conversation.get("remoteJid", "")
             if jid and not jid.endswith("@newsletter"):
                 self.main_window.send_recording_status(jid, False, jid.endswith("@g.us"))
+
+    def update_conversation_name(self, jid: str, new_name: str):
+        """Update the conversation header and related UI elements if the renamed group is currently open."""
+        if not hasattr(self, "current_jid") or self.current_jid != jid:
+            return
+        
+        self.conversation_name = new_name
+        is_group = jid.endswith("@g.us")
+        i18n = self.main_window.i18n
+        
+        # Update conversation data button
+        self._conv_data_btn.SetNote(new_name)
+        
+        # Update message label if we are not in read-only mode
+        is_channel = jid.endswith("@newsletter")
+        conversation = self.main_window.chats.get(jid, {})
+        admins_only_group = is_group and self.main_window._is_group_send_restricted(conversation)
+        
+        if is_channel:
+            self.message_label.SetLabel(i18n.t("channel_read_only"))
+        elif admins_only_group:
+            self.message_label.SetLabel(i18n.t("group_admins_only"))
+        else:
+            self.message_label.SetLabel(
+                f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
+            )
+        self.conversation_panel.Layout()
 
     def navigate_to_conversation(self, conversation):
         if self.conversation is not None and self.conversation.get("remoteJid") == conversation.get("remoteJid"):
@@ -1051,13 +1102,9 @@ class ConversationsPanel(wx.Panel):
             self._add_attachment_btn.Disable()
             self.message_label.SetLabel(i18n.t("channel_read_only"))
         elif admins_only_group:
-            # Keep the field enabled/focusable (unlike the channel case
-            # above) so it stays reachable via Tab/the Alt+D accelerator and
-            # NVDA can announce its read-only state — only actual editing is
-            # blocked. Sending/attaching/recording would just be rejected by
-            # WhatsApp Web anyway, so those stay disabled like the channel case.
             self.message_field.Enable()
-            self.message_field.SetEditable(False)
+            self.message_field.SetEditable(True)
+            self.message_field.Disable()
             self.send_message_btn.Disable()
             self.record_voice_message_btn.Disable()
             self._add_attachment_btn.Disable()
@@ -1151,7 +1198,7 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 logging.exception("[navigate_to_conversation] message_field.SetFocus() raised")
 
-        if focus_setting == "unread_or_last":
+        if focus_setting == "unread_or_last" or not self.message_field.IsEnabled():
             wx.CallAfter(_do_focus_messages_list)
         else:
             wx.CallAfter(_do_focus_message_field)
@@ -2354,6 +2401,27 @@ class ConversationsPanel(wx.Panel):
 
         menu = wx.Menu()
 
+        if getattr(self, "selected_chats", None):
+            mass_menu = wx.Menu()
+            
+            clear_item = mass_menu.Append(wx.ID_ANY, i18n.t("clear_selected_chats"))
+            self.Bind(wx.EVT_MENU, self._on_mass_clear_chats, clear_item)
+            
+            delete_item = mass_menu.Append(wx.ID_ANY, i18n.t("delete_selected_chats"))
+            self.Bind(wx.EVT_MENU, self._on_mass_delete_chats, delete_item)
+            
+            archive_item = mass_menu.Append(wx.ID_ANY, i18n.t("archive_selected_chats"))
+            self.Bind(wx.EVT_MENU, self._on_mass_archive_chats, archive_item)
+            
+            read_item = mass_menu.Append(wx.ID_ANY, i18n.t("mark_selected_read"))
+            self.Bind(wx.EVT_MENU, self._on_mass_mark_read_chats, read_item)
+            
+            unread_item = mass_menu.Append(wx.ID_ANY, i18n.t("mark_selected_unread"))
+            self.Bind(wx.EVT_MENU, self._on_mass_mark_unread_chats, unread_item)
+            
+            menu.AppendSubMenu(mass_menu, i18n.t("mass_actions"))
+            menu.AppendSeparator()
+
         # ── Conversation / group data ─────────────────────────────────────
         data_label = i18n.t("group_data") if is_group else i18n.t("conversation_data")
         data_item = menu.Append(wx.ID_ANY, f"{data_label}\tCtrl+Shift+D")
@@ -2629,6 +2697,21 @@ class ConversationsPanel(wx.Panel):
         i18n     = self.main_window.i18n
 
         menu = wx.Menu()
+
+        if getattr(self, "selected_messages", None):
+            mass_menu = wx.Menu()
+            
+            fwd_item = mass_menu.Append(wx.ID_ANY, i18n.t("forward_selected"))
+            self.Bind(wx.EVT_MENU, self._on_mass_forward_messages, fwd_item)
+            
+            save_item = mass_menu.Append(wx.ID_ANY, i18n.t("save_selected"))
+            self.Bind(wx.EVT_MENU, self._on_mass_save_messages, save_item)
+            
+            delete_item = mass_menu.Append(wx.ID_ANY, i18n.t("delete_selected"))
+            self.Bind(wx.EVT_MENU, self._on_mass_delete_messages, delete_item)
+            
+            menu.AppendSubMenu(mass_menu, i18n.t("mass_actions"))
+            menu.AppendSeparator()
 
         # ── "Ir para a mensagem citada" (only for reply messages) ─────────────
         ctx_reply = self._get_context_info(msg)
@@ -3608,6 +3691,13 @@ class ConversationsPanel(wx.Panel):
 
     def _on_message_focused(self, event):
         idx = event.GetIndex()
+        
+        if 0 <= idx < len(self._sorted_messages):
+            msg = self._sorted_messages[idx]
+            if getattr(self, "selection_sound", None) and not self._is_separator(msg):
+                msg_id = msg.get("key", {}).get("id", "")
+                if msg_id and msg_id in self.selected_messages:
+                    self.selection_sound.play()
 
         # Unread-separator logic:
         # - Focus reaching the separator (or anything below it) marks the
@@ -4135,8 +4225,19 @@ class ConversationsPanel(wx.Panel):
                 self.seek_active_playback_to_edge(to_end=True)
             return
         if key == wx.WXK_SPACE:
-            if idx >= 0:
-                self._do_activate_message(idx)
+            if idx >= 0 and idx < len(self._sorted_messages):
+                msg = self._sorted_messages[idx]
+                if not self._is_separator(msg):
+                    msg_id = msg.get("key", {}).get("id", "")
+                    if msg_id:
+                        if msg_id in self.selected_messages:
+                            self.selected_messages.remove(msg_id)
+                            self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+                        else:
+                            self.selected_messages.add(msg_id)
+                            if getattr(self, "selection_sound", None):
+                                self.selection_sound.play()
+                            self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
             if idx <= 0 and not self._is_loading_more:
                 if self._messages_offset > 0:
@@ -4175,9 +4276,18 @@ class ConversationsPanel(wx.Panel):
 
         if key == wx.WXK_SPACE:
             idx = self.conversations_list.GetFocusedItem()
-            if idx >= 0:
-                self.conversations_list.Select(idx)
-                self.on_conversation_selected_by_index(idx)
+            if idx >= 0 and idx < len(self.chats_list):
+                chat = self.chats_list[idx]
+                jid = chat.get("remoteJid", "")
+                if jid:
+                    if jid in self.selected_chats:
+                        self.selected_chats.remove(jid)
+                        self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+                    else:
+                        self.selected_chats.add(jid)
+                        if getattr(self, "selection_sound", None):
+                            self.selection_sound.play()
+                        self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
             self._jump_list_by(self.conversations_list, -self._page_jump_size())
         elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
@@ -7387,7 +7497,7 @@ class ConversationsPanel(wx.Panel):
                     all_names.append(name)
         return all_chats, all_names
 
-    def _on_menu_forward(self, msg: dict):
+    def _on_menu_forward(self, msg: dict, msgs_list: list = None):
         """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
         if self._reject_system_event_action(msg):
             return
@@ -7509,7 +7619,7 @@ class ConversationsPanel(wx.Panel):
                 _lst_set_caret(max(0, min(count - 1, caret + delta)))
                 return  # suppressed — no Skip(), so selection is left alone
 
-            if key == wx.WXK_SPACE and ctrl and shift:
+            if key == wx.WXK_SPACE and shift:
                 # Toggle everything: select all unless every row is already
                 # selected, in which case clear it all instead.
                 all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
@@ -7517,7 +7627,7 @@ class ConversationsPanel(wx.Panel):
                     _lst_set_selected(i, not all_selected)
                 return
 
-            if key == wx.WXK_SPACE and ctrl:
+            if key == wx.WXK_SPACE:
                 caret = _lst_caret()
                 if caret >= 0:
                     now_selected = not _lst_is_selected(caret)
@@ -7607,23 +7717,25 @@ class ConversationsPanel(wx.Panel):
         if not target_jids:
             return
 
-        # ── Forward via the real WPPConnect forward endpoint ────────────────────
         # Uses WPP.chat.forwardMessagesV2 server-side (main_window.forward_message),
         # which forwards the actual message as WhatsApp does — media, documents,
         # audio, captions, etc. all come through, unlike re-extracting the text
         # and sending it as a brand-new message. The forwarded copy arrives back
         # through the normal WebSocket echo, same as any other outgoing message.
-        msg_key = msg.get("key", {}) or {}
-        source_jid = msg_key.get("remoteJid") or (self.conversation.get("remoteJid", "") if self.conversation else "")
-        if not source_jid or not msg_key.get("id"):
-            return
-
+        msgs_to_forward = msgs_list if msgs_list else [msg]
         targets = list(zip(target_jids, target_names))
-
         keep_caption = chk_keep_caption.GetValue() if chk_keep_caption else False
 
         def _do_forward():
-            failed_names = self._forward_message_to_targets(msg, targets, keep_caption=keep_caption)
+            failed_names = set()
+            for m in msgs_to_forward:
+                msg_key = m.get("key", {}) or {}
+                source_jid = msg_key.get("remoteJid") or (self.conversation.get("remoteJid", "") if hasattr(self, "conversation") and self.conversation else "")
+                if not source_jid or not msg_key.get("id"):
+                    continue
+                f_names = self._forward_message_to_targets(m, targets, keep_caption=keep_caption, source_jid_override=source_jid)
+                failed_names.update(f_names)
+            
             if failed_names:
                 wx.CallAfter(mw.error_sound.play)
                 if len(targets) == 1:
@@ -7636,7 +7748,7 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_do_forward, daemon=True).start()
 
-    def _forward_message_to_targets(self, msg: dict, targets: list, keep_caption: bool = False) -> list:
+    def _forward_message_to_targets(self, msg: dict, targets: list, keep_caption: bool = False, source_jid_override: str = "") -> list:
         """Forward one message to each (jid, name) pair in *targets*, one at
         a time — so one failing recipient (e.g. a stale JID) doesn't abort
         delivery to the rest. If keep_caption is True, uses resend_media_message_with_caption.
@@ -7644,7 +7756,7 @@ class ConversationsPanel(wx.Panel):
         mw = self.main_window
         failed = []
         msg_key = msg.get("key", {}) or {}
-        source_jid = msg_key.get("remoteJid") or ""
+        source_jid = source_jid_override or msg_key.get("remoteJid") or ""
 
         for jid, name in targets:
             if keep_caption:
@@ -10032,6 +10144,168 @@ class ConversationsPanel(wx.Panel):
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────
 
+
+    # ── Mass Action Handlers ────────────────────────────────────────────────
+    
+    def _on_mass_clear_chats(self, event):
+        i18n = self.main_window.i18n
+        if not self.selected_chats: return
+        if wx.MessageBox(i18n.t("clear_confirm_msg"), i18n.t("clear_chat"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
+            return
+        for jid in list(self.selected_chats):
+            self.main_window.clear_chat(jid)
+        self.selected_chats.clear()
+        self.main_window.output(i18n.t("success_clear"), interrupt=True)
+
+    def _on_mass_delete_chats(self, event):
+        i18n = self.main_window.i18n
+        if not self.selected_chats: return
+        if wx.MessageBox(i18n.t("delete_confirm_msg"), i18n.t("delete_chat"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
+            return
+        for jid in list(self.selected_chats):
+            self.main_window.delete_chat(jid)
+        self.selected_chats.clear()
+        self.main_window.output(i18n.t("success_delete"), interrupt=True)
+
+    def _on_mass_archive_chats(self, event):
+        i18n = self.main_window.i18n
+        if not self.selected_chats: return
+        for jid in list(self.selected_chats):
+            self.main_window.archive_chat(jid, True)
+        self.selected_chats.clear()
+        self.main_window.output(i18n.t("success_archive"), interrupt=True)
+
+    def _on_mass_mark_read_chats(self, event):
+        if not self.selected_chats: return
+        for jid in list(self.selected_chats):
+            self.main_window.mark_conversation_as_read(jid, True)
+        self.selected_chats.clear()
+
+    def _on_mass_mark_unread_chats(self, event):
+        if not self.selected_chats: return
+        for jid in list(self.selected_chats):
+            self.main_window.mark_conversation_as_unread(jid)
+        self.selected_chats.clear()
+
+    def _on_mass_forward_messages(self, event):
+        if not self.selected_messages: return
+        msgs_to_forward = []
+        for m in self._sorted_messages:
+            if not self._is_separator(m) and m.get("key", {}).get("id") in self.selected_messages:
+                msgs_to_forward.append(m)
+        if msgs_to_forward:
+            self._on_menu_forward(msgs_to_forward[0], msgs_list=msgs_to_forward)
+        self.selected_messages.clear()
+        self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+
+    def _on_mass_save_messages(self, event):
+        if not self.selected_messages: return
+        for msg_id in list(self.selected_messages):
+            msg = next((m for m in self._sorted_messages if not self._is_separator(m) and m.get("key", {}).get("id") == msg_id), None)
+            if msg:
+                self._on_menu_save(msg)
+        self.selected_messages.clear()
+
+    def _on_mass_delete_messages(self, event):
+        i18n = self.main_window.i18n
+        if not self.selected_messages: return
+        if wx.MessageBox(i18n.t("delete_msg_confirm"), i18n.t("delete_message"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
+            return
+            
+        import threading
+        
+        msgs_to_delete = []
+        for msg_id in self.selected_messages:
+            msg = next((m for m in self._sorted_messages if not self._is_separator(m) and m.get("key", {}).get("id") == msg_id), None)
+            if msg: msgs_to_delete.append(msg)
+            
+        def _delete_bg():
+            for msg in msgs_to_delete:
+                msg_key = msg.get("key", {})
+                jid = msg_key.get("remoteJid", "") or (self.conversation.get("remoteJid", "") if self.conversation else "")
+                if jid:
+                    self.main_window.delete_message_for_me(jid, dict(msg_key))
+                    
+        threading.Thread(target=_delete_bg, daemon=True).start()
+        
+        # Always delete locally
+        self.remove_messages_by_id(set(self.selected_messages), focus_previous=True)
+        self.selected_messages.clear()
+        self.main_window.output(i18n.t("success_delete"), interrupt=True)
+
+    def _on_accel_recent_reactions(self, event):
+        if not self.conversation:
+            return
+        # Show recent reactions in the current conversation
+        recent = []
+        for msg_id, reactions in self._reaction_map.items():
+            for jid, emoji in reactions.items():
+                recent.append((msg_id, jid, emoji))
+        
+        if not recent:
+            self.main_window.output(self.main_window.i18n.t("no_reactions_found"), interrupt=True)
+            return
+            
+        recent.reverse() # show newest first
+        recent = recent[:10] # limit to 10
+        
+        msg_parts = []
+        for msg_id, jid, emoji in recent:
+            name = self.main_window._resolve_jid_name(jid)
+            msg_parts.append(f"{name}: {emoji}")
+            
+        text = self.main_window.i18n.t("recent_reactions") + " " + ", ".join(msg_parts)
+        self.main_window.output(text, interrupt=True)
+
+    def _on_accel_mentions(self, event):
+        if not self.conversation:
+            return
+            
+        mentions = []
+        for i, msg in enumerate(self._sorted_messages):
+            if self._is_separator(msg): continue
+            
+            # Check if mentioned
+            msg_inner = msg.get("message", {})
+            if isinstance(msg_inner, str):
+                import json
+                try:
+                    msg_inner = json.loads(msg_inner)
+                except:
+                    msg_inner = {}
+                    
+            mentioned_jids = []
+            for msg_type_dict in msg_inner.values():
+                if isinstance(msg_type_dict, dict):
+                    ctx = msg_type_dict.get("contextInfo", {})
+                    if "mentionedJid" in ctx:
+                        mentioned_jids = ctx["mentionedJid"]
+                        break
+            
+            if any(self.main_window._is_self_jid(j) for j in mentioned_jids):
+                mentions.append(i)
+                
+        if not mentions:
+            self.main_window.output(self.main_window.i18n.t("no_mentions_found"), interrupt=True)
+            return
+            
+        # Jump to the next mention (older message, going backwards)
+        curr_idx = self.messages_list.GetFocusedItem()
+        target_idx = -1
+        
+        for idx in reversed(mentions):
+            if curr_idx < 0 or idx < curr_idx:
+                target_idx = idx
+                break
+                
+        # If we reached the oldest mention, or started below the newest, wrap around to newest
+        if target_idx == -1:
+            target_idx = mentions[-1]
+            
+        self.messages_list.Focus(target_idx)
+        self.messages_list.Select(target_idx, True)
+        self.messages_list.EnsureVisible(target_idx)
+        self.main_window.output(self.main_window.i18n.t("jumped_to_mention"), interrupt=True)
 
 class ArchivedConversationsPanel(wx.Panel):
     """

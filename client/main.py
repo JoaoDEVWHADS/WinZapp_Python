@@ -8160,11 +8160,19 @@ class MainWindow(wx.Frame):
             # failed request is far more often a briefly-busy local Node
             # process than a real outage.
             self._wa_http_fail_strikes = getattr(self, "_wa_http_fail_strikes", 0) + 1
+            
+            allowed_strikes = self._HTTP_PROBE_STRIKES
+            # If the initial sync is running and downloading history for hundreds of chats,
+            # the Node.js server event loop can be blocked for >30s. Don't falsely declare
+            # an offline outage just because of these timeouts.
+            if getattr(self, "_initial_sync_running", False):
+                allowed_strikes = self._HTTP_PROBE_STRIKES * 10
+                
             logging.warning(
                 "[check_wa_connection_http] Request failed (strike %d/%d): %s",
-                self._wa_http_fail_strikes, self._HTTP_PROBE_STRIKES, e,
+                self._wa_http_fail_strikes, allowed_strikes, e,
             )
-            if self._wa_http_fail_strikes < self._HTTP_PROBE_STRIKES:
+            if self._wa_http_fail_strikes < allowed_strikes:
                 return
             self._set_wa_connected(False, f"status-session request failed: {e}")
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
@@ -8308,22 +8316,14 @@ class MainWindow(wx.Frame):
         """What to do when the settle loop reaches its last attempt without a
         stable count: ``"extend"``, ``"accept"`` or ``"incomplete"``.
 
-        Still growing and there is budget left -> extend, because a list that
-        is visibly still arriving just needs more time. Otherwise a snapshot
-        big enough to be a real account is accepted (an incomplete sync gets
-        retried from scratch by the health checker, which is what users saw as
-        spontaneous re-syncing); anything smaller stays incomplete, since
-        accepting it would strand the account on a handful of conversations.
-
-        Pulled out of _run_sync()'s retry loop purely so it can be tested —
-        see tests/test_chat_list_settled.py.
+        Still growing (or hasn't started, server_count == 0) and there is budget left -> extend.
+        Otherwise, accept the snapshot so we don't infinitely retry via the health checker
+        for genuinely small or empty accounts.
         """
-        is_growing = server_count > prev_server_count and server_count > 0
+        is_growing = (server_count > prev_server_count) or (server_count == 0)
         if is_growing and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
             return "extend"
-        if server_count > cls._CHAT_MIN_ACCEPTABLE_SNAPSHOT:
-            return "accept"
-        return "incomplete"
+        return "accept"
 
     def _should_abort_sync_for_offline(self) -> bool:
         """True once offline mode (manual or auto-detected) has come on while
@@ -10118,6 +10118,9 @@ class MainWindow(wx.Frame):
         chat["name"] = new_name
         self._group_name_cache = getattr(self, "_group_name_cache", {})
         self._group_name_cache[remote_jid] = new_name
+        
+        if hasattr(self, "conversations_panel"):
+            wx.CallAfter(self.conversations_panel.update_conversation_name, remote_jid, new_name)
 
     def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
         """
@@ -10141,6 +10144,9 @@ class MainWindow(wx.Frame):
 
         self._schedule_save(dirty_jid=remote_jid)
         self._schedule_set_chats()
+        
+        if hasattr(self, "conversations_panel"):
+            wx.CallAfter(self.conversations_panel.update_conversation_name, remote_jid, new_name)
 
     def _resolve_missing_group_names(self):
         """Retry group-info lookups for groups still unnamed after sync.
