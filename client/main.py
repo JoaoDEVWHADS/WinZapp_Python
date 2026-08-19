@@ -523,6 +523,50 @@ def _message_ts(msg: dict) -> int:
         return 0
 
 
+def own_message_marks_chat_read(records: list, msg: dict) -> bool:
+    """True when our own message *msg* proves the chat was read elsewhere.
+
+    Sending a reply from the phone (or any other linked device) is the
+    strongest possible evidence that the chat was read there — WhatsApp
+    itself clears the unread count the moment you do it. WinZapp used to
+    ignore this entirely: on_new_message() only ever touches the badge
+    inside `if not from_me`, and returns outright a few lines later on
+    `if from_me`. Reported live as a chat still showing "2 mensagens não
+    lidas" while its own last line already read "Eu: áudio 0:06" — the
+    reply had been sent from the phone seconds earlier, its echo had
+    arrived, and the badge sat there untouched.
+
+    The caller only reaches this for an echo that matched no pending
+    virtual message, i.e. one this WinZapp process did not send (a local
+    send returns much earlier, see on_new_message). The remaining check is
+    recency: a re-delivered *old* message of ours must never clear a badge
+    for messages that arrived after it, so this only answers True when our
+    message is at least as new as the newest countable message we received.
+    A chat with nothing countable received at all has no real unread to
+    protect and answers True as well.
+    """
+    if not isinstance(msg, dict) or not (msg.get("key") or {}).get("fromMe"):
+        return False
+    own_ts = _message_ts(msg)
+    if own_ts <= 0:
+        # No usable timestamp — refuse rather than guess. The next chats-update
+        # or the 60s list-chats poll still gets a chance to fix the count.
+        return False
+    own_id = (msg.get("key") or {}).get("id")
+    for record in reversed(records or []):
+        if not isinstance(record, dict):
+            continue
+        key = record.get("key") or {}
+        if key.get("fromMe"):
+            continue
+        if own_id and key.get("id") == own_id:
+            continue  # msg itself, already appended to records by the caller
+        if not is_countable_message(record):
+            continue  # system events never counted toward the badge either
+        return own_ts >= _message_ts(record)
+    return True
+
+
 def unread_after_history_sync(
     server_unread: int,
     local_unread: int,
@@ -4329,6 +4373,29 @@ class MainWindow(wx.Frame):
                 if not hasattr(self, "_new_since_read"):
                     self._new_since_read = {}
                 self._new_since_read[remote_jid] = self._new_since_read.get(remote_jid, 0) + 1
+        elif from_me and int(chat.get("unreadCount") or 0) > 0:
+            # Our own message, and it matched no pending virtual message —
+            # a local send never reaches this far (see the from_me echo
+            # matching above, which returns). So this was sent from the
+            # phone or another linked device, which means the chat was read
+            # there: clear the badge, exactly as WhatsApp itself does.
+            # mark_conversation_as_read() is reused rather than assigning 0
+            # here so the read also gets the /send-seen call and the
+            # _locally_read_at bookkeeping that stops the 60s list-chats
+            # poll from resurrecting the count a minute later.
+            if own_message_marks_chat_read(records, msg):
+                logging.info(
+                    "[on_new_message] Own message from another device in %s — "
+                    "clearing unread (%s).", remote_jid, chat.get("unreadCount"),
+                )
+                # Called directly, like every other call site: this runs on
+                # the main thread already (on_new_message is always invoked
+                # via wx.CallAfter), and mark_conversation_as_read() already
+                # backgrounds its own /send-seen HTTP call internally. Wrapping
+                # the whole call in an extra thread bought nothing and mutated
+                # self.chats/self._locally_read_at off the main thread instead,
+                # racing with the very same dicts this handler mutates.
+                self.mark_conversation_as_read(remote_jid, True)
 
         # ── Persist in background — debounced so rapid bursts produce one write ─
         self._schedule_save(dirty_jid=remote_jid)
