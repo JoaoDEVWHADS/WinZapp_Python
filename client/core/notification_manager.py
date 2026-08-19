@@ -637,16 +637,27 @@ class NotificationManager:
         self._register_aumid_registry()
 
         # Build a prioritised list of AUMID candidates to try.
-        # Installed build: registered AUMID "WinZapp" first, outer exe as fallback.
-        # Dev build / portable: outer exe path (always available to Windows).
         # _is_frozen() handles both PyInstaller (sys.frozen) and Nuitka (__compiled__).
         # Use sys.argv[0] as the exe fallback — in Nuitka onefile sys.executable
         # points to a temp-dir extraction; sys.argv[0] is the user-visible path.
+        #
+        # Both frozen and dev mode try the registered "WinZapp" AUMID first —
+        # _register_aumid_registry() just above always writes that key's
+        # DisplayName, regardless of frozen state. Dev mode used to skip
+        # straight to sys.executable (the venv's own python.exe) instead,
+        # an AUMID shared by every unrelated Python script run from that
+        # same venv, with no registered DisplayName/icon of its own — the
+        # "WinZapp" registry entry was simply never used. Reported live:
+        # running from source, only the custom sound played and the toast
+        # never appeared on screen at all (no exception anywhere) — Windows
+        # can silently decline to show a banner for an AUMID it has no real
+        # app identity for. The exe path stays as the fallback for whichever
+        # step fails, same as frozen mode.
         if _is_frozen():
-            outer_exe = self._outer_exe_path()
-            candidates = [self.APP_ID, outer_exe]
+            fallback = self._outer_exe_path()
         else:
-            candidates = [sys.executable]
+            fallback = sys.executable
+        candidates = [self.APP_ID, fallback]
 
         for app_id in candidates:
             # Try interactable first (supports inline reply text box).
