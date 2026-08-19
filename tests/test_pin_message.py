@@ -29,9 +29,18 @@ class _FakeI18n:
         return self._STRINGS[key]
 
 
+class _FakeDB:
+    def __init__(self):
+        self.inserted = []
+
+    def insert_message(self, jid, msg):
+        self.inserted.append((jid, dict(msg)))
+
+
 class _FakeMainWindow:
     def __init__(self, pin_result=True):
         self.i18n = _FakeI18n()
+        self.db = _FakeDB()
         self.pin_result = pin_result
         self.pin_calls = []
         self.save_calls = 0
@@ -51,6 +60,7 @@ class _FakeMainWindow:
 class _Stub:
     _on_menu_pin_message = ConversationsPanel._on_menu_pin_message
     _on_pin_message_failed = ConversationsPanel._on_pin_message_failed
+    _persist_message_local_flag = ConversationsPanel._persist_message_local_flag
     # _is_system_event is a staticmethod on the real class and attribute
     # access unwraps it, so it has to be re-wrapped here.
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)
@@ -104,6 +114,11 @@ class TestPinMessage:
         assert mw.save_calls >= 1
         assert s.populate_calls, "list should be re-rendered after the toggle"
         assert mw.pin_calls == [("5521999999999@s.whatsapp.net", {"id": "a", "fromMe": True}, True)]
+        assert mw.db.inserted[0][1]["pinInChat"] is True, (
+            "the optimistic pin must be written to the message's own DB row too — "
+            "_schedule_save() alone only persists chat metadata, and "
+            "navigate_to_conversation() reloads messages fresh from the DB on reopen"
+        )
 
     def test_unpinning_a_pinned_message_toggles_the_other_way(self):
         mw = _FakeMainWindow(pin_result=True)
@@ -125,6 +140,10 @@ class TestPinMessage:
         s._on_menu_pin_message(msg)
 
         assert msg["pinInChat"] is False, "rollback must undo the optimistic pin"
+        assert mw.db.inserted[-1][1]["pinInChat"] is False, (
+            "the rollback must overwrite the optimistically-persisted DB row too, "
+            "or a reopened conversation would keep showing the rejected pin"
+        )
 
     def test_a_group_notice_is_never_pinned(self):
         """Pinning is visible to every participant, so a group notice reaching

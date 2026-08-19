@@ -7841,6 +7841,35 @@ class ConversationsPanel(wx.Panel):
                 failed.append(name)
         return failed
 
+    def _persist_message_local_flag(self, jid: str, msg: dict):
+        """Persist a message-level, locally-mutated field (e.g. "starred",
+        "pinInChat") to that message's own row in the database.
+
+        _schedule_save() only ever calls db.upsert_chat() — it writes chat
+        metadata (name, unreadCount, last message preview, ...), never an
+        individual row in the messages table. Meanwhile navigate_to_conversation()
+        unconditionally reloads a conversation's messages fresh from the
+        database every time it's opened. Without this, a flag toggled here
+        lived only in the in-memory dict — correct until the user left and
+        reopened the conversation (or any resync replaced the in-memory
+        records), at which point it silently reverted, e.g. a starred
+        message's context-menu item going back to "Favoritar" instead of
+        staying "Desfavoritar".
+
+        Runs on a background thread — db.insert_message() blocks the caller
+        until the write completes (see DatabaseBridge), and this is always
+        called from a UI event handler.
+        """
+        db = getattr(self.main_window, "db", None)
+        if db is None:
+            return
+        def _do(j=jid, m=dict(msg)):
+            try:
+                db.insert_message(j, m)
+            except Exception as exc:
+                logging.warning("[_persist_message_local_flag] failed for %s: %s", j, exc)
+        threading.Thread(target=_do, daemon=True).start()
+
     def _on_menu_star(self, msg: dict):
         if self._reject_system_event_action(msg):
             return
@@ -7848,6 +7877,7 @@ class ConversationsPanel(wx.Panel):
         jid = self.conversation.get("remoteJid", "")
         if jid:
             self.main_window._schedule_save()
+            self._persist_message_local_flag(jid, msg)
             self.populate_messages(preserve_focus=True)
 
     def _on_menu_pin_message(self, msg: dict):
@@ -7866,6 +7896,7 @@ class ConversationsPanel(wx.Panel):
         pin = not bool(msg.get("pinInChat"))
         msg["pinInChat"] = pin
         self.main_window._schedule_save()
+        self._persist_message_local_flag(jid, msg)
         self.populate_messages(preserve_focus=True)
 
         msg_key = dict(msg.get("key", {}))
@@ -7880,6 +7911,9 @@ class ConversationsPanel(wx.Panel):
     def _on_pin_message_failed(self, msg: dict, attempted_pin: bool):
         """Roll back an optimistic pin/unpin the server rejected (main thread)."""
         msg["pinInChat"] = not attempted_pin
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if jid:
+            self._persist_message_local_flag(jid, msg)
         self.main_window._schedule_save()
         self.populate_messages(preserve_focus=True)
         i18n = self.main_window.i18n

@@ -66,6 +66,7 @@ class _Stub:
     _is_system_event = staticmethod(ConversationsPanel._is_system_event)
     _reject_system_event_action = ConversationsPanel._reject_system_event_action
     _on_menu_star = ConversationsPanel._on_menu_star
+    _persist_message_local_flag = ConversationsPanel._persist_message_local_flag
 
     def __init__(self):
         self.main_window = _FakeMainWindow()
