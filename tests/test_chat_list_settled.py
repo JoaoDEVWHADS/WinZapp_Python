@@ -15,6 +15,14 @@ chat and message declared itself incomplete.
 _attempts_needed_to_confirm() grants a one-off extension so the first non-zero
 answer always gets a confirmation round. These tests pin both halves: the
 extension happens, and it does not turn a still-growing store into a settled one.
+
+Once that budget is spent, _settle_deadline_decision() has to separate two
+failures that look identical from the count alone and need opposite answers:
+a store that has not finished loading (must stay incomplete, so the health
+checker retries) and an account that really has nothing or almost nothing
+(must be accepted, or that retry never stops). Chats already stored locally
+are the tie-breaker — they cannot vanish, so a server reporting fewer is
+behind. See TestZeroIsDisambiguatedByTheLocalCache.
 """
 
 import pytest
@@ -78,7 +86,7 @@ def _run_loop(counts, local_cache, retries=6, confirm=CONFIRM):
             break
         if attempt == max_attempts - 1:
             decision = MainWindow._settle_deadline_decision(
-                server_count, prev_server_count, max_attempts
+                server_count, prev_server_count, max_attempts, local_cache
             )
             if decision == "extend":
                 max_attempts += MainWindow._CHAT_ATTEMPT_EXTENSION
@@ -131,11 +139,26 @@ class TestSettleDecision:
         settled, _ = _run_loop([0, 0, 0, 0, 4, 7, 7, 7], local_cache=0)
         assert settled is True
 
-    def test_server_that_never_answers_with_anything_stays_unsettled(self):
-        settled, fetches = _run_loop([0, 0, 0, 0, 0, 0], local_cache=0)
+    def test_a_server_stuck_on_zero_with_chats_cached_stays_unsettled(self):
+        """We already hold 500 chats; the server insisting on 0 has not
+        finished loading its store. Stored chats do not vanish, so this must
+        stay incomplete and be retried rather than be taken at face value."""
+        settled, _ = _run_loop([0] * 40, local_cache=500)
         assert settled is False
-        # No non-zero answer ever arrived, so no extension was granted either.
-        assert fetches == 6
+
+    def test_an_account_that_really_is_empty_eventually_settles(self):
+        """Same answers, no local cache to contradict them — a first pairing
+        of a number with no conversations. Waiting longer cannot distinguish
+        it from a cold store, so once the ceiling is reached the 0 is taken at
+        face value; the alternative is re-syncing a brand-new number for ever."""
+        settled, _ = _run_loop([0] * 40, local_cache=0)
+        assert settled is True
+
+    def test_the_empty_account_is_not_accepted_before_the_ceiling(self):
+        """It settles only after the full budget has been spent waiting — a
+        store that is merely slow still gets every chance to fill in first."""
+        _, fetches = _run_loop([0] * 40, local_cache=0)
+        assert fetches == MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
 
     @pytest.mark.parametrize("counts", [
         [0, 0, 0, 0, 0, 498, 498],
@@ -178,9 +201,10 @@ class TestDeadlineDecision:
         it beats declaring the sync incomplete and having it start over."""
         assert self.decide(498, 498, 6) == "accept"
 
-    def test_a_stalled_tiny_snapshot_is_now_accepted(self):
-        """Returning incomplete caused infinite sync loops on small accounts,
-        so we accept them now."""
+    def test_a_stalled_tiny_snapshot_is_accepted_too(self):
+        """Size is no longer a reason to reject. Four conversations is a
+        finished sync for someone who has four conversations, and calling it
+        incomplete is what had the health checker restart the sync for ever."""
         assert self.decide(4, 4, 6) == "accept"
 
     def test_a_growing_list_at_the_ceiling_is_accepted_regardless_of_size(self):
@@ -188,21 +212,59 @@ class TestDeadlineDecision:
         assert self.decide(498, 400, ceiling) == "accept"
         assert self.decide(4, 2, ceiling) == "accept"
 
-    def test_zero_chats_is_growth_and_eventually_acceptable(self):
-        """A server answering 0 means we should wait (extend) to give it time to load.
-        If it never loads, we must accept it to break the infinite loop."""
+    def test_zero_buys_time_first(self):
+        """0 tells us nothing at all, so it is always worth waiting on while
+        the ceiling allows — whether or not anything is cached."""
         assert self.decide(0, -1, 6) == "extend"
         assert self.decide(0, 0, 6) == "extend"
-        ceiling = MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
-        assert self.decide(0, 0, ceiling) == "accept"
+        assert self.decide(0, 0, 6, 500) == "extend"
 
-    @pytest.mark.parametrize("count", [11, 50, 498, 5000])
-    def test_sizes_above_the_threshold_are_accepted_when_stalled(self, count):
+    @pytest.mark.parametrize("count", [1, 5, 9, 10, 11, 50, 498, 5000])
+    def test_any_real_snapshot_is_accepted_when_stalled(self, count):
         assert self.decide(count, count, 6) == "accept"
 
-    @pytest.mark.parametrize("count", [1, 5, 9, 10])
-    def test_sizes_at_or_below_the_threshold_are_also_accepted(self, count):
-        assert self.decide(count, count, 6) == "accept"
+
+class TestZeroIsDisambiguatedByTheLocalCache:
+    """The heart of the rule: a bare count cannot tell "the store is still
+    cold" from "this account is genuinely empty" — both answer 0 — and the two
+    need opposite outcomes. Chats already stored locally cannot vanish, so
+    they are the tie-breaker.
+    """
+
+    decide = staticmethod(MainWindow._settle_deadline_decision)
+    ceiling = MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
+
+    def test_zero_against_a_populated_cache_is_incomplete(self):
+        """500 chats are on disk and the server claims none: it has not
+        finished loading. Only an incomplete sync gets retried, so accepting
+        this would strand the session with nothing left to fix it."""
+        assert self.decide(0, 0, self.ceiling, 500) == "incomplete"
+
+    def test_zero_with_no_cache_is_an_empty_account(self):
+        """Nothing contradicts the 0 — a first pairing of a number with no
+        conversations. Retrying for ever would never produce a 1."""
+        assert self.decide(0, 0, self.ceiling, 0) == "accept"
+
+    def test_falling_short_of_the_cache_is_incomplete(self):
+        """Not just zero: any snapshot smaller than what is already stored is
+        a store that is still filling in.
+
+        This pins the decision itself. Note the loop rarely gets here with a
+        *stable* non-zero count — two equal answers exit through the normal
+        settle rule first, which does not consult the cache (it never did,
+        on any version). Zero is the case that reliably reaches this branch,
+        since that rule requires server_count > 0 to fire at all."""
+        assert self.decide(300, 300, self.ceiling, 660) == "incomplete"
+
+    def test_reaching_the_cache_is_accepted(self):
+        assert self.decide(660, 660, self.ceiling, 660) == "accept"
+        assert self.decide(700, 700, self.ceiling, 660) == "accept"
+
+    @pytest.mark.parametrize("count", [1, 4, 10, 498])
+    def test_a_real_snapshot_with_no_cache_is_never_incomplete(self, count):
+        """The small-account guarantee: with nothing cached to fall short of,
+        no non-zero answer can be rejected for its size."""
+        assert self.decide(count, count, self.ceiling, 0) == "accept"
 
 
 class TestTheLoopEndToEnd:
@@ -257,17 +319,17 @@ class TestSmallAccountsAreNotLockedOut:
         _, fetches = _run_loop([3, 3, 3, 3, 3, 3], local_cache=0)
         assert fetches == 2
 
-    def test_the_deadline_is_strictly_more_permissive_than_before(self):
-        """Before this change the deadline always meant "incomplete". Now it
-        can also extend or accept, so no account that used to finish its sync
-        can stop finishing it: every outcome is at least as good."""
+    def test_nothing_cached_means_the_deadline_never_says_incomplete(self):
+        """A first sync has no cache to fall short of, so "incomplete" — the
+        one outcome that sends the health checker round again — is
+        unreachable however small the account turns out to be. That is what
+        keeps a genuinely small (or empty) account from looping for ever."""
         ceiling = MainWindow._CHAT_ABSOLUTE_MAX_ATTEMPTS
         outcomes = {
-            MainWindow._settle_deadline_decision(count, prev, budget)
+            MainWindow._settle_deadline_decision(count, prev, budget, 0)
             for count in (0, 1, 4, 10, 11, 500)
             for prev in (-1, 0, 3, 10, 499)
             for budget in (6, ceiling)
         }
         assert outcomes <= {"extend", "accept"}
-        # ...and "accept" is what prevents the infinite loops!
-        assert MainWindow._settle_deadline_decision(4, 4, ceiling) == "accept"
+        assert MainWindow._settle_deadline_decision(4, 4, ceiling, 0) == "accept"

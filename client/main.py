@@ -8160,14 +8160,14 @@ class MainWindow(wx.Frame):
             # failed request is far more often a briefly-busy local Node
             # process than a real outage.
             self._wa_http_fail_strikes = getattr(self, "_wa_http_fail_strikes", 0) + 1
-            
+
             allowed_strikes = self._HTTP_PROBE_STRIKES
             # If the initial sync is running and downloading history for hundreds of chats,
             # the Node.js server event loop can be blocked for >30s. Don't falsely declare
             # an offline outage just because of these timeouts.
             if getattr(self, "_initial_sync_running", False):
                 allowed_strikes = self._HTTP_PROBE_STRIKES * 10
-                
+
             logging.warning(
                 "[check_wa_connection_http] Request failed (strike %d/%d): %s",
                 self._wa_http_fail_strikes, allowed_strikes, e,
@@ -8301,28 +8301,48 @@ class MainWindow(wx.Frame):
     # Attempts granted per extension: small enough that a list which settles
     # right after the deadline costs one short extra wait, not a full round.
     _CHAT_ATTEMPT_EXTENSION = 2
-    # Below this, a still-growing snapshot is too small to be worth keeping:
-    # accepting e.g. 4 chats as a finished sync is the exact failure the
-    # settle rule exists to prevent (see tests/test_chat_list_settled.py).
-    # Above it the snapshot is a real, if possibly incomplete, account — and
-    # the periodic chat poller plus live WebSocket events keep filling it in,
-    # which beats re-running the whole sync every time the health checker
-    # comes round.
-    _CHAT_MIN_ACCEPTABLE_SNAPSHOT = 10
-
     @classmethod
     def _settle_deadline_decision(cls, server_count: int, prev_server_count: int,
-                                  max_attempts: int) -> str:
+                                  max_attempts: int, local_chat_count: int = 0) -> str:
         """What to do when the settle loop reaches its last attempt without a
         stable count: ``"extend"``, ``"accept"`` or ``"incomplete"``.
 
-        Still growing (or hasn't started, server_count == 0) and there is budget left -> extend.
-        Otherwise, accept the snapshot so we don't infinitely retry via the health checker
-        for genuinely small or empty accounts.
+        Two different failures meet at this deadline and they need opposite
+        answers, which is why the local cache is consulted rather than the
+        snapshot's size alone:
+
+        * A small account really is small. Four conversations is a complete
+          sync for someone who has four conversations, and answering
+          "incomplete" there is what made the health checker restart the sync
+          every time it came round — the user heard "sincronizando" for ever.
+          Any non-zero count is therefore accepted once the budget is spent.
+        * A server that keeps answering 0, or fewer chats than we already have
+          cached, has not finished loading its store. Accepting that would
+          mark a sync complete that plainly is not, and — because only an
+          incomplete sync gets retried — would leave the session stuck there
+          with nothing left to fix it.
+
+        A bare count cannot tell "the store is still cold" from "this account
+        is genuinely empty": both answer 0. `local_chat_count` breaks the tie.
+        Chats we have already stored cannot vanish, so a server reporting
+        fewer than those is demonstrably behind and the sync stays incomplete
+        so it gets retried. With no cache to contradict it — a first pairing —
+        a persistent 0 is taken at face value as an empty account once the
+        absolute ceiling is reached, so a brand-new number does not re-sync
+        for ever either.
+
+        Pulled out of _run_sync()'s retry loop purely so it can be tested —
+        see tests/test_chat_list_settled.py.
         """
-        is_growing = (server_count > prev_server_count) or (server_count == 0)
-        if is_growing and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
+        # Nothing at all yet, or a list visibly still arriving: more time is
+        # the only thing that helps, and only while the ceiling allows it.
+        still_arriving = server_count > prev_server_count or server_count == 0
+        if still_arriving and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
             return "extend"
+        # Behind what we already know exists (the loop's covers_cache exit
+        # means reaching here with a cache at all implies falling short of it).
+        if local_chat_count > 0 and server_count < local_chat_count:
+            return "incomplete"
         return "accept"
 
     def _should_abort_sync_for_offline(self) -> bool:
@@ -8501,12 +8521,12 @@ class MainWindow(wx.Frame):
                 # _settle_deadline_decision() for what each outcome means and
                 # why the thresholds are what they are.
                 decision = self._settle_deadline_decision(
-                    server_count, prev_server_count, max_attempts
+                    server_count, prev_server_count, max_attempts, local_chat_count
                 )
                 if decision == "extend":
                     max_attempts += self._CHAT_ATTEMPT_EXTENSION
                     logging.info(
-                        "[start_sync] Chat list is still growing (%d -> %d), extending to %d attempts...",
+                        "[start_sync] Chat list is still arriving (%d -> %d), extending to %d attempts...",
                         prev_server_count, server_count, max_attempts,
                     )
                     prev_server_count = server_count
@@ -8521,8 +8541,10 @@ class MainWindow(wx.Frame):
                     chat_list_settled = True
                     break
                 logging.warning(
-                    "[start_sync] Chat list never settled (last count: %d) and too small to accept — "
-                    "treating this sync as incomplete.", server_count,
+                    "[start_sync] Chat list never settled (last count: %d) and is behind the %d "
+                    "chat(s) already cached locally — the server store has not finished loading, "
+                    "so this sync stays incomplete and the health checker will retry it.",
+                    server_count, local_chat_count,
                 )
                 break
             prev_server_count = server_count
@@ -10118,7 +10140,7 @@ class MainWindow(wx.Frame):
         chat["name"] = new_name
         self._group_name_cache = getattr(self, "_group_name_cache", {})
         self._group_name_cache[remote_jid] = new_name
-        
+
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.conversations_panel.update_conversation_name, remote_jid, new_name)
 
@@ -10144,7 +10166,7 @@ class MainWindow(wx.Frame):
 
         self._schedule_save(dirty_jid=remote_jid)
         self._schedule_set_chats()
-        
+
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.conversations_panel.update_conversation_name, remote_jid, new_name)
 

@@ -23,6 +23,8 @@ import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
 from core.audio_transcode import transcode_m4a_to_wav
+from core.alert_tones import resolve_alert_tone_path
+from core.sound_system import load_sound
 from ui.accessible import (
     AccessibleSearchConversations,
     AccessibleRecordVoiceMessage,
@@ -64,6 +66,33 @@ _SAVEABLE_MESSAGE_TYPES = frozenset({
 })
 
 
+def message_caption(msg) -> str:
+    """The caption carried by an image/video/document message, '' otherwise.
+
+    Forwarding preserves captions through a different server call than a
+    plain forward (resend_media_message_with_caption), so "does this message
+    have a caption?" has to be answered per message — a mass forward mixes
+    captioned media with plain text, and sending a text message down the
+    media path is not a no-op.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    inner = msg.get("message", {})
+    if isinstance(inner, str):
+        import json
+        try:
+            inner = json.loads(inner)
+        except Exception:
+            return ""
+    if not isinstance(inner, dict):
+        return ""
+    for key in ("imageMessage", "videoMessage", "documentMessage"):
+        media = inner.get(key)
+        if isinstance(media, dict):
+            return (media.get("caption") or "").strip()
+    return ""
+
+
 def _fmt_last_seen(ts, i18n) -> str:
     """Format a Unix timestamp as a localized last-seen string."""
     if not ts:
@@ -102,16 +131,22 @@ class ConversationsPanel(wx.Panel):
         self.chat_names = []
         self.selected_chats = set()
         self.selected_messages = set()
-        
-        # Load a selection sound (Alert-01.ogg)
-        try:
-            from core.sound_system import Sound
-            import os
-            sound_path = os.path.join(self.main_window.app_dir, "sounds", "Alert-01.ogg")
-            self.selection_sound = Sound(self.main_window.sound_system, sound_path)
-        except Exception:
-            self.selection_sound = None
-            
+
+        # Feedback tone for the Space-toggled selection in both lists. Resolved
+        # through the active soundpack (falling back to the default pack) like
+        # every other alert tone, rather than a hardcoded path — a pack that
+        # ships its own alerts/ folder overrides this one too. load_sound()
+        # returns a NullSound if nothing resolves, so the callers below never
+        # have to care whether it loaded.
+        self.selection_sound = load_sound(
+            self.main_window.sound_system,
+            resolve_alert_tone_path(
+                self.main_window.get_active_sound_pack(),
+                self.main_window._default_sound_pack,
+                "alert_1",
+            ),
+        )
+
         self.conversation = None
         self.conversation_name = ""
         self._last_open_jid = ""
@@ -791,7 +826,8 @@ class ConversationsPanel(wx.Panel):
         self.ID_TEMP_BOOKMARK        = [wx.NewIdRef() for _ in range(10)]  # set/jump (Alt+Shift+0..9)
         self.ID_TEMP_BOOKMARK_REMOVE = [wx.NewIdRef() for _ in range(10)]  # remove   (Ctrl+Alt+Shift+0..9)
         # ── Group actions ────────────────────────────────────────────────────
-        self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # recent reactions        (Alt+Shift+R)
+        self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
+        self.ID_ALT_SHIFT_E     = wx.NewIdRef()  # recent reactions        (Alt+Shift+E)
         self.ID_ALT_SHIFT_M     = wx.NewIdRef()  # mentions                (Alt+Shift+M)
         self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
         self.ID_ALT_SHIFT_V     = wx.NewIdRef()  # converse with           (Alt+Shift+V)
@@ -867,6 +903,7 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_CTRL,    ord("L"),          self.ID_ALT_U),
             (wx.ACCEL_CTRL,    ord("l"),          self.ID_ALT_U),
             (AS,               ord("R"),          self.ID_ALT_SHIFT_R),
+            (AS,               ord("E"),          self.ID_ALT_SHIFT_E),
             (AS,               ord("M"),          self.ID_ALT_SHIFT_M),
             (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
@@ -918,7 +955,8 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_open_search,         id=self.ID_CTRL_SHIFT_F)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_3)
         self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_U)
-        self.Bind(wx.EVT_MENU, self._on_accel_recent_reactions,    id=self.ID_ALT_SHIFT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_reply_private,       id=self.ID_ALT_SHIFT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_recent_reactions,    id=self.ID_ALT_SHIFT_E)
         self.Bind(wx.EVT_MENU, self._on_accel_mentions,            id=self.ID_ALT_SHIFT_M)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_number_speak,   id=self.ID_ALT_SHIFT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
@@ -940,9 +978,9 @@ class ConversationsPanel(wx.Panel):
         if 0 <= idx < len(self.chats_list):
             chat = self.chats_list[idx]
             jid = chat.get("remoteJid", "")
-            if getattr(self, "selection_sound", None) and jid and jid in self.selected_chats:
+            if jid and jid in self.selected_chats:
                 self.selection_sound.play()
-                
+
     def on_conversation_selected(self, event):
         self.on_conversation_selected_by_index(event.GetIndex())
 
@@ -964,31 +1002,48 @@ class ConversationsPanel(wx.Panel):
             if jid and not jid.endswith("@newsletter"):
                 self.main_window.send_recording_status(jid, False, jid.endswith("@g.us"))
 
+    def _conversation_note_text(self, name: str, is_group: bool) -> str:
+        """Subtitle for the conversation-data button. A one-to-one chat whose
+        name is still just a phone number gets it labelled as such, so the
+        screen reader announces "Telefone: <number>" rather than reading bare
+        digits as if they were a contact name."""
+        if not is_group and is_phone_like(name):
+            return f"{self.main_window.i18n.t('phone_label')}: {name}"
+        return name
+
+    def _message_label_text(self, jid: str, conversation: dict, name: str) -> str:
+        """What the composer's label reads: either why the field cannot be
+        written to, or who the message is going to.
+
+        Shared by navigate_to_conversation() (opening a chat) and
+        update_conversation_name() (a rename landing on the open one) so the
+        two cannot drift — they used to carry separate copies of this switch.
+        """
+        i18n = self.main_window.i18n
+        if jid.endswith("@newsletter"):
+            return i18n.t("channel_read_only")
+        is_group = jid.endswith("@g.us")
+        if is_group and self.main_window._is_group_send_restricted(conversation):
+            return i18n.t("group_admins_only")
+        return f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {name}"
+
     def update_conversation_name(self, jid: str, new_name: str):
-        """Update the conversation header and related UI elements if the renamed group is currently open."""
-        if not hasattr(self, "current_jid") or self.current_jid != jid:
+        """Apply a group rename to the conversation currently on screen.
+
+        A no-op unless *jid* is the open conversation: a rename anywhere else
+        only has to reach the chat list, which main.py already schedules
+        separately (_schedule_set_chats). Called via wx.CallAfter from
+        MainWindow's two group-rename paths, so this runs on the UI thread.
+        """
+        if not self.conversation or self.conversation.get("remoteJid") != jid:
             return
-        
+
         self.conversation_name = new_name
         is_group = jid.endswith("@g.us")
-        i18n = self.main_window.i18n
-        
-        # Update conversation data button
-        self._conv_data_btn.SetNote(new_name)
-        
-        # Update message label if we are not in read-only mode
-        is_channel = jid.endswith("@newsletter")
-        conversation = self.main_window.chats.get(jid, {})
-        admins_only_group = is_group and self.main_window._is_group_send_restricted(conversation)
-        
-        if is_channel:
-            self.message_label.SetLabel(i18n.t("channel_read_only"))
-        elif admins_only_group:
-            self.message_label.SetLabel(i18n.t("group_admins_only"))
-        else:
-            self.message_label.SetLabel(
-                f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
-            )
+        self._conv_data_btn.SetNote(self._conversation_note_text(new_name, is_group))
+        self.message_label.SetLabel(
+            self._message_label_text(jid, self.main_window.chats.get(jid, {}), new_name)
+        )
         self.conversation_panel.Layout()
 
     def navigate_to_conversation(self, conversation):
@@ -1086,10 +1141,9 @@ class ConversationsPanel(wx.Panel):
         self._conv_data_btn.SetLabel(
             i18n.t("group_data") if is_group else i18n.t("conversation_data")
         )
-        display_note = self.conversation_name
-        if not is_group and is_phone_like(display_note):
-            display_note = f"{i18n.t('phone_label')}: {display_note}"
-        self._conv_data_btn.SetNote(display_note)
+        self._conv_data_btn.SetNote(
+            self._conversation_note_text(self.conversation_name, is_group)
+        )
 
         is_channel        = jid.endswith("@newsletter")
         admins_only_group = is_group and self.main_window._is_group_send_restricted(conversation)
@@ -1100,24 +1154,29 @@ class ConversationsPanel(wx.Panel):
             self.send_message_btn.Disable()
             self.record_voice_message_btn.Disable()
             self._add_attachment_btn.Disable()
-            self.message_label.SetLabel(i18n.t("channel_read_only"))
         elif admins_only_group:
+            # Keep the field enabled/focusable (unlike the channel case
+            # above) so it stays reachable via Tab/the Alt+D accelerator and
+            # NVDA can announce its read-only state — only actual editing is
+            # blocked. Sending/attaching/recording would just be rejected by
+            # WhatsApp Web anyway, so those stay disabled like the channel case.
+            # Disable() here instead of SetEditable(False) drops the field out
+            # of the tab order entirely, which leaves a screen-reader user in
+            # a group they cannot post in with nothing announcing why.
             self.message_field.Enable()
-            self.message_field.SetEditable(True)
-            self.message_field.Disable()
+            self.message_field.SetEditable(False)
             self.send_message_btn.Disable()
             self.record_voice_message_btn.Disable()
             self._add_attachment_btn.Disable()
-            self.message_label.SetLabel(i18n.t("group_admins_only"))
         else:
             self.message_field.Enable()
             self.message_field.SetEditable(True)
             self.send_message_btn.Enable()
             self.record_voice_message_btn.Enable()
             self._add_attachment_btn.Enable()
-            self.message_label.SetLabel(
-                f"{i18n.t('type_message_group') if is_group else i18n.t('type_message')} {self.conversation_name}"
-            )
+        self.message_label.SetLabel(
+            self._message_label_text(jid, conversation, self.conversation_name)
+        )
             
         if hasattr(self, "_remove_quote_btn"):
             self._remove_quote_btn.Hide()
@@ -2403,22 +2462,22 @@ class ConversationsPanel(wx.Panel):
 
         if getattr(self, "selected_chats", None):
             mass_menu = wx.Menu()
-            
+
             clear_item = mass_menu.Append(wx.ID_ANY, i18n.t("clear_selected_chats"))
             self.Bind(wx.EVT_MENU, self._on_mass_clear_chats, clear_item)
-            
+
             delete_item = mass_menu.Append(wx.ID_ANY, i18n.t("delete_selected_chats"))
             self.Bind(wx.EVT_MENU, self._on_mass_delete_chats, delete_item)
-            
+
             archive_item = mass_menu.Append(wx.ID_ANY, i18n.t("archive_selected_chats"))
             self.Bind(wx.EVT_MENU, self._on_mass_archive_chats, archive_item)
-            
+
             read_item = mass_menu.Append(wx.ID_ANY, i18n.t("mark_selected_read"))
             self.Bind(wx.EVT_MENU, self._on_mass_mark_read_chats, read_item)
-            
+
             unread_item = mass_menu.Append(wx.ID_ANY, i18n.t("mark_selected_unread"))
             self.Bind(wx.EVT_MENU, self._on_mass_mark_unread_chats, unread_item)
-            
+
             menu.AppendSubMenu(mass_menu, i18n.t("mass_actions"))
             menu.AppendSeparator()
 
@@ -2636,7 +2695,11 @@ class ConversationsPanel(wx.Panel):
             self._do_activate_message(idx)
 
     def _do_activate_message(self, index: int):
-        """Core activation logic shared by Enter, double-click, and Space."""
+        """Core activation logic shared by Enter and double-click.
+
+        Space no longer reaches here: it toggles the row's selection for the
+        mass actions instead (see _on_messages_list_key_down).
+        """
         if index < 0 or index >= len(self._sorted_messages):
             return
         if self._is_separator(self._sorted_messages[index]):
@@ -2700,16 +2763,16 @@ class ConversationsPanel(wx.Panel):
 
         if getattr(self, "selected_messages", None):
             mass_menu = wx.Menu()
-            
+
             fwd_item = mass_menu.Append(wx.ID_ANY, i18n.t("forward_selected"))
             self.Bind(wx.EVT_MENU, self._on_mass_forward_messages, fwd_item)
-            
+
             save_item = mass_menu.Append(wx.ID_ANY, i18n.t("save_selected"))
             self.Bind(wx.EVT_MENU, self._on_mass_save_messages, save_item)
-            
+
             delete_item = mass_menu.Append(wx.ID_ANY, i18n.t("delete_selected"))
             self.Bind(wx.EVT_MENU, self._on_mass_delete_messages, delete_item)
-            
+
             menu.AppendSubMenu(mass_menu, i18n.t("mass_actions"))
             menu.AppendSeparator()
 
@@ -3691,10 +3754,10 @@ class ConversationsPanel(wx.Panel):
 
     def _on_message_focused(self, event):
         idx = event.GetIndex()
-        
+
         if 0 <= idx < len(self._sorted_messages):
             msg = self._sorted_messages[idx]
-            if getattr(self, "selection_sound", None) and not self._is_separator(msg):
+            if not self._is_separator(msg):
                 msg_id = msg.get("key", {}).get("id", "")
                 if msg_id and msg_id in self.selected_messages:
                     self.selection_sound.play()
@@ -4186,7 +4249,9 @@ class ConversationsPanel(wx.Panel):
         list_ctrl.EnsureVisible(target)
 
     def _on_messages_list_key_down(self, event):
-        """Make Space fire the same activation as Enter / double-click.
+        """Space toggles the focused row's membership in self.selected_messages
+        (the mass actions act on that set); activation stayed on Enter /
+        double-click — see _do_activate_message.
         Page Up / Page Down jump by a configurable number of messages (page_up_down_step setting).
         Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
         key = event.GetKeyCode()
@@ -4235,8 +4300,7 @@ class ConversationsPanel(wx.Panel):
                             self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
                         else:
                             self.selected_messages.add(msg_id)
-                            if getattr(self, "selection_sound", None):
-                                self.selection_sound.play()
+                            self.selection_sound.play()
                             self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
             if idx <= 0 and not self._is_loading_more:
@@ -4268,7 +4332,9 @@ class ConversationsPanel(wx.Panel):
 
 
     def _on_conv_list_key_down(self, event):
-        """Make Space open the focused conversation (same as Enter).
+        """Space toggles the focused chat's membership in self.selected_chats
+        (the mass actions act on that set); opening a conversation stayed on
+        Enter / double-click.
         Ctrl+P pins/unpins, Ctrl+Shift+Q archives/unarchives."""
         key   = event.GetKeyCode()
         ctrl  = event.ControlDown()
@@ -4285,8 +4351,7 @@ class ConversationsPanel(wx.Panel):
                         self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
                     else:
                         self.selected_chats.add(jid)
-                        if getattr(self, "selection_sound", None):
-                            self.selection_sound.play()
+                        self.selection_sound.play()
                         self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
             self._jump_list_by(self.conversations_list, -self._page_jump_size())
@@ -7498,8 +7563,17 @@ class ConversationsPanel(wx.Panel):
         return all_chats, all_names
 
     def _on_menu_forward(self, msg: dict, msgs_list: list = None):
-        """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
-        if self._reject_system_event_action(msg):
+        """Open a conversation-picker dialog and forward to the chosen chats.
+
+        Forwards *msg* alone, or every message in *msgs_list* when a mass
+        forward supplied one. System events (group notices) are dropped from
+        the batch rather than aborting it — one accidentally-selected join
+        notice must not cost the user the whole selection — and only a batch
+        left with nothing at all is refused outright.
+        """
+        msgs_to_forward = [m for m in (msgs_list or [msg]) if not self._is_system_event(m)]
+        if not msgs_to_forward:
+            self._reject_system_event_action(msg)
             return
         import ctypes
         mw   = self.main_window
@@ -7536,24 +7610,13 @@ class ConversationsPanel(wx.Panel):
             0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6,
         )
 
-        msg_inner = msg.get("message", {})
-        if isinstance(msg_inner, str):
-            import json
-            try:
-                msg_inner = json.loads(msg_inner)
-            except Exception:
-                msg_inner = {}
-
-        original_caption = ""
-        for key in ["imageMessage", "videoMessage", "documentMessage"]:
-            if key in msg_inner and isinstance(msg_inner[key], dict):
-                cap = msg_inner[key].get("caption", "").strip()
-                if cap:
-                    original_caption = cap
-                break
-
+        # Offered as soon as ANY message in the batch carries a caption, not
+        # just the first one — the first is simply whichever row the mass
+        # forward happened to hand over, and keying the offer on it hid the
+        # checkbox (silently dropping every other caption) whenever that row
+        # was a plain text message.
         chk_keep_caption = None
-        if original_caption:
+        if any(message_caption(m) for m in msgs_to_forward):
             chk_keep_caption = wx.CheckBox(p, label=i18n.t("forward_keep_caption"))
             chk_keep_caption.SetValue(True)
             vsz.Add(chk_keep_caption, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
@@ -7722,20 +7785,26 @@ class ConversationsPanel(wx.Panel):
         # audio, captions, etc. all come through, unlike re-extracting the text
         # and sending it as a brand-new message. The forwarded copy arrives back
         # through the normal WebSocket echo, same as any other outgoing message.
-        msgs_to_forward = msgs_list if msgs_list else [msg]
         targets = list(zip(target_jids, target_names))
-        keep_caption = chk_keep_caption.GetValue() if chk_keep_caption else False
+        keep_captions = chk_keep_caption.GetValue() if chk_keep_caption else False
 
         def _do_forward():
             failed_names = set()
             for m in msgs_to_forward:
                 msg_key = m.get("key", {}) or {}
-                source_jid = msg_key.get("remoteJid") or (self.conversation.get("remoteJid", "") if hasattr(self, "conversation") and self.conversation else "")
+                source_jid = msg_key.get("remoteJid") or (self.conversation.get("remoteJid", "") if self.conversation else "")
                 if not source_jid or not msg_key.get("id"):
                     continue
-                f_names = self._forward_message_to_targets(m, targets, keep_caption=keep_caption, source_jid_override=source_jid)
+                # Decided per message, never once for the batch: the
+                # caption-preserving path is a media resend, so handing it a
+                # plain text message (which a mass forward mixes in freely)
+                # would push that message through the media call.
+                keep = keep_captions and bool(message_caption(m))
+                f_names = self._forward_message_to_targets(
+                    m, targets, keep_caption=keep, source_jid_override=source_jid
+                )
                 failed_names.update(f_names)
-            
+
             if failed_names:
                 wx.CallAfter(mw.error_sound.play)
                 if len(targets) == 1:
@@ -7751,7 +7820,12 @@ class ConversationsPanel(wx.Panel):
     def _forward_message_to_targets(self, msg: dict, targets: list, keep_caption: bool = False, source_jid_override: str = "") -> list:
         """Forward one message to each (jid, name) pair in *targets*, one at
         a time — so one failing recipient (e.g. a stale JID) doesn't abort
-        delivery to the rest. If keep_caption is True, uses resend_media_message_with_caption.
+        delivery to the rest.
+
+        keep_caption applies to THIS message and must already account for
+        whether it actually carries a caption (see message_caption()) — it is
+        not a batch-wide flag: the True branch is a media resend and would
+        misroute a plain text message.
         """
         mw = self.main_window
         failed = []
@@ -10142,11 +10216,11 @@ class ConversationsPanel(wx.Panel):
                 self._messages_signature_cache = None
 
 
-# ── Archived Conversations Panel ─────────────────────────────────────────────
+    # ── Mass action handlers ────────────────────────────────────────────────
+    # Act on the Space-toggled selections (self.selected_chats /
+    # self.selected_messages), reached from the "mass actions" submenu both
+    # context menus grow while a selection exists.
 
-
-    # ── Mass Action Handlers ────────────────────────────────────────────────
-    
     def _on_mass_clear_chats(self, event):
         i18n = self.main_window.i18n
         if not self.selected_chats: return
@@ -10211,23 +10285,23 @@ class ConversationsPanel(wx.Panel):
         if not self.selected_messages: return
         if wx.MessageBox(i18n.t("delete_msg_confirm"), i18n.t("delete_message"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
             return
-            
+
         import threading
-        
+
         msgs_to_delete = []
         for msg_id in self.selected_messages:
             msg = next((m for m in self._sorted_messages if not self._is_separator(m) and m.get("key", {}).get("id") == msg_id), None)
             if msg: msgs_to_delete.append(msg)
-            
+
         def _delete_bg():
             for msg in msgs_to_delete:
                 msg_key = msg.get("key", {})
                 jid = msg_key.get("remoteJid", "") or (self.conversation.get("remoteJid", "") if self.conversation else "")
                 if jid:
                     self.main_window.delete_message_for_me(jid, dict(msg_key))
-                    
+
         threading.Thread(target=_delete_bg, daemon=True).start()
-        
+
         # Always delete locally
         self.remove_messages_by_id(set(self.selected_messages), focus_previous=True)
         self.selected_messages.clear()
@@ -10241,30 +10315,30 @@ class ConversationsPanel(wx.Panel):
         for msg_id, reactions in self._reaction_map.items():
             for jid, emoji in reactions.items():
                 recent.append((msg_id, jid, emoji))
-        
+
         if not recent:
             self.main_window.output(self.main_window.i18n.t("no_reactions_found"), interrupt=True)
             return
-            
+
         recent.reverse() # show newest first
         recent = recent[:10] # limit to 10
-        
+
         msg_parts = []
         for msg_id, jid, emoji in recent:
             name = self.main_window._resolve_jid_name(jid)
             msg_parts.append(f"{name}: {emoji}")
-            
+
         text = self.main_window.i18n.t("recent_reactions") + " " + ", ".join(msg_parts)
         self.main_window.output(text, interrupt=True)
 
     def _on_accel_mentions(self, event):
         if not self.conversation:
             return
-            
+
         mentions = []
         for i, msg in enumerate(self._sorted_messages):
             if self._is_separator(msg): continue
-            
+
             # Check if mentioned
             msg_inner = msg.get("message", {})
             if isinstance(msg_inner, str):
@@ -10273,7 +10347,7 @@ class ConversationsPanel(wx.Panel):
                     msg_inner = json.loads(msg_inner)
                 except:
                     msg_inner = {}
-                    
+
             mentioned_jids = []
             for msg_type_dict in msg_inner.values():
                 if isinstance(msg_type_dict, dict):
@@ -10281,31 +10355,35 @@ class ConversationsPanel(wx.Panel):
                     if "mentionedJid" in ctx:
                         mentioned_jids = ctx["mentionedJid"]
                         break
-            
+
             if any(self.main_window._is_self_jid(j) for j in mentioned_jids):
                 mentions.append(i)
-                
+
         if not mentions:
             self.main_window.output(self.main_window.i18n.t("no_mentions_found"), interrupt=True)
             return
-            
+
         # Jump to the next mention (older message, going backwards)
         curr_idx = self.messages_list.GetFocusedItem()
         target_idx = -1
-        
+
         for idx in reversed(mentions):
             if curr_idx < 0 or idx < curr_idx:
                 target_idx = idx
                 break
-                
+
         # If we reached the oldest mention, or started below the newest, wrap around to newest
         if target_idx == -1:
             target_idx = mentions[-1]
-            
+
         self.messages_list.Focus(target_idx)
         self.messages_list.Select(target_idx, True)
         self.messages_list.EnsureVisible(target_idx)
         self.main_window.output(self.main_window.i18n.t("jumped_to_mention"), interrupt=True)
+
+
+# ── Archived Conversations Panel ─────────────────────────────────────────────
+
 
 class ArchivedConversationsPanel(wx.Panel):
     """
