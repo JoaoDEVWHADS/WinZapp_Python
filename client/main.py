@@ -4178,7 +4178,11 @@ class MainWindow(wx.Frame):
                 self._resolve_group_name_async(remote_jid)
 
         chat = self.chats[remote_jid]
-        self._apply_group_subject_change(remote_jid, chat, msg)
+        # live=True: this is the funnel for events happening now, the only one
+        # worth spending a /group-info request on when the notification itself
+        # arrives without the new name (on_historical_message deliberately
+        # does not — see _apply_group_subject_change).
+        self._apply_group_subject_change(remote_jid, chat, msg, live=True)
 
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
@@ -10128,7 +10132,8 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._schedule_set_chats)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
+    def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict,
+                                    live: bool = False) -> None:
         """Rename an already-known group chat when its WhatsApp subject changes.
 
         The "gp2"/subject-change system message (subtype "subject", new name
@@ -10141,6 +10146,14 @@ class MainWindow(wx.Frame):
         here — from the same event that already told us the new name — keeps
         the chat list in sync instead of looking like the renamed group
         vanished.
+
+        WPPConnect does not always fill that body in, though (observed live:
+        the notification arrives and renders, but carries no new name, so this
+        used to return empty-handed and the rename reached nothing). `live`
+        turns on a background /group-info lookup for exactly that case — see
+        _resolve_subject_change_async(). Only the live funnel passes it: doing
+        it from history backfill would fire one HTTP request per past rename
+        for names that are already long superseded.
         """
         if not remote_jid.endswith("@g.us"):
             return
@@ -10150,18 +10163,77 @@ class MainWindow(wx.Frame):
         if notif.get("subtype") != "subject":
             return
         new_name = (notif.get("body") or "").strip()
-        if not new_name or chat.get("name") == new_name:
+        if not new_name:
+            logging.info(
+                "[_apply_group_subject_change] Subject change for %s carried no new name "
+                "(notification keys: %s) — resolving it from group-info: %s",
+                remote_jid, sorted(notif.keys()), live,
+            )
+            if live:
+                self._resolve_subject_change_async(remote_jid, chat, notif)
             return
+        if chat.get("name") == new_name:
+            return
+        self._store_group_subject(remote_jid, chat, new_name)
+
+    def _resolve_subject_change_async(self, jid: str, chat: dict, notif: dict) -> None:
+        """Fetch the group's current subject after a rename notification that
+        did not carry it, and fill it in everywhere.
+
+        /group-info is a live lookup and does know the new name — that is why
+        the group-data dialog shows it correctly while the chat list does not:
+        the list is built from list-chats, which serialises WhatsApp Web's own
+        chat store, and that store can still be holding the old subject.
+
+        The resolved name is written back into the notification's own body so
+        the timeline row upgrades itself from "X changed the group name" to
+        "X changed the group name to Y" (group_notif_subject_changed_to) —
+        the renderer already prefers that wording whenever a body is present.
+
+        _fill_group_name() blocks on HTTP, and the callers of this run on the
+        wx main thread, hence the thread — same reason and shape as
+        _resolve_group_name_async().
+        """
+        def _worker():
+            name = self._fill_group_name(jid)
+            if not name:
+                logging.info(
+                    "[_resolve_subject_change_async] group-info returned no name for %s", jid)
+                return
+            # Same dict the message record holds, so the stored notification
+            # gains the name too and survives a conversation reopen.
+            notif["body"] = name
+            renamed = chat.get("name") != name
+            if renamed:
+                self._store_group_subject(jid, chat, name)
+            self._schedule_save(dirty_jid=jid)
+            wx.CallAfter(self._schedule_set_chats)
+            # Re-render the open conversation so the notification row picks up
+            # the name it was missing when it was first drawn.
+            panel = getattr(self, "conversations_panel", None)
+            if panel is not None and (panel.conversation or {}).get("remoteJid") == jid:
+                wx.CallAfter(panel.populate_messages, True)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _store_group_subject(self, jid: str, chat: dict, new_name: str) -> None:
+        """Apply a resolved group name to the chat, the name cache and the
+        conversation currently on screen."""
         chat["name"] = new_name
         self._group_name_cache = getattr(self, "_group_name_cache", {})
-        self._group_name_cache[remote_jid] = new_name
-
+        self._group_name_cache[jid] = new_name
         if hasattr(self, "conversations_panel"):
-            wx.CallAfter(self.conversations_panel.update_conversation_name, remote_jid, new_name)
+            wx.CallAfter(self.conversations_panel.update_conversation_name, jid, new_name)
 
     def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
         """
         Handle a live group subject update received via the groups.update websocket event.
+
+        Note this path currently never fires: the Node layer emits no
+        'groups.update' Socket.IO event at all (WebSocketClient registers the
+        handler, but nothing on the server side sends it), so a rename only
+        reaches Python as the gp2 notification handled by
+        _apply_group_subject_change(). Kept wired for when that event does get
+        emitted — the work it does is the same either way.
         """
         if remote_jid not in self.chats:
             return
@@ -10175,15 +10247,10 @@ class MainWindow(wx.Frame):
             return
 
         logging.info(f"[on_group_subject_updated] Updating group {remote_jid} name to {new_name}")
-        chat["name"] = new_name
-        self._group_name_cache = getattr(self, "_group_name_cache", {})
-        self._group_name_cache[remote_jid] = new_name
+        self._store_group_subject(remote_jid, chat, new_name)
 
         self._schedule_save(dirty_jid=remote_jid)
         self._schedule_set_chats()
-
-        if hasattr(self, "conversations_panel"):
-            wx.CallAfter(self.conversations_panel.update_conversation_name, remote_jid, new_name)
 
     def _resolve_missing_group_names(self):
         """Retry group-info lookups for groups still unnamed after sync.
