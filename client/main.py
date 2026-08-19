@@ -14793,6 +14793,38 @@ class MainWindow(wx.Frame):
             return False
         return isinstance(previous_unread, int) and previous_unread > 0
 
+    def _resolve_chat_for_event(self, jid: str):
+        """Find the stored chat a chats-update event refers to.
+
+        Returns ``(key, chat)`` — the key self.chats actually holds the chat
+        under — or ``(normalized, None)`` when nothing matches.
+
+        WhatsApp emits these events keyed by whichever identity its own Store
+        holds the chat under, which on @lid-enabled accounts is the linked
+        device id and not the phone JID WinZapp normalizes everything else to
+        (_normalize_jid deliberately leaves @lid alone). Looking the event up
+        by that JID alone therefore found nothing and dropped it in silence —
+        a chat read on the phone kept its badge lit with nothing in the log
+        to say why. on_chat_pin_update() already bridged the two identities
+        inline for exactly this reason; the unread and archive handlers never
+        did, so the same event reached one handler and was thrown away by the
+        other two.
+        """
+        normalized = self._normalize_jid(jid)
+        chat = self.chats.get(normalized)
+        if chat is not None:
+            return normalized, chat
+        if normalized.endswith("@lid"):
+            alt = getattr(self, "_lid_to_phone", {}).get(normalized, "")
+        else:
+            alt = getattr(self, "_phone_to_lid", {}).get(normalized, "")
+        if alt:
+            alt = self._normalize_jid(alt)
+            chat = self.chats.get(alt)
+            if chat is not None:
+                return alt, chat
+        return normalized, None
+
     def on_chat_unread_update(self, jid: str, unread_count: int, previous_unread: int | None = None):
         """Handle unread-count change from chats.update (e.g. read on another device).
 
@@ -14804,8 +14836,7 @@ class MainWindow(wx.Frame):
         loaded into the Store with nothing behind it, which is the event that
         used to wipe locally counted arrivals; see _remote_read_confirmed().
         """
-        normalized = self._normalize_jid(jid)
-        chat = self.chats.get(normalized)
+        normalized, chat = self._resolve_chat_for_event(jid)
         if chat is None:
             return
         # During the initial sync the WPPConnect handshake can emit
@@ -14945,8 +14976,7 @@ class MainWindow(wx.Frame):
 
     def on_chat_archive_update(self, jid: str, archived: bool):
         """Handle archive/unarchive status change from chats.update."""
-        normalized = self._normalize_jid(jid)
-        chat = self.chats.get(normalized)
+        normalized, chat = self._resolve_chat_for_event(jid)
         if chat is None:
             return
         self._set_archived_state(normalized, archived)
