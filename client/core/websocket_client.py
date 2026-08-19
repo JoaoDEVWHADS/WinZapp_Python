@@ -730,6 +730,18 @@ class WebSocketClient:
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
 
+            # See on_wpp_message_received()'s own breadcrumb for why this is
+            # unconditional — pins down exactly which branch below (history-
+            # sync echo, own-send echo, or a genuine live dispatch) a given
+            # message id took, instead of only knowing the event arrived.
+            key = msg.get("key", {})
+            logging.info(
+                "[WebSocketClient] on_messages_upsert: id=%s remoteJid=%s fromMe=%s "
+                "type=%s isMdHistoryMsg=%s",
+                key.get("id", ""), key.get("remoteJid", ""), key.get("fromMe"),
+                msg.get("messageType", ""), msg.get("isMdHistoryMsg"),
+            )
+
             # ── Skip history-sync echoes ───────────────────────────────────────
             # WPPConnect/Baileys fires messages.upsert for historical messages
             # (isMdHistoryMsg=True) during its initial sync phase. These are
@@ -1309,7 +1321,29 @@ class WebSocketClient:
 
     def on_wpp_message_received(self, data):
         try:
-            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            # Unconditional breadcrumb, logged before any filtering below —
+            # reported live: a message shows up in the chat list (unread
+            # count bumped) with no toast/sound/local notification at all,
+            # only surfacing minutes later once a periodic get_remote_chats()
+            # poll catches the stale unread count. This method previously
+            # logged nothing on its normal path, so there was no way to tell
+            # "the received-message Socket.IO event never arrived at all"
+            # apart from "it arrived and was silently filtered somewhere in
+            # here" after the fact — both looked identical: nothing in
+            # log.log. This line alone answers that: its absence around the
+            # time a message went missing means the event never reached this
+            # handler in the first place (a WPPConnect/Baileys-side delivery
+            # gap, not a WinZapp bug in this file); its presence, combined
+            # with which of the checks below actually returns early, pins
+            # down exactly where the drop happened instead.
+            is_dict = isinstance(data, dict)
+            session_ok = is_dict and self._belongs_to_this_session(data)
+            has_response = is_dict and bool(data.get("response"))
+            logging.info(
+                "[WebSocketClient] received-message event: session_ok=%s has_response=%s",
+                session_ok, has_response,
+            )
+            if not session_ok:
                 return
             wpp_msg = data.get("response")
             if not wpp_msg:
