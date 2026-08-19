@@ -245,26 +245,52 @@ class TestZeroIsDisambiguatedByTheLocalCache:
         conversations. Retrying for ever would never produce a 1."""
         assert self.decide(0, 0, self.ceiling, 0) == "accept"
 
-    def test_falling_short_of_the_cache_is_incomplete(self):
-        """Not just zero: any snapshot smaller than what is already stored is
-        a store that is still filling in.
+    def test_falling_short_of_the_cache_is_still_accepted(self):
+        """The cache breaks the tie for zero and nothing else.
 
-        This pins the decision itself. Note the loop rarely gets here with a
-        *stable* non-zero count — two equal answers exit through the normal
-        settle rule first, which does not consult the cache (it never did,
-        on any version). Zero is the case that reliably reaches this branch,
-        since that rule requires server_count > 0 to fire at all."""
-        assert self.decide(300, 300, self.ceiling, 660) == "incomplete"
+        Chats really can disappear from the server: the user deletes them
+        from another device. Rejecting every snapshot smaller than the cache
+        would call that "the server is behind" and retry for ever, which is
+        the exact loop this whole rule exists to avoid.
+
+        Nor is the check needed for a non-zero count. The loop's own
+        two-equal exit fires on any stable answer, short of the cache or not,
+        long before this deadline — and it never consulted the cache, on any
+        version. An answer that is still moving is genuinely still moving."""
+        assert self.decide(300, 300, self.ceiling, 660) == "accept"
 
     def test_reaching_the_cache_is_accepted(self):
         assert self.decide(660, 660, self.ceiling, 660) == "accept"
         assert self.decide(700, 700, self.ceiling, 660) == "accept"
+
+    def test_an_unstable_count_below_the_cache_is_accepted(self):
+        """A raw list-chats count can wobble (it includes the phantom entries
+        filtered out later), so "never two equal in a row" is reachable
+        without anything being wrong. This used to come out incomplete after
+        only six attempts."""
+        assert self.decide(448, 451, self.ceiling, 500) == "accept"
 
     @pytest.mark.parametrize("count", [1, 4, 10, 498])
     def test_a_real_snapshot_with_no_cache_is_never_incomplete(self, count):
         """The small-account guarantee: with nothing cached to fall short of,
         no non-zero answer can be rejected for its size."""
         assert self.decide(count, count, self.ceiling, 0) == "accept"
+
+    @pytest.mark.parametrize("count", [1, 4, 10, 498, 5000])
+    def test_no_non_zero_answer_is_ever_incomplete(self, count):
+        """Zero is the only count that can produce "incomplete" at all —
+        whatever the cache says, and whether or not the list is still moving.
+        Anything else would make deleting chats elsewhere loop."""
+        for prev in (-1, 0, count - 1, count, count + 1):
+            for cache in (0, 1, count, count * 2):
+                assert self.decide(count, prev, self.ceiling, cache) != "incomplete"
+
+    def test_deleting_every_conversation_elsewhere_is_the_known_ambiguity(self):
+        """Documented, not accidental: 0 against a populated cache is
+        indistinguishable from a store that never loaded, so it keeps
+        retrying. The cached chats stay on screen meanwhile, and retrying is
+        the recoverable half of the pair — accepting a broken store is not."""
+        assert self.decide(0, 0, self.ceiling, 500) == "incomplete"
 
 
 class TestTheLoopEndToEnd:

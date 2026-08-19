@@ -8316,20 +8316,35 @@ class MainWindow(wx.Frame):
           "incomplete" there is what made the health checker restart the sync
           every time it came round — the user heard "sincronizando" for ever.
           Any non-zero count is therefore accepted once the budget is spent.
-        * A server that keeps answering 0, or fewer chats than we already have
-          cached, has not finished loading its store. Accepting that would
-          mark a sync complete that plainly is not, and — because only an
-          incomplete sync gets retried — would leave the session stuck there
-          with nothing left to fix it.
+        * A server still answering 0 when we hold chats locally has not
+          finished loading its store. Accepting that would mark a sync
+          complete that plainly is not, and — because only an incomplete sync
+          gets retried — would leave the session stuck there with nothing left
+          to fix it.
 
         A bare count cannot tell "the store is still cold" from "this account
-        is genuinely empty": both answer 0. `local_chat_count` breaks the tie.
-        Chats we have already stored cannot vanish, so a server reporting
-        fewer than those is demonstrably behind and the sync stays incomplete
-        so it gets retried. With no cache to contradict it — a first pairing —
-        a persistent 0 is taken at face value as an empty account once the
-        absolute ceiling is reached, so a brand-new number does not re-sync
-        for ever either.
+        is genuinely empty": both answer 0. `local_chat_count` breaks that tie,
+        and ONLY that one. It is deliberately not used to reject a non-zero
+        count for merely falling short of the cache: chats absolutely can
+        disappear from the server legitimately, because the user deleted them
+        from another device, and treating every shortfall as "the server is
+        behind" would loop on exactly that. Zero is the only count that needs
+        the cache at all, since the loop's own two-equal exit requires
+        server_count > 0 to fire — any stable non-zero answer, short of the
+        cache or not, settles there long before this deadline, and an unstable
+        one is genuinely still moving.
+
+        With no cache to contradict it — a first pairing — a persistent 0 is
+        taken at face value as an empty account once the ceiling is reached,
+        so a brand-new number does not re-sync for ever either.
+
+        The one case left ambiguous is deleting every conversation from
+        another device: that reports 0 against a populated cache, exactly like
+        a store that never loaded, and no count can separate the two. It stays
+        "incomplete" because retrying is the recoverable failure of the pair —
+        the local cache still shows the chats meanwhile, and the retry is
+        paced by the health checker rather than being a tight loop, whereas
+        accepting a broken store strands the session for good.
 
         Pulled out of _run_sync()'s retry loop purely so it can be tested —
         see tests/test_chat_list_settled.py.
@@ -8339,9 +8354,7 @@ class MainWindow(wx.Frame):
         still_arriving = server_count > prev_server_count or server_count == 0
         if still_arriving and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
             return "extend"
-        # Behind what we already know exists (the loop's covers_cache exit
-        # means reaching here with a cache at all implies falling short of it).
-        if local_chat_count > 0 and server_count < local_chat_count:
+        if server_count == 0 and local_chat_count > 0:
             return "incomplete"
         return "accept"
 
@@ -8541,10 +8554,12 @@ class MainWindow(wx.Frame):
                     chat_list_settled = True
                     break
                 logging.warning(
-                    "[start_sync] Chat list never settled (last count: %d) and is behind the %d "
-                    "chat(s) already cached locally — the server store has not finished loading, "
-                    "so this sync stays incomplete and the health checker will retry it.",
-                    server_count, local_chat_count,
+                    "[start_sync] Chat list still empty after every attempt while %d chat(s) are "
+                    "cached locally — treating the server store as not loaded, so this sync stays "
+                    "incomplete and the health checker will retry it. (If every conversation was "
+                    "genuinely deleted from another device this retries until the cache is "
+                    "rebuilt — see _settle_deadline_decision.)",
+                    local_chat_count,
                 )
                 break
             prev_server_count = server_count
