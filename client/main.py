@@ -7398,6 +7398,21 @@ class MainWindow(wx.Frame):
         self.my_jid = self.db.get_metadata("my_jid") or ""
         self.my_lid = self.db.get_metadata("my_lid") or ""
 
+        # 8. locally_read_at — {jid: chat["t"] at the moment WE marked it read}.
+        # mark_conversation_as_read() records it so on_chat_unread_update() and
+        # get_remote_chats() can tell a genuinely new unread count apart from
+        # WhatsApp Web's own server-side read receipt simply not having caught
+        # up with our /send-seen yet. It used to live only in memory, so every
+        # restart threw the guard away while the stale server-side count did
+        # NOT go away — the next list-chats snapshot then reported the pre-read
+        # total against a local 0, which is higher, so it was accepted and
+        # already-read messages came back as unread. Reported live as
+        # "algumas mensagens ja lidas voltam a aparecer como nao lidas".
+        self._locally_read_at = {
+            k: int(v or 0)
+            for k, v in dict(self.db.get_metadata_json("locally_read_at", {})).items()
+        }
+
         if settings_dirty:
             self.save_settings()
 
@@ -9522,6 +9537,7 @@ class MainWindow(wx.Frame):
                                         if incoming_t <= read_at_t:
                                             continue
                                         self._locally_read_at.pop(jid, None)
+                                        self._persist_locally_read_at()
                                 # A real chat-list snapshot now backs this
                                 # chat's unreadCount, whichever way the guards
                                 # above resolved it — the notification code can
@@ -15001,6 +15017,7 @@ class MainWindow(wx.Frame):
                 elif local_new:
                     unread_count = min(unread_count, local_new)
                 self._locally_read_at.pop(normalized, None)
+                self._persist_locally_read_at()
                 if hasattr(self, "_new_since_read"):
                     self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
@@ -15450,6 +15467,23 @@ class MainWindow(wx.Frame):
             #Ignore audios that couldn't be saved for now
             return False
 
+    def _persist_locally_read_at(self):
+        """Write the read-ack map to DB metadata.
+
+        Kept tiny (one int per chat) and written only when the map actually
+        changes — a mark-as-read, or an entry retiring because the server has
+        since reported genuinely newer activity for that chat.
+        """
+        db = getattr(self, "db", None)
+        if db is None:
+            return
+        try:
+            db.set_metadata_json(
+                "locally_read_at", dict(getattr(self, "_locally_read_at", {}))
+            )
+        except Exception as exc:
+            logging.warning("[mark_as_read] failed to persist locally_read_at: %s", exc)
+
     def mark_conversation_as_read(self, remote_jid: str, force: bool = False):
         """Mark conversation as read locally and notify WPPConnect."""
         chat = self.chats.get(remote_jid)
@@ -15466,6 +15500,10 @@ class MainWindow(wx.Frame):
         if not hasattr(self, "_locally_read_at"):
             self._locally_read_at = {}
         self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
+        # Persisted (not just in-memory): the stale server-side unread count
+        # this guard exists to reject outlives the process, so the guard has
+        # to as well — see prepare_sync()'s "8. locally_read_at" block.
+        self._persist_locally_read_at()
         if not hasattr(self, "_new_since_read"):
             self._new_since_read = {}
         self._new_since_read[remote_jid] = 0
