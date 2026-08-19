@@ -9618,19 +9618,21 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        # WPPConnect supports documents up to 1 GB. WinZapp's WPPConnect patch
+        # WPPConnect supports files up to 1 GB. WinZapp's WPPConnect patch
         # transfers large files to Chromium in bounded chunks, avoiding the
-        # single oversized CDP argument that previously killed the session.
-        _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
-        _MAX_DOC_BYTES      = 1 * 1024 * 1024 * 1024
+        # single oversized CDP argument that previously killed the session —
+        # that used to be document-only but now covers image/video/audio too
+        # (see core/wppconnect_sender_layer_patch.py), so every attachment
+        # type shares the same ceiling.
+        _MAX_ATTACHMENT_BYTES = 1 * 1024 * 1024 * 1024
+        _MAX_ATTACHMENT_MB    = 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
 
-            is_doc    = media_type == "document"
-            max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
-            max_mb    = 1024 if is_doc else 70
+            max_bytes = _MAX_ATTACHMENT_BYTES
+            max_mb    = _MAX_ATTACHMENT_MB
 
             try:
                 if os.path.getsize(path) > max_bytes:

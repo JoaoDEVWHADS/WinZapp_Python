@@ -1182,9 +1182,20 @@ class WebSocketClient:
     def _set_wpp_limits(self):
         """Push raised file-size limits into WhatsApp Web via the setLimit API.
 
-        WPPConnect documented maximums:
+        WPPConnect documented defaults:
           maxMediaSize — 70 MB  (images, videos, audio)
           maxFileSize  — 1 GB   (documents)
+
+        maxMediaSize now matches maxFileSize: the 70 MB ceiling only ever
+        existed because non-document sends had no way to move a large file
+        into Chromium without building one giant in-memory base64 string
+        and passing it as a single CDP argument. Now that sender.layer.js's
+        bounded/chunked transfer covers image/video/audio too (see
+        core/wppconnect_sender_layer_patch.py), there is no longer a reason
+        for WhatsApp Web's own client-side guard to reject a large media
+        send before WinZapp ever gets a chance to use that path — matches
+        the client-side caps in send_media_attachment()/ui/conversations.py
+        (_MAX_MEDIA_BYTES).
         """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
@@ -1193,7 +1204,7 @@ class WebSocketClient:
             "Content-Type": "application/json",
         }
         limits = [
-            ("maxMediaSize", 70 * 1024 * 1024),    # 70 MB
+            ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
             ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
         ]
         for limit_type, value in limits:
