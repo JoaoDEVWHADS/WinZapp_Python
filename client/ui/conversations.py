@@ -123,6 +123,12 @@ class ConversationsPanel(wx.Panel):
     # middle of a word with one letter missing.
     _LIST_CTRL_TEXT_LIMIT = 511
 
+    # Box _media_bitmap is given while an in-app video plays (released again
+    # once playback stops — see _start_video_playback). Matches the fixed
+    # (320, 240) StatusPanel creates its own video bitmap at, so a video
+    # renders the same size whether it came from a conversation or a status.
+    _VIDEO_BITMAP_SIZE = (320, 240)
+
     def __init__(self, main_window, parent):
         super().__init__(parent)
         self.main_window = main_window
@@ -506,6 +512,10 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._mentions_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         # ── Thumbnail (image / sticker / video) ─────────────────────────────
+        # Doubles as the in-app video surface (see _start_video_playback,
+        # which installs _VIDEO_BITMAP_SIZE on it for the duration of a
+        # playback and releases it afterwards). Same box StatusPanel's own
+        # video viewer uses, so both places render video at one size.
         self._media_bitmap = wx.StaticBitmap(
             self.conversation_panel, bitmap=wx.NullBitmap
         )
@@ -3019,6 +3029,9 @@ class ConversationsPanel(wx.Panel):
             # the background and re-show them on refocus) — nothing else
             # will hide them since video always stops on defocus.
             self._hide_audio_controls()
+        # Drop the video-sized box _start_video_playback() installs, so the
+        # next still thumbnail sizes itself from its own bitmap again.
+        self._media_bitmap.SetMinSize((-1, -1))
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -4399,6 +4412,7 @@ class ConversationsPanel(wx.Panel):
                 image = image.Scale(
                     int(w * ratio), int(h * ratio), wx.IMAGE_QUALITY_HIGH
                 )
+            self._media_bitmap.SetMinSize((-1, -1))
             self._media_bitmap.SetBitmap(wx.Bitmap(image))
             self._media_bitmap.Show()
             self.conversation_panel.Layout()
@@ -4634,7 +4648,17 @@ class ConversationsPanel(wx.Panel):
         though decoding/playback was working fine underneath. StatusPanel's
         own video viewer already does this same Show()+Layout() right
         before load_and_play() (see _on_play_pause_video/
-        _start_downloaded_video in status_panel.py) — mirrored here."""
+        _start_downloaded_video in status_panel.py) — mirrored here.
+
+        The control is also given an explicit video-sized box first. Without
+        it the sizer keeps whatever size the last thumbnail left behind (at
+        most 200 px — see _try_show_thumbnail — or nothing at all for a
+        video with no embedded thumbnail), and wx.StaticBitmap clips rather
+        than scales, so the picture came out cropped to a corner. The box is
+        released again by _hide_all_media_controls()/_try_show_thumbnail()
+        so still images keep sizing themselves as before; VideoPlayer scales
+        each frame down into whatever box it finds (see fit_frame_size())."""
+        self._media_bitmap.SetMinSize(self._VIDEO_BITMAP_SIZE)
         self._media_bitmap.Show()
         self.conversation_panel.Layout()
         self._video_player.load_and_play(path, speed)
