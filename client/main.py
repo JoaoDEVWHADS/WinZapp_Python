@@ -14836,8 +14836,18 @@ class MainWindow(wx.Frame):
         loaded into the Store with nothing behind it, which is the event that
         used to wipe locally counted arrivals; see _remote_read_confirmed().
         """
+        # This whole path used to be silent: four separate `return`s, no
+        # logging anywhere, and no way to tell from log.log whether a read
+        # made on the phone had reached WinZapp at all, been thrown away by
+        # one of the guards, or never been emitted by WhatsApp Web in the
+        # first place. Every exit now says which one it was — the events are
+        # rare enough (a handful per read) that this costs nothing.
         normalized, chat = self._resolve_chat_for_event(jid)
         if chat is None:
+            logging.info(
+                "[unread] %s -> %s: dropped, no such chat (unread=%s, previous=%s).",
+                jid, normalized, unread_count, previous_unread,
+            )
             return
         # During the initial sync the WPPConnect handshake can emit
         # chats-update with unreadCount=0 BEFORE get_remote_chats() has
@@ -14848,6 +14858,12 @@ class MainWindow(wx.Frame):
         # is the authoritative source for the real counts; ignore live
         # chats.update while it (or the initial sync) is still running.
         if getattr(self, "_initial_sync_running", False) or not getattr(self, "_sync_completed", False):
+            logging.info(
+                "[unread] %s: dropped, sync gate (running=%s, completed=%s, "
+                "unread=%s, previous=%s).",
+                normalized, getattr(self, "_initial_sync_running", False),
+                getattr(self, "_sync_completed", False), unread_count, previous_unread,
+            )
             return
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
@@ -14942,6 +14958,11 @@ class MainWindow(wx.Frame):
             # on the phone left its badge lit in WinZapp until some later sync
             # happened to correct it. With previousUnreadCount telling the two
             # apart, only the uninformative kind is rejected.
+            logging.info(
+                "[unread] %s: dropped, uninformative server zero "
+                "(%s -> %s, previous=%s).",
+                normalized, old_count, unread_count, previous_unread,
+            )
             return
         elif read_at_t is not None:
             incoming_t = int(chat.get("t", 0) or 0)
@@ -14970,6 +14991,10 @@ class MainWindow(wx.Frame):
                 self._locally_read_at.pop(normalized, None)
                 if hasattr(self, "_new_since_read"):
                     self._new_since_read.pop(normalized, None)
+        logging.info(
+            "[unread] %s: %s -> %s (previous=%s, open=%s, read_ack=%s).",
+            normalized, old_count, unread_count, previous_unread, _open_now, read_at_t,
+        )
         chat["unreadCount"] = unread_count
         self._schedule_save(dirty_jid=normalized)
         self._schedule_set_chats()
