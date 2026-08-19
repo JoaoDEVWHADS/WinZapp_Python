@@ -1206,8 +1206,9 @@ class WebSocketClient:
         core/wppconnect_sender_layer_patch.py), there is no longer a reason
         for WhatsApp Web's own client-side guard to reject a large media
         send before WinZapp ever gets a chance to use that path — matches
-        the client-side caps in send_media_attachment()/ui/conversations.py
-        (_MAX_MEDIA_BYTES).
+        the single client-side cap every attachment type now shares
+        (ui/conversations.py's _MAX_ATTACHMENT_BYTES; the separate, lower
+        _MAX_MEDIA_BYTES it replaced no longer exists).
         """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"

@@ -127,9 +127,11 @@ PATCHED_FILE_LOADING_V1 = (
 # in the first place, just for every OTHER media type instead of documents:
 # reported live as "erro 500 ao enviar vídeos em diferentes formatos" for
 # anything beyond WinZapp's own conservative 70MB client-side media cap
-# (ui/conversations.py's _MAX_MEDIA_BYTES / websocket_client.py's
-# maxMediaSize) — a cap that only exists because this path couldn't safely
-# go any higher. WPP.chat.sendFileMessage() itself doesn't care whether the
+# (ui/conversations.py's since-removed _MAX_MEDIA_BYTES / websocket_client.py's
+# maxMediaSize) — a cap that only existed because this path couldn't safely
+# go any higher, and that widening this gate is what allowed image/video/audio
+# to be folded into the single _MAX_ATTACHMENT_BYTES ceiling documents already
+# used. WPP.chat.sendFileMessage() itself doesn't care whether the
 # content it's classifying is a document or a video — options.type (always
 # explicitly set by WinZapp, never left at 'auto-detect') is what tells it
 # that, identically on both paths — so there is no reason large image/
