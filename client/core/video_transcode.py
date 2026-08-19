@@ -3,8 +3,100 @@
 import logging
 import mimetypes
 import os
+import re
 import subprocess
 import sys
+
+
+# Codecs WhatsApp's own video pipeline accepts inside an MP4 container.
+# Anything else has to be re-encoded before upload — see
+# prepare_video_for_whatsapp below.
+_ACCEPTED_VIDEO_CODECS = {"h264"}
+_ACCEPTED_AUDIO_CODECS = {"aac"}
+
+# "Stream #0:0[0x1](und): Video: hevc (Main) (hvc1 / 0x31637668), yuv420p, ..."
+# ffmpeg prints one of these per stream; the codec name is the first token
+# after "Video:"/"Audio:".
+_STREAM_RE = re.compile(
+    r"^\s*Stream #\d+:\d+.*?:\s*(Video|Audio):\s*([A-Za-z0-9_]+)",
+    re.MULTILINE,
+)
+
+
+def probe_stream_codecs(ffmpeg_stderr: str) -> tuple[set[str], set[str]]:
+    """Parse ``ffmpeg -i <file>`` stderr into ``(video_codecs, audio_codecs)``.
+
+    ffprobe is the natural tool for this and WinZapp does not bundle it —
+    but plain ``ffmpeg -i`` with no output file prints exactly the same
+    stream table to stderr before exiting non-zero ("At least one output
+    file must be specified"), which is all this needs. Pure function so the
+    parsing is unit-testable without running ffmpeg.
+    """
+    video: set[str] = set()
+    audio: set[str] = set()
+    for kind, codec in _STREAM_RE.findall(ffmpeg_stderr or ""):
+        (video if kind == "Video" else audio).add(codec.lower())
+    return video, audio
+
+
+def _probe(ffmpeg: str, source_path: str) -> tuple[set[str], set[str]] | None:
+    """Run ``ffmpeg -i`` on *source_path* and return its stream codecs.
+
+    ``None`` means the probe itself could not be trusted (ffmpeg missing,
+    crashed, printed nothing recognisable) — callers treat that as "unknown",
+    never as "no streams".
+    """
+    creationflags = 0
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        creationflags = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", source_path],
+            capture_output=True,
+            timeout=60,
+            creationflags=creationflags,
+        )
+    except Exception:
+        logging.exception("[send_media] video codec probe failed")
+        return None
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+    video, audio = probe_stream_codecs(stderr)
+    if not video and not audio:
+        logging.warning(
+            "[send_media] video codec probe produced no stream info for %s: %s",
+            source_path, stderr[-400:],
+        )
+        return None
+    return video, audio
+
+
+def needs_transcode(extension: str, codecs: tuple[set[str], set[str]] | None) -> bool:
+    """Whether a file has to be re-encoded before WhatsApp will accept it.
+
+    *extension* is the source file's lowercase extension (".mp4", ".mkv",
+    ...) and *codecs* is what _probe() returned, or ``None`` when the probe
+    could not tell.
+
+    A non-MP4 container always needs converting. An MP4 needs converting
+    when its streams are anything other than H.264 video / AAC audio — an
+    MP4 is just a container, and an iPhone's HEVC or a modern
+    screen-recorder's AV1 sits inside one exactly as happily as H.264 does.
+    When the probe fails, an .mp4 is passed through unchanged: that is the
+    behaviour this function replaced (extension trusted outright) and it is
+    the safe side — a needless re-encode of every video is worse than the
+    occasional upload that still has to be retried.
+    """
+    if extension != ".mp4":
+        return True
+    if codecs is None:
+        return False
+    video, audio = codecs
+    if video and not video <= _ACCEPTED_VIDEO_CODECS:
+        return True
+    # No audio track at all is fine — WhatsApp accepts a silent video.
+    if audio and not audio <= _ACCEPTED_AUDIO_CODECS:
+        return True
+    return False
 
 
 def prepare_video_for_whatsapp(ffmpeg: str, source_path: str) -> tuple[str, str] | None:
@@ -19,16 +111,25 @@ def prepare_video_for_whatsapp(ffmpeg: str, source_path: str) -> tuple[str, str]
     failed server-side with a bare, unexplained 500 — reported live as
     "erro 500 ao enviar vídeos em diferentes formatos".
 
-    Trusts the .mp4 extension the same way prepare_audio_for_whatsapp trusts
-    anything that isn't .ogg — the overwhelmingly common case (a phone/
-    camera/screen-recording export, or a video forwarded from WhatsApp
-    itself) already is H.264/AAC MP4, and actually confirming the codec
-    would need ffprobe, which WinZapp does not bundle (only ffmpeg.exe).
+    The container alone is not enough to decide: an .mp4 is only a box, and
+    the ones an iPhone or a modern screen recorder produce routinely carry
+    HEVC/AV1 inside it, which fails identically. This used to trust the
+    .mp4 extension outright (ffprobe, the obvious way to check, is not
+    bundled), so exactly those files kept reproducing the 500 the rest of
+    this function exists to prevent. The codecs are now read out of plain
+    ``ffmpeg -i`` instead — see probe_stream_codecs().
     """
     mime = mimetypes.guess_type(source_path)[0] or "video/mp4"
-    if os.path.splitext(source_path)[1].lower() == ".mp4":
-        return source_path, mime
-    if not ffmpeg or not os.path.isfile(ffmpeg):
+    extension = os.path.splitext(source_path)[1].lower()
+    have_ffmpeg = bool(ffmpeg) and os.path.isfile(ffmpeg)
+    # Only an .mp4 is worth probing: every other container has to be
+    # converted whatever is inside it, so spending an ffmpeg run to confirm
+    # that would just slow the send down.
+    if extension == ".mp4":
+        codecs = _probe(ffmpeg, source_path) if have_ffmpeg else None
+        if not needs_transcode(extension, codecs):
+            return source_path, mime
+    if not have_ffmpeg:
         return None
 
     output_path = source_path + ".whatsapp.mp4"
