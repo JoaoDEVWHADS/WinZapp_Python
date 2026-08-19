@@ -4439,9 +4439,30 @@ class MainWindow(wx.Frame):
         # nothing else) whenever the user turned it off.
         if not self.settings.get("general", {}).get("notifications_enabled", True):
             return
+        title = format_notification_title(msg, self, self.i18n)
+
+        # Speak it via AO2 too, independent of whether the Windows toast
+        # below actually renders. Reported live: the toast can silently
+        # never appear on screen at all — no exception anywhere, nothing in
+        # the log — most likely Windows' own notification platform (Focus
+        # Assist, or some other silent failure in the WinRT/COM pipeline)
+        # accepting the toast and still never displaying the banner. Before
+        # this, a blind user with WinZapp backgrounded had NO way to learn
+        # who wrote what when that happened — only the sound cue, with NVDA
+        # having nothing on screen left to read since the banner never
+        # rendered. accessible_output2 speaks straight through the active
+        # screen reader's own API, independent of whether Windows actually
+        # draws anything, so this can't be silently swallowed the same way.
+        # Same setting/wording as the "different conversation, window
+        # active" scenario above — a backgrounded window is that same
+        # "not what the user is currently looking at" case, just more so.
+        speech = self.settings.get("speech_content", {})
+        if speech.get("speak_other_conv_messages", True):
+            spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+            self.output(spoken)
+
         if not self.settings.get("general", {}).get("show_tray_icon", True):
             return
-        title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
             # The unread suffix is deliberately NOT baked in here — see
             # NotificationManager._dispatch(), which appends it fresh right
