@@ -16984,6 +16984,7 @@ class MainWindow(wx.Frame):
         logging.info("[send_media] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
         import mimetypes
         from core.audio_transcode import prepare_audio_for_whatsapp
+        from core.video_transcode import prepare_video_for_whatsapp
         try:
             file_size = os.path.getsize(file_path)
         except Exception as exc:
@@ -16993,6 +16994,7 @@ class MainWindow(wx.Frame):
         filename = os.path.basename(file_path)
         upload_path = file_path
         converted_audio_path = None
+        converted_video_path = None
         if media_type == "audio":
             prepared = prepare_audio_for_whatsapp(self._find_api_ffmpeg(), file_path)
             if prepared is None:
@@ -17004,6 +17006,24 @@ class MainWindow(wx.Frame):
             upload_path, mime = prepared
             if upload_path != file_path:
                 converted_audio_path = upload_path
+                filename = os.path.basename(upload_path)
+                file_size = os.path.getsize(upload_path)
+        elif media_type == "video":
+            # WhatsApp's own pipeline expects H.264/AAC MP4 — anything else
+            # (.mkv, .webm, .avi, ...) used to go straight to WPPConnect's
+            # upload as-is and fail server-side with a bare 500. See
+            # core/video_transcode.py's own docstring for the full reasoning
+            # (mirrors the audio branch just above).
+            prepared = prepare_video_for_whatsapp(self._find_api_ffmpeg(), file_path)
+            if prepared is None:
+                return {
+                    "ok": False,
+                    "error": "Não foi possível converter o vídeo para um formato aceito pelo WhatsApp.",
+                    "retry": False,
+                }
+            upload_path, mime = prepared
+            if upload_path != file_path:
+                converted_video_path = upload_path
                 filename = os.path.basename(upload_path)
                 file_size = os.path.getsize(upload_path)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
@@ -17139,6 +17159,11 @@ class MainWindow(wx.Frame):
             if converted_audio_path:
                 try:
                     os.unlink(converted_audio_path)
+                except OSError:
+                    pass
+            if converted_video_path:
+                try:
+                    os.unlink(converted_video_path)
                 except OSError:
                     pass
 
