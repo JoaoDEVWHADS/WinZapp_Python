@@ -50,10 +50,11 @@ class _FakeList:
 
 
 class _FakeMainWindow:
-    def __init__(self, names=None):
+    def __init__(self, names=None, self_reference="Eu"):
         self.i18n = _FakeI18n()
         self.announced = []
         self._names = names or {}
+        self._self_reference = self_reference
 
     def output(self, text, interrupt=False):
         self.announced.append(text)
@@ -61,21 +62,33 @@ class _FakeMainWindow:
     def _is_self_jid(self, jid):
         return jid == ME
 
-    def _resolve_jid_name(self, jid):
-        return self._names.get(jid, jid)
+    def self_reference_label(self):
+        """Stands in for the real one, which reads the "Como se referir a
+        mim?" setting (Eu / Você / a custom word)."""
+        return self._self_reference
 
 
 class _Panel:
     _is_separator = ConversationsPanel._is_separator
     _on_accel_mentions = ConversationsPanel._on_accel_mentions
     _on_accel_recent_reactions = ConversationsPanel._on_accel_recent_reactions
+    _SELF_REACTOR_KEY = ConversationsPanel._SELF_REACTOR_KEY
 
-    def __init__(self, messages=(), focused=-1, reactions=None, names=None, open_chat=True):
-        self.main_window = _FakeMainWindow(names)
+    def __init__(self, messages=(), focused=-1, reactions=None, names=None,
+                 open_chat=True, self_reference="Eu"):
+        self.main_window = _FakeMainWindow(names, self_reference)
         self._sorted_messages = list(messages)
         self.messages_list = _FakeList(focused=focused)
         self._reaction_map = reactions if reactions is not None else {}
         self.conversation = {"remoteJid": "grupo@g.us"} if open_chat else None
+
+    def _get_participant_name(self, jid, msg=None):
+        """The real one resolves a JID through contacts/pushName and returns
+        self_reference_label() for our own JID — that second half matters
+        here, since a reaction of ours can arrive under either form."""
+        if self.main_window._is_self_jid(jid):
+            return self.main_window.self_reference_label()
+        return self.main_window._names.get(jid, jid)
 
 
 def _mention(*jids, kind="extendedTextMessage"):
@@ -203,8 +216,8 @@ class TestRecentReactions:
 
     def test_several_reactions_are_joined(self):
         panel = _Panel(
-            reactions={"m1": {SOMEONE: "👍"}, "m2": {ME: "❤️"}},
-            names={SOMEONE: "Fulano", ME: "Beltrano"},
+            reactions={"m1": {SOMEONE: "👍"}, "m2": {"5511922222222@s.whatsapp.net": "❤️"}},
+            names={SOMEONE: "Fulano", "5511922222222@s.whatsapp.net": "Beltrano"},
         )
         panel._on_accel_recent_reactions(None)
         announced, = panel.main_window.announced
@@ -226,21 +239,49 @@ class TestRecentReactions:
         assert panel.main_window.announced == []
 
 
-class TestKnownGaps:
-    """Defects found while writing these tests, pinned as xfail so they are
-    not lost and so the test turns green by itself once fixed."""
+class TestMyOwnReaction:
+    """Our own reaction is stored under the _SELF_REACTOR_KEY sentinel rather
+    than a JID, so it cannot go through the participant lookup at all — it
+    announced the raw sentinel ("_me_") until this was routed through
+    self_reference_label(), the same resolution the reactions dialog already
+    did for this very map.
 
-    @pytest.mark.xfail(
-        reason="_on_accel_recent_reactions passes the reactor KEY to "
-               "_resolve_jid_name, but our own reactions are stored under the "
-               "_SELF_REACTOR_KEY sentinel ('_me_'), not a JID. The screen "
-               "reader announces that sentinel instead of 'Eu' — the "
-               "ui_self_reference_eu string already exists for exactly this.",
-        strict=True,
-    )
-    def test_my_own_reaction_should_be_announced_as_me(self):
-        panel = _Panel(reactions={"m1": {ConversationsPanel._SELF_REACTOR_KEY: "👍"}},
-                       names={})
+    The word is a user setting ("Como se referir a mim?": Eu / Você / a custom
+    word), so it must come from that setting and not from a hardcoded string —
+    otherwise this one announcement disagrees with every other place the app
+    refers to the user.
+    """
+
+    SENTINEL = ConversationsPanel._SELF_REACTOR_KEY
+
+    def test_the_raw_sentinel_never_reaches_the_user(self):
+        panel = _Panel(reactions={"m1": {self.SENTINEL: "👍"}})
         panel._on_accel_recent_reactions(None)
         announced, = panel.main_window.announced
-        assert ConversationsPanel._SELF_REACTOR_KEY not in announced
+        assert self.SENTINEL not in announced
+
+    @pytest.mark.parametrize("word", ["Eu", "Você", "Yo", "I", "Ja", "Capitão"])
+    def test_the_configured_self_reference_is_used(self, word):
+        """Covers the three modes at once: "eu" and "voce" resolve to a
+        translated word per locale, "custom" to whatever the user typed."""
+        panel = _Panel(reactions={"m1": {self.SENTINEL: "👍"}}, self_reference=word)
+        panel._on_accel_recent_reactions(None)
+        assert panel.main_window.announced == [f"recent_reactions {word}: 👍"]
+
+    def test_our_own_reaction_arriving_under_a_real_jid_agrees(self):
+        """The other half: the same reaction can be keyed by our own JID
+        instead of the sentinel depending on which path stored it. Both must
+        announce the same word, or the user hears two names for themselves."""
+        panel = _Panel(reactions={"m1": {ME: "👍"}}, self_reference="Capitão")
+        panel._on_accel_recent_reactions(None)
+        assert panel.main_window.announced == ["recent_reactions Capitão: 👍"]
+
+    def test_mixed_with_someone_else(self):
+        panel = _Panel(
+            reactions={"m1": {self.SENTINEL: "👍", SOMEONE: "❤️"}},
+            names={SOMEONE: "Fulano"},
+            self_reference="Você",
+        )
+        panel._on_accel_recent_reactions(None)
+        announced, = panel.main_window.announced
+        assert "Você: 👍" in announced and "Fulano: ❤️" in announced

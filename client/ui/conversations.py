@@ -10323,9 +10323,19 @@ class ConversationsPanel(wx.Panel):
         recent.reverse() # show newest first
         recent = recent[:10] # limit to 10
 
+        # Our own reactions are stored under the _SELF_REACTOR_KEY sentinel,
+        # not a JID, so they can't go through the participant lookup — and the
+        # word for them is the user's "Como se referir a mim?" choice
+        # (Eu/Você/custom), not a hardcoded one. Same resolution the reactions
+        # dialog does for the very same map; _get_participant_name() covers
+        # the other half, where our own reaction did arrive under a real JID.
         msg_parts = []
         for msg_id, jid, emoji in recent:
-            name = self.main_window._resolve_jid_name(jid)
+            name = (
+                self.main_window.self_reference_label()
+                if jid == self._SELF_REACTOR_KEY
+                else self._get_participant_name(jid)
+            )
             msg_parts.append(f"{name}: {emoji}")
 
         text = self.main_window.i18n.t("recent_reactions") + " " + ", ".join(msg_parts)
