@@ -4178,7 +4178,11 @@ class MainWindow(wx.Frame):
                 self._resolve_group_name_async(remote_jid)
 
         chat = self.chats[remote_jid]
-        self._apply_group_subject_change(remote_jid, chat, msg)
+        # live=True: this is the funnel for events happening now, the only one
+        # worth spending a /group-info request on when the notification itself
+        # arrives without the new name (on_historical_message deliberately
+        # does not — see _apply_group_subject_change).
+        self._apply_group_subject_change(remote_jid, chat, msg, live=True)
 
         msg_ts = int(msg.get("messageTimestamp", 0) or msg.get("t", 0) or time.time())
         if msg_ts > 1_000_000_000_000:
@@ -8160,11 +8164,19 @@ class MainWindow(wx.Frame):
             # failed request is far more often a briefly-busy local Node
             # process than a real outage.
             self._wa_http_fail_strikes = getattr(self, "_wa_http_fail_strikes", 0) + 1
+
+            allowed_strikes = self._HTTP_PROBE_STRIKES
+            # If the initial sync is running and downloading history for hundreds of chats,
+            # the Node.js server event loop can be blocked for >30s. Don't falsely declare
+            # an offline outage just because of these timeouts.
+            if getattr(self, "_initial_sync_running", False):
+                allowed_strikes = self._HTTP_PROBE_STRIKES * 10
+
             logging.warning(
                 "[check_wa_connection_http] Request failed (strike %d/%d): %s",
-                self._wa_http_fail_strikes, self._HTTP_PROBE_STRIKES, e,
+                self._wa_http_fail_strikes, allowed_strikes, e,
             )
-            if self._wa_http_fail_strikes < self._HTTP_PROBE_STRIKES:
+            if self._wa_http_fail_strikes < allowed_strikes:
                 return
             self._set_wa_connected(False, f"status-session request failed: {e}")
             logging.error("[check_wa_connection_http] Error checking connection state: %s", e)
@@ -8293,37 +8305,62 @@ class MainWindow(wx.Frame):
     # Attempts granted per extension: small enough that a list which settles
     # right after the deadline costs one short extra wait, not a full round.
     _CHAT_ATTEMPT_EXTENSION = 2
-    # Below this, a still-growing snapshot is too small to be worth keeping:
-    # accepting e.g. 4 chats as a finished sync is the exact failure the
-    # settle rule exists to prevent (see tests/test_chat_list_settled.py).
-    # Above it the snapshot is a real, if possibly incomplete, account — and
-    # the periodic chat poller plus live WebSocket events keep filling it in,
-    # which beats re-running the whole sync every time the health checker
-    # comes round.
-    _CHAT_MIN_ACCEPTABLE_SNAPSHOT = 10
-
     @classmethod
     def _settle_deadline_decision(cls, server_count: int, prev_server_count: int,
-                                  max_attempts: int) -> str:
+                                  max_attempts: int, local_chat_count: int = 0) -> str:
         """What to do when the settle loop reaches its last attempt without a
         stable count: ``"extend"``, ``"accept"`` or ``"incomplete"``.
 
-        Still growing and there is budget left -> extend, because a list that
-        is visibly still arriving just needs more time. Otherwise a snapshot
-        big enough to be a real account is accepted (an incomplete sync gets
-        retried from scratch by the health checker, which is what users saw as
-        spontaneous re-syncing); anything smaller stays incomplete, since
-        accepting it would strand the account on a handful of conversations.
+        Two different failures meet at this deadline and they need opposite
+        answers, which is why the local cache is consulted rather than the
+        snapshot's size alone:
+
+        * A small account really is small. Four conversations is a complete
+          sync for someone who has four conversations, and answering
+          "incomplete" there is what made the health checker restart the sync
+          every time it came round — the user heard "sincronizando" for ever.
+          Any non-zero count is therefore accepted once the budget is spent.
+        * A server still answering 0 when we hold chats locally has not
+          finished loading its store. Accepting that would mark a sync
+          complete that plainly is not, and — because only an incomplete sync
+          gets retried — would leave the session stuck there with nothing left
+          to fix it.
+
+        A bare count cannot tell "the store is still cold" from "this account
+        is genuinely empty": both answer 0. `local_chat_count` breaks that tie,
+        and ONLY that one. It is deliberately not used to reject a non-zero
+        count for merely falling short of the cache: chats absolutely can
+        disappear from the server legitimately, because the user deleted them
+        from another device, and treating every shortfall as "the server is
+        behind" would loop on exactly that. Zero is the only count that needs
+        the cache at all, since the loop's own two-equal exit requires
+        server_count > 0 to fire — any stable non-zero answer, short of the
+        cache or not, settles there long before this deadline, and an unstable
+        one is genuinely still moving.
+
+        With no cache to contradict it — a first pairing — a persistent 0 is
+        taken at face value as an empty account once the ceiling is reached,
+        so a brand-new number does not re-sync for ever either.
+
+        The one case left ambiguous is deleting every conversation from
+        another device: that reports 0 against a populated cache, exactly like
+        a store that never loaded, and no count can separate the two. It stays
+        "incomplete" because retrying is the recoverable failure of the pair —
+        the local cache still shows the chats meanwhile, and the retry is
+        paced by the health checker rather than being a tight loop, whereas
+        accepting a broken store strands the session for good.
 
         Pulled out of _run_sync()'s retry loop purely so it can be tested —
         see tests/test_chat_list_settled.py.
         """
-        is_growing = server_count > prev_server_count and server_count > 0
-        if is_growing and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
+        # Nothing at all yet, or a list visibly still arriving: more time is
+        # the only thing that helps, and only while the ceiling allows it.
+        still_arriving = server_count > prev_server_count or server_count == 0
+        if still_arriving and max_attempts < cls._CHAT_ABSOLUTE_MAX_ATTEMPTS:
             return "extend"
-        if server_count > cls._CHAT_MIN_ACCEPTABLE_SNAPSHOT:
-            return "accept"
-        return "incomplete"
+        if server_count == 0 and local_chat_count > 0:
+            return "incomplete"
+        return "accept"
 
     def _should_abort_sync_for_offline(self) -> bool:
         """True once offline mode (manual or auto-detected) has come on while
@@ -8501,12 +8538,12 @@ class MainWindow(wx.Frame):
                 # _settle_deadline_decision() for what each outcome means and
                 # why the thresholds are what they are.
                 decision = self._settle_deadline_decision(
-                    server_count, prev_server_count, max_attempts
+                    server_count, prev_server_count, max_attempts, local_chat_count
                 )
                 if decision == "extend":
                     max_attempts += self._CHAT_ATTEMPT_EXTENSION
                     logging.info(
-                        "[start_sync] Chat list is still growing (%d -> %d), extending to %d attempts...",
+                        "[start_sync] Chat list is still arriving (%d -> %d), extending to %d attempts...",
                         prev_server_count, server_count, max_attempts,
                     )
                     prev_server_count = server_count
@@ -8521,8 +8558,12 @@ class MainWindow(wx.Frame):
                     chat_list_settled = True
                     break
                 logging.warning(
-                    "[start_sync] Chat list never settled (last count: %d) and too small to accept — "
-                    "treating this sync as incomplete.", server_count,
+                    "[start_sync] Chat list still empty after every attempt while %d chat(s) are "
+                    "cached locally — treating the server store as not loaded, so this sync stays "
+                    "incomplete and the health checker will retry it. (If every conversation was "
+                    "genuinely deleted from another device this retries until the cache is "
+                    "rebuilt — see _settle_deadline_decision.)",
+                    local_chat_count,
                 )
                 break
             prev_server_count = server_count
@@ -10091,7 +10132,8 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self._schedule_set_chats)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict) -> None:
+    def _apply_group_subject_change(self, remote_jid: str, chat: dict, msg: dict,
+                                    live: bool = False) -> None:
         """Rename an already-known group chat when its WhatsApp subject changes.
 
         The "gp2"/subject-change system message (subtype "subject", new name
@@ -10104,6 +10146,14 @@ class MainWindow(wx.Frame):
         here — from the same event that already told us the new name — keeps
         the chat list in sync instead of looking like the renamed group
         vanished.
+
+        WPPConnect does not always fill that body in, though (observed live:
+        the notification arrives and renders, but carries no new name, so this
+        used to return empty-handed and the rename reached nothing). `live`
+        turns on a background /group-info lookup for exactly that case — see
+        _resolve_subject_change_async(). Only the live funnel passes it: doing
+        it from history backfill would fire one HTTP request per past rename
+        for names that are already long superseded.
         """
         if not remote_jid.endswith("@g.us"):
             return
@@ -10113,15 +10163,77 @@ class MainWindow(wx.Frame):
         if notif.get("subtype") != "subject":
             return
         new_name = (notif.get("body") or "").strip()
-        if not new_name or chat.get("name") == new_name:
+        if not new_name:
+            logging.info(
+                "[_apply_group_subject_change] Subject change for %s carried no new name "
+                "(notification keys: %s) — resolving it from group-info: %s",
+                remote_jid, sorted(notif.keys()), live,
+            )
+            if live:
+                self._resolve_subject_change_async(remote_jid, chat, notif)
             return
+        if chat.get("name") == new_name:
+            return
+        self._store_group_subject(remote_jid, chat, new_name)
+
+    def _resolve_subject_change_async(self, jid: str, chat: dict, notif: dict) -> None:
+        """Fetch the group's current subject after a rename notification that
+        did not carry it, and fill it in everywhere.
+
+        /group-info is a live lookup and does know the new name — that is why
+        the group-data dialog shows it correctly while the chat list does not:
+        the list is built from list-chats, which serialises WhatsApp Web's own
+        chat store, and that store can still be holding the old subject.
+
+        The resolved name is written back into the notification's own body so
+        the timeline row upgrades itself from "X changed the group name" to
+        "X changed the group name to Y" (group_notif_subject_changed_to) —
+        the renderer already prefers that wording whenever a body is present.
+
+        _fill_group_name() blocks on HTTP, and the callers of this run on the
+        wx main thread, hence the thread — same reason and shape as
+        _resolve_group_name_async().
+        """
+        def _worker():
+            name = self._fill_group_name(jid)
+            if not name:
+                logging.info(
+                    "[_resolve_subject_change_async] group-info returned no name for %s", jid)
+                return
+            # Same dict the message record holds, so the stored notification
+            # gains the name too and survives a conversation reopen.
+            notif["body"] = name
+            renamed = chat.get("name") != name
+            if renamed:
+                self._store_group_subject(jid, chat, name)
+            self._schedule_save(dirty_jid=jid)
+            wx.CallAfter(self._schedule_set_chats)
+            # Re-render the open conversation so the notification row picks up
+            # the name it was missing when it was first drawn.
+            panel = getattr(self, "conversations_panel", None)
+            if panel is not None and (panel.conversation or {}).get("remoteJid") == jid:
+                wx.CallAfter(panel.populate_messages, True)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _store_group_subject(self, jid: str, chat: dict, new_name: str) -> None:
+        """Apply a resolved group name to the chat, the name cache and the
+        conversation currently on screen."""
         chat["name"] = new_name
         self._group_name_cache = getattr(self, "_group_name_cache", {})
-        self._group_name_cache[remote_jid] = new_name
+        self._group_name_cache[jid] = new_name
+        if hasattr(self, "conversations_panel"):
+            wx.CallAfter(self.conversations_panel.update_conversation_name, jid, new_name)
 
     def on_group_subject_updated(self, remote_jid: str, new_subject: str) -> None:
         """
         Handle a live group subject update received via the groups.update websocket event.
+
+        Note this path currently never fires: the Node layer emits no
+        'groups.update' Socket.IO event at all (WebSocketClient registers the
+        handler, but nothing on the server side sends it), so a rename only
+        reaches Python as the gp2 notification handled by
+        _apply_group_subject_change(). Kept wired for when that event does get
+        emitted — the work it does is the same either way.
         """
         if remote_jid not in self.chats:
             return
@@ -10135,9 +10247,7 @@ class MainWindow(wx.Frame):
             return
 
         logging.info(f"[on_group_subject_updated] Updating group {remote_jid} name to {new_name}")
-        chat["name"] = new_name
-        self._group_name_cache = getattr(self, "_group_name_cache", {})
-        self._group_name_cache[remote_jid] = new_name
+        self._store_group_subject(remote_jid, chat, new_name)
 
         self._schedule_save(dirty_jid=remote_jid)
         self._schedule_set_chats()
