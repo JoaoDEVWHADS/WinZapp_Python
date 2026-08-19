@@ -16772,7 +16772,18 @@ class MainWindow(wx.Frame):
         (or a WebSocket re-delivery) would simply repopulate the chat, making the
         clear appear to do nothing. Messages received after the clear have a
         newer timestamp and are kept.
+
+        Starred messages are never "cleared", whatever their timestamp.
+        clear_chat_messages_local() deliberately keeps them (starring is meant
+        to make a message durable, same as WhatsApp itself), but every path
+        that rebuilds a conversation — the history sync, the on-disk cache
+        merge, a WebSocket re-delivery — filtered them right back out through
+        this cutoff, so the survivors it had just saved disappeared again on
+        the next sync or restart. Reported live as "limpar uma conversa
+        tambem apaga as mensagens favoritas".
         """
+        if isinstance(msg, dict) and msg.get("starred"):
+            return False
         cutoff = self.settings.get("cleared_chats", {}).get(jid)
         if not cutoff:
             return False
