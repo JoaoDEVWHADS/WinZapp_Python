@@ -86,6 +86,7 @@ class _RemovalStub:
     """Minimal stand-in for ConversationsPanel, just for remove_messages_by_id."""
 
     remove_messages_by_id = ConversationsPanel.remove_messages_by_id
+    _stop_playback_for_removed_messages = ConversationsPanel._stop_playback_for_removed_messages
     _focused_msg_id = ConversationsPanel._focused_msg_id
     _is_separator = ConversationsPanel._is_separator
 
@@ -94,6 +95,12 @@ class _RemovalStub:
         self._all_sorted_messages = list(sorted_messages)
         self._messages_offset = 0
         self._unread_sep_idx = -1
+        # Not under test here (see tests/test_stop_playback_on_delete.py) —
+        # just need _stop_playback_for_removed_messages() to find nothing
+        # playing and no-op.
+        self._current_audio_id = None
+        self._audio_stream = None
+        self._current_video_msg_id = None
         self.messages_list = _FakeMessagesList()
         self.messages_list._count = len(sorted_messages)
         self.db = _FakeDB()

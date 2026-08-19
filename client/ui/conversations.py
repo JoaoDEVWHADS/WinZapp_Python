@@ -5187,23 +5187,41 @@ class ConversationsPanel(wx.Panel):
                 pass
             self._audio_temp_file = None
 
+    def _stop_playback_for_removed_messages(self, msg_ids: set):
+        """Stop any in-app audio/video playback belonging to a message that
+        is about to disappear from the list — deleted locally, deleted for
+        everyone, mass-deleted, or mirrored in from a phone-side deletion
+        the periodic poll picked up (MainWindow._mirror_remote_deletions()).
+
+        Audio is allowed to keep playing in the background while the user
+        scrolls/selects elsewhere (see _hide_all_media_controls()'s own
+        comment), so it's matched purely by _current_audio_id — not by
+        whether its row is currently focused or even still loaded in
+        _sorted_messages (pagination can scroll it out of view while it
+        keeps playing). Video (in-app playback via Enter, core/video_player.py
+        — a live ffmpeg subprocess) is matched by _current_video_msg_id the
+        same way; before this, remove_messages_by_id() never checked either
+        one at all, so deleting a message that was actively playing left it
+        looping/streaming with no row left in the UI to stop it from.
+        """
+        if self._current_audio_id in msg_ids and self._audio_stream is not None:
+            self._stop_audio()
+            self._hide_audio_controls()
+        if self._current_video_msg_id in msg_ids:
+            self._hide_all_media_controls()
+
     def on_message_revoked(self, msg_id: str):
         """A message was deleted for everyone by its sender, detected live
         (see MainWindow._apply_remote_revoke()). The official client swaps
         it for "Mensagem apagada" instantly, including stopping playback if
-        you were mid-listen — WinZapp used to leave the original audio/text/
-        media on screen (and audio still playing) until the next periodic
-        remote-deletion poll, which only removes the row outright rather
-        than marking it deleted, and can take a while to even notice.
-
-        Video has no in-app player to stop — "abrir" launches the OS's own
-        default video player as a separate process WinZapp has no handle
-        to, so an already-open video keeps playing there regardless; only
-        the row/controls in WinZapp's own UI are updated here.
+        you were mid-listen — WinZapp used to leave the original audio/
+        video/text/media on screen (and audio/video still playing) until
+        the next periodic remote-deletion poll, which only removes the row
+        outright rather than marking it deleted, and can take a while to
+        even notice.
         """
-        if msg_id and self._current_audio_id == msg_id and self._audio_stream is not None:
-            self._stop_audio()
-            self._hide_audio_controls()
+        if msg_id:
+            self._stop_playback_for_removed_messages({msg_id})
         if msg_id and self._focused_msg_id() == msg_id:
             self._hide_all_media_controls()
         self.refresh_active_conversation_messages()
@@ -8065,6 +8083,11 @@ class ConversationsPanel(wx.Panel):
         """
         if not msg_ids:
             return
+        # Stop playback before touching the list — a currently-playing audio
+        # message may not even be in _sorted_messages any more (pagination
+        # can scroll it out while it keeps playing in the background), so
+        # this must not be gated on the row actually being found below.
+        self._stop_playback_for_removed_messages(msg_ids)
         indices = sorted(
             i for i, m in enumerate(self._sorted_messages)
             if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids
