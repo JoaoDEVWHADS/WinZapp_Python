@@ -2035,15 +2035,35 @@ class ConversationsPanel(wx.Panel):
         my_token = self._recording_open_token
 
         def _bg_open_stream():
-            input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
-            stream, rate, ch = _try_open(input_device_index)
-
+            # Everything here runs off the UI thread, so an exception escaping
+            # this function would die silently in a daemon thread — and take
+            # the wx.CallAfter below with it. _recording_starting would then
+            # stay True forever and on_record_voice_message()'s
+            # `elif not self._recording_starting` guard would refuse every
+            # further attempt: the record button goes dead for the rest of the
+            # session, with nothing on screen or in the log to say why.
+            # find_input_device_index() is the realistic raiser —
+            # _pyaudio_input_devices() falls back to get_default_host_api_info()
+            # unguarded when the WASAPI query fails, which is exactly the kind
+            # of broken audio stack this background open exists to survive.
+            # _on_stream_opened() is therefore scheduled from a finally: it is
+            # the only thing that clears the flag, so it must run either way.
+            stream = rate = ch = None
             fell_back = False
-            if stream is None and input_device_index is not None:
-                fell_back = True
-                stream, rate, ch = _try_open(None)
+            try:
+                input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
+                stream, rate, ch = _try_open(input_device_index)
 
-            wx.CallAfter(_on_stream_opened, stream, rate, ch, fell_back)
+                if stream is None and input_device_index is not None:
+                    fell_back = True
+                    stream, rate, ch = _try_open(None)
+            except Exception:
+                logging.exception(
+                    "[audio] Failed to open the recording stream (device=%r).",
+                    configured_name,
+                )
+            finally:
+                wx.CallAfter(_on_stream_opened, stream, rate, ch, fell_back)
 
         def _on_stream_opened(stream, rate, ch, fell_back):
             # Discard the result if the user cancelled, or switched/closed
