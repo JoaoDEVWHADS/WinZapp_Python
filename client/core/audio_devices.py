@@ -216,6 +216,35 @@ def find_input_device_index(name: str, pa: "pyaudio.PyAudio | None" = None):
     return _match_device(name, enumerate_input_devices(pa))
 
 
+def fallback_input_device_indices(pa: "pyaudio.PyAudio | None" = None, exclude=()) -> list:
+    """Input device indices still worth trying after the preferred open
+    attempts — the pinned device, then `input_device_index=None` — have all
+    failed.
+
+    `input_device_index=None` does not mean "whichever device works": PortAudio
+    resolves it to the default device of its *default host API*, which is MME
+    on Windows. enumerate_input_devices() deliberately reads the WASAPI host
+    API instead, so the indices it returns are a different set of handles,
+    potentially onto the very same microphone reached by a different path.
+    Host APIs fail independently — the same headset answered -9999
+    "Unanticipated host error" through MME, DirectSound and WDM-KS but -9996
+    "Invalid device" through WASAPI, three drivers disagreeing about one piece
+    of hardware. "The default device refused every rate/channel combo" is
+    therefore not evidence that nothing on this machine can record, which is
+    the conclusion both recording paths used to draw.
+
+    Costs nothing while recording works: callers only get here after every
+    earlier attempt returned None — the path that previously just gave up.
+
+    Never raises: enumerate_input_devices() already guarantees that, and both
+    callers run inside a daemon thread where an escaping exception dies unseen.
+    `exclude` drops indices already tried; None entries in it are ignored,
+    being the system-default sentinel rather than an index.
+    """
+    skip = {idx for idx in exclude if idx is not None}
+    return [idx for idx, _name in enumerate_input_devices(pa) if idx not in skip]
+
+
 # Sample-rate/channel combinations to try opening an input device with, in
 # preference order — must mirror ui/conversations.py's _start_voice_recording()
 # fallback chain exactly. A single hardcoded (rate, channels) pair doesn't

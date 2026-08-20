@@ -85,6 +85,9 @@ class _FakeStream:
     def __init__(self):
         self.closed = False
 
+    def start_stream(self):
+        pass
+
     def stop_stream(self):
         pass
 
@@ -296,3 +299,91 @@ class TestFailedOpenIsAnnounced:
         assert [b[0] for b in _BOXES] == ["audio_device_failed_input"]
         assert stub._is_recording is True
         assert stub._recording_starting is False
+
+
+class _FakeSelectivePyAudio:
+    """A PyAudio stand-in where exactly one device index can be opened and
+    every other attempt raises -9999, mirroring a machine whose default host
+    API refuses the microphone that a different host API accepts. Records the
+    index of every attempt, in order, so a test can assert what was tried and
+    in which sequence."""
+
+    def __init__(self, working_index=None):
+        self.working_index = working_index
+        self.opened_indices = []
+
+    def open(self, **kwargs):
+        idx = kwargs.get("input_device_index")
+        self.opened_indices.append(idx)
+        if self.working_index is None or idx != self.working_index:
+            raise OSError(-9999, "Unanticipated host error")
+        return _FakeStream()
+
+
+class TestHostApiFallback:
+    """_try_open(None) asks PortAudio for the default device of its *default*
+    host API — MME on Windows — which is not the handle set
+    enumerate_input_devices() reads (WASAPI). One host API refusing a
+    microphone establishes nothing about the others, so giving up after the
+    default failed could abandon recording for the session while a working
+    path to the same microphone sat one index away, never attempted.
+    """
+
+    def test_a_failed_default_falls_back_to_an_enumerated_device(self, scheduled, monkeypatch):
+        calls, fired = scheduled
+        monkeypatch.setattr(conversations_module, "fallback_input_device_indices",
+                            lambda pa, exclude=(): [7])
+
+        stub = _Stub()
+        stub.main_window.effective_input_device_name = ""   # nothing pinned
+        stub._recording_pa = _FakeSelectivePyAudio(working_index=7)
+        stub._start_voice_recording()
+        assert fired.wait(timeout=5)
+        _dispatch(calls)
+
+        # The system default is still preferred and still tried first.
+        assert stub._recording_pa.opened_indices[0] is None
+        assert 7 in stub._recording_pa.opened_indices
+        assert stub._is_recording is True
+        assert stub._recording_starting is False
+        assert _BOXES == [], "recording started — there was nothing to warn about"
+
+    def test_the_pinned_device_is_not_tried_a_second_time(self, scheduled, monkeypatch):
+        """It already failed as the first attempt; re-opening it would spend
+        another full round of driver negotiation on a known answer."""
+        calls, fired = scheduled
+        seen = {}
+
+        def _candidates(pa, exclude=()):
+            seen["exclude"] = exclude
+            return []
+
+        monkeypatch.setattr(conversations_module, "find_input_device_index", lambda *a, **kw: 3)
+        monkeypatch.setattr(conversations_module, "fallback_input_device_indices", _candidates)
+
+        stub = _Stub()
+        stub._start_voice_recording()
+        assert fired.wait(timeout=5)
+        _dispatch(calls)
+
+        assert 3 in seen["exclude"]
+
+    def test_every_candidate_failing_still_warns(self, scheduled, monkeypatch):
+        """Non-regression guard on the fix this branch already carries: the
+        fallback adds attempts, it must not swallow the announcement when all
+        of them fail."""
+        calls, fired = scheduled
+        monkeypatch.setattr(conversations_module, "fallback_input_device_indices",
+                            lambda pa, exclude=(): [7, 9])
+
+        stub = _Stub()
+        stub.main_window.effective_input_device_name = ""
+        stub._recording_pa = _FakeSelectivePyAudio(working_index=None)
+        stub._start_voice_recording()
+        assert fired.wait(timeout=5)
+        _dispatch(calls)
+
+        assert 7 in stub._recording_pa.opened_indices
+        assert 9 in stub._recording_pa.opened_indices
+        assert [b[0] for b in _BOXES] == ["voice_recording_device_failed"]
+        assert stub._is_recording is False

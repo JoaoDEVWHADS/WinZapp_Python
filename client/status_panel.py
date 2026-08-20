@@ -13,7 +13,9 @@ from ui.accessible import (
 )
 from core.utils import format_number, get_downloads_folder, normalize_line_separators
 from core.video_player import VideoPlayer
-from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
+from core.audio_devices import (
+    find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
+)
 
 try:
     import pyaudio
@@ -1925,6 +1927,24 @@ class StatusPanel(wx.Panel):
                 stream, rate, ch = _try_open(input_device_index)
                 if stream is None and input_device_index is not None:
                     stream, rate, ch = _try_open(None)
+
+                if stream is None:
+                    # Same last resort as ConversationsPanel, and kept
+                    # deliberately identical to it: _try_open(None) only
+                    # covers the default host API's default device, so a
+                    # microphone that refuses MME but answers on WASAPI is
+                    # still reachable by index. Posting a voice status and
+                    # sending a voice message have no reason to disagree
+                    # about which microphones exist — this panel already
+                    # drifted behind the other one once.
+                    for idx in fallback_input_device_indices(pa, exclude=(input_device_index,)):
+                        stream, rate, ch = _try_open(idx)
+                        if stream is not None:
+                            logging.info(
+                                "[status audio] Default input device failed; recording via "
+                                "enumerated device index %s instead.", idx,
+                            )
+                            break
             except Exception:
                 logging.exception(
                     "[status audio] Failed to open the recording stream (device=%r).",

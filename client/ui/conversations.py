@@ -21,7 +21,9 @@ except ImportError:
 import wave
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
-from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
+from core.audio_devices import (
+    find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
+)
 from core.audio_transcode import transcode_m4a_to_wav
 from core.sound_system import load_sound
 from ui.accessible import (
@@ -2057,6 +2059,26 @@ class ConversationsPanel(wx.Panel):
                 if stream is None and input_device_index is not None:
                     fell_back = True
                     stream, rate, ch = _try_open(None)
+
+                if stream is None:
+                    # Last resort, and the reason this branch exists at all:
+                    # _try_open(None) asks PortAudio for the default device of
+                    # its *default* host API — MME on Windows — which is not
+                    # the same handle set enumerate_input_devices() reads
+                    # (WASAPI). One host API refusing a microphone says
+                    # nothing about the others; see
+                    # fallback_input_device_indices() for the observed
+                    # disagreement. Giving up here used to mean "no recording
+                    # this session" while a working path to the same mic sat
+                    # one index away, unexamined.
+                    for idx in fallback_input_device_indices(pa, exclude=(input_device_index,)):
+                        stream, rate, ch = _try_open(idx)
+                        if stream is not None:
+                            logging.info(
+                                "[audio] Default input device failed; recording via "
+                                "enumerated device index %s instead.", idx,
+                            )
+                            break
             except Exception:
                 logging.exception(
                     "[audio] Failed to open the recording stream (device=%r).",

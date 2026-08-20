@@ -20,6 +20,7 @@ from core.audio_devices import (
     _match_device,
     enumerate_input_devices,
     enumerate_output_devices,
+    fallback_input_device_indices,
     test_input_device as _test_input_device,
 )
 from core.sound_system import SoundSystem
@@ -442,3 +443,49 @@ class TestBrokenAudioStack:
         fake_pa = _BrokenPyAudio()
         monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: fake_pa)
         assert audio_devices_module.find_input_device_index("Microfone USB") is None
+
+
+class TestFallbackInputDeviceIndices:
+    """The candidates a recording path may still try once its preferred
+    attempts have failed.
+
+    `input_device_index=None` is not "any device that works": PortAudio maps
+    it to the default device of its default host API (MME on Windows), while
+    enumerate_input_devices() reads WASAPI. They are different handles, and
+    host APIs fail independently — so the default refusing every rate/channel
+    combo does not mean nothing on the machine can record, which is exactly
+    the conclusion both recording paths used to draw before giving up.
+    """
+
+    def test_offers_every_enumerated_index(self, monkeypatch):
+        monkeypatch.setattr(audio_devices_module, "enumerate_input_devices",
+                            lambda pa=None: [(12, "Headset"), (18, "Webcam")])
+        assert fallback_input_device_indices() == [12, 18]
+
+    def test_skips_indices_already_tried(self, monkeypatch):
+        """The pinned device was tried first and failed; retrying it would
+        just cost another round of driver negotiation for a known answer."""
+        monkeypatch.setattr(audio_devices_module, "enumerate_input_devices",
+                            lambda pa=None: [(12, "Headset"), (18, "Webcam")])
+        assert fallback_input_device_indices(exclude=(12,)) == [18]
+
+    def test_none_in_exclude_is_ignored(self, monkeypatch):
+        """None is the system-default sentinel, not a device index — dropping
+        entries equal to it would silently remove device 0 on any machine
+        where PortAudio numbers from zero."""
+        monkeypatch.setattr(audio_devices_module, "enumerate_input_devices",
+                            lambda pa=None: [(0, "Onboard"), (12, "Headset")])
+        assert fallback_input_device_indices(exclude=(None,)) == [0, 12]
+
+    def test_no_devices_means_nothing_left_to_try(self, monkeypatch):
+        monkeypatch.setattr(audio_devices_module, "enumerate_input_devices",
+                            lambda pa=None: [])
+        assert fallback_input_device_indices() == []
+
+    def test_a_broken_audio_stack_yields_no_candidates(self, monkeypatch):
+        """Not a separate guard, just the consequence of going through
+        enumerate_input_devices(): its "never raises" contract carries over,
+        which matters because both callers run in a daemon thread where an
+        escaping exception dies unseen."""
+        monkeypatch.setattr(audio_devices_module.pyaudio, "PyAudio", lambda: _BrokenPyAudio())
+        assert fallback_input_device_indices() == []

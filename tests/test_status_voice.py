@@ -542,3 +542,102 @@ class TestVoiceStatusRecordingOpensOffTheUiThread:
         assert opened_stream.closed is True, "orphan stream left capturing"
         assert stub._is_recording is False
         assert stub._recording_stream is None
+
+
+class _FakeSelectivePyAudio:
+    """Like _FakeRecordingPyAudio, but only ONE device index opens — the shape
+    of a machine whose default host API refuses the microphone that another
+    host API accepts. Records every attempted index, in order."""
+
+    def __init__(self, working_index=None):
+        self.working_index = working_index
+        self.opened_indices = []
+        self.opened_with = []
+
+    def open(self, rate, channels, format, input, input_device_index,
+             frames_per_buffer, stream_callback):
+        self.opened_indices.append(input_device_index)
+        self.opened_with.append((rate, channels))
+        if self.working_index is None or input_device_index != self.working_index:
+            raise OSError(-9999, "Unanticipated host error")
+        return _FakeStream()
+
+
+class TestVoiceStatusHostApiFallback:
+    """Same last resort as ConversationsPanel, and deliberately identical to
+    it: posting a voice status and sending a voice message have no reason to
+    disagree about which microphones exist. This panel already drifted behind
+    the other one once — it kept opening the stream on the wx thread long
+    after the conversations panel had stopped (see
+    TestVoiceStatusRecordingOpensOffTheUiThread above).
+    """
+
+    def _patch(self, monkeypatch, call_after, message_boxes=None):
+        _CapturedThread.created = []
+        monkeypatch.setattr(status_panel_module.threading, "Thread", _CapturedThread)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter",
+                            lambda func, *a, **kw: call_after.append((func, a)))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                            lambda *a, **kw: (message_boxes if message_boxes is not None else []).append(a))
+        monkeypatch.setattr(status_panel_module, "pyaudio",
+                            types.SimpleNamespace(paInt16=8, paContinue=0))
+
+    def test_a_failed_default_falls_back_to_an_enumerated_device(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: None)
+        monkeypatch.setattr(status_panel_module, "fallback_input_device_indices",
+                            lambda pa, exclude=(): [12])
+
+        stub = _RecordingStub(device_name="")
+        stub._recording_pa = _FakeSelectivePyAudio(working_index=12)
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert stub._recording_pa.opened_indices[0] is None
+        assert 12 in stub._recording_pa.opened_indices
+        assert stub._is_recording is True
+        assert stub._recording_starting is False
+        assert boxes == [], "recording started — there was nothing to warn about"
+
+    def test_the_pinned_device_is_not_tried_a_second_time(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        seen = {}
+
+        def _candidates(pa, exclude=()):
+            seen["exclude"] = exclude
+            return []
+
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        monkeypatch.setattr(status_panel_module, "fallback_input_device_indices", _candidates)
+
+        stub = _RecordingStub(pa_works=False)
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert 3 in seen["exclude"]
+
+    def test_every_candidate_failing_still_warns(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: None)
+        monkeypatch.setattr(status_panel_module, "fallback_input_device_indices",
+                            lambda pa, exclude=(): [12, 18])
+
+        stub = _RecordingStub(device_name="")
+        stub._recording_pa = _FakeSelectivePyAudio(working_index=None)
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert 12 in stub._recording_pa.opened_indices
+        assert 18 in stub._recording_pa.opened_indices
+        assert stub._recording_starting is False
+        assert stub._is_recording is False
+        assert len(boxes) == 1
