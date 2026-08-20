@@ -4439,9 +4439,30 @@ class MainWindow(wx.Frame):
         # nothing else) whenever the user turned it off.
         if not self.settings.get("general", {}).get("notifications_enabled", True):
             return
+        title = format_notification_title(msg, self, self.i18n)
+
+        # Speak it via AO2 too, independent of whether the Windows toast
+        # below actually renders. Reported live: the toast can silently
+        # never appear on screen at all — no exception anywhere, nothing in
+        # the log — most likely Windows' own notification platform (Focus
+        # Assist, or some other silent failure in the WinRT/COM pipeline)
+        # accepting the toast and still never displaying the banner. Before
+        # this, a blind user with WinZapp backgrounded had NO way to learn
+        # who wrote what when that happened — only the sound cue, with NVDA
+        # having nothing on screen left to read since the banner never
+        # rendered. accessible_output2 speaks straight through the active
+        # screen reader's own API, independent of whether Windows actually
+        # draws anything, so this can't be silently swallowed the same way.
+        # Same setting/wording as the "different conversation, window
+        # active" scenario above — a backgrounded window is that same
+        # "not what the user is currently looking at" case, just more so.
+        speech = self.settings.get("speech_content", {})
+        if speech.get("speak_other_conv_messages", True):
+            spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
+            self.output(spoken)
+
         if not self.settings.get("general", {}).get("show_tray_icon", True):
             return
-        title = format_notification_title(msg, self, self.i18n)
         if hasattr(self, "notification_manager"):
             # The unread suffix is deliberately NOT baked in here — see
             # NotificationManager._dispatch(), which appends it fresh right
@@ -7377,6 +7398,21 @@ class MainWindow(wx.Frame):
         self.my_jid = self.db.get_metadata("my_jid") or ""
         self.my_lid = self.db.get_metadata("my_lid") or ""
 
+        # 8. locally_read_at — {jid: chat["t"] at the moment WE marked it read}.
+        # mark_conversation_as_read() records it so on_chat_unread_update() and
+        # get_remote_chats() can tell a genuinely new unread count apart from
+        # WhatsApp Web's own server-side read receipt simply not having caught
+        # up with our /send-seen yet. It used to live only in memory, so every
+        # restart threw the guard away while the stale server-side count did
+        # NOT go away — the next list-chats snapshot then reported the pre-read
+        # total against a local 0, which is higher, so it was accepted and
+        # already-read messages came back as unread. Reported live as
+        # "algumas mensagens ja lidas voltam a aparecer como nao lidas".
+        self._locally_read_at = {
+            k: int(v or 0)
+            for k, v in dict(self.db.get_metadata_json("locally_read_at", {})).items()
+        }
+
         if settings_dirty:
             self.save_settings()
 
@@ -9501,6 +9537,7 @@ class MainWindow(wx.Frame):
                                         if incoming_t <= read_at_t:
                                             continue
                                         self._locally_read_at.pop(jid, None)
+                                        self._persist_locally_read_at()
                                 # A real chat-list snapshot now backs this
                                 # chat's unreadCount, whichever way the guards
                                 # above resolved it — the notification code can
@@ -14980,6 +15017,7 @@ class MainWindow(wx.Frame):
                 elif local_new:
                     unread_count = min(unread_count, local_new)
                 self._locally_read_at.pop(normalized, None)
+                self._persist_locally_read_at()
                 if hasattr(self, "_new_since_read"):
                     self._new_since_read.pop(normalized, None)
         chat["unreadCount"] = unread_count
@@ -15429,6 +15467,23 @@ class MainWindow(wx.Frame):
             #Ignore audios that couldn't be saved for now
             return False
 
+    def _persist_locally_read_at(self):
+        """Write the read-ack map to DB metadata.
+
+        Kept tiny (one int per chat) and written only when the map actually
+        changes — a mark-as-read, or an entry retiring because the server has
+        since reported genuinely newer activity for that chat.
+        """
+        db = getattr(self, "db", None)
+        if db is None:
+            return
+        try:
+            db.set_metadata_json(
+                "locally_read_at", dict(getattr(self, "_locally_read_at", {}))
+            )
+        except Exception as exc:
+            logging.warning("[mark_as_read] failed to persist locally_read_at: %s", exc)
+
     def mark_conversation_as_read(self, remote_jid: str, force: bool = False):
         """Mark conversation as read locally and notify WPPConnect."""
         chat = self.chats.get(remote_jid)
@@ -15445,6 +15500,10 @@ class MainWindow(wx.Frame):
         if not hasattr(self, "_locally_read_at"):
             self._locally_read_at = {}
         self._locally_read_at[remote_jid] = int(chat.get("t", 0) or 0)
+        # Persisted (not just in-memory): the stale server-side unread count
+        # this guard exists to reject outlives the process, so the guard has
+        # to as well — see prepare_sync()'s "8. locally_read_at" block.
+        self._persist_locally_read_at()
         if not hasattr(self, "_new_since_read"):
             self._new_since_read = {}
         self._new_since_read[remote_jid] = 0
@@ -16713,7 +16772,18 @@ class MainWindow(wx.Frame):
         (or a WebSocket re-delivery) would simply repopulate the chat, making the
         clear appear to do nothing. Messages received after the clear have a
         newer timestamp and are kept.
+
+        Starred messages are never "cleared", whatever their timestamp.
+        clear_chat_messages_local() deliberately keeps them (starring is meant
+        to make a message durable, same as WhatsApp itself), but every path
+        that rebuilds a conversation — the history sync, the on-disk cache
+        merge, a WebSocket re-delivery — filtered them right back out through
+        this cutoff, so the survivors it had just saved disappeared again on
+        the next sync or restart. Reported live as "limpar uma conversa
+        tambem apaga as mensagens favoritas".
         """
+        if isinstance(msg, dict) and msg.get("starred"):
+            return False
         cutoff = self.settings.get("cleared_chats", {}).get(jid)
         if not cutoff:
             return False
@@ -16984,6 +17054,7 @@ class MainWindow(wx.Frame):
         logging.info("[send_media] destination resolved to %s (isLid=%s)", remote_jid, is_lid_target)
         import mimetypes
         from core.audio_transcode import prepare_audio_for_whatsapp
+        from core.video_transcode import prepare_video_for_whatsapp
         try:
             file_size = os.path.getsize(file_path)
         except Exception as exc:
@@ -16993,6 +17064,7 @@ class MainWindow(wx.Frame):
         filename = os.path.basename(file_path)
         upload_path = file_path
         converted_audio_path = None
+        converted_video_path = None
         if media_type == "audio":
             prepared = prepare_audio_for_whatsapp(self._find_api_ffmpeg(), file_path)
             if prepared is None:
@@ -17004,6 +17076,24 @@ class MainWindow(wx.Frame):
             upload_path, mime = prepared
             if upload_path != file_path:
                 converted_audio_path = upload_path
+                filename = os.path.basename(upload_path)
+                file_size = os.path.getsize(upload_path)
+        elif media_type == "video":
+            # WhatsApp's own pipeline expects H.264/AAC MP4 — anything else
+            # (.mkv, .webm, .avi, ...) used to go straight to WPPConnect's
+            # upload as-is and fail server-side with a bare 500. See
+            # core/video_transcode.py's own docstring for the full reasoning
+            # (mirrors the audio branch just above).
+            prepared = prepare_video_for_whatsapp(self._find_api_ffmpeg(), file_path)
+            if prepared is None:
+                return {
+                    "ok": False,
+                    "error": "Não foi possível converter o vídeo para um formato aceito pelo WhatsApp.",
+                    "retry": False,
+                }
+            upload_path, mime = prepared
+            if upload_path != file_path:
+                converted_video_path = upload_path
                 filename = os.path.basename(upload_path)
                 file_size = os.path.getsize(upload_path)
         url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-file"
@@ -17139,6 +17229,11 @@ class MainWindow(wx.Frame):
             if converted_audio_path:
                 try:
                     os.unlink(converted_audio_path)
+                except OSError:
+                    pass
+            if converted_video_path:
+                try:
+                    os.unlink(converted_video_path)
                 except OSError:
                     pass
 

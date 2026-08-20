@@ -139,7 +139,28 @@ _PATCHED_DEPENDENCY_KEYS = [
 ]
 
 # Runtime state dirs/files that should survive a re-download.
-_KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
+#
+# "tokens" is the one that actually holds the paired WhatsApp session:
+# wppconnect-server's file token store (config.ts `tokenStoreType: 'file'`)
+# writes to `./tokens` relative to process.cwd(), which is client/api/ — see
+# src/util/tokenStore/FileTokenStore/FileTokenStore.ts (`path: './tokens'`).
+# It was missing from this set, so the clean step below deleted every stored
+# session token on each full reinstall/update while userDataDir (the Chrome
+# profile) survived. What that costs is spelled out by WinZapp's own patch
+# in api_patches/src/util/createSessionUtil.ts, which exists to stop the
+# same token being destroyed by a different route: "The saved WhatsApp Web
+# credentials are then gone for good and the next start looks like a logout,
+# even though the phone still lists the linked device." Nothing recreates
+# the file, so whatever state that leaves the session in survives every
+# restart — which is what "ao reinstalar a WPPConnect o programa fica em
+# modo offline permanente, mesmo ao reiniciar" describes.
+#
+# "wppconnect_tokens" is kept alongside it purely for older installs. It is
+# the folder name upstream used before "tokens" (both are still listed in
+# api/.gitignore) and nothing writes to it any more — it is empty on a
+# current install — but dropping it here would delete whatever an old
+# install still has in it.
+_KEEP_RUNTIME = {"tokens", "wppconnect_tokens", "userDataDir", "wppconnect.log"}
 
 # WinZapp's patches on top of upstream wppconnect-server — same list as
 # setup_api.py's custom_files and build.py's API_CUSTOM_SRC_FILES. Unlike

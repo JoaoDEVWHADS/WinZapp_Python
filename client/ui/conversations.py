@@ -123,6 +123,12 @@ class ConversationsPanel(wx.Panel):
     # middle of a word with one letter missing.
     _LIST_CTRL_TEXT_LIMIT = 511
 
+    # Box _media_bitmap is given while an in-app video plays (released again
+    # once playback stops — see _start_video_playback). Matches the fixed
+    # (320, 240) StatusPanel creates its own video bitmap at, so a video
+    # renders the same size whether it came from a conversation or a status.
+    _VIDEO_BITMAP_SIZE = (320, 240)
+
     def __init__(self, main_window, parent):
         super().__init__(parent)
         self.main_window = main_window
@@ -506,6 +512,10 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._mentions_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         # ── Thumbnail (image / sticker / video) ─────────────────────────────
+        # Doubles as the in-app video surface (see _start_video_playback,
+        # which installs _VIDEO_BITMAP_SIZE on it for the duration of a
+        # playback and releases it afterwards). Same box StatusPanel's own
+        # video viewer uses, so both places render video at one size.
         self._media_bitmap = wx.StaticBitmap(
             self.conversation_panel, bitmap=wx.NullBitmap
         )
@@ -3019,6 +3029,9 @@ class ConversationsPanel(wx.Panel):
             # the background and re-show them on refocus) — nothing else
             # will hide them since video always stops on defocus.
             self._hide_audio_controls()
+        # Drop the video-sized box _start_video_playback() installs, so the
+        # next still thumbnail sizes itself from its own bitmap again.
+        self._media_bitmap.SetMinSize((-1, -1))
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
@@ -4399,6 +4412,7 @@ class ConversationsPanel(wx.Panel):
                 image = image.Scale(
                     int(w * ratio), int(h * ratio), wx.IMAGE_QUALITY_HIGH
                 )
+            self._media_bitmap.SetMinSize((-1, -1))
             self._media_bitmap.SetBitmap(wx.Bitmap(image))
             self._media_bitmap.Show()
             self.conversation_panel.Layout()
@@ -4634,7 +4648,17 @@ class ConversationsPanel(wx.Panel):
         though decoding/playback was working fine underneath. StatusPanel's
         own video viewer already does this same Show()+Layout() right
         before load_and_play() (see _on_play_pause_video/
-        _start_downloaded_video in status_panel.py) — mirrored here."""
+        _start_downloaded_video in status_panel.py) — mirrored here.
+
+        The control is also given an explicit video-sized box first. Without
+        it the sizer keeps whatever size the last thumbnail left behind (at
+        most 200 px — see _try_show_thumbnail — or nothing at all for a
+        video with no embedded thumbnail), and wx.StaticBitmap clips rather
+        than scales, so the picture came out cropped to a corner. The box is
+        released again by _hide_all_media_controls()/_try_show_thumbnail()
+        so still images keep sizing themselves as before; VideoPlayer scales
+        each frame down into whatever box it finds (see fit_frame_size())."""
+        self._media_bitmap.SetMinSize(self._VIDEO_BITMAP_SIZE)
         self._media_bitmap.Show()
         self.conversation_panel.Layout()
         self._video_player.load_and_play(path, speed)
@@ -5187,23 +5211,41 @@ class ConversationsPanel(wx.Panel):
                 pass
             self._audio_temp_file = None
 
+    def _stop_playback_for_removed_messages(self, msg_ids: set):
+        """Stop any in-app audio/video playback belonging to a message that
+        is about to disappear from the list — deleted locally, deleted for
+        everyone, mass-deleted, or mirrored in from a phone-side deletion
+        the periodic poll picked up (MainWindow._mirror_remote_deletions()).
+
+        Audio is allowed to keep playing in the background while the user
+        scrolls/selects elsewhere (see _hide_all_media_controls()'s own
+        comment), so it's matched purely by _current_audio_id — not by
+        whether its row is currently focused or even still loaded in
+        _sorted_messages (pagination can scroll it out of view while it
+        keeps playing). Video (in-app playback via Enter, core/video_player.py
+        — a live ffmpeg subprocess) is matched by _current_video_msg_id the
+        same way; before this, remove_messages_by_id() never checked either
+        one at all, so deleting a message that was actively playing left it
+        looping/streaming with no row left in the UI to stop it from.
+        """
+        if self._current_audio_id in msg_ids and self._audio_stream is not None:
+            self._stop_audio()
+            self._hide_audio_controls()
+        if self._current_video_msg_id in msg_ids:
+            self._hide_all_media_controls()
+
     def on_message_revoked(self, msg_id: str):
         """A message was deleted for everyone by its sender, detected live
         (see MainWindow._apply_remote_revoke()). The official client swaps
         it for "Mensagem apagada" instantly, including stopping playback if
-        you were mid-listen — WinZapp used to leave the original audio/text/
-        media on screen (and audio still playing) until the next periodic
-        remote-deletion poll, which only removes the row outright rather
-        than marking it deleted, and can take a while to even notice.
-
-        Video has no in-app player to stop — "abrir" launches the OS's own
-        default video player as a separate process WinZapp has no handle
-        to, so an already-open video keeps playing there regardless; only
-        the row/controls in WinZapp's own UI are updated here.
+        you were mid-listen — WinZapp used to leave the original audio/
+        video/text/media on screen (and audio/video still playing) until
+        the next periodic remote-deletion poll, which only removes the row
+        outright rather than marking it deleted, and can take a while to
+        even notice.
         """
-        if msg_id and self._current_audio_id == msg_id and self._audio_stream is not None:
-            self._stop_audio()
-            self._hide_audio_controls()
+        if msg_id:
+            self._stop_playback_for_removed_messages({msg_id})
         if msg_id and self._focused_msg_id() == msg_id:
             self._hide_all_media_controls()
         self.refresh_active_conversation_messages()
@@ -7841,6 +7883,35 @@ class ConversationsPanel(wx.Panel):
                 failed.append(name)
         return failed
 
+    def _persist_message_local_flag(self, jid: str, msg: dict):
+        """Persist a message-level, locally-mutated field (e.g. "starred",
+        "pinInChat") to that message's own row in the database.
+
+        _schedule_save() only ever calls db.upsert_chat() — it writes chat
+        metadata (name, unreadCount, last message preview, ...), never an
+        individual row in the messages table. Meanwhile navigate_to_conversation()
+        unconditionally reloads a conversation's messages fresh from the
+        database every time it's opened. Without this, a flag toggled here
+        lived only in the in-memory dict — correct until the user left and
+        reopened the conversation (or any resync replaced the in-memory
+        records), at which point it silently reverted, e.g. a starred
+        message's context-menu item going back to "Favoritar" instead of
+        staying "Desfavoritar".
+
+        Runs on a background thread — db.insert_message() blocks the caller
+        until the write completes (see DatabaseBridge), and this is always
+        called from a UI event handler.
+        """
+        db = getattr(self.main_window, "db", None)
+        if db is None:
+            return
+        def _do(j=jid, m=dict(msg)):
+            try:
+                db.insert_message(j, m)
+            except Exception as exc:
+                logging.warning("[_persist_message_local_flag] failed for %s: %s", j, exc)
+        threading.Thread(target=_do, daemon=True).start()
+
     def _on_menu_star(self, msg: dict):
         if self._reject_system_event_action(msg):
             return
@@ -7848,6 +7919,7 @@ class ConversationsPanel(wx.Panel):
         jid = self.conversation.get("remoteJid", "")
         if jid:
             self.main_window._schedule_save()
+            self._persist_message_local_flag(jid, msg)
             self.populate_messages(preserve_focus=True)
 
     def _on_menu_pin_message(self, msg: dict):
@@ -7866,6 +7938,7 @@ class ConversationsPanel(wx.Panel):
         pin = not bool(msg.get("pinInChat"))
         msg["pinInChat"] = pin
         self.main_window._schedule_save()
+        self._persist_message_local_flag(jid, msg)
         self.populate_messages(preserve_focus=True)
 
         msg_key = dict(msg.get("key", {}))
@@ -7880,6 +7953,9 @@ class ConversationsPanel(wx.Panel):
     def _on_pin_message_failed(self, msg: dict, attempted_pin: bool):
         """Roll back an optimistic pin/unpin the server rejected (main thread)."""
         msg["pinInChat"] = not attempted_pin
+        jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if jid:
+            self._persist_message_local_flag(jid, msg)
         self.main_window._schedule_save()
         self.populate_messages(preserve_focus=True)
         i18n = self.main_window.i18n
@@ -8031,6 +8107,11 @@ class ConversationsPanel(wx.Panel):
         """
         if not msg_ids:
             return
+        # Stop playback before touching the list — a currently-playing audio
+        # message may not even be in _sorted_messages any more (pagination
+        # can scroll it out while it keeps playing in the background), so
+        # this must not be gated on the row actually being found below.
+        self._stop_playback_for_removed_messages(msg_ids)
         indices = sorted(
             i for i, m in enumerate(self._sorted_messages)
             if isinstance(m, dict) and m.get("key", {}).get("id") in msg_ids
@@ -9561,19 +9642,21 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
-        # WPPConnect supports documents up to 1 GB. WinZapp's WPPConnect patch
+        # WPPConnect supports files up to 1 GB. WinZapp's WPPConnect patch
         # transfers large files to Chromium in bounded chunks, avoiding the
-        # single oversized CDP argument that previously killed the session.
-        _MAX_MEDIA_BYTES    = 70  * 1024 * 1024
-        _MAX_DOC_BYTES      = 1 * 1024 * 1024 * 1024
+        # single oversized CDP argument that previously killed the session —
+        # that used to be document-only but now covers image/video/audio too
+        # (see core/wppconnect_sender_layer_patch.py), so every attachment
+        # type shares the same ceiling.
+        _MAX_ATTACHMENT_BYTES = 1 * 1024 * 1024 * 1024
+        _MAX_ATTACHMENT_MB    = 1024
         i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
 
-            is_doc    = media_type == "document"
-            max_bytes = _MAX_DOC_BYTES if is_doc else _MAX_MEDIA_BYTES
-            max_mb    = 1024 if is_doc else 70
+            max_bytes = _MAX_ATTACHMENT_BYTES
+            max_mb    = _MAX_ATTACHMENT_MB
 
             try:
                 if os.path.getsize(path) > max_bytes:

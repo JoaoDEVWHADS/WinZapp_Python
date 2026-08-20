@@ -29,7 +29,7 @@ import queue
 
 import pytest
 
-from core.video_player import extract_jpeg_frames, VideoPlayer
+from core.video_player import extract_jpeg_frames, fit_frame_size, VideoPlayer
 
 
 def _jpeg(payload: bytes) -> bytes:
@@ -354,3 +354,51 @@ class TestIsPlayingReflectsStopEvent:
         player.is_playing = True
         player.stop()
         assert player.is_playing is False
+
+
+class TestFitFrameSize:
+    """wx.StaticBitmap clips rather than scales, so a frame bigger than the
+    control it is drawn into shows only its top-left corner. ffmpeg emits
+    frames at a fixed 480 px width while both callers hand this module a
+    smaller control (StatusPanel: a fixed 320x240; ConversationsPanel: a
+    box sized from the last <=200 px thumbnail, or nothing at all), which is
+    what "os videos so abrem pela metade nos status e conversas" actually
+    was."""
+
+    def test_a_frame_wider_than_the_box_is_scaled_down_to_fit(self):
+        assert fit_frame_size(480, 270, 320, 240) == (320, 180)
+
+    def test_a_portrait_frame_is_limited_by_the_boxs_height(self):
+        # 480x854 into 320x240: height is the binding constraint (240/854),
+        # so the result must fit inside BOTH dimensions, not just the width —
+        # and must actually USE the height it has (int() truncation can cost
+        # a pixel, nothing more).
+        width, height = fit_frame_size(480, 854, 320, 240)
+        assert width <= 320 and height <= 240
+        assert height >= 239
+
+    def test_aspect_ratio_is_preserved(self):
+        width, height = fit_frame_size(1920, 1080, 320, 240)
+        assert abs((width / height) - (1920 / 1080)) < 0.02
+
+    def test_a_frame_that_already_fits_is_left_alone(self):
+        assert fit_frame_size(160, 90, 320, 240) is None
+
+    def test_a_frame_exactly_the_size_of_the_box_is_left_alone(self):
+        assert fit_frame_size(320, 240, 320, 240) is None
+
+    def test_a_control_with_no_size_of_its_own_leaves_the_frame_alone(self):
+        """A wx.StaticBitmap created with no explicit size and never laid
+        out with a bitmap in it reports 0 (or 1) — there is no box to fit
+        into, so the frame is drawn at its natural size and the caller's own
+        layout decides."""
+        assert fit_frame_size(480, 270, 0, 0) is None
+        assert fit_frame_size(480, 270, 1, 1) is None
+
+    def test_a_degenerate_frame_is_left_alone(self):
+        assert fit_frame_size(0, 0, 320, 240) is None
+        assert fit_frame_size(-1, 100, 320, 240) is None
+
+    def test_the_result_is_never_zero_sized(self):
+        width, height = fit_frame_size(4000, 4, 320, 240)
+        assert width >= 1 and height >= 1

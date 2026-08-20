@@ -28,6 +28,10 @@ class _Stub:
     on_chat_unread_update = MainWindow.on_chat_unread_update
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _remote_read_confirmed = staticmethod(MainWindow._remote_read_confirmed)
+    # _locally_read_at is persisted to DB metadata now (it has to survive a
+    # restart — see tests/test_locally_read_at_persisted.py); the real method
+    # is a no-op without a `db` attribute, which this stub deliberately lacks.
+    _persist_locally_read_at = MainWindow._persist_locally_read_at
 
     def __init__(self, chat):
         self.chats = {"5511999999999@s.whatsapp.net": chat}
