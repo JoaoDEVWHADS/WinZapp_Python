@@ -822,11 +822,22 @@ export default class CreateSessionUtil {
     const installListener = () => {
       client.page
         .evaluate(() => {
+          // Everything in here is wrapped, and the "installed" flag is only
+          // set once WPP.on() has actually returned: `WPP.on` is foreign,
+          // minified code that can throw even once the `!WPP.on` guard has
+          // passed (wa-js present, emitter not bootstrapped). Marking the
+          // context as installed first would leave it permanently claiming a
+          // listener it never registered, and letting the throw escape is
+          // worse still — on the first attempt it rejects the whole evaluate
+          // so the retry below is never even scheduled, and from inside the
+          // retry it skips clearInterval(), leaving a timer firing every 500ms
+          // for the life of the page. Same shape as restoreStatusSender above,
+          // for the same reason.
           const install = () => {
+            try {
             const WPP = (window as any).WPP;
             if (!WPP || !WPP.on) return false;
             if ((window as any).__winzappUnreadListenerInstalled) return true;
-            (window as any).__winzappUnreadListenerInstalled = true;
             WPP.on('chat.unread_count_changed', (evt: any) => {
               try {
               const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
@@ -881,23 +892,37 @@ export default class CreateSessionUtil {
                 // silently stop updating everywhere in the app.
               }
             });
+            (window as any).__winzappUnreadListenerInstalled = true;
             return true;
+            } catch (e) {
+              return false;
+            }
           };
           if (install()) return 'installed';
-          // wa-js is injected into the page asynchronously after each
-          // (re)connect — the same reason the MsgKey._serialized and status
-          // sender shims above poll instead of trusting a single attempt.
-          // wireListeners() (which calls this) runs BEFORE isConnected() is
-          // even confirmed, so window.WPP routinely does not exist yet on
-          // this first try. Without retrying, the listener was simply never
-          // installed for the rest of the session — WhatsApp Web's SPA never
-          // fires another 'load' once connected, so the page-reload reinstall
-          // below never got a chance to run either. Measured live: zero
-          // chats-update events for unreadCount over 24+ minutes of active
-          // message traffic in one session.
+          // wa-js is injected asynchronously, so the first try above usually
+          // finds no window.WPP at all — poll instead of giving up, exactly
+          // like the MsgKey._serialized and status sender shims. See this
+          // method's own doc comment for why a single attempt was never
+          // enough here.
           let tries = 0;
           const timer = setInterval(() => {
-            if (install() || ++tries > 60) clearInterval(timer);
+            if (install() || ++tries > 60) {
+              clearInterval(timer);
+              // The evaluate below can only ever log 'scheduled' — it returns
+              // long before this loop resolves — so without this line the log
+              // cannot tell "installed three seconds later" apart from "gave
+              // up after 30s and this session will never see an unread event",
+              // which is exactly the blind spot that let the single-attempt
+              // version go unnoticed for 24 minutes. The page console is
+              // already bridged into log.log for anything tagged
+              // '[browser-evaluate]' (see the page.on('console') handler where
+              // the client is created).
+              console.log(
+                (window as any).__winzappUnreadListenerInstalled
+                  ? `[browser-evaluate] onUnreadCountChanged listener: installed after ${tries} retries`
+                  : '[browser-evaluate] onUnreadCountChanged listener: GAVE UP after 60 retries — wa-js never appeared, unread counts will not update'
+              );
+            }
           }, 500);
           return 'scheduled (wa-js not ready yet)';
         })
