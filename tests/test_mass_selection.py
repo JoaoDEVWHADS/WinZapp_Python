@@ -17,12 +17,13 @@ wx.App, so the methods under test are bound to a small stub carrying only the
 attributes they touch — same approach as tests/test_message_bookmarks.py.
 """
 
+import os
 import threading
 
 import pytest
 import wx
 
-from ui.conversations import ConversationsPanel
+from ui.conversations import ConversationsPanel, _SAVEABLE_MESSAGE_TYPES
 
 
 class _FakeI18n:
@@ -174,8 +175,11 @@ class _Panel:
     def _on_menu_forward(self, msg, msgs_list=None):
         self.forwarded.append((msg, msgs_list))
 
-    def _on_menu_save(self, msg):
-        self.saved.append(msg)
+    def _resolve_media_filename(self, msg):
+        return f"{msg['key']['id']}.bin"
+
+    def _save_message_media(self, msg, save_path):
+        self.saved.append((msg, save_path))
 
     def remove_messages_by_id(self, ids, focus_previous=False):
         self.removed_locally.append((set(ids), focus_previous))
@@ -193,6 +197,10 @@ def _chat(jid):
 
 def _msg(msg_id, jid="grupo@g.us"):
     return {"key": {"id": msg_id, "remoteJid": jid}, "message": {"conversation": "x"}}
+
+
+def _saveable_msg(msg_id, jid="grupo@g.us", msg_type="documentMessage"):
+    return {"key": {"id": msg_id, "remoteJid": jid}, "message": {}, "messageType": msg_type}
 
 
 SEPARATOR = {"_type": "unread_separator", "count": 3}
@@ -434,15 +442,42 @@ def confirm_no(monkeypatch):
 
 
 @pytest.fixture
+def choose_folder(monkeypatch, tmp_path):
+    """_on_mass_save_messages opens a single folder picker (wx.DirDialog) up
+    front, rather than the single-file wx.FileDialog used by the one-message
+    "Save as" flow — fake it choosing tmp_path."""
+    class _FakeDirDialog:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ShowModal(self):
+            return wx.ID_OK
+
+        def GetPath(self):
+            return str(tmp_path)
+
+    monkeypatch.setattr(wx, "DirDialog", _FakeDirDialog)
+    return tmp_path
+
+
+@pytest.fixture
 def run_threads_inline(monkeypatch):
     """_on_mass_delete_messages hands the server calls to a background thread;
     run it inline so the test observes the result deterministically."""
     class _Inline:
-        def __init__(self, target=None, daemon=None, **kw):
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, **kw):
             self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
 
         def start(self):
-            self._target()
+            self._target(*self._args, **self._kwargs)
 
     monkeypatch.setattr(threading, "Thread", _Inline)
 
@@ -577,13 +612,58 @@ class TestMassMessageActions:
         assert panel.forwarded == []
         assert panel.selected_messages == set()
 
-    def test_saving_asks_for_each_selected_message(self):
-        msgs = [_msg("m1"), _msg("m2")]
+    def test_saving_opens_one_folder_picker_and_saves_every_selected_message(
+        self, choose_folder, run_threads_inline
+    ):
+        """Reported live: bulk save used to call a nonexistent
+        self._on_menu_save(msg) and crash with AttributeError. The correct
+        behavior is a single folder picker (wx.DirDialog), then each
+        selected message saved into that folder."""
+        msgs = [_saveable_msg("m1"), _saveable_msg("m2")]
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_save_messages(None)
-        assert sorted(m["key"]["id"] for m in panel.saved) == ["m1", "m2"]
+        assert sorted(m["key"]["id"] for m, _path in panel.saved) == ["m1", "m2"]
+        for _msg_obj, save_path in panel.saved:
+            assert os.path.dirname(save_path) == str(choose_folder)
         assert panel.selected_messages == set()
+
+    def test_saving_skips_non_saveable_messages_in_the_selection(
+        self, choose_folder, run_threads_inline
+    ):
+        panel = _Panel(messages=[_saveable_msg("m1"), _msg("m2")])
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_save_messages(None)
+        assert [m["key"]["id"] for m, _path in panel.saved] == ["m1"]
+
+    def test_saving_with_nothing_saveable_in_the_selection_opens_no_dialog(self, monkeypatch):
+        monkeypatch.setattr(wx, "DirDialog", lambda *a, **k: pytest.fail("opened dialog"))
+        panel = _Panel(messages=[_msg("m1")])
+        panel.selected_messages = {"m1"}
+        panel._on_mass_save_messages(None)
+        assert panel.saved == []
+        assert panel.main_window.announced == ["save_as_nothing_to_save"]
+
+    def test_declining_the_folder_picker_saves_nothing(self, monkeypatch):
+        class _CancelledDirDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def ShowModal(self):
+                return wx.ID_CANCEL
+
+        monkeypatch.setattr(wx, "DirDialog", _CancelledDirDialog)
+        panel = _Panel(messages=[_saveable_msg("m1")])
+        panel.selected_messages = {"m1"}
+        panel._on_mass_save_messages(None)
+        assert panel.saved == []
+        assert panel.selected_messages == {"m1"}
 
     def test_deleting_messages_removes_them_locally_and_on_the_server(
         self, confirm_yes, run_threads_inline

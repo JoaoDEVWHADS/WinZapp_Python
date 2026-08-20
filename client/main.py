@@ -14592,6 +14592,14 @@ class MainWindow(wx.Frame):
                 candidates.append(phone.rsplit("@", 1)[0] + "@c.us")
 
         for cjid in candidates:
+            # A participant JID is never a group JID — some WPPConnect/Baileys
+            # presence payloads key a group-wide event by the group's own
+            # @g.us id instead of a specific participant (seen after deleting
+            # and re-pairing a session). Falling through to self.chats.get()
+            # below would then resolve to the GROUP's own chat entry, showing
+            # "<group name> está digitando..." instead of a person's name.
+            if cjid.endswith("@g.us"):
+                continue
             contact = self._get_contact_tolerant(cjid)
             if contact:
                 name = (contact.get("name") or contact.get("pushName") or "").strip()
@@ -14616,9 +14624,13 @@ class MainWindow(wx.Frame):
             # showing a bare numeric ID instead of a name/phone). A generic
             # placeholder is far more useful than exposing that internal ID.
             return self.i18n.t("unnamed_participant")
-        if not jid_norm.endswith("@g.us"):
-            return format_number(jid_norm)
-        return local
+        if jid_norm.endswith("@g.us"):
+            # The presence event never identified an actual participant (its
+            # jid_norm is the group itself) — same reasoning as the @lid
+            # branch above: raw digits are meaningless/inaccessible to read
+            # aloud, so use the generic placeholder instead.
+            return self.i18n.t("unnamed_participant")
+        return format_number(jid_norm)
 
     def _presence_label_for_chat(self, chat_jid_norm: str, is_group: bool) -> str:
         """Return the typing/recording label to append to a chat-list row, or ''."""

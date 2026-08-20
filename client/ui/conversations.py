@@ -5071,6 +5071,17 @@ class ConversationsPanel(wx.Panel):
                 return
             save_path = dlg.GetPath()
 
+        threading.Thread(target=self._save_message_media, args=(msg, save_path), daemon=True).start()
+
+    def _save_message_media(self, msg, save_path):
+        """
+        Background-thread worker: download the media (if not already cached),
+        decrypt it, and write it to save_path. Shared by the single "Save as"
+        flow and the bulk-save flow (_on_mass_save_messages) so both save
+        through the exact same download/decrypt/write path.
+        """
+        msg_type = msg.get("messageType", "")
+        msg_id   = msg.get("key", {}).get("id", "")
         clean_msg_id = msg_id
         if "_" in msg_id:
             parts = msg_id.split("_")
@@ -5080,51 +5091,48 @@ class ConversationsPanel(wx.Panel):
         else:
             media_path = data_path("media", f"{clean_msg_id}.wzmedia")
 
-        def _run():
-            if not os.path.isfile(media_path):
-                if not getattr(self.main_window, "_wa_connected", False):
-                    wx.CallAfter(
-                        self.main_window.output,
-                        self.main_window.i18n.t("media_download_offline"),
-                    )
-                    return
+        if not os.path.isfile(media_path):
+            if not getattr(self.main_window, "_wa_connected", False):
                 wx.CallAfter(
-                    self.main_window.output, self.main_window.i18n.t("downloading")
-                )
-                try:
-                    if msg_type == "audioMessage":
-                        self.main_window.handle_audio_message(msg)
-                    else:
-                        self.main_window.handle_media_message(msg)
-                except Exception:
-                    return
-            if not os.path.isfile(media_path):
-                # Download silently failed — nothing to save.
-                wx.CallAfter(
-                    wx.MessageBox,
-                    self.main_window.i18n.t("media_download_failed"),
-                    self.main_window.i18n.t("error").format(
-                        app_name=self.main_window.app_name
-                    ),
-                    wx.OK | wx.ICON_ERROR,
+                    self.main_window.output,
+                    self.main_window.i18n.t("media_download_offline"),
                 )
                 return
+            wx.CallAfter(
+                self.main_window.output, self.main_window.i18n.t("downloading")
+            )
             try:
-                with open(media_path, "rb") as fh:
-                    content = decrypt_bytes(fh.read(), self.main_window.key)
-                with open(save_path, "wb") as fh:
-                    fh.write(content)
-            except Exception as exc:
-                wx.CallAfter(
-                    wx.MessageBox,
-                    str(exc),
-                    self.main_window.i18n.t("error").format(
-                        app_name=self.main_window.app_name
-                    ),
-                    wx.OK | wx.ICON_ERROR,
-                )
-
-        threading.Thread(target=_run, daemon=True).start()
+                if msg_type == "audioMessage":
+                    self.main_window.handle_audio_message(msg)
+                else:
+                    self.main_window.handle_media_message(msg)
+            except Exception:
+                return
+        if not os.path.isfile(media_path):
+            # Download silently failed — nothing to save.
+            wx.CallAfter(
+                wx.MessageBox,
+                self.main_window.i18n.t("media_download_failed"),
+                self.main_window.i18n.t("error").format(
+                    app_name=self.main_window.app_name
+                ),
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
+        try:
+            with open(media_path, "rb") as fh:
+                content = decrypt_bytes(fh.read(), self.main_window.key)
+            with open(save_path, "wb") as fh:
+                fh.write(content)
+        except Exception as exc:
+            wx.CallAfter(
+                wx.MessageBox,
+                str(exc),
+                self.main_window.i18n.t("error").format(
+                    app_name=self.main_window.app_name
+                ),
+                wx.OK | wx.ICON_ERROR,
+            )
 
     def _on_action_download(self, event):
         """
@@ -10646,10 +10654,43 @@ class ConversationsPanel(wx.Panel):
 
     def _on_mass_save_messages(self, event):
         if not self.selected_messages: return
+        i18n = self.main_window.i18n
+        msgs = []
         for msg_id in list(self.selected_messages):
             msg = next((m for m in self._sorted_messages if not self._is_separator(m) and m.get("key", {}).get("id") == msg_id), None)
-            if msg:
-                self._on_menu_save(msg)
+            if msg and not self._is_separator(msg) and msg.get("messageType", "") in _SAVEABLE_MESSAGE_TYPES:
+                msgs.append(msg)
+
+        if not msgs:
+            self.main_window.output(i18n.t("save_as_nothing_to_save"), interrupt=True)
+            return
+
+        with wx.DirDialog(
+            self,
+            i18n.t("save_as"),
+            defaultPath=get_downloads_folder(),
+            style=wx.DD_DEFAULT_STYLE,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            target_dir = dlg.GetPath()
+
+        # Resolve filenames up front and dedupe within this batch so two
+        # messages that would otherwise collide (e.g. same original name)
+        # don't clobber each other on disk.
+        used_names = set()
+        for msg in msgs:
+            default_file = self._resolve_media_filename(msg)
+            base, ext = os.path.splitext(default_file)
+            candidate = default_file
+            n = 1
+            while candidate.lower() in used_names or os.path.isfile(os.path.join(target_dir, candidate)):
+                candidate = f"{base}_{n}{ext}"
+                n += 1
+            used_names.add(candidate.lower())
+            save_path = os.path.join(target_dir, candidate)
+            threading.Thread(target=self._save_message_media, args=(msg, save_path), daemon=True).start()
+
         saved_ids = list(self.selected_messages)
         self.selected_messages.clear()
         self._refresh_message_rows_by_ids(saved_ids)
