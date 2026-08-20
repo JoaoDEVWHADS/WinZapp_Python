@@ -702,6 +702,17 @@ class StatusPanel(wx.Panel):
         self._recording_channels = 1
         self._recording_paused  = False
         self._is_recording      = False
+        # True while a background thread is opening the PyAudio input stream.
+        # pa.open() (and find_input_device_index()'s device enumeration) can
+        # block for seconds negotiating with the driver, and this used to run
+        # straight on the wx thread — freezing the window, and the screen
+        # reader with it, for as long as the driver took. Mirrors
+        # ConversationsPanel's own recording open (client/ui/conversations.py):
+        # _recording_starting guards against re-entry, _recording_open_token
+        # lets a discard/close that happens mid-open throw the stream away
+        # once it finally arrives.
+        self._recording_starting   = False
+        self._recording_open_token = 0
 
         self.SetSizer(sizer)
 
@@ -1828,7 +1839,8 @@ class StatusPanel(wx.Panel):
         If voice post panel is shown: start recording if idle, or send if recording."""
         if self._voice_post_panel.IsShown():
             if not self._is_recording:
-                self._start_voice_recording()
+                if not self._recording_starting:
+                    self._start_voice_recording()
             else:
                 self._on_send_voice_status(None)
         else:
@@ -1846,7 +1858,8 @@ class StatusPanel(wx.Panel):
 
     def _on_record_voice_button(self, event):
         if not self._is_recording:
-            self._start_voice_recording()
+            if not self._recording_starting:
+                self._start_voice_recording()
         else:
             self._on_send_voice_status(event)
 
@@ -1887,39 +1900,83 @@ class StatusPanel(wx.Panel):
             return None, None, None
 
         configured_name = getattr(self.main_window, "effective_input_device_name", "") or ""
-        input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
 
-        stream, rate, ch = _try_open(input_device_index)
-        if stream is None and input_device_index is not None:
-            stream, rate, ch = _try_open(None)
+        # Everything up to here is cheap. find_input_device_index() and
+        # pa.open() are not: both talk to the audio driver and can block for
+        # seconds, and they used to run right here on the wx thread — the
+        # window (and the screen reader reading it) froze for the duration.
+        self._recording_starting = True
+        self._recording_open_token += 1
+        my_token = self._recording_open_token
 
-        if stream is None:
-            wx.MessageBox(
-                self.main_window.i18n.t("voice_recording_unavailable"),
-                self.main_window.app_name,
-                wx.OK | wx.ICON_WARNING, self,
-            )
-            return
+        def _bg_open_stream():
+            # An exception escaping this function would die unseen in a daemon
+            # thread and take the wx.CallAfter with it, leaving
+            # _recording_starting stuck True — and both entry points
+            # (_on_record_voice_button, _on_ctrl_r_shortcut) refuse to start
+            # while it is, so the record control would go dead for the rest of
+            # the session. _on_stream_opened() is the only thing that clears
+            # the flag, so it is scheduled from a finally and runs either way.
+            stream = rate = ch = None
+            try:
+                input_device_index = (
+                    find_input_device_index(configured_name, pa) if configured_name else None
+                )
+                stream, rate, ch = _try_open(input_device_index)
+                if stream is None and input_device_index is not None:
+                    stream, rate, ch = _try_open(None)
+            except Exception:
+                logging.exception(
+                    "[status audio] Failed to open the recording stream (device=%r).",
+                    configured_name,
+                )
+            finally:
+                wx.CallAfter(_on_stream_opened, stream, rate, ch)
 
-        self._recording_stream   = stream
-        self._recording_rate     = rate
-        self._recording_channels = ch
-        self._is_recording       = True
+        def _on_stream_opened(stream, rate, ch):
+            # Discard the result if the panel was closed or the recording
+            # discarded while the stream was still opening — otherwise a
+            # stream nobody asked for any more starts capturing in silence.
+            if my_token != self._recording_open_token:
+                if stream is not None:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                return
 
-        if hasattr(self.main_window, "voicemsg_startrecording_sound"):
-            self.main_window.voicemsg_startrecording_sound.play()
+            self._recording_starting = False
 
-        i18n = self.main_window.i18n
-        self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
-        self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
-        self._voice_close_btn.Show()
-        self._voice_start_btn.Hide()
-        self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
-        self._voice_pause_btn.Show()
-        self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
-        self._voice_send_btn.Show()
-        self.Layout()
-        self._voice_send_btn.SetFocus()
+            if stream is None:
+                wx.MessageBox(
+                    self.main_window.i18n.t("voice_recording_unavailable"),
+                    self.main_window.app_name,
+                    wx.OK | wx.ICON_WARNING, self,
+                )
+                return
+
+            self._recording_stream   = stream
+            self._recording_rate     = rate
+            self._recording_channels = ch
+            self._is_recording       = True
+
+            if hasattr(self.main_window, "voicemsg_startrecording_sound"):
+                self.main_window.voicemsg_startrecording_sound.play()
+
+            i18n = self.main_window.i18n
+            self._voice_status_lbl.SetLabel(i18n.t("recording_in_progress"))
+            self._voice_close_btn.SetLabel(i18n.t("discard_voice_message"))
+            self._voice_close_btn.Show()
+            self._voice_start_btn.Hide()
+            self._voice_pause_btn.SetLabel(i18n.t("pause_recording"))
+            self._voice_pause_btn.Show()
+            self._voice_send_btn.SetLabel(i18n.t("send_voice_message"))
+            self._voice_send_btn.Show()
+            self.Layout()
+            self._voice_send_btn.SetFocus()
+
+        threading.Thread(target=_bg_open_stream, daemon=True).start()
 
     def _toggle_pause_voice_recording(self, event):
         if not self._is_recording:
@@ -1948,6 +2005,11 @@ class StatusPanel(wx.Panel):
             self._recording_stream = None
 
     def _on_close_voice_panel(self, event):
+        # Bump the token so a stream still opening on a background thread (see
+        # _start_voice_recording) is closed and discarded when it arrives,
+        # instead of starting to capture into a panel the user just dismissed.
+        self._recording_open_token += 1
+        self._recording_starting = False
         if self._is_recording and hasattr(self.main_window, "voicemsg_discard_sound"):
             try:
                 self.main_window.voicemsg_discard_sound.play()

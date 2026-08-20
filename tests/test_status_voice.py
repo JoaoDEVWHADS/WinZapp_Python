@@ -32,6 +32,7 @@ of this test suite (test_status_panel.py).
 """
 
 import os
+import types
 
 import status_panel as status_panel_module
 from status_panel import StatusPanel
@@ -360,4 +361,184 @@ class TestChooseVoiceStatusDegradesGracefullyWithoutPyaudio:
         stub._on_choose_voice_status(None)
 
         assert stub.main_window.output_calls == []
+        assert stub._recording_stream is None
+
+
+class _FakeStream:
+    def __init__(self):
+        self.stopped = False
+        self.closed = False
+
+    def start_stream(self):
+        pass
+
+    def stop_stream(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeRecordingPyAudio:
+    """Stands in for a live pyaudio.PyAudio instance: records every open()
+    so a test can assert the driver was NOT touched on the wx thread."""
+
+    def __init__(self, works=True):
+        self.works = works
+        self.opened_with = []
+
+    def open(self, rate, channels, format, input, input_device_index,
+             frames_per_buffer, stream_callback):
+        self.opened_with.append((rate, channels))
+        if not self.works:
+            raise OSError(-9996, "Device unavailable")
+        return _FakeStream()
+
+
+class _RecordingStub(_Stub):
+    """_Stub plus the attributes the background stream open touches."""
+
+    _start_voice_recording = StatusPanel._start_voice_recording
+    _on_close_voice_panel  = StatusPanel._on_close_voice_panel
+    _on_record_voice_button = StatusPanel._on_record_voice_button
+
+    def __init__(self, pa_works=True, device_name="Microfone USB"):
+        super().__init__()
+        self.main_window.effective_input_device_name = device_name
+        self._recording_pa = _FakeRecordingPyAudio(works=pa_works)
+        self._recording_starting = False
+        self._recording_open_token = 0
+        self._recording_rate = 48000
+        self._recording_channels = 1
+        self._status_list = _FakeButton()
+
+
+class _CapturedThread:
+    """Captures the thread target instead of running it, so the test controls
+    exactly when the "background" work happens."""
+
+    created = []
+
+    def __init__(self, target=None, daemon=None, **_kw):
+        self.target = target
+        self.daemon = daemon
+        self.started = False
+        _CapturedThread.created.append(self)
+
+    def start(self):
+        self.started = True
+
+
+class TestVoiceStatusRecordingOpensOffTheUiThread:
+    """find_input_device_index() and pa.open() both negotiate with the audio
+    driver and can block for seconds. In StatusPanel they ran directly on the
+    wx thread, so starting a voice status froze the window — and the screen
+    reader reading it — for however long the driver took. ConversationsPanel
+    had the same bug and was fixed first (see
+    tests/test_recording_open_failure.py); this is the same treatment for the
+    status panel, including the finally that guarantees the flag is released.
+    """
+
+    def _patch(self, monkeypatch, call_after, message_boxes=None):
+        _CapturedThread.created = []
+        monkeypatch.setattr(status_panel_module.threading, "Thread", _CapturedThread)
+        monkeypatch.setattr(status_panel_module.wx, "CallAfter",
+                            lambda func, *a, **kw: call_after.append((func, a)))
+        monkeypatch.setattr(status_panel_module.wx, "MessageBox",
+                            lambda *a, **kw: (message_boxes if message_boxes is not None else []).append(a))
+        monkeypatch.setattr(status_panel_module, "pyaudio",
+                            types.SimpleNamespace(paInt16=8, paContinue=0))
+
+    def test_the_driver_is_not_touched_before_the_thread_runs(self, monkeypatch):
+        scheduled = []
+        self._patch(monkeypatch, scheduled)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+
+        # Returned immediately: the open is queued, not done.
+        assert stub._recording_starting is True
+        assert stub._is_recording is False
+        assert stub._recording_pa.opened_with == [], "pa.open() ran on the wx thread"
+        assert len(_CapturedThread.created) == 1
+        assert _CapturedThread.created[0].daemon is True
+        assert _CapturedThread.created[0].started is True
+
+    def test_successful_open_arms_the_panel_from_the_callback(self, monkeypatch):
+        scheduled = []
+        self._patch(monkeypatch, scheduled)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()          # the "background" work
+
+        assert stub._recording_pa.opened_with == [(48000, 1)]
+        func, args = scheduled[0]
+        func(*args)                                   # what wx would dispatch
+
+        assert stub._is_recording is True
+        assert stub._recording_starting is False
+        assert stub._voice_status_lbl.label == "recording_in_progress"
+
+    def test_open_failure_releases_the_flag_and_warns(self, monkeypatch):
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        stub = _RecordingStub(pa_works=False)
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+        func, args = scheduled[0]
+        func(*args)
+
+        assert stub._recording_starting is False
+        assert stub._is_recording is False
+        assert len(boxes) == 1
+
+    def test_an_exception_still_schedules_the_callback(self, monkeypatch):
+        """The finally: an escaping exception would die unseen in a daemon
+        thread, leaving _recording_starting stuck True and both entry points
+        refusing to ever start recording again."""
+        scheduled, boxes = [], []
+        self._patch(monkeypatch, scheduled, boxes)
+
+        def _boom(*_a, **_kw):
+            raise OSError("no default host API")
+
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", _boom)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+
+        assert len(scheduled) == 1, "exception swallowed the wx.CallAfter"
+        func, args = scheduled[0]
+        func(*args)
+        assert stub._recording_starting is False
+
+        # The user-visible symptom: pressing record again must get through.
+        reached = []
+        stub._start_voice_recording = lambda: reached.append(True)
+        stub._on_record_voice_button(None)
+        assert reached == [True], "record control stayed dead after a failed open"
+
+    def test_a_stream_that_arrives_after_discard_is_thrown_away(self, monkeypatch):
+        scheduled = []
+        self._patch(monkeypatch, scheduled)
+        monkeypatch.setattr(status_panel_module, "find_input_device_index", lambda *a, **kw: 3)
+        stub = _RecordingStub()
+
+        stub._start_voice_recording()
+        _CapturedThread.created[0].target()
+
+        # User closes the voice panel while the stream is still opening.
+        stub._on_close_voice_panel(None)
+
+        func, args = scheduled[0]
+        func(*args)
+
+        opened_stream = args[0]
+        assert opened_stream.closed is True, "orphan stream left capturing"
+        assert stub._is_recording is False
         assert stub._recording_stream is None
