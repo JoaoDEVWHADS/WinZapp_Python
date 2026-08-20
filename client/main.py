@@ -903,6 +903,10 @@ class MainWindow(wx.Frame):
         # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned
         # from presence.update events. Loaded from DB on prepare_sync() and saved whenever updated.
         self._presence_pushname_map = {}
+        # Incoming call IDs currently ringing. The sound is one shared looping
+        # stream, so it stops only after the final simultaneous call ends.
+        self._active_incoming_calls = {}
+        self._incoming_call_watchdogs = {}
         # List of deleted, archived, pinned, and muted chats, loaded from DB on prepare_sync()
         self._deleted_chats = set()
         self._archived_chats = set()
@@ -3720,6 +3724,10 @@ class MainWindow(wx.Frame):
         # just stopped above.
         if getattr(self, "_presence_debounce_timer", None) is not None and self._presence_debounce_timer.IsRunning():
             self._presence_debounce_timer.Stop()
+        for identity in list(getattr(self, "_incoming_call_watchdogs", {})):
+            self._cancel_incoming_call_watchdog(identity)
+        if hasattr(self, "call_incoming_sound"):
+            self.call_incoming_sound.stop()
         if getattr(self, "tray_icon", None) is not None:
             try:
                 self.tray_icon.RemoveIcon()
@@ -3779,6 +3787,99 @@ class MainWindow(wx.Frame):
             self.conversations_panel.navigate_to_jid(jid)
 
     # ── Incoming real-time messages ───────────────────────────────────────────
+
+    # `3` and `8` are WhatsApp Web's newer numeric states ReceivedCall and
+    # ReceivedCallWithoutOffer. Keep them here as a defensive fallback even
+    # though the Node bridge normally converts both to INCOMING_RING.
+    _CALL_RINGING_STATES = frozenset({
+        "", "3", "8", "OFFER", "INCOMING_RING", "RINGING",
+    })
+    _CALL_ALERT_MAX_SECONDS = 120
+
+    def _cancel_incoming_call_watchdog(self, identity: str):
+        timer = self._incoming_call_watchdogs.pop(identity, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _arm_incoming_call_watchdog(self, identity: str):
+        """Guarantee a lost WPP lifecycle event cannot leave audio looping."""
+        self._cancel_incoming_call_watchdog(identity)
+        timer = threading.Timer(
+            self._CALL_ALERT_MAX_SECONDS,
+            lambda: wx.CallAfter(self._expire_incoming_call_alert, identity),
+        )
+        timer.daemon = True
+        self._incoming_call_watchdogs[identity] = timer
+        timer.start()
+
+    def _expire_incoming_call_alert(self, identity: str):
+        self._cancel_incoming_call_watchdog(identity)
+        if self._active_incoming_calls.pop(identity, None) is None:
+            return
+        logging.warning("[incoming_call] lifecycle timeout id=%s", identity)
+        if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
+            self.call_incoming_sound.stop()
+
+    def on_incoming_call_event(self, event: dict):
+        """Announce an incoming call and keep its tone playing until it ends.
+
+        WPPConnect cannot answer a call for WinZapp, but WhatsApp Web's call
+        model still reports enough lifecycle state to provide an accessible
+        alert. Duplicate offer events are expected because the Node bridge has
+        both the public WA-JS event and a direct CallStore fallback.
+        """
+        if not isinstance(event, dict):
+            return
+        call_id = str(event.get("id") or "")
+        peer_jid = self._normalize_jid(str(event.get("peerJid") or ""))
+        event_name = str(event.get("event") or "offer").strip().lower()
+        state = str(event.get("state") or "").strip().upper()
+        is_ringing = state in self._CALL_RINGING_STATES and (
+            bool(state) or event_name in ("offer", "ringing", "incoming")
+        )
+
+        # State changes away from INCOMING_RING mean the call was answered on
+        # another device, rejected, missed, failed, or otherwise ended.
+        if not is_ringing:
+            if call_id:
+                self._active_incoming_calls.pop(call_id, None)
+                self._cancel_incoming_call_watchdog(call_id)
+            elif peer_jid:
+                ended_ids = [
+                    cid for cid, jid in self._active_incoming_calls.items()
+                    if jid == peer_jid
+                ]
+                self._active_incoming_calls = {
+                    cid: jid for cid, jid in self._active_incoming_calls.items()
+                    if jid != peer_jid
+                }
+                for identity in ended_ids:
+                    self._cancel_incoming_call_watchdog(identity)
+            else:
+                self._active_incoming_calls.clear()
+                for identity in list(self._incoming_call_watchdogs):
+                    self._cancel_incoming_call_watchdog(identity)
+            if not self._active_incoming_calls and hasattr(self, "call_incoming_sound"):
+                self.call_incoming_sound.stop()
+            return
+
+        identity = call_id or peer_jid
+        if not identity or identity in self._active_incoming_calls:
+            return
+        self._active_incoming_calls[identity] = peer_jid
+        self._arm_incoming_call_watchdog(identity)
+
+        caller_name = self._preview_sender_from_jid(peer_jid) if peer_jid else ""
+        if not caller_name:
+            caller_name = self.i18n.t("unknown_contact")
+        message = self.i18n.t("incoming_call_announcement").format(name=caller_name)
+        self.output(message, interrupt=True)
+        if hasattr(self, "call_incoming_sound"):
+            self.call_incoming_sound.play()
+        logging.info(
+            "[incoming_call] ringing id=%s peer=%s video=%s group=%s",
+            call_id, peer_jid, bool(event.get("isVideo")), bool(event.get("isGroup")),
+        )
 
     @staticmethod
     def _normalize_jid(jid: str) -> str:
@@ -6960,7 +7061,17 @@ class MainWindow(wx.Frame):
             override_path = cfg.get("path", "")
             resolved = resolve_sound_event_path(active_pack, default_pack, key, override_path)
             if resolved:
-                setattr(self, f"{key}_sound", load_sound(self.sound_system, resolved, event_key=key, pack_id=pack_id))
+                setattr(
+                    self,
+                    f"{key}_sound",
+                    load_sound(
+                        self.sound_system,
+                        resolved,
+                        event_key=key,
+                        pack_id=pack_id,
+                        looping=(key == "call_incoming"),
+                    ),
+                )
             else:
                 # Nothing resolves at all (broken install: even the default
                 # pack is missing this file) — a silent no-op beats a crash.
