@@ -789,6 +789,7 @@
     "soundpack_import_error_invalid_zip": "Archivo .zip no válido.",
     "media_unsupported_error": "el archivo parece estar dañado o en un formato que WhatsApp no puede procesar",
     "voice_recording_unavailable": "Grabación de voz no disponible en esta instalación de Python (biblioteca de audio no encontrada).",
+    "voice_recording_device_failed": "No se pudo abrir el micrófono. Comprueba que está conectado y que WinZapp tiene permiso para usarlo en la configuración de privacidad de Windows.",
     "copy_caption": "Copiar leyenda",
     "group_admin_suffix": "administrador del grupo",
     "remove_member": "Eliminar miembro",

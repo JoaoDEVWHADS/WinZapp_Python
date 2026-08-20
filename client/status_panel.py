@@ -1949,8 +1949,18 @@ class StatusPanel(wx.Panel):
             self._recording_starting = False
 
             if stream is None:
+                # voice_recording_unavailable means "PyAudio isn't installed"
+                # (see the top of _start_voice_recording) — reused here it
+                # pointed at the wrong cause entirely, since PyAudio is
+                # plainly present if we got as far as trying to open a
+                # stream. The device-specific message tells the user the one
+                # thing that is actionable: check the mic and its Windows
+                # permission.
+                logging.warning(
+                    "[status audio] No input stream could be opened — recording not started."
+                )
                 wx.MessageBox(
-                    self.main_window.i18n.t("voice_recording_unavailable"),
+                    self.main_window.i18n.t("voice_recording_device_failed"),
                     self.main_window.app_name,
                     wx.OK | wx.ICON_WARNING, self,
                 )

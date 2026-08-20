@@ -2086,13 +2086,39 @@ class ConversationsPanel(wx.Panel):
                 # (retried again next launch) but fall back to the system
                 # default for the rest of this run.
                 self.main_window.effective_input_device_name = ""
+                if stream is not None:
+                    # Only worth saying when the fallback actually worked.
+                    # If it didn't, recording never started at all, and the
+                    # message below is the accurate thing to report instead
+                    # of two dialogs in a row.
+                    wx.MessageBox(
+                        self.main_window.i18n.t("audio_device_failed_input").format(device=configured_name),
+                        self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                        wx.OK | wx.ICON_WARNING, self,
+                    )
+
+            if stream is None:
+                # This used to `return` in silence unless a *configured*
+                # device had failed (fell_back above) — and a pinned device
+                # is not the default state. On a machine with no device
+                # pinned, every open failure was invisible: no dialog, no
+                # sound, nothing in log.log. Reported live as "I press
+                # record and nothing happens at all", against a mic whose
+                # every sample-rate/channel combo PortAudio rejected with
+                # -9999. For a screen-reader-first app that is the worst
+                # outcome available — there is no visual cue either, so
+                # nothing tells the user whether the app, the shortcut or
+                # the microphone is at fault. StatusPanel already warned in
+                # this exact situation; the two panels disagreed, and the
+                # busier one was the silent one.
+                logging.warning(
+                    "[audio] No input stream could be opened — recording not started."
+                )
                 wx.MessageBox(
-                    self.main_window.i18n.t("audio_device_failed_input").format(device=configured_name),
+                    self.main_window.i18n.t("voice_recording_device_failed"),
                     self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
                     wx.OK | wx.ICON_WARNING, self,
                 )
-
-            if stream is None:
                 return
 
             self._recording_stream      = stream
