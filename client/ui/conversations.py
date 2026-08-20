@@ -200,6 +200,13 @@ class ConversationsPanel(wx.Panel):
         # Actual rate/channels are resolved at open time (stereo → mono fallback).
         self._recording_actual_rate: int = 48000
         self._recording_actual_ch:   int = 1
+        # True while a background thread is opening the PyAudio input stream
+        # (pa.open() can block for seconds negotiating with the driver — it
+        # must never run on the UI thread). Guards on_record_voice_message
+        # against re-entry, and _recording_open_token lets a conversation
+        # switch/close that happens mid-open discard the stream once it opens.
+        self._recording_starting    = False
+        self._recording_open_token  = 0
 
         # ── Attachment staging ──────────────────────────────────────────────
         # list of {"path": str, "media_type": str}
@@ -1477,7 +1484,7 @@ class ConversationsPanel(wx.Panel):
         """
         if self._is_recording:
             self._send_voice_message(event)
-        else:
+        elif not self._recording_starting:
             self._start_voice_recording()
 
     # ── Text message sending ─────────────────────────────────────────────────
@@ -2016,55 +2023,109 @@ class ConversationsPanel(wx.Panel):
         # configured, or a prior failure this session already fell back to
         # the system default.
         configured_name = getattr(self.main_window, "effective_input_device_name", "") or ""
-        input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
 
-        stream, rate, ch = _try_open(input_device_index)
+        # pa.open() (and find_input_device_index()'s device enumeration) can
+        # block for many seconds negotiating with the audio driver — this
+        # used to run directly on the UI thread and froze the whole app
+        # (wx MainLoop, screen reader included) for as long as it took.
+        # Do the actual opening on a background thread instead; only the
+        # quick, non-blocking UI updates below run back on the main thread.
+        self._recording_starting = True
+        self._recording_open_token += 1
+        my_token = self._recording_open_token
 
-        if stream is None and input_device_index is not None:
-            # The configured device worked earlier this session (at startup,
-            # or since) but just failed to open — e.g. unplugged mid-session.
-            # Keep the stored setting untouched (retried again next launch)
-            # but fall back to the system default for the rest of this run.
-            self.main_window.effective_input_device_name = ""
-            wx.MessageBox(
-                self.main_window.i18n.t("audio_device_failed_input").format(device=configured_name),
-                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
-                wx.OK | wx.ICON_WARNING, self,
+        def _bg_open_stream():
+            # Everything here runs off the UI thread, so an exception escaping
+            # this function would die silently in a daemon thread — and take
+            # the wx.CallAfter below with it. _recording_starting would then
+            # stay True forever and on_record_voice_message()'s
+            # `elif not self._recording_starting` guard would refuse every
+            # further attempt: the record button goes dead for the rest of the
+            # session, with nothing on screen or in the log to say why.
+            # find_input_device_index() is the realistic raiser —
+            # _pyaudio_input_devices() falls back to get_default_host_api_info()
+            # unguarded when the WASAPI query fails, which is exactly the kind
+            # of broken audio stack this background open exists to survive.
+            # _on_stream_opened() is therefore scheduled from a finally: it is
+            # the only thing that clears the flag, so it must run either way.
+            stream = rate = ch = None
+            fell_back = False
+            try:
+                input_device_index = find_input_device_index(configured_name, pa) if configured_name else None
+                stream, rate, ch = _try_open(input_device_index)
+
+                if stream is None and input_device_index is not None:
+                    fell_back = True
+                    stream, rate, ch = _try_open(None)
+            except Exception:
+                logging.exception(
+                    "[audio] Failed to open the recording stream (device=%r).",
+                    configured_name,
+                )
+            finally:
+                wx.CallAfter(_on_stream_opened, stream, rate, ch, fell_back)
+
+        def _on_stream_opened(stream, rate, ch, fell_back):
+            # Discard the result if the user cancelled, or switched/closed
+            # the conversation, while the stream was still opening.
+            if my_token != self._recording_open_token:
+                if stream is not None:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                return
+
+            self._recording_starting = False
+
+            if fell_back:
+                # The configured device worked earlier this session (at
+                # startup, or since) but just failed to open — e.g.
+                # unplugged mid-session. Keep the stored setting untouched
+                # (retried again next launch) but fall back to the system
+                # default for the rest of this run.
+                self.main_window.effective_input_device_name = ""
+                wx.MessageBox(
+                    self.main_window.i18n.t("audio_device_failed_input").format(device=configured_name),
+                    self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                    wx.OK | wx.ICON_WARNING, self,
+                )
+
+            if stream is None:
+                return
+
+            self._recording_stream      = stream
+            self._recording_actual_rate = rate
+            self._recording_actual_ch   = ch
+
+            self._is_recording = True
+
+            # UI: play sound, swap buttons, focus the configured recording action.
+            self.main_window.voicemsg_startrecording_sound.play()
+
+            # Notify contacts that the user is recording audio
+            _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+            if _rec_jid and not _rec_jid.endswith("@newsletter"):
+                self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
+            self.message_field.Hide()
+            self.send_message_btn.Hide()
+            self.record_voice_message_btn.Hide()
+            self._add_attachment_btn.Hide()
+            self._pause_resume_btn.SetLabel(
+                self.main_window.i18n.t("pause_recording")
             )
-            stream, rate, ch = _try_open(None)
+            self._voice_panel.Show()
+            self.conversation_panel.Layout()
+            voice_focus = self.main_window.settings.get("user_interface", {}).get(
+                "voice_record_focus", "send"
+            )
+            if voice_focus == "discard":
+                self._discard_voice_btn.SetFocus()
+            else:
+                self._send_voice_btn.SetFocus()
 
-        if stream is None:
-            return
-
-        self._recording_stream      = stream
-        self._recording_actual_rate = rate
-        self._recording_actual_ch   = ch
-
-        self._is_recording = True
-
-        # UI: play sound, swap buttons, focus the configured recording action.
-        self.main_window.voicemsg_startrecording_sound.play()
-
-        # Notify contacts that the user is recording audio
-        _rec_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
-        if _rec_jid and not _rec_jid.endswith("@newsletter"):
-            self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
-        self.message_field.Hide()
-        self.send_message_btn.Hide()
-        self.record_voice_message_btn.Hide()
-        self._add_attachment_btn.Hide()
-        self._pause_resume_btn.SetLabel(
-            self.main_window.i18n.t("pause_recording")
-        )
-        self._voice_panel.Show()
-        self.conversation_panel.Layout()
-        voice_focus = self.main_window.settings.get("user_interface", {}).get(
-            "voice_record_focus", "send"
-        )
-        if voice_focus == "discard":
-            self._discard_voice_btn.SetFocus()
-        else:
-            self._send_voice_btn.SetFocus()
+        threading.Thread(target=_bg_open_stream, daemon=True).start()
 
     def _stop_recording_stream(self):
         """Stop and close the active stream (safe to call when None)."""
@@ -2325,6 +2386,12 @@ class ConversationsPanel(wx.Panel):
         in, since _send_voice_message() reads self.conversation at send
         time, not at record-start time.
         """
+        # Bump the token so a PyAudio stream still opening on a background
+        # thread (see _start_voice_recording) gets closed and discarded
+        # instead of surfacing into whatever conversation is open when it
+        # finishes.
+        self._recording_open_token += 1
+        self._recording_starting = False
         if not self._is_recording:
             return
         self._stop_recording_stream()

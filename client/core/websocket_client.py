@@ -882,6 +882,16 @@ class WebSocketClient:
                         previous = int(previous) if previous is not None else None
                     except (TypeError, ValueError):
                         previous = None
+                    # Logged on arrival, before any of MainWindow's guards can
+                    # discard it: this is the only place that can tell "WhatsApp
+                    # Web never emitted the event" apart from "it arrived and
+                    # something dropped it", and the whole path used to be
+                    # silent — a read made on the phone that never reached the
+                    # badge left no trace at all in log.log to work from.
+                    logging.info(
+                        "[unread] chats-update in: %s unread=%s previous=%s",
+                        jid, unread, previous,
+                    )
                     wx.CallAfter(
                         self.main_window.on_chat_unread_update,
                         jid, int(unread), previous,

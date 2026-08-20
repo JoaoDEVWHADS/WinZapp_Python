@@ -58,6 +58,13 @@ class _Stub:
     mark_conversation_as_read = MainWindow.mark_conversation_as_read
     _persist_locally_read_at = MainWindow._persist_locally_read_at
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    # on_chat_unread_update looks the chat up through this rather than
+    # self.chats.get() directly, so the @lid / phone identities of an incoming
+    # event get bridged first — see tests/test_chats_update_lid_resolution.py.
+    # The stub carries no _lid_to_phone/_phone_to_lid, which the real method
+    # reads via getattr defaults; a plain phone JID resolves on the first
+    # lookup anyway.
+    _resolve_chat_for_event = MainWindow._resolve_chat_for_event
 
     def __init__(self, chat, db=None):
         self.chats = {JID: chat}
