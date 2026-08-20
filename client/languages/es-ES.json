@@ -284,7 +284,7 @@
     "notif_mentioned_you": "Te mencionó",
     "notif_mentioned_all": "Mencionó a todos",
     "notif_unsupported": "Mensaje incompatible",
-    "update_available_title": "Actualización disponible",
+    "update_available_title": "Actualización de WinZapp disponible",
     "update_available_msg": "Hay una nueva versión de WinZapp disponible (v{new_version}). ¿Deseas descargarla e instalarla ahora?",
     "update_yes": "&Sí",
     "update_no": "&No",

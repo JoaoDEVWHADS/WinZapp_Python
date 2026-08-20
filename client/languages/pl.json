@@ -284,7 +284,7 @@
     "notif_mentioned_you": "Wzmianka o Tobie",
     "notif_mentioned_all": "Wzmianka o wszystkich",
     "notif_unsupported": "Niezgodna wiadomość",
-    "update_available_title": "Dostępna aktualizacja",
+    "update_available_title": "Dostępna aktualizacja WinZapp",
     "update_available_msg": "Dostępna jest nowa wersja WinZapp (v{new_version}). Czy chcesz ją teraz pobrać i zainstalować?",
     "update_yes": "&Tak",
     "update_no": "&Nie",
