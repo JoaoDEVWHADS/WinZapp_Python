@@ -148,9 +148,17 @@ class VideoPlayer:
         player.stop()   # always call when the viewer is closed/torn down
     """
 
-    def __init__(self, main_window, bitmap_ctrl: wx.StaticBitmap):
+    def __init__(self, main_window, bitmap_ctrl: wx.StaticBitmap, on_frame_size=None):
         self.main_window = main_window
         self.bitmap_ctrl  = bitmap_ctrl
+        # Called once per playback, the moment the first frame's actual
+        # on-screen size is known, as on_frame_size(width, height). Lets a
+        # caller shrink-wrap its box to that exact size (the same thing
+        # already done for still images/thumbnails) instead of leaving it at
+        # a generic placeholder box for the whole video — see _on_timer()'s
+        # own comment for why this fires once, not every frame.
+        self._on_frame_size = on_frame_size
+        self._box_sized = False
 
         self._audio_stream = None
         self._tempo_ctrl   = None
@@ -200,6 +208,7 @@ class VideoPlayer:
         self.stop()
         self._stop_event.clear()
         self._eof_reached = False
+        self._box_sized = False
         self._generation += 1
         self._video_path = video_path
 
@@ -483,8 +492,29 @@ class VideoPlayer:
                 fitted = fit_frame_size(
                     img.GetWidth(), img.GetHeight(), target_w, target_h
                 )
+                shown_w, shown_h = fitted if fitted is not None else (img.GetWidth(), img.GetHeight())
                 if fitted is not None:
-                    img = img.Scale(fitted[0], fitted[1], wx.IMAGE_QUALITY_NORMAL)
+                    img = img.Scale(shown_w, shown_h, wx.IMAGE_QUALITY_NORMAL)
+                # One-time box resize, on the first frame only: the caller's
+                # box starts out a generic placeholder size (see e.g.
+                # ConversationsPanel._VIDEO_BITMAP_SIZE), which almost never
+                # matches this video's own aspect ratio — a portrait video in
+                # a 4:3 box, say, ends up small and left-aligned with a big
+                # blank gap filling the rest of the box, which reads as "the
+                # video doesn't show completely" even though every pixel of
+                # it is actually there (reported live, still, after the
+                # scale-to-fit change above stopped the literal clipping).
+                # Shrinking the box to the frame's own fitted size the first
+                # time makes video match how a still photo is shown — sized
+                # exactly to its own content, no leftover space. Done once,
+                # not every frame, to avoid relaying out the panel at 12fps.
+                if not self._box_sized:
+                    self._box_sized = True
+                    if self._on_frame_size is not None and (shown_w, shown_h) != (target_w, target_h):
+                        try:
+                            self._on_frame_size(shown_w, shown_h)
+                        except Exception:
+                            pass
                 self.bitmap_ctrl.SetBitmap(wx.Bitmap(img))
                 self.bitmap_ctrl.Refresh()
         except Exception:

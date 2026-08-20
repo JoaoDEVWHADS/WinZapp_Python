@@ -72,6 +72,9 @@ class _FakeWidget:
     def SetLabel(self, text):
         self.label = text
 
+    def SetMinSize(self, size):
+        pass
+
 
 class _FakeTextCtrl(_FakeWidget):
     """Stands in for _reply_field: a wx.TextCtrl, which _show_current_status()

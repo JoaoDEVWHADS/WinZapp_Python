@@ -264,7 +264,9 @@ class MyStatusDialog(wx.Dialog):
             sizer.Add(self._play_pause_btn, 0, wx.LEFT | wx.BOTTOM, 8)
             self._play_pause_btn.Hide()
 
-            self._video_player = VideoPlayer(self._mw, self._video_bitmap)
+            self._video_player = VideoPlayer(
+                self._mw, self._video_bitmap, on_frame_size=self._on_video_frame_size_known
+            )
             self._video_local_path = None
             self._video_download_status_id = None
             self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -321,6 +323,12 @@ class MyStatusDialog(wx.Dialog):
         self._video_local_path = None
         self._video_download_status_id = None
         self._video_bitmap.Hide()
+        # Undo whatever shrink-to-content _on_video_frame_size_known() did
+        # for the video just left behind — otherwise the NEXT video's first
+        # frame gets fitted against that leftover (often much smaller) box
+        # instead of the real 320x240 baseline, compounding smaller and
+        # smaller across consecutive status videos.
+        self._video_bitmap.SetMinSize((320, 240))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
         is_video = msg_type == "videoMessage"
         is_audio = msg_type == "audioMessage"
@@ -359,6 +367,17 @@ class MyStatusDialog(wx.Dialog):
     # since this dialog and StatusPanel track their own current-status state
     # independently (self._statuses/self._current here vs.
     # self._status_contacts/self._selected_contact_idx there).
+
+    def _on_video_frame_size_known(self, width: int, height: int):
+        """VideoPlayer callback (see core/video_player.py's own comment):
+        fires once per playback with the first frame's actual on-screen
+        size, so the fixed 320x240 placeholder box can shrink-wrap to it —
+        same as a still photo is sized to its own content, instead of
+        leaving a blank gap around a video whose aspect ratio doesn't match
+        that box (reported live as the video "not showing completely" even
+        once it was no longer literally clipped)."""
+        self._video_bitmap.SetMinSize((width, height))
+        self.Layout()
 
     def _on_play_pause_video(self, event):
         if not self._statuses:
@@ -479,7 +498,9 @@ class StatusPanel(wx.Panel):
         self.init_UI()
         self._create_accelerators()
 
-        self._video_player = VideoPlayer(main_window, self._video_bitmap)
+        self._video_player = VideoPlayer(
+            main_window, self._video_bitmap, on_frame_size=self._on_video_frame_size_known
+        )
         # Stop playback (audio + frame decoding) whenever this panel is
         # hidden — Alt+1/Alt+4 switching away from the Status tab, or the
         # window closing — regardless of which of the several call sites in
@@ -1270,6 +1291,12 @@ class StatusPanel(wx.Panel):
         self._video_local_path = None
         self._video_download_status_id = None
         self._video_bitmap.Hide()
+        # Undo whatever shrink-to-content _on_video_frame_size_known() did
+        # for the video just left behind — otherwise the NEXT video's first
+        # frame gets fitted against that leftover (often much smaller) box
+        # instead of the real 320x240 baseline, compounding smaller and
+        # smaller across consecutive status videos.
+        self._video_bitmap.SetMinSize((320, 240))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))
 
         # Kept for the action handlers below (copy text, save media, open
@@ -1514,6 +1541,17 @@ class StatusPanel(wx.Panel):
     # so the video's audio is extracted to WAV (bundled ffmpeg) for BASS,
     # and its picture is decoded by that same ffmpeg binary as a capped-rate
     # JPEG frame sequence drawn into self._video_bitmap.
+
+    def _on_video_frame_size_known(self, width: int, height: int):
+        """VideoPlayer callback (see core/video_player.py's own comment):
+        fires once per playback with the first frame's actual on-screen
+        size, so the fixed 320x240 placeholder box can shrink-wrap to it —
+        same as a still photo is sized to its own content, instead of
+        leaving a blank gap around a video whose aspect ratio doesn't match
+        that box (reported live as the video "not showing completely" even
+        once it was no longer literally clipped)."""
+        self._video_bitmap.SetMinSize((width, height))
+        self.Layout()
 
     def _on_play_pause_video(self, event):
         """Play/pause the current status's media — video (picture + audio)

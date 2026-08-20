@@ -324,7 +324,9 @@ class ConversationsPanel(wx.Panel):
         # In-app video-message playback (audio via BASS, frames via ffmpeg —
         # see core/video_player.py). Created after init_UI() since it needs
         # _media_bitmap to already exist.
-        self._video_player = VideoPlayer(self.main_window, self._media_bitmap)
+        self._video_player = VideoPlayer(
+            self.main_window, self._media_bitmap, on_frame_size=self._on_video_frame_size_known
+        )
         # id of the video message currently loaded in _video_player, or None
         # — lets a second Enter on the SAME video toggle pause instead of
         # restarting it, while Enter on a DIFFERENT video switches to it.
@@ -4902,6 +4904,20 @@ class ConversationsPanel(wx.Panel):
             self.audio_speed_btn.SetLabel(self._format_speed(speed))
         if not self._audio_timer.IsRunning():
             self._audio_timer.Start(30)
+
+    def _on_video_frame_size_known(self, width: int, height: int):
+        """VideoPlayer callback (see core/video_player.py's own comment):
+        fired once per playback, as soon as the first frame's actual
+        on-screen size is known. _VIDEO_BITMAP_SIZE is a generic 4:3
+        placeholder that rarely matches the real video's aspect ratio — a
+        portrait clip inside it ends up small with a big blank gap filling
+        the rest of the box, which reads as "the video isn't fully shown"
+        even once the frame itself is correctly scaled (not clipped).
+        Shrinking the box to the frame's own size makes video match how a
+        photo is shown: exactly the size of its own content, same as
+        _try_show_thumbnail()'s SetMinSize((-1, -1)) does for still images."""
+        self._media_bitmap.SetMinSize((width, height))
+        self.conversation_panel.Layout()
 
     def _resolve_media_filename(self, msg: dict) -> str:
         """Resolve original filename and extension for any media message (document, audio, image, video)."""
