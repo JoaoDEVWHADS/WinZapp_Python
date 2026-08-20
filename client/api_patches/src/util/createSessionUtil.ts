@@ -769,6 +769,7 @@ export default class CreateSessionUtil {
     }
 
     await this.onUnreadCountChanged(client, req);
+    await this.onIncomingCallDirect(client, req);
   }
 
   /**
@@ -887,6 +888,276 @@ export default class CreateSessionUtil {
     // starts undefined again along with everything else wa-js re-injects), so
     // re-running installListener() here is exactly the reinstall the reload
     // needs — no separate reset step required.
+    client.page.on('load', installListener);
+    installListener();
+  }
+
+  /**
+   * WinZapp patch: detect incoming WhatsApp calls by injecting a listener
+   * directly into the WhatsApp Web page via page.evaluate, bypassing
+   * wppconnect's own client.onIncomingCall() wrapper which stopped working
+   * after a WhatsApp Web VoIP stack change (wa-js 4.5.0 bug, fixed in 4.6.0).
+   *
+   * Uses the same page.exposeFunction + page.evaluate pattern as
+   * onUnreadCountChanged above. Two detection layers are installed:
+   *
+   *   1. WPP.on('call.incoming_call') — the wa-js event itself, in case the
+   *      issue is only in wppconnect's wrapper and not in wa-js's internal
+   *      registration.
+   *   2. Direct Store access — if WPP exposes the internal CallStore/CallCollection,
+   *      we hook its 'add' event directly, bypassing wa-js's event plumbing
+   *      entirely.
+   *
+   * If both layers fire for the same call, the Python side receives two
+   * events. This is harmless: the sound plays idempotently and the toast
+   * deduplicates by nature (Windows suppresses identical toasts within a
+   * short window).
+   *
+   * If neither layer works (WhatsApp changed too much), nothing breaks —
+   * every call is wrapped in try/catch and failures are logged.
+   */
+  async onIncomingCallDirect(client: WhatsAppServer, req: Request) {
+    try {
+      await client.page.exposeFunction(
+        '__winzappOnIncomingCall',
+        (
+          event: string,
+          state: string,
+          peerJid: string,
+          callId: string,
+          isVideo: boolean,
+          isGroup: boolean
+        ) => {
+          req.io.emit('incomingcall', {
+            session: client.session,
+            data: {
+              event: event,
+              state: state,
+              peerJid: peerJid,
+              id: callId,
+              isVideo: isVideo,
+              isGroup: isGroup,
+            },
+          });
+        }
+      );
+    } catch (e) {
+      // exposeFunction throws if a prior session already registered this
+      // name on the same page (e.g. a reconnect reusing the browser) —
+      // harmless, the existing binding still works.
+    }
+
+    const installListener = () => {
+      client.page
+        .evaluate(() => {
+          const WPP = (window as any).WPP;
+          if (
+            !WPP ||
+            !WPP.on ||
+            (window as any).__winzappIncomingCallInstalled
+          ) {
+            return;
+          }
+          (window as any).__winzappIncomingCallInstalled = true;
+
+          // WA-JS 4.5 only exposes the incoming offer publicly. Later states
+          // live in CallStore, and some WhatsApp builds mutate them without
+          // firing the expected Backbone event, so retain and poll by call id.
+          const trackedCalls = new Map<string, any>();
+          const stores = [
+            WPP?.whatsapp?.CallStore,
+            WPP?.whatsapp?.CallCollection,
+            (window as any).Store?.Call,
+          ].filter((store, index, all) => store && all.indexOf(store) === index);
+          const callIdOf = (call: any) =>
+            String(call?.id?._serialized || call?.id || '');
+          const callStateOf = (call: any) => {
+            const raw = String(
+              call?.getState?.() || call?.state || call?.get?.('state') || ''
+            );
+            // WhatsApp Web 2.3000 may return its newer numeric VoIP enum even
+            // though WA-JS 4.5 types still advertise strings. ReceivedCall (3)
+            // and ReceivedCallWithoutOffer (8) both mean it is still ringing.
+            const numericStates: Record<string, string> = {
+              '0': 'NONE',
+              '1': 'CALLING',
+              '2': 'PREACCEPT_RECEIVED',
+              '3': 'INCOMING_RING',
+              '4': 'ACCEPT_SENT',
+              '5': 'ACCEPT_RECEIVED',
+              '6': 'ACTIVE',
+              '7': 'HANDLED_REMOTELY',
+              '8': 'INCOMING_RING',
+              '9': 'REJOINING',
+              '10': 'LINK',
+              '11': 'CONNECTED_LONELY',
+              '12': 'PRE_CALLING',
+              '13': 'ENDED',
+              '14': 'CALL_B_STARTING',
+            };
+            return numericStates[raw] || raw;
+          };
+          const emitCall = (event: string, call: any, state = '') => {
+            const peerJid =
+              call?.peerJid?._serialized ||
+              call?.peerJid?.toString?.() ||
+              call?.sender?._serialized ||
+              call?.sender?.toString?.() ||
+              call?.from?._serialized ||
+              call?.from?.toString?.() ||
+              '';
+            if (!peerJid) return;
+            (window as any).__winzappOnIncomingCall(
+              event,
+              state,
+              peerJid,
+              callIdOf(call),
+              !!call?.isVideo || !!call?.isVideoCall,
+              !!call?.isGroup || !!call?.isGroupCall
+            );
+          };
+          const rememberCall = (call: any) => {
+            const id = callIdOf(call);
+            if (!id) return;
+            const previous = trackedCalls.get(id) || {};
+            trackedCalls.set(id, {
+              call: call || previous.call,
+              startedAt: previous.startedAt || Date.now(),
+              missingSince: 0,
+              foundInStore: previous.foundInStore || false,
+            });
+          };
+          const findCall = (id: string) => {
+            for (const store of stores) {
+              try {
+                const direct = store?.get?.(id);
+                if (direct) return direct;
+                const models =
+                  store?.getModelsArray?.() || store?._models || store?.models || [];
+                const found = models.find?.((model: any) => callIdOf(model) === id);
+                if (found) return found;
+              } catch (e) {
+                // Try the next exported alias.
+              }
+            }
+            return null;
+          };
+
+          // ── Layer 1: WPP.on('call.incoming_call') ──────────────────
+          // Uses wa-js's own event, which MAY work if the bug is only
+          // in wppconnect's Node-side wrapper rather than in wa-js's
+          // internal event registration.
+          try {
+            WPP.on('call.incoming_call', (call: any) => {
+              try {
+                emitCall('offer', call, 'INCOMING_RING');
+                rememberCall(call);
+              } catch (e) {
+                // Never let one event kill the listener
+              }
+            });
+          } catch (e) {
+            // WPP.on might not support this event in this version
+          }
+
+          // ── Layer 2: direct internal CallStore access ──────────────
+          // If wa-js exposes the raw WhatsApp Web Store for calls, hook
+          // its collection's 'add' event directly. This bypasses wa-js's
+          // event plumbing entirely.
+          try {
+            for (const store of stores) {
+              if (store && typeof store.on === 'function') {
+                store.on('add', (call: any) => {
+                  try {
+                    // Only trigger for incoming calls (not outgoing)
+                    const isIncoming =
+                      call?.getState?.() === 'INCOMING_RING' ||
+                      call?.isIncoming ||
+                      call?.direction === 'incoming' ||
+                      !call?.outgoing;
+                    if (!isIncoming) return;
+
+                    const initialState = String(call?.getState?.() || 'INCOMING_RING');
+                    emitCall('offer', call, initialState);
+                    rememberCall(call);
+                  } catch (e) {
+                    // Never let one event kill the listener
+                  }
+                });
+                const onStateChange = (call: any) => {
+                  try {
+                    const nextState = callStateOf(call);
+                    if (!nextState) return;
+                    emitCall('state', call, nextState);
+                    if (nextState === 'INCOMING_RING') rememberCall(call);
+                    else trackedCalls.delete(callIdOf(call));
+                  } catch (e) {
+                    // A malformed state update must not remove the listener.
+                  }
+                };
+                // Collections re-emit model changes, including for a CallModel
+                // that existed before our `add` listener saw it.
+                store.on('change:state', onStateChange);
+                store.on('change', onStateChange);
+                store.on('remove', (call: any) => {
+                  try {
+                    emitCall('ended', call, 'ENDED');
+                    trackedCalls.delete(callIdOf(call));
+                  } catch (e) {
+                    // Never let one event kill the listener
+                  }
+                });
+              }
+            }
+          } catch (e) {
+            // Store access failed — not critical
+          }
+
+          // Poll only active incoming calls. If a model disappears for 2.5s,
+          // WhatsApp has removed it after answer/rejection/caller cancellation.
+          (window as any).__winzappIncomingCallPoll = window.setInterval(() => {
+            const now = Date.now();
+            for (const [id, tracked] of trackedCalls.entries()) {
+              try {
+                const liveCall = findCall(id);
+                const currentCall = liveCall || tracked.call;
+                const state = callStateOf(currentCall);
+                if (state && state !== 'INCOMING_RING') {
+                  emitCall('state', currentCall, state);
+                  trackedCalls.delete(id);
+                  continue;
+                }
+                if (liveCall) {
+                  tracked.call = liveCall;
+                  tracked.missingSince = 0;
+                  tracked.foundInStore = true;
+                  continue;
+                }
+
+                if (tracked.foundInStore) {
+                  tracked.missingSince = tracked.missingSince || now;
+                }
+                if (tracked.foundInStore && now - tracked.missingSince >= 2500) {
+                  emitCall('ended', tracked.call, 'ENDED');
+                  trackedCalls.delete(id);
+                } else if (now - tracked.startedAt >= 120000) {
+                  emitCall('timeout', tracked.call, 'NOT_ANSWERED');
+                  trackedCalls.delete(id);
+                }
+              } catch (e) {
+                // The next poll can recover from a transient Store mutation.
+              }
+            }
+          }, 500);
+        })
+        .catch((e: any) =>
+          req.logger.warn(
+            `[onIncomingCallDirect] install failed: ${e?.message || e}`
+          )
+        );
+    };
+
+    // Re-install on page reload (fresh JS context loses the listener)
     client.page.on('load', installListener);
     installListener();
   }

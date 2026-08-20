@@ -711,6 +711,8 @@
     "sound_event_message_foreground": "Mensagem noutra conversa (programa em primeiro plano)",
     "sound_event_message_sent": "Mensagem enviada",
     "sound_event_message_background": "Mensagem com o programa em segundo plano",
+    "sound_event_call_incoming": "Chamada recebida",
+    "incoming_call_announcement": "{name} está a ligar-lhe.",
     "sound_event_audio_transition_next": "Transição para a próxima mensagem de voz",
     "sound_event_audio_transition_end": "Conclusão da sequência de mensagens de voz",
     "sound_event_state_enabled": "Ativado",

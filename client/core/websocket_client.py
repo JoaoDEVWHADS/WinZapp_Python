@@ -115,6 +115,7 @@ class WebSocketClient:
         self.sio.on("chats-update", self.on_chats_update)
         self.sio.on("messages.update", self.on_messages_update)
         self.sio.on("onreactionmessage", self.on_wpp_reaction)
+        self.sio.on("incomingcall", self.on_wpp_incoming_call)
         # These two handlers existed but were never registered — contact
         # name/photo updates and presence changes only ever reached the app
         # through onpresencechanged and the 5-minute contacts poll, so a
@@ -1425,6 +1426,30 @@ class WebSocketClient:
             wx.CallAfter(self.main_window.on_new_message, normalized)
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_reaction error")
+
+    def on_wpp_incoming_call(self, data):
+        """Forward WPPConnect call lifecycle events to the wx main thread."""
+        try:
+            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+                return
+            payload = data.get("data") if isinstance(data.get("data"), dict) else data
+            normalized = {
+                "event": str(payload.get("event") or payload.get("status") or "offer"),
+                "state": str(payload.get("state") or ""),
+                "id": str(payload.get("id") or ""),
+                "peerJid": self._clean_jid(
+                    payload.get("peerJid") or payload.get("sender") or payload.get("from")
+                ),
+                "isVideo": bool(payload.get("isVideo", False)),
+                "isGroup": bool(payload.get("isGroup", False)),
+            }
+            if not normalized["id"] and not normalized["peerJid"]:
+                logging.warning("[WebSocketClient] incomingcall without id or peer: %r", data)
+                return
+            logging.info("[WebSocketClient] incomingcall event: %r", normalized)
+            wx.CallAfter(self.main_window.on_incoming_call_event, normalized)
+        except Exception:
+            logging.exception("[WebSocketClient] on_wpp_incoming_call error")
 
     def on_wpp_ack(self, data):
         try:

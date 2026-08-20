@@ -711,6 +711,8 @@
     "sound_event_message_foreground": "Wiadomość w innej rozmowie (aplikacja na pierwszym planie)",
     "sound_event_message_sent": "Wiadomość wysłana",
     "sound_event_message_background": "Wiadomość, gdy program jest w tle",
+    "sound_event_call_incoming": "Połączenie przychodzące",
+    "incoming_call_announcement": "{name} dzwoni do ciebie.",
     "sound_event_audio_transition_next": "Przejście do następnej wiadomości głosowej",
     "sound_event_audio_transition_end": "Koniec sekwencji wiadomości głosowych",
     "sound_event_state_enabled": "Włączone",
