@@ -167,6 +167,7 @@ class ConversationsPanel(wx.Panel):
         self._chain_play_timer = None
         self._chain_start_timer = None
         self._chain_end_timer = None
+        self._pending_played_refresh_id = None
         self._audio_stream_duration = 0
         self._audio_temp_file = None
         self._audio_speed_steps = [1.0, 1.5, 2.0]
@@ -5564,19 +5565,26 @@ class ConversationsPanel(wx.Panel):
                     # mark it locally and tell WhatsApp so the sender sees it
                     # too. See MainWindow.mark_audio_message_played()'s own
                     # docstring for why this never applies to our own sends.
+                    will_chain = bool(finished_id) and self._next_message_is_chainable_audio(finished_id)
                     if finished_msg is not None:
-                        will_chain = bool(finished_id) and self._next_message_is_chainable_audio(finished_id)
                         self.main_window.mark_audio_message_played(
                             finished_msg,
                             # See mark_audio_message_played()'s own docstring:
-                            # long enough to land after _auto_chain_next_audio's
-                            # two chained 100ms wx.CallLater steps have already
-                            # moved focus onto the next voice note.
-                            defer_ui_refresh_ms=300 if will_chain else 0,
+                            # when the chain is about to move focus onto the
+                            # next voice note, the row refresh is held back
+                            # and fired by _auto_chain_next_audio() itself
+                            # right after that focus move actually happens —
+                            # not on a fixed timeout guess, which in practice
+                            # could still lose the race against however long
+                            # the chain's own transition actually takes.
+                            skip_panel_refresh=will_chain,
                         )
                     # Try to auto-play the next consecutive audio message
                     if finished_id:
-                        self._auto_chain_next_audio(finished_id)
+                        self._auto_chain_next_audio(
+                            finished_id,
+                            pending_played_msg_id=finished_id if will_chain else None,
+                        )
                     return
                 self.audio_slider.SetValue(int(pos / total * 1000))
                 self.audio_slider.Refresh()
@@ -5599,6 +5607,15 @@ class ConversationsPanel(wx.Panel):
                 except Exception:
                     pass
                 setattr(self, attr, None)
+        # A "played" row refresh _auto_chain_next_audio() deferred onto the
+        # (now-cancelled) chain step must still happen — otherwise the row
+        # is left showing stale status until something unrelated refreshes
+        # it. It just can no longer wait for the focus move that isn't
+        # going to happen any more, so it fires right here instead.
+        pending = getattr(self, "_pending_played_refresh_id", None)
+        if pending:
+            self._pending_played_refresh_id = None
+            self.refresh_message_status(pending, "5")
 
     def _next_message_is_chainable_audio(self, finished_id: str) -> bool:
         """Read-only peek at what _auto_chain_next_audio(finished_id) is
@@ -5628,21 +5645,43 @@ class ConversationsPanel(wx.Panel):
             return candidate.get("messageType") == "audioMessage" and self._is_voice_message(candidate)
         return False
 
-    def _auto_chain_next_audio(self, finished_id: str):
+    def _auto_chain_next_audio(self, finished_id: str, pending_played_msg_id: str = None):
         """
         After an audio message finishes playing, automatically start the next
         consecutive audio message if one exists immediately after in the list.
         Stops at the first non-audio (or separator) message.
+
+        pending_played_msg_id: when on_audio_timer() skipped the "played" row
+        refresh for finished_id (see its own call site comment), this is
+        finished_id again — this method fires that refresh itself, exactly
+        once, at whichever point it's actually safe: right after the chain
+        moves focus onto the next voice note if it does, or immediately if it
+        turns out there's nothing to chain into after all. A fixed timeout
+        guess was tried first and lost the race in practice (reported live:
+        still announced "played" before the focus change); this can't lose
+        it because both actions run in the same callback, in this order.
         """
         # Cancel any timers left over from a previous chain step before
         # scheduling new ones — a stale timer must never start audio after
-        # the user has already stopped/jumped elsewhere.
+        # the user has already stopped/jumped elsewhere. Also flushes
+        # whatever pending "played" refresh that previous step was carrying
+        # (see _cancel_pending_chain_timers()'s own comment), so it never
+        # gets silently dropped by being overwritten below.
         self._cancel_pending_chain_timers()
+        self._pending_played_refresh_id = pending_played_msg_id
+
+        def _flush_pending_played_refresh():
+            pending = self._pending_played_refresh_id
+            if pending:
+                self._pending_played_refresh_id = None
+                self.refresh_message_status(pending, "5")
+
         # Don't chain if the user has navigated to a different conversation —
         # _sorted_messages belongs to the current conversation, not the one
         # where the audio was playing.
         current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
         if current_jid != self._audio_conv_jid:
+            _flush_pending_played_refresh()
             return
 
         # Find the index of the just-finished message
@@ -5654,12 +5693,14 @@ class ConversationsPanel(wx.Panel):
                 finished_msg = msg
                 break
         if current_idx < 0 or finished_msg is None:
+            _flush_pending_played_refresh()
             return
 
         # Sequential playback and transition sounds ONLY apply to voice notes (PTT),
         # not to generic attached audio/music files.
         if not self._is_voice_message(finished_msg):
             self._is_in_audio_chain = False
+            _flush_pending_played_refresh()
             return
 
         # Walk forward, skipping separators, to find the next message
@@ -5710,6 +5751,12 @@ class ConversationsPanel(wx.Panel):
                         self.messages_list.Focus(target_idx)
                         self.messages_list.Select(target_idx, True)
                         self.messages_list.EnsureVisible(target_idx)
+                    # Only now — focus has already landed wherever it's going
+                    # to land for this step — is it safe to refresh the
+                    # finished row's "played" status without that refresh's
+                    # own accessibility event competing with (and queuing
+                    # ahead of) the announcement of the newly focused row.
+                    _flush_pending_played_refresh()
                     clean_msg_id = msg_id
                     if "_" in msg_id:
                         parts = msg_id.split("_")
@@ -5726,6 +5773,10 @@ class ConversationsPanel(wx.Panel):
                 self._chain_start_timer = wx.CallLater(100, _start_audio)
             self._chain_play_timer = wx.CallLater(100, _play_next)
         else:
+            # No next voice note to chain into — nothing else is ever going
+            # to move focus away from the finished row, so the "played"
+            # refresh (if any) is safe to fire right now.
+            _flush_pending_played_refresh()
             if getattr(self, "_is_in_audio_chain", False):
                 def _play_end():
                     snd = getattr(self.main_window, "audio_transition_end_sound", None)
@@ -10767,7 +10818,7 @@ class ConversationsPanel(wx.Panel):
 
         with wx.DirDialog(
             self,
-            i18n.t("save_as"),
+            i18n.t("select_folder_dialog_title"),
             defaultPath=get_downloads_folder(),
             style=wx.DD_DEFAULT_STYLE,
         ) as dlg:

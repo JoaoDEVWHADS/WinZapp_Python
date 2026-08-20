@@ -21,11 +21,12 @@ from ui.conversations import ConversationsPanel
 
 
 class _FakeMessagesList:
-    def __init__(self, focused):
+    def __init__(self, focused, events=None):
         self._focused = focused
         self.focus_calls = []
         self.select_calls = []
         self.ensure_visible_calls = []
+        self._events = events
 
     def GetFocusedItem(self):
         return self._focused
@@ -33,6 +34,8 @@ class _FakeMessagesList:
     def Focus(self, idx):
         self.focus_calls.append(idx)
         self._focused = idx
+        if self._events is not None:
+            self._events.append(("focus", idx))
 
     def Select(self, idx, on=True):
         self.select_calls.append((idx, on))
@@ -67,15 +70,20 @@ class _Stub:
         self._sorted_messages = sorted_messages
         self.conversation = {"remoteJid": finished_jid}
         self._audio_conv_jid = finished_jid
-        self.messages_list = _FakeMessagesList(focused)
+        self.events = []  # ordered log shared across focus/select/refresh calls
+        self.messages_list = _FakeMessagesList(focused, events=self.events)
         self._is_in_audio_chain = False
         self._chain_play_timer = None
         self._chain_start_timer = None
         self._chain_end_timer = None
+        self._pending_played_refresh_id = None
         self.toggle_calls = []
 
     def _toggle_playback(self, msg_id, duration, msg, file_path, audio_ext):
         self.toggle_calls.append(msg_id)
+
+    def refresh_message_status(self, msg_id, status):
+        self.events.append(("refresh", msg_id))
 
 
 @pytest.fixture
@@ -121,3 +129,63 @@ class TestAutoFocusNextAudioDisabled:
         assert stub.messages_list.focus_calls == []
         assert stub.messages_list.select_calls == []
         assert stub.toggle_calls == ["m2"]
+
+
+class TestPendingPlayedRefreshFiresAfterTheFocusMove:
+    """Reported live, twice over: the "played" status refresh for the
+    finished voice note kept landing before (or racing) the chain's own
+    focus move onto the next one, so NVDA announced the stale change first.
+    A first attempt used a fixed 300ms wx.CallLater guess and still lost the
+    race. _auto_chain_next_audio() now takes the pending refresh as an
+    explicit argument and fires it itself, in the same callback, right after
+    the focus decision — never on a timer that can be outrun."""
+
+    def test_the_refresh_is_logged_strictly_after_the_focus_move(self, call_later_now):
+        msgs = [_voice_msg("m1"), _voice_msg("m2")]
+        stub = _Stub(msgs, focused=0, auto_focus_next_audio=True)
+
+        stub._auto_chain_next_audio("m1", pending_played_msg_id="m1")
+
+        assert stub.events == [("focus", 1), ("refresh", "m1")]
+
+    def test_the_refresh_still_fires_when_auto_focus_is_disabled(self, call_later_now):
+        """Focus never moves in this mode, so there's no focus event to
+        order against — the refresh must still happen, just without racing
+        anything."""
+        msgs = [_voice_msg("m1"), _voice_msg("m2")]
+        stub = _Stub(msgs, focused=0, auto_focus_next_audio=False)
+
+        stub._auto_chain_next_audio("m1", pending_played_msg_id="m1")
+
+        assert stub.events == [("refresh", "m1")]
+
+    def test_the_refresh_fires_immediately_when_there_is_nothing_to_chain_into(self, call_later_now):
+        msgs = [_voice_msg("m1")]
+        stub = _Stub(msgs, focused=0, auto_focus_next_audio=True)
+
+        stub._auto_chain_next_audio("m1", pending_played_msg_id="m1")
+
+        assert stub.events == [("refresh", "m1")]
+
+    def test_no_pending_refresh_means_no_refresh_call_at_all(self, call_later_now):
+        """The everyday case (no chain in flight) must not call
+        refresh_message_status a second time — on_audio_timer() already did
+        it itself before ever reaching _auto_chain_next_audio()."""
+        msgs = [_voice_msg("m1"), _voice_msg("m2")]
+        stub = _Stub(msgs, focused=0, auto_focus_next_audio=True)
+
+        stub._auto_chain_next_audio("m1")
+
+        assert stub.events == [("focus", 1)]
+
+    def test_cancelling_the_chain_still_flushes_a_pending_refresh(self):
+        """If the chain gets cancelled (conversation switch, user stops
+        playback) before its timers fire, the pending refresh must not be
+        silently lost — _cancel_pending_chain_timers() flushes it."""
+        stub = _Stub([_voice_msg("m1"), _voice_msg("m2")], focused=0)
+        stub._pending_played_refresh_id = "m1"
+
+        stub._cancel_pending_chain_timers()
+
+        assert stub.events == [("refresh", "m1")]
+        assert stub._pending_played_refresh_id is None

@@ -14474,16 +14474,17 @@ class MainWindow(wx.Frame):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    def on_message_status_update(self, update: dict, defer_ui_refresh_ms: int = 0):
+    def on_message_status_update(self, update: dict, skip_panel_refresh: bool = False):
         """
         Handle a messages.update WebSocket event on the main thread.
         Updates MessageUpdate list on the cached message record and refreshes
         the status icon shown in the active conversation.
 
-        defer_ui_refresh_ms: delay the visible row refresh instead of firing
-        it immediately. Used only by mark_audio_message_played() when a voice
-        note's auto-chain is about to move list focus to the next one — see
-        that method's own docstring for why.
+        skip_panel_refresh: skip the visible row refresh instead of firing it
+        here. Used only by mark_audio_message_played() when a voice note's
+        auto-chain is about to move list focus to the next one — the caller
+        (ConversationsPanel._auto_chain_next_audio()) fires that refresh
+        itself once it's actually safe to, see that method's own docstring.
         """
         key       = update.get("key", {})
         msg_id    = key.get("id", "")
@@ -14575,11 +14576,8 @@ class MainWindow(wx.Frame):
         except (TypeError, ValueError):
             pass
 
-        if hasattr(self, "conversations_panel"):
-            if defer_ui_refresh_ms > 0:
-                wx.CallLater(defer_ui_refresh_ms, self.conversations_panel.refresh_message_status, msg_id, status)
-            else:
-                self.conversations_panel.refresh_message_status(msg_id, status)
+        if hasattr(self, "conversations_panel") and not skip_panel_refresh:
+            self.conversations_panel.refresh_message_status(msg_id, status)
 
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
@@ -17922,7 +17920,7 @@ class MainWindow(wx.Frame):
             logging.error(f"[resend_media] Error decrypting or sending {msg_id}: {exc}")
             return False
 
-    def mark_audio_message_played(self, msg: dict, defer_ui_refresh_ms: int = 0):
+    def mark_audio_message_played(self, msg: dict, skip_panel_refresh: bool = False):
         """Mark a received voice message as played, both locally (the
         status icon in the message list, same as a "played" receipt
         arriving over the WebSocket) and for real, via a played receipt
@@ -17935,14 +17933,14 @@ class MainWindow(wx.Frame):
         RECIPIENT's own playback, which for our own sends already arrives
         the normal way via on_message_status_update()/messages.update.
 
-        defer_ui_refresh_ms: passed straight through to
-        on_message_status_update() — see its docstring. The caller sets
-        this whenever this same voice note is about to auto-chain into the
-        next one, so the "now played" row refresh (which NVDA announces as
-        a change on the still-focused finished row) doesn't land just
-        before the chain moves focus onto the next message — the two
-        announcements would otherwise queue back to back and the user hears
-        the stale one first every time.
+        skip_panel_refresh: passed straight through to
+        on_message_status_update() — see its docstring. The caller sets this
+        whenever this same voice note is about to auto-chain into the next
+        one: the "now played" row refresh (which NVDA announces as a change
+        on the still-focused finished row) must not land just before the
+        chain moves focus onto the next message, so instead of firing it
+        here, the caller (ConversationsPanel._auto_chain_next_audio()) fires
+        it itself right after that focus move actually happens.
         """
         key = msg.get("key", {}) or {}
         if key.get("fromMe", False):
@@ -17960,7 +17958,7 @@ class MainWindow(wx.Frame):
         self.on_message_status_update({
             "key": {"id": msg_id, "remoteJid": remote_jid},
             "status": "5",
-        }, defer_ui_refresh_ms=defer_ui_refresh_ms)
+        }, skip_panel_refresh=skip_panel_refresh)
         threading.Thread(
             target=self._send_mark_played_request,
             args=(remote_jid, dict(key)),
