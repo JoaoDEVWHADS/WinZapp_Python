@@ -44,7 +44,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -6957,26 +6957,11 @@ class ConversationsPanel(wx.Panel):
         Deliberately does not reuse _get_context_info(): that helper only
         ever returns contextInfo when it also carries a quote, and a
         forwarded message is very often neither a reply nor a mention.
+
+        Thin wrapper around core.utils.is_message_forwarded() — shared with
+        main.py's on_new_message(), which needs the exact same check.
         """
-        if not isinstance(msg, dict):
-            return False
-        top_ctx = msg.get("contextInfo")
-        if isinstance(top_ctx, dict) and top_ctx.get("isForwarded"):
-            return True
-        msg_obj = msg.get("message") or {}
-        if not isinstance(msg_obj, dict):
-            return False
-        for sub_key in (
-            "extendedTextMessage", "audioMessage", "imageMessage",
-            "videoMessage", "documentMessage", "stickerMessage",
-            "locationMessage", "contactMessage", "buttonsMessage",
-            "listMessage",
-        ):
-            sub = msg_obj.get(sub_key)
-            if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
-                if sub["contextInfo"].get("isForwarded"):
-                    return True
-        return False
+        return is_message_forwarded(msg)
 
     def _get_quoted_sender(self, ctx: dict, msg: dict) -> str:
         """Resolve the display name of the quoted message sender from contextInfo."""

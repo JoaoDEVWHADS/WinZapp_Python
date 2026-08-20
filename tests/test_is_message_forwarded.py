@@ -1,17 +1,37 @@
-"""Tests for ConversationsPanel._is_message_forwarded() — used by
-_render_message_line() to append a "Forwarded" label (comma-separated,
-alongside edited/read/delivered) to any message carrying WhatsApp's own
-contextInfo.isForwarded flag, whether it was forwarded by this app or by
-anyone else.
+"""Tests for core.utils.is_message_forwarded() — used by
+ConversationsPanel._render_message_line() (via its own thin
+_is_message_forwarded() wrapper) to append a "Forwarded" label (comma-
+separated, alongside edited/read/delivered) to any message carrying
+WhatsApp's own contextInfo.isForwarded flag, whether it was forwarded by
+this app or by anyone else — and, since a live bug (see
+test_forward_does_not_corrupt_my_lid.py), also by main.py's
+on_new_message() to keep a forwarded copy's residual provenance fields from
+being mistaken for identifying who actually sent that copy.
 
 Deliberately a separate helper from _get_context_info(): that one only ever
 returns contextInfo when it also carries a quote, and a forwarded message is
 very often neither a reply nor a mention.
 """
 
+from core.utils import is_message_forwarded
 from ui.conversations import ConversationsPanel
 
 _is_message_forwarded = ConversationsPanel._is_message_forwarded
+
+
+class TestModuleLevelFunctionDirectly:
+    """The panel method is now a thin wrapper — pin the underlying function
+    itself works the same, independent of ConversationsPanel."""
+
+    def test_forwarded_flag_is_detected(self):
+        assert is_message_forwarded({"contextInfo": {"isForwarded": True}, "message": {}}) is True
+
+    def test_plain_message_is_not_forwarded(self):
+        assert is_message_forwarded({"messageType": "conversation", "message": {"conversation": "hi"}}) is False
+
+    def test_non_dict_message_is_not_forwarded(self):
+        assert is_message_forwarded("not a dict") is False
+        assert is_message_forwarded(None) is False
 
 
 class _Stub:

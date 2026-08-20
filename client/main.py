@@ -45,7 +45,7 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
@@ -4052,7 +4052,19 @@ class MainWindow(wx.Frame):
         # which otherwise left _get_participant_name() falling through to a
         # saved contact name (e.g. a self-addressed contact literally named
         # "Eu") instead of honouring the "Como se referir a mim?" setting.
-        if from_me and participant_raw.endswith("@lid") and not getattr(self, "my_lid", "") and my_lid != participant_raw:
+        # A forwarded copy is the exception to the comment above: its own
+        # participant/key fields can carry residual provenance about
+        # whoever originally sent the message being forwarded, not about
+        # the forward action itself (which is always us, on a fromMe
+        # message). Learning my_lid from that residual value here corrupted
+        # self-identity globally — reported live as a forwarded contact's
+        # OWN later messages, in a completely different chat, rendering as
+        # "Eu" everywhere (last-message preview, quoted-reply header, ...)
+        # the instant one of their messages got forwarded to "Mensagens
+        # para mim". Recognizable via the same contextInfo.isForwarded flag
+        # _is_message_forwarded() already checks for other purposes.
+        if (from_me and participant_raw.endswith("@lid") and not getattr(self, "my_lid", "")
+                and my_lid != participant_raw and not is_message_forwarded(msg)):
             self.my_lid = my_lid = participant_raw
             if my_jid:
                 self.register_jid_mapping(participant_raw, my_jid)

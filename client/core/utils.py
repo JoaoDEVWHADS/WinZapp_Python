@@ -97,6 +97,41 @@ def normalize_line_separators(text) -> str:
     return text
 
 
+_FORWARDABLE_SUB_KEYS = (
+    "extendedTextMessage", "audioMessage", "imageMessage",
+    "videoMessage", "documentMessage", "stickerMessage",
+    "locationMessage", "contactMessage", "buttonsMessage",
+    "listMessage",
+)
+
+
+def is_message_forwarded(msg) -> bool:
+    """True when contextInfo.isForwarded is set — a real WhatsApp protocol
+    field present on any forwarded message, from anyone, not only ones this
+    app itself forwarded (WebSocketClient._normalize_wpp_message threads it
+    through from WPPConnect's own Message.isForwarded).
+
+    Shared by ui/conversations.py (to skip offering forward-related actions
+    it doesn't apply to) and main.py's on_new_message() (to make sure a
+    forwarded copy's own contextInfo/key fields — which can carry residual
+    provenance about whoever originally sent the message being forwarded —
+    are never mistaken for identifying WHO SENT THIS COPY)."""
+    if not isinstance(msg, dict):
+        return False
+    top_ctx = msg.get("contextInfo")
+    if isinstance(top_ctx, dict) and top_ctx.get("isForwarded"):
+        return True
+    msg_obj = msg.get("message") or {}
+    if not isinstance(msg_obj, dict):
+        return False
+    for sub_key in _FORWARDABLE_SUB_KEYS:
+        sub = msg_obj.get(sub_key)
+        if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
+            if sub["contextInfo"].get("isForwarded"):
+                return True
+    return False
+
+
 def append_selected_marker(text: str, word: str, position: str, is_selected: bool) -> str:
     """Add the localized "selected" marker word to a list-row string when
     *is_selected*, at the configured *position* ("start" or anything else,
