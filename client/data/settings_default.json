@@ -9,6 +9,7 @@
     "general": {
         "language": "",
         "notifications_enabled": true,
+        "keep_muted_chats_silent_when_open": true,
         "updates_enabled": true,
         "noise_reduction_enabled": false,
         "first_run": true,
