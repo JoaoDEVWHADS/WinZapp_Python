@@ -4441,41 +4441,44 @@ class MainWindow(wx.Frame):
             return
         title = format_notification_title(msg, self, self.i18n)
 
-        # Speak it via AO2 too, independent of whether the Windows toast
-        # below actually renders. Reported live: the toast can silently
-        # never appear on screen at all — no exception anywhere, nothing in
-        # the log — most likely Windows' own notification platform (Focus
-        # Assist, or some other silent failure in the WinRT/COM pipeline)
-        # accepting the toast and still never displaying the banner. Before
-        # this, a blind user with WinZapp backgrounded had NO way to learn
-        # who wrote what when that happened — only the sound cue, with NVDA
-        # having nothing on screen left to read since the banner never
-        # rendered. accessible_output2 speaks straight through the active
-        # screen reader's own API, independent of whether Windows actually
-        # draws anything, so this can't be silently swallowed the same way.
-        # Same setting/wording as the "different conversation, window
-        # active" scenario above — a backgrounded window is that same
-        # "not what the user is currently looking at" case, just more so.
-        speech = self.settings.get("speech_content", {})
-        if speech.get("speak_other_conv_messages", True):
-            spoken = self.i18n.t("fg_new_msg").format(name=title) + f": {body}"
-            self.output(spoken)
+        # The toast is the ONLY announcement a backgrounded message gets.
+        # Speaking it through AO2 here as well used to make every background
+        # message arrive twice: once as "Nova mensagem de X: ..." straight
+        # from accessible_output2, and again as the screen reader read the
+        # toast banner Windows had just put on screen. That AO2 call was
+        # added when the banner could silently never render at all (an
+        # unregistered AUMID in dev mode — see _setup_toaster()); now that
+        # the toast reliably shows in both source and frozen builds, the
+        # unconditional announcement is pure duplication.
+        #
+        # The safety net stays, just moved to where the outcome is actually
+        # known: NotificationManager._dispatch() speaks the message itself
+        # when — and only when — it produced no banner, and
+        # should_speak_background_message() covers the cases where no toast
+        # is even attempted — otherwise a user with toasts off would be left
+        # with nothing but the sound cue.
+        from core.notification_manager import (
+            announce_background_message, should_speak_background_message,
+        )
 
-        if not self.settings.get("general", {}).get("show_tray_icon", True):
+        if should_speak_background_message(
+            self.settings, hasattr(self, "notification_manager")
+        ):
+            announce_background_message(self, self.i18n, title, body)
             return
-        if hasattr(self, "notification_manager"):
-            # The unread suffix is deliberately NOT baked in here — see
-            # NotificationManager._dispatch(), which appends it fresh right
-            # before the toast is actually shown. A burst of messages queues
-            # one notification per message, but _coalesce_pending() only
-            # ever displays the newest one; that toast's body (formatted
-            # here, at enqueue time) could still be showing the unreadCount
-            # from the FIRST message of the burst — e.g. "1" — while several
-            # more arrived (and incremented the real count) before the
-            # worker thread got around to actually dispatching it. Reported
-            # live as the toast's "✉️ N não lidas" line reading much lower
-            # than what Alt+3 announced moments later in the same chat.
-            self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
+
+        # The unread suffix is deliberately NOT baked in here — see
+        # NotificationManager._dispatch(), which appends it fresh right
+        # before the toast is actually shown. A burst of messages queues
+        # one notification per message, but _coalesce_pending() only
+        # ever displays the newest one; that toast's body (formatted
+        # here, at enqueue time) could still be showing the unreadCount
+        # from the FIRST message of the burst — e.g. "1" — while several
+        # more arrived (and incremented the real count) before the
+        # worker thread got around to actually dispatching it. Reported
+        # live as the toast's "✉️ N não lidas" line reading much lower
+        # than what Alt+3 announced moments later in the same chat.
+        self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
