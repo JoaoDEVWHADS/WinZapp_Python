@@ -45,7 +45,7 @@ from core.sound_system import (
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
 from core import token_vault
@@ -18364,7 +18364,11 @@ class MainWindow(wx.Frame):
                 text += f" ({self.i18n.t('muted')})"
             if chat_jid_norm and self.is_contact_blocked(chat_jid_norm):
                 text += f" ({self.i18n.t('blocked')})"
-            return text
+            is_selected = bool(chat_jid) and chat_jid in getattr(self.conversations_panel, "selected_chats", ())
+            position = self.settings.get("user_interface", {}).get(
+                "selected_announcement_position", "end"
+            )
+            return append_selected_marker(text, self.i18n.t("selected_suffix"), position, is_selected)
 
         displayed_chats: list = []
         displayed_names: list = []

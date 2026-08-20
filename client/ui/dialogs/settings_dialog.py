@@ -412,6 +412,34 @@ class SettingsDialog(wx.Dialog):
             self._preserve_typed_caption_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._bulk_action_shortcuts_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_bulk_action_shortcuts")
+        )
+        ui_sizer.Add(
+            self._bulk_action_shortcuts_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._selected_announce_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_selected_announce_position_label")
+        )
+        selected_announce_sizer = wx.StaticBoxSizer(self._selected_announce_box, wx.VERTICAL)
+
+        self._selected_announce_start_rb = wx.RadioButton(
+            self._ui_page,
+            label=i18n.t("ui_selected_announce_position_start"),
+            style=wx.RB_GROUP,
+        )
+        selected_announce_sizer.Add(self._selected_announce_start_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._selected_announce_end_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_selected_announce_position_end")
+        )
+        selected_announce_sizer.Add(
+            self._selected_announce_end_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+        )
+
+        ui_sizer.Add(selected_announce_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
 
@@ -806,6 +834,19 @@ class SettingsDialog(wx.Dialog):
             "preserve_typed_text_as_attachment_caption", True
         )
         self._preserve_typed_caption_cb.SetValue(bool(preserve_typed_caption))
+
+        bulk_action_shortcuts = self.main_window.settings.get("user_interface", {}).get(
+            "bulk_action_shortcuts", True
+        )
+        self._bulk_action_shortcuts_cb.SetValue(bool(bulk_action_shortcuts))
+
+        selected_announce_position = self.main_window.settings.get("user_interface", {}).get(
+            "selected_announcement_position", "end"
+        )
+        if selected_announce_position == "start":
+            self._selected_announce_start_rb.SetValue(True)
+        else:
+            self._selected_announce_end_rb.SetValue(True)
 
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
@@ -1500,6 +1541,12 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "preserve_typed_text_as_attachment_caption"
         ] = self._preserve_typed_caption_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "bulk_action_shortcuts"
+        ] = self._bulk_action_shortcuts_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "selected_announcement_position"
+        ] = "start" if self._selected_announce_start_rb.GetValue() else "end"
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -1778,6 +1825,10 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
         self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
+        self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
+        self._selected_announce_box.SetLabel(i18n.t("ui_selected_announce_position_label"))
+        self._selected_announce_start_rb.SetLabel(i18n.t("ui_selected_announce_position_start"))
+        self._selected_announce_end_rb.SetLabel(i18n.t("ui_selected_announce_position_end"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._speak_active_conv_check.SetLabel(i18n.t("speech_speak_active_conv_label"))

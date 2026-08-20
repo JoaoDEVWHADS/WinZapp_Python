@@ -1,9 +1,10 @@
-"""Tests for the Space-toggled selection and the mass actions built on it.
+"""Tests for the Ctrl+Space-toggled selection and the mass actions built on it.
 
-Space on a row in either list toggles that row's membership in a selection set
-(self.selected_chats / self.selected_messages) instead of activating it, and
-the two context menus grow a "mass actions" submenu whose handlers act on
-whatever is in those sets.
+Ctrl+Space on a row in either list toggles that row's membership in a
+selection set (self.selected_chats / self.selected_messages) instead of
+activating it — kept off plain Space, which is reserved for playing/pausing
+the focused audio/video message — and the two context menus grow a "mass
+actions" submenu whose handlers act on whatever is in those sets.
 
 What is worth pinning here is that the selection is keyed by identity — chat
 JID and message key.id — not by list index. Both lists are rebuilt constantly
@@ -61,6 +62,9 @@ class _FakeList:
     def EnsureVisible(self, idx):
         self.ensure_visible_calls.append(idx)
 
+    def SetItemText(self, idx, text):
+        pass
+
 
 class _FakeMainWindow:
     def __init__(self):
@@ -94,6 +98,9 @@ class _FakeMainWindow:
 
     def delete_message_for_me(self, jid, key):
         self.deleted_messages.append((jid, key))
+
+    def add_chats_to_ui(self):
+        pass
 
 
 class _FakeEvent:
@@ -131,6 +138,13 @@ class _Panel:
     _on_mass_save_messages = ConversationsPanel._on_mass_save_messages
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
 
+    _select_message_at = ConversationsPanel._select_message_at
+    _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
+    _select_chat_at = ConversationsPanel._select_chat_at
+    _all_chat_jids = ConversationsPanel._all_chat_jids
+    _refresh_message_rows_by_ids = ConversationsPanel._refresh_message_rows_by_ids
+    _render_message_line = lambda self, msg, index=None, total=None: msg.get("key", {}).get("id", "")
+
     def __init__(self, chats=(), messages=(), focused=-1):
         self.main_window = _FakeMainWindow()
         self.selection_sound = _FakeSound()
@@ -157,6 +171,12 @@ class _Panel:
     def remove_messages_by_id(self, ids, focus_previous=False):
         self.removed_locally.append((set(ids), focus_previous))
 
+    def seek_active_playback_by(self, delta_seconds):
+        return False
+
+    def seek_active_playback_to_edge(self, to_end):
+        return False
+
 
 def _chat(jid):
     return {"remoteJid": jid}
@@ -171,21 +191,52 @@ PLACEHOLDER = {"_type": "empty_placeholder"}
 
 
 def _space():
+    """Plain Space — reserved for audio/video playback, must not toggle
+    selection any more."""
     return _FakeEvent(wx.WXK_SPACE)
 
 
-class TestSpaceInTheConversationsList:
-    def test_space_selects_the_focused_chat(self):
+def _ctrl_space():
+    return _FakeEvent(wx.WXK_SPACE, ctrl=True)
+
+
+def _ctrl_shift_space():
+    return _FakeEvent(wx.WXK_SPACE, ctrl=True, shift=True)
+
+
+def _shift_down():
+    return _FakeEvent(wx.WXK_DOWN, shift=True)
+
+
+def _shift_home():
+    return _FakeEvent(wx.WXK_HOME, shift=True)
+
+
+def _shift_end():
+    return _FakeEvent(wx.WXK_END, shift=True)
+
+
+class TestCtrlSpaceInTheConversationsList:
+    def test_ctrl_space_selects_the_focused_chat(self):
         panel = _Panel(chats=[_chat("a@s.whatsapp.net"), _chat("b@s.whatsapp.net")], focused=1)
-        panel._on_conv_list_key_down(_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == {"b@s.whatsapp.net"}
         assert panel.main_window.announced == ["selected"]
         assert panel.selection_sound.plays == 1
 
-    def test_space_again_deselects_it(self):
+    def test_plain_space_does_not_select(self):
+        """Plain Space is left alone in the conversations list too, for
+        consistency with the messages list."""
         panel = _Panel(chats=[_chat("a@s.whatsapp.net")], focused=0)
-        panel._on_conv_list_key_down(_space())
-        panel._on_conv_list_key_down(_space())
+        event = _space()
+        panel._on_conv_list_key_down(event)
+        assert panel.selected_chats == set()
+        assert event.skipped
+
+    def test_ctrl_space_again_deselects_it(self):
+        panel = _Panel(chats=[_chat("a@s.whatsapp.net")], focused=0)
+        panel._on_conv_list_key_down(_ctrl_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == set()
         assert panel.main_window.announced == ["selected", "unselected"]
 
@@ -193,8 +244,8 @@ class TestSpaceInTheConversationsList:
         """The tone marks "now selected"; replaying it on removal would make
         the two states indistinguishable by ear."""
         panel = _Panel(chats=[_chat("a@s.whatsapp.net")], focused=0)
-        panel._on_conv_list_key_down(_space())
-        panel._on_conv_list_key_down(_space())
+        panel._on_conv_list_key_down(_ctrl_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selection_sound.plays == 1
 
     def test_several_chats_accumulate(self):
@@ -202,12 +253,12 @@ class TestSpaceInTheConversationsList:
         panel = _Panel(chats=chats)
         for i in (0, 2, 3):
             panel.conversations_list._focused = i
-            panel._on_conv_list_key_down(_space())
+            panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == {"0@s.whatsapp.net", "2@s.whatsapp.net", "3@s.whatsapp.net"}
 
-    def test_space_with_nothing_focused_is_a_no_op(self):
+    def test_ctrl_space_with_nothing_focused_is_a_no_op(self):
         panel = _Panel(chats=[_chat("a@s.whatsapp.net")], focused=-1)
-        panel._on_conv_list_key_down(_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == set()
         assert panel.main_window.announced == []
 
@@ -215,12 +266,12 @@ class TestSpaceInTheConversationsList:
         """The list can shrink under a stale focus index (a chat archived or
         deleted while the list was focused)."""
         panel = _Panel(chats=[_chat("a@s.whatsapp.net")], focused=7)
-        panel._on_conv_list_key_down(_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == set()
 
     def test_a_chat_with_no_jid_is_skipped(self):
         panel = _Panel(chats=[{"name": "sem jid"}], focused=0)
-        panel._on_conv_list_key_down(_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         assert panel.selected_chats == set()
 
     def test_the_selection_survives_the_list_being_reordered(self):
@@ -228,23 +279,61 @@ class TestSpaceInTheConversationsList:
         JIDs and not a set of indices."""
         chats = [_chat("a@s.whatsapp.net"), _chat("b@s.whatsapp.net")]
         panel = _Panel(chats=chats, focused=0)
-        panel._on_conv_list_key_down(_space())
+        panel._on_conv_list_key_down(_ctrl_space())
         panel.chats_list = list(reversed(chats))  # a new message re-sorts the list
         assert panel.selected_chats == {"a@s.whatsapp.net"}
 
+    def test_shift_down_extends_selection_and_moves_focus(self):
+        chats = [_chat("a@s.whatsapp.net"), _chat("b@s.whatsapp.net"), _chat("c@s.whatsapp.net")]
+        panel = _Panel(chats=chats, focused=0)
+        panel._on_conv_list_key_down(_shift_down())
+        assert panel.selected_chats == {"b@s.whatsapp.net"}
+        assert panel.conversations_list._focused == 1
 
-class TestSpaceInTheMessagesList:
-    def test_space_selects_the_focused_message(self):
+    def test_shift_end_selects_everything_below_and_jumps_to_the_last_row(self):
+        chats = [_chat(f"{i}@s.whatsapp.net") for i in range(4)]
+        panel = _Panel(chats=chats, focused=1)
+        panel._on_conv_list_key_down(_shift_end())
+        assert panel.selected_chats == {"1@s.whatsapp.net", "2@s.whatsapp.net", "3@s.whatsapp.net"}
+        assert panel.conversations_list._focused == 3
+
+    def test_shift_home_selects_everything_above_and_jumps_to_the_first_row(self):
+        chats = [_chat(f"{i}@s.whatsapp.net") for i in range(4)]
+        panel = _Panel(chats=chats, focused=2)
+        panel._on_conv_list_key_down(_shift_home())
+        assert panel.selected_chats == {"0@s.whatsapp.net", "1@s.whatsapp.net", "2@s.whatsapp.net"}
+        assert panel.conversations_list._focused == 0
+
+    def test_ctrl_shift_space_selects_everything_then_clears_on_repeat(self):
+        chats = [_chat(f"{i}@s.whatsapp.net") for i in range(3)]
+        panel = _Panel(chats=chats, focused=0)
+        panel._on_conv_list_key_down(_ctrl_shift_space())
+        assert panel.selected_chats == {"0@s.whatsapp.net", "1@s.whatsapp.net", "2@s.whatsapp.net"}
+        panel._on_conv_list_key_down(_ctrl_shift_space())
+        assert panel.selected_chats == set()
+
+
+class TestCtrlSpaceInTheMessagesList:
+    def test_ctrl_space_selects_the_focused_message(self):
         panel = _Panel(messages=[_msg("m1"), _msg("m2")], focused=1)
-        panel._on_messages_list_key_down(_space())
+        panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == {"m2"}
         assert panel.main_window.announced == ["selected"]
         assert panel.selection_sound.plays == 1
 
-    def test_space_again_deselects_it(self):
+    def test_plain_space_does_not_select(self):
+        """Plain Space is reserved for playing/pausing the focused audio or
+        video message — it must fall through here (Skip), not toggle."""
         panel = _Panel(messages=[_msg("m1")], focused=0)
-        panel._on_messages_list_key_down(_space())
-        panel._on_messages_list_key_down(_space())
+        event = _space()
+        panel._on_messages_list_key_down(event)
+        assert panel.selected_messages == set()
+        assert event.skipped
+
+    def test_ctrl_space_again_deselects_it(self):
+        panel = _Panel(messages=[_msg("m1")], focused=0)
+        panel._on_messages_list_key_down(_ctrl_space())
+        panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == set()
         assert panel.main_window.announced == ["selected", "unselected"]
 
@@ -254,33 +343,50 @@ class TestSpaceInTheMessagesList:
         key.id; every other handler guards on _is_separator for the same
         reason."""
         panel = _Panel(messages=[row], focused=0)
-        panel._on_messages_list_key_down(_space())
+        panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == set()
         assert panel.main_window.announced == []
 
     def test_a_message_with_no_id_is_skipped(self):
         panel = _Panel(messages=[{"key": {}, "message": {}}], focused=0)
-        panel._on_messages_list_key_down(_space())
+        panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == set()
 
-    def test_space_with_nothing_focused_is_a_no_op(self):
+    def test_ctrl_space_with_nothing_focused_is_a_no_op(self):
         panel = _Panel(messages=[_msg("m1")], focused=-1)
-        panel._on_messages_list_key_down(_space())
+        panel._on_messages_list_key_down(_ctrl_space())
         assert panel.selected_messages == set()
-
-    def test_shift_space_still_selects(self):
-        """Shift+<key> is intercepted first for playback seeking, but only for
-        the arrow/Home/End/PageUp/PageDown set. Space is not one of them, so a
-        Shift held over from seeking must not swallow the toggle."""
-        panel = _Panel(messages=[_msg("m1")], focused=0)
-        panel._on_messages_list_key_down(_FakeEvent(wx.WXK_SPACE, shift=True))
-        assert panel.selected_messages == {"m1"}
 
     def test_the_selection_survives_pagination_prepending_older_messages(self):
         panel = _Panel(messages=[_msg("m5"), _msg("m6")], focused=1)
-        panel._on_messages_list_key_down(_space())
+        panel._on_messages_list_key_down(_ctrl_space())
         panel._sorted_messages = [_msg("m1"), _msg("m2"), _msg("m5"), _msg("m6")]
         assert panel.selected_messages == {"m6"}
+
+    def test_shift_down_extends_selection_and_moves_focus(self):
+        panel = _Panel(messages=[_msg("m1"), _msg("m2"), _msg("m3")], focused=0)
+        panel._on_messages_list_key_down(_shift_down())
+        assert panel.selected_messages == {"m2"}
+        assert panel.messages_list._focused == 1
+
+    def test_shift_end_selects_everything_below_when_nothing_is_playing(self):
+        panel = _Panel(messages=[_msg("m1"), _msg("m2"), _msg("m3")], focused=1)
+        panel._on_messages_list_key_down(_shift_end())
+        assert panel.selected_messages == {"m2", "m3"}
+        assert panel.messages_list._focused == 2
+
+    def test_shift_home_selects_everything_above_when_nothing_is_playing(self):
+        panel = _Panel(messages=[_msg("m1"), _msg("m2"), _msg("m3")], focused=1)
+        panel._on_messages_list_key_down(_shift_home())
+        assert panel.selected_messages == {"m1", "m2"}
+        assert panel.messages_list._focused == 0
+
+    def test_ctrl_shift_space_selects_everything_then_clears_on_repeat(self):
+        panel = _Panel(messages=[_msg("m1"), _msg("m2")], focused=0)
+        panel._on_messages_list_key_down(_ctrl_shift_space())
+        assert panel.selected_messages == {"m1", "m2"}
+        panel._on_messages_list_key_down(_ctrl_shift_space())
+        assert panel.selected_messages == set()
 
 
 @pytest.fixture

@@ -23,7 +23,6 @@ import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from core.audio_devices import find_input_device_index, RECORDING_SAMPLE_CONFIGS
 from core.audio_transcode import transcode_m4a_to_wav
-from core.alert_tones import resolve_alert_tone_path
 from core.sound_system import load_sound
 from ui.accessible import (
     AccessibleSearchConversations,
@@ -43,7 +42,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
-from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag
+from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
 from app_paths import data_path
@@ -138,19 +137,13 @@ class ConversationsPanel(wx.Panel):
         self.selected_chats = set()
         self.selected_messages = set()
 
-        # Feedback tone for the Space-toggled selection in both lists. Resolved
-        # through the active soundpack (falling back to the default pack) like
-        # every other alert tone, rather than a hardcoded path — a pack that
-        # ships its own alerts/ folder overrides this one too. load_sound()
-        # returns a NullSound if nothing resolves, so the callers below never
-        # have to care whether it loaded.
+        # Feedback tone for the Ctrl+Space-toggled selection in both lists —
+        # the dedicated "selected" cue, not a generic alert tone. load_sound()
+        # returns a NullSound if the file can't be opened, so the callers
+        # below never have to care whether it loaded.
         self.selection_sound = load_sound(
             self.main_window.sound_system,
-            resolve_alert_tone_path(
-                self.main_window.get_active_sound_pack(),
-                self.main_window._default_sound_pack,
-                "alert_1",
-            ),
+            os.path.join("default", "selected.ogg"),
         )
 
         self.conversation = None
@@ -4261,13 +4254,59 @@ class ConversationsPanel(wx.Panel):
         list_ctrl.Select(target, True)
         list_ctrl.EnsureVisible(target)
 
+    # ── Selection helpers (messages list) ───────────────────────────────────
+
+    def _select_message_at(self, idx: int) -> bool:
+        """Add the message at *idx* to self.selected_messages, if it's a real
+        (non-separator) message with an id. Returns whether it was added."""
+        if not (0 <= idx < len(self._sorted_messages)):
+            return False
+        msg = self._sorted_messages[idx]
+        if self._is_separator(msg):
+            return False
+        msg_id = msg.get("key", {}).get("id", "")
+        if not msg_id or msg_id in self.selected_messages:
+            return False
+        self.selected_messages.add(msg_id)
+        return True
+
+    def _all_selectable_message_ids(self) -> list:
+        return [
+            msg_id
+            for m in self._sorted_messages
+            if not self._is_separator(m)
+            for msg_id in [m.get("key", {}).get("id", "")]
+            if msg_id
+        ]
+
+    def _refresh_message_rows_by_ids(self, msg_ids) -> None:
+        """Re-render specific rows (by message id) so the " selecionado"
+        marker _render_message_line() adds stays in sync after a selection
+        change — SetItemText only, no list rebuild/focus disruption."""
+        if not msg_ids:
+            return
+        ids = set(msg_ids)
+        total = len(self._sorted_messages)
+        for i, m in enumerate(self._sorted_messages):
+            if not self._is_separator(m) and m.get("key", {}).get("id") in ids:
+                self.messages_list.SetItemText(i, self._render_message_line(m, index=i, total=total))
+
     def _on_messages_list_key_down(self, event):
-        """Space toggles the focused row's membership in self.selected_messages
-        (the mass actions act on that set); activation stayed on Enter /
-        double-click — see _do_activate_message.
+        """Ctrl+Space toggles the focused row's membership in
+        self.selected_messages (the mass actions act on that set) — kept off
+        plain Space, which is reserved for playing/pausing the focused audio
+        or video message. Shift+Down extends the selection to the next row;
+        Shift+Home/Shift+End select every row above/below the focused one and
+        move focus to the first/last row (falling back to their previous
+        meaning — seeking the active playback to its start/end — whenever
+        something actually is playing); Ctrl+Shift+Space selects every
+        message, or clears the selection if everything is already selected.
+        Activation stayed on Enter / double-click — see _do_activate_message.
         Page Up / Page Down jump by a configurable number of messages (page_up_down_step setting).
         Trigger loading older messages on Arrow Up / Page Up when at the top (index 0)."""
         key = event.GetKeyCode()
+        ctrl = event.ControlDown()
+        shift = event.ShiftDown()
         idx = self.messages_list.GetFocusedItem()
         total = self.messages_list.GetItemCount()
         logging.info(f"[_on_messages_list_key_down] Key down: {key}, idx: {idx}, is_loading_more: {self._is_loading_more}, offset: {self._messages_offset}")
@@ -4279,15 +4318,14 @@ class ConversationsPanel(wx.Panel):
         except (ValueError, TypeError):
             step = 15
 
-        # Shift+arrow/PageUp/PageDown/Home/End seek the currently playing
-        # voice message or video instead of moving list focus (issue #17).
-        # Checked before the plain (unmodified) equivalents below, since
-        # Home/PageUp/PageDown already have their own unmodified meaning
-        # here (jump N messages / load older history).
-        if event.ShiftDown() and key in (
+        # Shift+arrow/PageUp/PageDown seek the currently playing voice
+        # message or video instead of moving list focus (issue #17). Checked
+        # before the plain (unmodified) equivalents below, since PageUp/
+        # PageDown already have their own unmodified meaning here (jump N
+        # messages / load older history).
+        if shift and key in (
             wx.WXK_LEFT, wx.WXK_NUMPAD_LEFT, wx.WXK_RIGHT, wx.WXK_NUMPAD_RIGHT,
             wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP, wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN,
-            wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END,
         ):
             if key in (wx.WXK_LEFT, wx.WXK_NUMPAD_LEFT):
                 self.seek_active_playback_by(-5)
@@ -4297,12 +4335,62 @@ class ConversationsPanel(wx.Panel):
                 self.seek_active_playback_by(-60)
             elif key in (wx.WXK_PAGEDOWN, wx.WXK_NUMPAD_PAGEDOWN):
                 self.seek_active_playback_by(60)
-            elif key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME):
-                self.seek_active_playback_to_edge(to_end=False)
-            elif key in (wx.WXK_END, wx.WXK_NUMPAD_END):
-                self.seek_active_playback_to_edge(to_end=True)
             return
-        if key == wx.WXK_SPACE:
+
+        # Shift+Home/Shift+End: seek to the very start/end of the active
+        # playback when something is actually playing (issue #17) — otherwise
+        # select every message above/below the focused row and move focus to
+        # the first/last row.
+        if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
+            to_end = key in (wx.WXK_END, wx.WXK_NUMPAD_END)
+            if self.seek_active_playback_to_edge(to_end=to_end):
+                return
+            if total > 0:
+                idx0 = idx if idx >= 0 else 0
+                lo, hi = (idx0, total - 1) if to_end else (0, idx0)
+                newly_selected = []
+                for i in range(lo, hi + 1):
+                    if self._select_message_at(i):
+                        newly_selected.append(self._sorted_messages[i].get("key", {}).get("id", ""))
+                target = total - 1 if to_end else 0
+                self.messages_list.Focus(target)
+                self.messages_list.Select(target, True)
+                self.messages_list.EnsureVisible(target)
+                if newly_selected:
+                    self._refresh_message_rows_by_ids(newly_selected)
+                    self.selection_sound.play()
+                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        # Shift+Down: extend the selection to the next row and move focus to it.
+        if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
+            target = (idx + 1) if idx >= 0 else 0
+            if target < total:
+                self.messages_list.Focus(target)
+                self.messages_list.Select(target, True)
+                self.messages_list.EnsureVisible(target)
+                if self._select_message_at(target):
+                    self._refresh_message_rows_by_ids([self._sorted_messages[target].get("key", {}).get("id", "")])
+                    self.selection_sound.play()
+                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        # Ctrl+Shift+Space: select every message, or clear the selection if
+        # everything selectable is already selected.
+        if ctrl and shift and key == wx.WXK_SPACE:
+            all_ids = self._all_selectable_message_ids()
+            if all_ids and all(mid in self.selected_messages for mid in all_ids):
+                self.selected_messages.clear()
+                self._refresh_message_rows_by_ids(all_ids)
+                self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+            elif all_ids:
+                self.selected_messages.update(all_ids)
+                self._refresh_message_rows_by_ids(all_ids)
+                self.selection_sound.play()
+                self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        if ctrl and not shift and key == wx.WXK_SPACE:
             if idx >= 0 and idx < len(self._sorted_messages):
                 msg = self._sorted_messages[idx]
                 if not self._is_separator(msg):
@@ -4310,9 +4398,11 @@ class ConversationsPanel(wx.Panel):
                     if msg_id:
                         if msg_id in self.selected_messages:
                             self.selected_messages.remove(msg_id)
+                            self._refresh_message_rows_by_ids([msg_id])
                             self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
                         else:
                             self.selected_messages.add(msg_id)
+                            self._refresh_message_rows_by_ids([msg_id])
                             self.selection_sound.play()
                             self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
@@ -4344,26 +4434,103 @@ class ConversationsPanel(wx.Panel):
             event.Skip()
 
 
+    # ── Selection helpers (conversations list) ──────────────────────────────
+
+    def _select_chat_at(self, idx: int) -> bool:
+        """Add the chat at *idx* to self.selected_chats. Returns whether it
+        was added (i.e. wasn't already selected)."""
+        if not (0 <= idx < len(self.chats_list)):
+            return False
+        jid = self.chats_list[idx].get("remoteJid", "")
+        if not jid or jid in self.selected_chats:
+            return False
+        self.selected_chats.add(jid)
+        return True
+
+    def _all_chat_jids(self) -> list:
+        return [c.get("remoteJid", "") for c in self.chats_list if c.get("remoteJid", "")]
+
+    def _bulk_shortcuts_enabled(self) -> bool:
+        """Settings > User Interface > "Substituir atalhos por ações em massa
+        ao selecionar conversas e mensagens" (default on). When enabled and a
+        selection exists, the single-item shortcuts (forward, save, clear,
+        delete, ...) act on the whole selection instead."""
+        return self.main_window.settings.get("user_interface", {}).get(
+            "bulk_action_shortcuts", True
+        )
+
     def _on_conv_list_key_down(self, event):
-        """Space toggles the focused chat's membership in self.selected_chats
-        (the mass actions act on that set); opening a conversation stayed on
-        Enter / double-click.
+        """Ctrl+Space toggles the focused chat's membership in
+        self.selected_chats (the mass actions act on that set) — kept off
+        plain Space for consistency with the messages list. Shift+Down
+        extends the selection to the next row; Shift+Home/Shift+End select
+        every row above/below the focused one and move focus to the
+        first/last row; Ctrl+Shift+Space selects every chat, or clears the
+        selection if everything is already selected. Opening a conversation
+        stayed on Enter / double-click.
         Ctrl+P pins/unpins, Ctrl+Shift+Q archives/unarchives."""
         key   = event.GetKeyCode()
         ctrl  = event.ControlDown()
         shift = event.ShiftDown()
+        idx   = self.conversations_list.GetFocusedItem()
+        total = len(self.chats_list)
 
-        if key == wx.WXK_SPACE:
-            idx = self.conversations_list.GetFocusedItem()
+        if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
+            target = (idx + 1) if idx >= 0 else 0
+            if target < total:
+                self.conversations_list.Focus(target)
+                self.conversations_list.Select(target, True)
+                self.conversations_list.EnsureVisible(target)
+                if self._select_chat_at(target):
+                    self.main_window.add_chats_to_ui()
+                    self.selection_sound.play()
+                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
+            to_end = key in (wx.WXK_END, wx.WXK_NUMPAD_END)
+            if total > 0:
+                idx0 = idx if idx >= 0 else 0
+                lo, hi = (idx0, total - 1) if to_end else (0, idx0)
+                selected_any = False
+                for i in range(lo, hi + 1):
+                    if self._select_chat_at(i):
+                        selected_any = True
+                target = total - 1 if to_end else 0
+                self.conversations_list.Focus(target)
+                self.conversations_list.Select(target, True)
+                self.conversations_list.EnsureVisible(target)
+                if selected_any:
+                    self.main_window.add_chats_to_ui()
+                    self.selection_sound.play()
+                    self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        if ctrl and shift and key == wx.WXK_SPACE:
+            all_jids = self._all_chat_jids()
+            if all_jids and all(j in self.selected_chats for j in all_jids):
+                self.selected_chats.clear()
+                self.main_window.add_chats_to_ui()
+                self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+            elif all_jids:
+                self.selected_chats.update(all_jids)
+                self.main_window.add_chats_to_ui()
+                self.selection_sound.play()
+                self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+            return
+
+        if ctrl and not shift and key == wx.WXK_SPACE:
             if idx >= 0 and idx < len(self.chats_list):
                 chat = self.chats_list[idx]
                 jid = chat.get("remoteJid", "")
                 if jid:
                     if jid in self.selected_chats:
                         self.selected_chats.remove(jid)
+                        self.main_window.add_chats_to_ui()
                         self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
                     else:
                         self.selected_chats.add(jid)
+                        self.main_window.add_chats_to_ui()
                         self.selection_sound.play()
                         self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
         elif key in (wx.WXK_PAGEUP, wx.WXK_NUMPAD_PAGEUP):
@@ -4770,6 +4937,9 @@ class ConversationsPanel(wx.Panel):
         return re.sub(r'[\\/*?:"<>|]', '_', default_file).strip()
 
     def _on_action_save_as(self, event):
+        if self._bulk_shortcuts_enabled() and self.selected_messages:
+            self._on_mass_save_messages(event)
+            return
         index = self.messages_list.GetFirstSelected()
         if index < 0 or index >= len(self._sorted_messages):
             return
@@ -6761,7 +6931,12 @@ class ConversationsPanel(wx.Panel):
             if index is not None and total is not None and total > 0:
                 pieces.append(f", {index + 1} {i18n.t('of')} {total}")
 
-        return " ".join(pieces)
+        line = " ".join(pieces)
+        is_selected = bool(msg_id) and msg_id in getattr(self, "selected_messages", ())
+        position = self.main_window.settings.get("user_interface", {}).get(
+            "selected_announcement_position", "end"
+        )
+        return append_selected_marker(line, i18n.t("selected_suffix"), position, is_selected)
 
     # ── Download progress ───────────────────────────────────────────────────
 
@@ -8286,11 +8461,17 @@ class ConversationsPanel(wx.Panel):
             self._on_menu_reply(self._sorted_messages[index])
 
     def _on_accel_forward(self, event):
+        if self._bulk_shortcuts_enabled() and self.selected_messages:
+            self._on_mass_forward_messages(event)
+            return
         index = self.messages_list.GetFirstSelected()
         if 0 <= index < len(self._sorted_messages):
             self._on_menu_forward(self._sorted_messages[index])
 
     def _on_accel_delete_message(self, event):
+        if self._bulk_shortcuts_enabled() and self.selected_messages:
+            self._on_mass_delete_messages(event)
+            return
         index = self.messages_list.GetFirstSelected()
         if index >= 0:
             self._on_menu_delete_message(index)
@@ -8344,7 +8525,12 @@ class ConversationsPanel(wx.Panel):
                 self._on_menu_star(msg)
 
     def _on_accel_delete_conv(self, event):
-        """Delete (in chat list): delete the focused conversation."""
+        """Delete (in chat list): delete the focused conversation, or every
+        selected conversation when a bulk selection exists (see
+        _bulk_shortcuts_enabled)."""
+        if self._bulk_shortcuts_enabled() and self.selected_chats:
+            self._on_mass_delete_chats(event)
+            return
         chat = self._selected_chat_from_list()
         if chat:
             jid = chat.get("remoteJid", "")
@@ -8365,6 +8551,16 @@ class ConversationsPanel(wx.Panel):
             self._show_conversation_data(chat=chat)
 
     def _on_accel_toggle_read_list(self, event):
+        if self._bulk_shortcuts_enabled() and self.selected_chats:
+            first_jid = next(iter(self.selected_chats))
+            first_chat = next(
+                (c for c in self.chats_list if c.get("remoteJid", "") == first_jid), None
+            )
+            if first_chat and int(first_chat.get("unreadCount") or 0) > 0:
+                self._on_mass_mark_read_chats(event)
+            else:
+                self._on_mass_mark_unread_chats(event)
+            return
         chat = self._selected_chat_from_list()
         if not chat:
             return
@@ -8395,6 +8591,9 @@ class ConversationsPanel(wx.Panel):
         self._on_menu_block(chat, jid, self.main_window.is_contact_blocked(jid))
 
     def _on_accel_clear_list(self, event):
+        if self._bulk_shortcuts_enabled() and self.selected_chats:
+            self._on_mass_clear_chats(event)
+            return
         chat = self._selected_chat_from_list()
         if chat:
             jid = chat.get("remoteJid", "")
@@ -8402,6 +8601,12 @@ class ConversationsPanel(wx.Panel):
                 self._on_menu_clear_chat(jid)
 
     def _on_accel_archive_list(self, event):
+        # No bulk "unarchive" action exists in the mass-actions submenu, so
+        # the shortcut always archives when a selection exists — matching
+        # what "Ações em massa > Arquivar conversas selecionadas" does.
+        if self._bulk_shortcuts_enabled() and self.selected_chats:
+            self._on_mass_archive_chats(event)
+            return
         chat = self._selected_chat_from_list()
         if not chat:
             return
@@ -10312,6 +10517,7 @@ class ConversationsPanel(wx.Panel):
         for jid in list(self.selected_chats):
             self.main_window.clear_chat(jid)
         self.selected_chats.clear()
+        self.main_window.add_chats_to_ui()
         self.main_window.output(i18n.t("success_clear"), interrupt=True)
 
     def _on_mass_delete_chats(self, event):
@@ -10322,6 +10528,7 @@ class ConversationsPanel(wx.Panel):
         for jid in list(self.selected_chats):
             self.main_window.delete_chat(jid)
         self.selected_chats.clear()
+        self.main_window.add_chats_to_ui()
         self.main_window.output(i18n.t("success_delete"), interrupt=True)
 
     def _on_mass_archive_chats(self, event):
@@ -10330,6 +10537,7 @@ class ConversationsPanel(wx.Panel):
         for jid in list(self.selected_chats):
             self.main_window.archive_chat(jid, True)
         self.selected_chats.clear()
+        self.main_window.add_chats_to_ui()
         self.main_window.output(i18n.t("success_archive"), interrupt=True)
 
     def _on_mass_mark_read_chats(self, event):
@@ -10337,12 +10545,14 @@ class ConversationsPanel(wx.Panel):
         for jid in list(self.selected_chats):
             self.main_window.mark_conversation_as_read(jid, True)
         self.selected_chats.clear()
+        self.main_window.add_chats_to_ui()
 
     def _on_mass_mark_unread_chats(self, event):
         if not self.selected_chats: return
         for jid in list(self.selected_chats):
             self.main_window.mark_conversation_as_unread(jid)
         self.selected_chats.clear()
+        self.main_window.add_chats_to_ui()
 
     def _on_mass_forward_messages(self, event):
         if not self.selected_messages: return
@@ -10352,7 +10562,9 @@ class ConversationsPanel(wx.Panel):
                 msgs_to_forward.append(m)
         if msgs_to_forward:
             self._on_menu_forward(msgs_to_forward[0], msgs_list=msgs_to_forward)
+        forwarded_ids = list(self.selected_messages)
         self.selected_messages.clear()
+        self._refresh_message_rows_by_ids(forwarded_ids)
         self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
 
     def _on_mass_save_messages(self, event):
@@ -10361,7 +10573,9 @@ class ConversationsPanel(wx.Panel):
             msg = next((m for m in self._sorted_messages if not self._is_separator(m) and m.get("key", {}).get("id") == msg_id), None)
             if msg:
                 self._on_menu_save(msg)
+        saved_ids = list(self.selected_messages)
         self.selected_messages.clear()
+        self._refresh_message_rows_by_ids(saved_ids)
 
     def _on_mass_delete_messages(self, event):
         i18n = self.main_window.i18n
