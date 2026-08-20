@@ -358,10 +358,16 @@ class TestTheWiringInsideForwardMessage:
         )
 
     def test_a_failed_forward_gives_the_expectation_back(self):
-        """Two exits — a non-2xx answer and a raised exception — and both must
-        drop it, or the next media message in that chat inherits a length
-        from something that never arrived."""
-        assert self._source().count("_forget_forwarded_duration(") >= 2
+        """A non-2xx answer and a raised exception both fall through to the
+        same forget-call once the retry loop gives up on both attempts — the
+        next media message in that chat must not inherit a length from
+        something that never arrived."""
+        src = self._source()
+        assert "_forget_forwarded_duration(" in src
+        # Must fire only after retries are exhausted, not on every attempt —
+        # forgetting mid-retry would drop the expectation before the retry
+        # even had a chance to succeed.
+        assert src.rindex("_forget_forwarded_duration(") > src.rindex("time.sleep(")
 
     def test_the_echo_path_applies_it(self):
         import inspect

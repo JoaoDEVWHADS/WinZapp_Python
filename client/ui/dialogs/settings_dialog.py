@@ -424,6 +424,13 @@ class SettingsDialog(wx.Dialog):
             self._bulk_action_shortcuts_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
         )
 
+        self._auto_focus_next_audio_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_auto_focus_next_audio")
+        )
+        ui_sizer.Add(
+            self._auto_focus_next_audio_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
         self._selected_announce_box = wx.StaticBox(
             self._ui_page, label=i18n.t("ui_selected_announce_position_label")
         )
@@ -849,6 +856,11 @@ class SettingsDialog(wx.Dialog):
             "bulk_action_shortcuts", True
         )
         self._bulk_action_shortcuts_cb.SetValue(bool(bulk_action_shortcuts))
+
+        auto_focus_next_audio = self.main_window.settings.get("user_interface", {}).get(
+            "auto_focus_next_audio", True
+        )
+        self._auto_focus_next_audio_cb.SetValue(bool(auto_focus_next_audio))
 
         selected_announce_position = self.main_window.settings.get("user_interface", {}).get(
             "selected_announcement_position", "end"
@@ -1555,6 +1567,9 @@ class SettingsDialog(wx.Dialog):
             "bulk_action_shortcuts"
         ] = self._bulk_action_shortcuts_cb.GetValue()
         self.main_window.settings.setdefault("user_interface", {})[
+            "auto_focus_next_audio"
+        ] = self._auto_focus_next_audio_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
             "selected_announcement_position"
         ] = "start" if self._selected_announce_start_rb.GetValue() else "end"
         if new_message_list_mode != old_message_list_mode:
@@ -1840,6 +1855,7 @@ class SettingsDialog(wx.Dialog):
         self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
         self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
         self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
+        self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))
         self._selected_announce_box.SetLabel(i18n.t("ui_selected_announce_position_label"))
         self._selected_announce_start_rb.SetLabel(i18n.t("ui_selected_announce_position_start"))
         self._selected_announce_end_rb.SetLabel(i18n.t("ui_selected_announce_position_end"))

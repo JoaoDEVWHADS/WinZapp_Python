@@ -35,10 +35,12 @@ class _Stub:
         self.wpp_port = 6300
         self.token = "session:key"
         self.status_update_calls = []
+        self.defer_ui_refresh_ms_calls = []
         self.conversations_panel = type("P", (), {"conversation": None})()
 
-    def on_message_status_update(self, update):
+    def on_message_status_update(self, update, defer_ui_refresh_ms=0):
         self.status_update_calls.append(update)
+        self.defer_ui_refresh_ms_calls.append(defer_ui_refresh_ms)
 
 
 def _received_audio_msg(msg_id="ABC123", remote_jid="5521999999999@s.whatsapp.net"):
@@ -102,6 +104,18 @@ class TestMarkAudioMessagePlayed:
 
         assert stub.status_update_calls[0]["key"]["remoteJid"] == "5521888888888@s.whatsapp.net"
         assert sent == ["5521888888888@s.whatsapp.net"]
+
+    def test_defer_ui_refresh_ms_is_passed_through_to_the_status_update(self, monkeypatch):
+        """Set by the caller (ConversationsPanel.on_audio_timer()) whenever
+        this voice note is about to auto-chain into the next one — see
+        on_message_status_update()'s own docstring for why the row refresh
+        needs to be delayed in that case."""
+        stub = _Stub()
+        monkeypatch.setattr(stub, "_send_mark_played_request", lambda *a, **k: None)
+
+        stub.mark_audio_message_played(_received_audio_msg(), defer_ui_refresh_ms=300)
+
+        assert stub.defer_ui_refresh_ms_calls == [300]
 
     def test_no_message_id_is_a_no_op(self, monkeypatch):
         stub = _Stub()

@@ -642,7 +642,7 @@ class TestMassMessageActions:
         panel.selected_messages = {"m1"}
         panel._on_mass_save_messages(None)
         assert panel.saved == []
-        assert panel.main_window.announced == ["save_as_nothing_to_save"]
+        assert panel.main_window.announced == ["save_as_nothing_to_save_bulk"]
 
     def test_declining_the_folder_picker_saves_nothing(self, monkeypatch):
         class _CancelledDirDialog:

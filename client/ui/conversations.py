@@ -5182,6 +5182,31 @@ class ConversationsPanel(wx.Panel):
 
     # ── Audio / video playback ──────────────────────────────────────────────
 
+    def toggle_current_audio_playback(self):
+        """Ctrl+Alt+Shift+P: pause/resume whatever voice or audio message is
+        currently loaded, without needing a specific message/row — unlike
+        _toggle_playback(), which always needs one to know what to switch
+        TO. A no-op when nothing is loaded (nothing paused, nothing to
+        resume)."""
+        if self._current_audio_id is None or self._audio_stream is None:
+            return
+        _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+        if self._is_audio_playing:
+            try:
+                _ctrl.pause()
+            except Exception:
+                pass
+            self._is_audio_playing = False
+            self._audio_timer.Stop()
+        else:
+            try:
+                _ctrl.play()
+            except Exception:
+                self._stop_audio()
+                return
+            self._is_audio_playing = True
+            self._audio_timer.Start(30)
+
     def _toggle_playback(self, msg_id, duration_seconds, msg, file_path, audio_ext):
         """
         Generic play/pause toggle for both audio messages (voice_messages/)
@@ -5540,7 +5565,15 @@ class ConversationsPanel(wx.Panel):
                     # too. See MainWindow.mark_audio_message_played()'s own
                     # docstring for why this never applies to our own sends.
                     if finished_msg is not None:
-                        self.main_window.mark_audio_message_played(finished_msg)
+                        will_chain = bool(finished_id) and self._next_message_is_chainable_audio(finished_id)
+                        self.main_window.mark_audio_message_played(
+                            finished_msg,
+                            # See mark_audio_message_played()'s own docstring:
+                            # long enough to land after _auto_chain_next_audio's
+                            # two chained 100ms wx.CallLater steps have already
+                            # moved focus onto the next voice note.
+                            defer_ui_refresh_ms=300 if will_chain else 0,
+                        )
                     # Try to auto-play the next consecutive audio message
                     if finished_id:
                         self._auto_chain_next_audio(finished_id)
@@ -5566,6 +5599,34 @@ class ConversationsPanel(wx.Panel):
                 except Exception:
                     pass
                 setattr(self, attr, None)
+
+    def _next_message_is_chainable_audio(self, finished_id: str) -> bool:
+        """Read-only peek at what _auto_chain_next_audio(finished_id) is
+        about to do: True if it will auto-play a next voice note and move
+        list focus onto it. Mirrors that method's own eligibility checks
+        without any side effect — used by on_audio_timer() to decide whether
+        the "played" row refresh for finished_id needs to be delayed (see
+        the call site's comment)."""
+        current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if current_jid != self._audio_conv_jid:
+            return False
+        current_idx = -1
+        finished_msg = None
+        for i, msg in enumerate(self._sorted_messages):
+            if not self._is_separator(msg) and msg.get("key", {}).get("id") == finished_id:
+                current_idx = i
+                finished_msg = msg
+                break
+        if current_idx < 0 or finished_msg is None or not self._is_voice_message(finished_msg):
+            return False
+        next_idx = current_idx + 1
+        while next_idx < len(self._sorted_messages):
+            candidate = self._sorted_messages[next_idx]
+            if self._is_separator(candidate):
+                next_idx += 1
+                continue
+            return candidate.get("messageType") == "audioMessage" and self._is_voice_message(candidate)
+        return False
 
     def _auto_chain_next_audio(self, finished_id: str):
         """
@@ -5636,9 +5697,16 @@ class ConversationsPanel(wx.Panel):
                     # EXCLUSIVELY focused on the audio that just finished
                     # playing (current_idx). If they've moved focus one row
                     # above/below (or anywhere else) while listening, keep the
-                    # chain playing but never steal their focus back.
+                    # chain playing but never steal their focus back. And
+                    # regardless of that, respect the user's own preference
+                    # (Settings > Interface) to never have the chain move
+                    # focus at all — audio keeps auto-advancing either way,
+                    # this only controls whether the list selection follows it.
+                    auto_focus = self.main_window.settings.get("user_interface", {}).get(
+                        "auto_focus_next_audio", True
+                    )
                     current_focus = self.messages_list.GetFocusedItem()
-                    if current_focus == current_idx:
+                    if auto_focus and current_focus == current_idx:
                         self.messages_list.Focus(target_idx)
                         self.messages_list.Select(target_idx, True)
                         self.messages_list.EnsureVisible(target_idx)
@@ -6810,6 +6878,8 @@ class ConversationsPanel(wx.Panel):
             return j.rsplit("@", 1)[0].split(":")[0]
 
         participant = ctx.get("participant", "")
+        conv = self.conversation or {}
+        is_group = conv.get("remoteJid", "").endswith("@g.us")
 
         if not participant:
             # Fast path: use local hint set when building virtual reply message.
@@ -6819,27 +6889,46 @@ class ConversationsPanel(wx.Panel):
                     or (self.conversation or {}).get("pushName", "")
                     or ""
                 )
-            # 1:1 chat: Baileys leaves participant empty; resolve by stanzaId lookup.
+            # Baileys leaves participant empty for 1:1 replies — there the
+            # quote is unambiguously either "me" or "the other party in this
+            # chat", both resolvable from the conversation itself. A GROUP
+            # reply with no participant (seen live from the WPPConnect API's
+            # own contextInfo normalization — see _get_context_info()'s
+            # docstring for the same layer's history of dropping/mangling
+            # this data) carries no such guarantee: guessing "the reply must
+            # be to me" here is exactly how a reply to a THIRD member of the
+            # group rendered live as "respondendo a Eu" — confirmed wrong by
+            # "go to quoted message" landing on that third member's message,
+            # not the user's own. So a group reply always resolves the
+            # quoted message's OWN recorded sender instead of guessing.
             stanza_id = ctx.get("stanzaId", "")
             if stanza_id:
                 for m in self._sorted_messages:
                     if m.get("key", {}).get("id") == stanza_id:
                         if m.get("key", {}).get("fromMe", False):
                             return mw.self_reference_label()
-                        # Not fromMe → the other party in the conversation
-                        conv = self.conversation or {}
+                        if is_group:
+                            m_participant = m.get("key", {}).get("participant") or m.get("participant") or ""
+                            if m_participant:
+                                return self._get_participant_name(m_participant, m)
+                            break  # no sender on record either — fall through to "unknown"
+                        # 1:1: not fromMe → the other party in the conversation
                         remote = conv.get("remoteJid", "")
                         return (
                             mw._resolve_contact_name(conv)
                             or conv.get("pushName", "")
                             or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
                         )
-            # Fallback when the quoted message is not in local _sorted_messages:
-            # In a 1:1 chat, if I sent this reply, I am replying to the other party.
+            if is_group:
+                # No participant in contextInfo AND the quoted message isn't
+                # loaded locally to look its sender up — genuinely unknown,
+                # so say so rather than defaulting to "Eu" or the group name.
+                return i18n.t("unnamed_participant")
+            # 1:1 fallback when the quoted message is not in local _sorted_messages:
+            # if I sent this reply, I am replying to the other party.
             # If the other party sent this reply, they are replying to me ("você").
             from_me = msg.get("key", {}).get("fromMe", False)
             if from_me:
-                conv = self.conversation or {}
                 remote = conv.get("remoteJid", "")
                 return (
                     mw._resolve_contact_name(conv)
@@ -7870,6 +7959,10 @@ class ConversationsPanel(wx.Panel):
         import ctypes
         mw   = self.main_window
         i18n = mw.i18n
+        dlg_label = (
+            i18n.t("forward_selected_messages_title") if len(msgs_to_forward) > 1
+            else i18n.t("forward_message")
+        )
 
         # ── Collect available conversations ───────────────────────────────────
         all_chats, all_names = self._forward_target_chats(mw)
@@ -7879,7 +7972,7 @@ class ConversationsPanel(wx.Panel):
         # ── Build a simple picker dialog ──────────────────────────────────────
         dlg = wx.Dialog(
             self,
-            title=i18n.t("forward_message"),
+            title=dlg_label,
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
             size=(400, 480),
         )
@@ -8082,7 +8175,14 @@ class ConversationsPanel(wx.Panel):
 
         def _do_forward():
             failed_names = set()
-            for m in msgs_to_forward:
+            for i, m in enumerate(msgs_to_forward):
+                # A short gap between messages when forwarding several at
+                # once: back-to-back forwardMessagesV2 calls with no pause
+                # are the trigger for the transient failure forward_message()
+                # retries against (see its own comment) — spacing them out
+                # here means most of the time the retry never has to fire.
+                if i > 0:
+                    time.sleep(0.4)
                 msg_key = m.get("key", {}) or {}
                 source_jid = msg_key.get("remoteJid") or (self.conversation.get("remoteJid", "") if self.conversation else "")
                 if not source_jid or not msg_key.get("id"):
@@ -10662,7 +10762,7 @@ class ConversationsPanel(wx.Panel):
                 msgs.append(msg)
 
         if not msgs:
-            self.main_window.output(i18n.t("save_as_nothing_to_save"), interrupt=True)
+            self.main_window.output(i18n.t("save_as_nothing_to_save_bulk"), interrupt=True)
             return
 
         with wx.DirDialog(

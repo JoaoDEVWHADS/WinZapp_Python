@@ -6243,6 +6243,7 @@ class MainWindow(wx.Frame):
         self.ID_CTRL_COMMA = wx.NewIdRef()
         self.ID_F1         = wx.NewIdRef()
         self.ID_ALT_T      = wx.NewIdRef()
+        self.ID_CTRL_ALT_SHIFT_P = wx.NewIdRef()
 
         # navigation_panel's "&Navegação principal" label mnemonic is meant
         # to redirect Alt+N to nav_list, but that native StaticText-mnemonic
@@ -6269,6 +6270,7 @@ class MainWindow(wx.Frame):
             (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
             (wx.ACCEL_NORMAL, wx.WXK_F1,  self.ID_F1),
             (wx.ACCEL_ALT,    ord('T'),    self.ID_ALT_T),
+            (wx.ACCEL_CTRL | wx.ACCEL_ALT | wx.ACCEL_SHIFT, ord('P'), self.ID_CTRL_ALT_SHIFT_P),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_alt_1,       id=self.ID_ALT_1)
@@ -6280,6 +6282,7 @@ class MainWindow(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
         self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
         self.Bind(wx.EVT_MENU, self._on_global_alt_t, id=self.ID_ALT_T)
+        self.Bind(wx.EVT_MENU, self._on_global_toggle_audio_playback, id=self.ID_CTRL_ALT_SHIFT_P)
 
     def _on_alt_nav(self, event):
         """Alt+N (or the localized equivalent): focus the main navigation list."""
@@ -14471,11 +14474,16 @@ class MainWindow(wx.Frame):
                 wx.OK | wx.ICON_ERROR,
             )
 
-    def on_message_status_update(self, update: dict):
+    def on_message_status_update(self, update: dict, defer_ui_refresh_ms: int = 0):
         """
         Handle a messages.update WebSocket event on the main thread.
         Updates MessageUpdate list on the cached message record and refreshes
         the status icon shown in the active conversation.
+
+        defer_ui_refresh_ms: delay the visible row refresh instead of firing
+        it immediately. Used only by mark_audio_message_played() when a voice
+        note's auto-chain is about to move list focus to the next one — see
+        that method's own docstring for why.
         """
         key       = update.get("key", {})
         msg_id    = key.get("id", "")
@@ -14568,7 +14576,10 @@ class MainWindow(wx.Frame):
             pass
 
         if hasattr(self, "conversations_panel"):
-            self.conversations_panel.refresh_message_status(msg_id, status)
+            if defer_ui_refresh_ms > 0:
+                wx.CallLater(defer_ui_refresh_ms, self.conversations_panel.refresh_message_status, msg_id, status)
+            else:
+                self.conversations_panel.refresh_message_status(msg_id, status)
 
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
@@ -14697,6 +14708,18 @@ class MainWindow(wx.Frame):
                 pass
 
         return self.i18n.t("presence_unavailable")
+
+    def _on_global_toggle_audio_playback(self, event):
+        """Ctrl+Alt+Shift+P: pause/resume whichever voice or audio message is
+        currently loaded in the player, from anywhere in the window —
+        regardless of which conversation it belongs to or which one is open.
+        Playback state (self._audio_stream etc.) lives on the single
+        conversations_panel instance, not per-conversation, so this works
+        even while looking at a different conversation than the one playing.
+        """
+        cp = getattr(self, "conversations_panel", None)
+        if cp is not None:
+            cp.toggle_current_audio_playback()
 
     def _on_global_alt_t(self, event):
         """Alt+T: announce the current/selected conversation's presence
@@ -17788,20 +17811,32 @@ class MainWindow(wx.Frame):
         # it is the echo that gets stored and rendered (see
         # _expect_forwarded_duration).
         duration_token = self._expect_forwarded_duration(target_jid, source_msg)
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=20)
-            if r.status_code in (200, 201):
-                logging.info("[forward_message] forwarded %s -> %s (duration expected: %s)",
-                             full_id, target_phone, duration_token is not None)
-                return True
-            logging.error("[forward_message] HTTP %s for %s -> %s: %s",
-                          r.status_code, full_id, target_phone, r.text[:300])
-            self._forget_forwarded_duration(duration_token)
-            return False
-        except Exception as exc:
-            logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
-            self._forget_forwarded_duration(duration_token)
-            return False
+
+        # forwardMessagesV2 drives WhatsApp Web's own Puppeteer-side Store the
+        # same way a live user forward does. Fired back-to-back for several
+        # messages selected at once (mass forward), the very next call can
+        # land before the Store has settled from the previous one and the
+        # server answers with a transient error even though nothing is
+        # actually wrong — reported live as forwarding several messages at
+        # once failing where forwarding one at a time never does. One retry
+        # after a short pause clears this in practice; a failure that
+        # survives the retry is treated as real.
+        for attempt in range(2):
+            try:
+                r = requests.post(url, json=payload, headers=headers, timeout=20)
+                if r.status_code in (200, 201):
+                    logging.info("[forward_message] forwarded %s -> %s (duration expected: %s)%s",
+                                 full_id, target_phone, duration_token is not None,
+                                 " (after retry)" if attempt else "")
+                    return True
+                logging.error("[forward_message] HTTP %s for %s -> %s: %s",
+                              r.status_code, full_id, target_phone, r.text[:300])
+            except Exception as exc:
+                logging.error("[forward_message] exception for %s -> %s: %s", full_id, target_phone, exc)
+            if attempt == 0:
+                time.sleep(0.6)
+        self._forget_forwarded_duration(duration_token)
+        return False
 
     def resend_media_message_with_caption(self, msg: dict, target_jid: str) -> bool:
         """Forward a media message by re-sending it as a new file upload,
@@ -17887,7 +17922,7 @@ class MainWindow(wx.Frame):
             logging.error(f"[resend_media] Error decrypting or sending {msg_id}: {exc}")
             return False
 
-    def mark_audio_message_played(self, msg: dict):
+    def mark_audio_message_played(self, msg: dict, defer_ui_refresh_ms: int = 0):
         """Mark a received voice message as played, both locally (the
         status icon in the message list, same as a "played" receipt
         arriving over the WebSocket) and for real, via a played receipt
@@ -17899,6 +17934,15 @@ class MainWindow(wx.Frame):
         sent ourselves: "played" only ever legitimately reflects the
         RECIPIENT's own playback, which for our own sends already arrives
         the normal way via on_message_status_update()/messages.update.
+
+        defer_ui_refresh_ms: passed straight through to
+        on_message_status_update() — see its docstring. The caller sets
+        this whenever this same voice note is about to auto-chain into the
+        next one, so the "now played" row refresh (which NVDA announces as
+        a change on the still-focused finished row) doesn't land just
+        before the chain moves focus onto the next message — the two
+        announcements would otherwise queue back to back and the user hears
+        the stale one first every time.
         """
         key = msg.get("key", {}) or {}
         if key.get("fromMe", False):
@@ -17916,7 +17960,7 @@ class MainWindow(wx.Frame):
         self.on_message_status_update({
             "key": {"id": msg_id, "remoteJid": remote_jid},
             "status": "5",
-        })
+        }, defer_ui_refresh_ms=defer_ui_refresh_ms)
         threading.Thread(
             target=self._send_mark_played_request,
             args=(remote_jid, dict(key)),
