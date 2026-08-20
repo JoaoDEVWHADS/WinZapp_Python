@@ -840,7 +840,7 @@
     "status_view_reactions": "Zobacz reakcje",
     "status_no_reactions": "Brak reakcji.",
     "ui_self_reference_eu": "Ja",
-    "forward_multiselect_hint": "Spacja: zaznacz/odznacz kontakt. Shift+Spacja: zaznacz/odznacz wszystkie. Bez zaznaczenia wiadomość trafia do kontaktu w fokusie.",
+    "forward_multiselect_hint": "Ctrl+Spacja: zaznacz/odznacz kontakt. Ctrl+Shift+Spacja: zaznacz/odznacz wszystkie. Bez zaznaczenia wiadomość trafia do kontaktu w fokusie.",
     "forward_selected_messages_title": "Przekaż zaznaczone wiadomości",
     "selected": "Zaznaczony",
     "selected_suffix": "zaznaczony",

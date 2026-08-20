@@ -840,7 +840,7 @@
     "status_view_reactions": "View reactions",
     "status_no_reactions": "No reactions yet.",
     "ui_self_reference_eu": "Me",
-    "forward_multiselect_hint": "Space: select/deselect contact. Shift+Space: select/deselect all. With nothing selected, forwards to the focused contact.",
+    "forward_multiselect_hint": "Ctrl+Space: select/deselect contact. Ctrl+Shift+Space: select/deselect all. With nothing selected, forwards to the focused contact.",
     "forward_selected_messages_title": "Forward selected messages",
     "selected": "Selected",
     "selected_suffix": "selected",

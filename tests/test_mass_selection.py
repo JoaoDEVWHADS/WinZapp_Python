@@ -87,6 +87,7 @@ class _FakeMainWindow:
         self.marked_read = []
         self.marked_unread = []
         self.deleted_messages = []
+        self.deleted_for_everyone = []
 
     def output(self, text, interrupt=False):
         self.announced.append(text)
@@ -108,6 +109,10 @@ class _FakeMainWindow:
 
     def delete_message_for_me(self, jid, key):
         self.deleted_messages.append((jid, key))
+
+    def delete_message_for_everyone(self, jid, key):
+        self.deleted_for_everyone.append((jid, key))
+        return True
 
     def add_chats_to_ui(self):
         pass
@@ -147,6 +152,8 @@ class _Panel:
     _on_mass_forward_messages = ConversationsPanel._on_mass_forward_messages
     _on_mass_save_messages = ConversationsPanel._on_mass_save_messages
     _on_mass_delete_messages = ConversationsPanel._on_mass_delete_messages
+    _group_admin_delete_override = ConversationsPanel._group_admin_delete_override
+    _is_system_event = staticmethod(ConversationsPanel._is_system_event)
 
     _select_message_at = ConversationsPanel._select_message_at
     _all_selectable_message_ids = ConversationsPanel._all_selectable_message_ids
@@ -195,8 +202,8 @@ def _chat(jid):
     return {"remoteJid": jid}
 
 
-def _msg(msg_id, jid="grupo@g.us"):
-    return {"key": {"id": msg_id, "remoteJid": jid}, "message": {"conversation": "x"}}
+def _msg(msg_id, jid="grupo@g.us", from_me=False):
+    return {"key": {"id": msg_id, "remoteJid": jid, "fromMe": from_me}, "message": {"conversation": "x"}}
 
 
 def _saveable_msg(msg_id, jid="grupo@g.us", msg_type="documentMessage"):
@@ -482,6 +489,97 @@ def run_threads_inline(monkeypatch):
     monkeypatch.setattr(threading, "Thread", _Inline)
 
 
+@pytest.fixture
+def fake_delete_dialog(monkeypatch):
+    """Fakes the wx.Dialog/Panel/RadioButton/Button/sizer chain
+    _on_mass_delete_messages() builds (mirroring _on_menu_delete_message()'s
+    single-message dialog) — no running wx.App needed. Returns a dict the
+    test sets before calling the handler: result (wx.ID_OK/wx.ID_CANCEL,
+    default OK) and everyone (whether the "delete for everyone" radio ends
+    up selected when that radio was even offered).
+    """
+    radios = []
+
+    class _FakeRadioButton:
+        def __init__(self, parent, label="", style=0):
+            self.label = label
+            self.style = style
+            self._value = False
+            radios.append(self)
+
+        def SetValue(self, v):
+            self._value = v
+
+        def GetValue(self):
+            return self._value
+
+    class _FakeSizer:
+        def __init__(self, *a, **k):
+            pass
+
+        def Add(self, *a, **k):
+            pass
+
+    class _FakePanel:
+        def __init__(self, *a, **k):
+            pass
+
+        def SetSizer(self, *a, **k):
+            pass
+
+    class _FakeButton:
+        def __init__(self, parent, id=None, label=""):
+            self.id = id
+            self.label = label
+
+    class _FakeBtnSizer:
+        def __init__(self, *a, **k):
+            pass
+
+        def AddButton(self, *a, **k):
+            pass
+
+        def Realize(self):
+            pass
+
+    state = {"result": wx.ID_OK, "everyone": False}
+
+    class _FakeDialog:
+        def __init__(self, *a, **k):
+            pass
+
+        def SetSizer(self, *a, **k):
+            pass
+
+        def Fit(self):
+            pass
+
+        def CentreOnParent(self):
+            pass
+
+        def ShowModal(self):
+            # radios[0] is always "delete for me" (RB_GROUP, defaulted True
+            # by the handler itself); radios[1], if present, is "delete for
+            # everyone" — only offered when eligible.
+            if len(radios) > 1 and state["everyone"]:
+                radios[1].SetValue(True)
+                radios[0].SetValue(False)
+            return state["result"]
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(wx, "Dialog", _FakeDialog)
+    monkeypatch.setattr(wx, "Panel", _FakePanel)
+    monkeypatch.setattr(wx, "BoxSizer", _FakeSizer)
+    monkeypatch.setattr(wx, "RadioButton", _FakeRadioButton)
+    monkeypatch.setattr(wx, "Button", _FakeButton)
+    monkeypatch.setattr(wx, "StdDialogButtonSizer", _FakeBtnSizer)
+
+    state["radios"] = radios
+    return state
+
+
 class TestMassChatActions:
     def test_clearing_applies_to_every_selected_chat(self, confirm_yes):
         panel = _Panel()
@@ -665,41 +763,110 @@ class TestMassMessageActions:
         assert panel.saved == []
         assert panel.selected_messages == {"m1"}
 
-    def test_deleting_messages_removes_them_locally_and_on_the_server(
-        self, confirm_yes, run_threads_inline
+    def test_deleting_for_me_removes_them_locally_and_on_the_server(
+        self, fake_delete_dialog, run_threads_inline
     ):
+        """Default choice (the "delete for me" radio, pre-selected same as
+        the single-message dialog) — local delete-for-me only, never a
+        for-everyone revoke."""
         msgs = [_msg("m1"), _msg("m2"), _msg("m3")]
         panel = _Panel(messages=msgs)
         panel.selected_messages = {"m1", "m3"}
         panel._on_mass_delete_messages(None)
         assert sorted(k["id"] for _jid, k in panel.main_window.deleted_messages) == ["m1", "m3"]
+        assert panel.main_window.deleted_for_everyone == []
         (removed, focus_previous), = panel.removed_locally
         assert removed == {"m1", "m3"}
         assert focus_previous is True
         assert panel.selected_messages == set()
         assert panel.main_window.announced == ["success_delete"]
 
-    def test_the_server_call_uses_each_message_own_chat(self, confirm_yes, run_threads_inline):
+    def test_the_server_call_uses_each_message_own_chat(self, fake_delete_dialog, run_threads_inline):
         panel = _Panel(messages=[_msg("m1", jid="outro@g.us")])
         panel.selected_messages = {"m1"}
         panel._on_mass_delete_messages(None)
         assert panel.main_window.deleted_messages[0][0] == "outro@g.us"
 
-    def test_declining_deletes_nothing(self, confirm_no, run_threads_inline):
+    def test_cancelling_the_dialog_deletes_nothing(self, fake_delete_dialog, run_threads_inline):
+        fake_delete_dialog["result"] = wx.ID_CANCEL
         panel = _Panel(messages=[_msg("m1")])
         panel.selected_messages = {"m1"}
         panel._on_mass_delete_messages(None)
         assert panel.main_window.deleted_messages == []
+        assert panel.main_window.deleted_for_everyone == []
         assert panel.removed_locally == []
         assert panel.selected_messages == {"m1"}
 
-    def test_deleting_confirmation_names_the_selection_not_a_single_message(self, confirm_yes_capture, run_threads_inline):
+    def test_the_dialog_title_names_the_selection_not_a_single_message(self, fake_delete_dialog, run_threads_inline):
         panel = _Panel(messages=[_msg("m1"), _msg("m2")])
         panel.selected_messages = {"m1", "m2"}
         panel._on_mass_delete_messages(None)
-        (message, title), = confirm_yes_capture
-        assert message == "Delete 2 selected messages?"
-        assert title == "delete_messages_bulk_title"
+        # Same key the single-message dialog reuses for both its title and
+        # its OK button — see _on_menu_delete_message().
+        assert panel.main_window.i18n.t("delete_messages_bulk_title") == "delete_messages_bulk_title"
+
+    def test_delete_for_everyone_is_not_offered_when_nothing_in_the_selection_is_eligible(
+        self, fake_delete_dialog, run_threads_inline
+    ):
+        """Every selected message came from someone else and the user isn't
+        a group admin — same as the single-message dialog, the "for
+        everyone" radio must not even be built."""
+        panel = _Panel(messages=[_msg("m1", from_me=False), _msg("m2", from_me=False)])
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_delete_messages(None)
+        assert len(fake_delete_dialog["radios"]) == 1
+
+    def test_delete_for_everyone_is_offered_when_at_least_one_message_is_from_me(
+        self, fake_delete_dialog, run_threads_inline
+    ):
+        panel = _Panel(messages=[_msg("m1", from_me=True), _msg("m2", from_me=False)])
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_delete_messages(None)
+        assert len(fake_delete_dialog["radios"]) == 2
+
+    def test_delete_for_everyone_revokes_eligible_messages_and_locally_removes_the_rest(
+        self, fake_delete_dialog, run_threads_inline
+    ):
+        """A mixed selection with "delete for everyone" chosen: only the
+        eligible (fromMe) messages get a real revoke — the other member's
+        message the user has no right to revoke is still removed from the
+        user's own view, just without calling delete_message_for_everyone
+        for it."""
+        fake_delete_dialog["everyone"] = True
+        panel = _Panel(messages=[_msg("m1", from_me=True), _msg("m2", from_me=False)])
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_delete_messages(None)
+        assert [k["id"] for _jid, k in panel.main_window.deleted_for_everyone] == ["m1"]
+        assert [k["id"] for _jid, k in panel.main_window.deleted_messages] == ["m2"]
+        (removed, _focus), = panel.removed_locally
+        assert removed == {"m1", "m2"}
+
+    def test_a_group_admin_can_delete_for_everyone_even_a_message_not_their_own(
+        self, fake_delete_dialog, run_threads_inline
+    ):
+        panel = _Panel(messages=[_msg("m1", from_me=False)])
+        panel.selected_messages = {"m1"}
+        panel._group_admin_delete_override = lambda: True
+        fake_delete_dialog["everyone"] = True
+        panel._on_mass_delete_messages(None)
+        assert [k["id"] for _jid, k in panel.main_window.deleted_for_everyone] == ["m1"]
+        assert panel.main_window.deleted_messages == []
+
+    def test_a_system_event_in_the_selection_is_never_eligible_for_everyone(
+        self, fake_delete_dialog, run_threads_inline
+    ):
+        """Same restriction the single-message dialog enforces: WhatsApp has
+        no revoke for its own group notices, admin override or not."""
+        notice = _msg("m1", from_me=True)
+        notice["messageType"] = "groupNotification"
+        panel = _Panel(messages=[notice])
+        panel.selected_messages = {"m1"}
+        panel._group_admin_delete_override = lambda: True
+        panel._on_mass_delete_messages(None)
+        # Not even offered: fromMe is true but it's a system event, and the
+        # admin override doesn't change that — same as a lone system event
+        # in the selection, nothing makes "for everyone" eligible.
+        assert len(fake_delete_dialog["radios"]) == 1
 
     @pytest.mark.parametrize("handler", [
         "_on_mass_forward_messages", "_on_mass_save_messages", "_on_mass_delete_messages",

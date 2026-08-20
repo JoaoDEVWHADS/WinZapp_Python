@@ -8121,29 +8121,22 @@ class ConversationsPanel(wx.Panel):
             chk_keep_caption.SetValue(True)
             vsz.Add(chk_keep_caption, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        # ── Custom arrow/selection keyboard handling ────────────────────────
-        # Native wx.LB_EXTENDED semantics: a plain Up/Down both moves focus
-        # AND collapses selection down to just the newly-focused item — there
-        # is no way to arrow through the list while building up a multi-
-        # selection with the default behavior. Remapped here so plain arrows
-        # move focus only (selection untouched); Ctrl+Space/Ctrl+Shift+Space
-        # control selection explicitly instead. Ctrl+Arrow and Shift+Arrow
-        # are left at their native behavior (move-focus-only and range-select
-        # respectively — already exactly what's wanted).
-        #
-        # Deliberately NOT plain Space or Shift+Space (an earlier version of
-        # this dialog used those instead): reserved for an upcoming feature
-        # — bulk message selection, where plain Space already plays/pauses
-        # the focused audio message, so it can't double as "select this row"
-        # here without colliding with that. Ctrl+Space/Ctrl+Shift+Space carry
-        # no such conflict.
-        #
-        # Driven via the raw Win32 listbox messages rather than wx's own
-        # Select()/Deselect() for the arrow case specifically: LB_SETCARETINDEX
-        # is the exact same message the native control's own Ctrl+Arrow
-        # handling uses internally, so remapping plain Arrow onto it reuses
-        # a code path already proven to notify screen readers correctly,
-        # rather than reimplementing focus movement by hand.
+        # ── Selection keyboard handling — same system as the messages and
+        # conversations lists (Ctrl+Space toggle, Ctrl+Shift+Space select/
+        # clear all, Shift+Down/Home/End range-select), including the sound
+        # event, the "selected"/"unselected"/"all_selected"/"all_unselected"
+        # announcements, and the append/prepend "selected" marker in the row
+        # text itself (selected_announcement_position setting) — see
+        # _select_message_at()/_on_messages_list_key_down() for the pattern
+        # this mirrors. A plain wx.ListBox has no separate "keyboard focus
+        # row" the way wx.ListCtrl does, so the caret (the row Up/Down would
+        # land the native selection on) is driven directly via the raw
+        # Win32 listbox messages instead — LB_SETCARETINDEX is the same
+        # message the control's own Ctrl+Arrow handling already uses
+        # internally, so it's known to notify screen readers correctly.
+        # Native wx.LB_EXTENDED Up/Down would otherwise both move focus AND
+        # collapse the selection to just the newly-focused row, which is
+        # why plain Up/Down is remapped to move the caret only.
         _LB_SETSEL        = 0x0185
         _LB_GETSEL        = 0x0187
         _LB_SETCARETINDEX = 0x019E
@@ -8165,6 +8158,17 @@ class ConversationsPanel(wx.Panel):
         def _lst_set_selected(idx, select):
             _lst_send(_LB_SETSEL, 1 if select else 0, idx)
 
+        def _row_text(idx, is_selected):
+            name = _filtered_names[idx] if idx < len(_filtered_names) else ""
+            position = mw.settings.get("user_interface", {}).get(
+                "selected_announcement_position", "end"
+            )
+            return append_selected_marker(name, i18n.t("selected_suffix"), position, is_selected)
+
+        def _refresh_row(idx):
+            if 0 <= idx < lst.GetCount():
+                lst.SetString(idx, _row_text(idx, _lst_is_selected(idx)))
+
         def _on_list_key_down(event):
             key   = event.GetKeyCode()
             ctrl  = event.ControlDown()
@@ -8182,31 +8186,63 @@ class ConversationsPanel(wx.Panel):
                 _lst_set_caret(max(0, min(count - 1, caret + delta)))
                 return  # suppressed — no Skip(), so selection is left alone
 
-            if key == wx.WXK_SPACE and shift:
-                # Toggle everything: select all unless every row is already
-                # selected, in which case clear it all instead.
+            if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
+                caret  = _lst_caret()
+                target = (caret + 1) if caret >= 0 else 0
+                if target < count:
+                    _lst_set_caret(target)
+                    if not _lst_is_selected(target):
+                        _lst_set_selected(target, True)
+                        _refresh_row(target)
+                        self.selection_sound.play()
+                        mw.output(i18n.t("selected"), interrupt=True)
+                return
+
+            if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
+                to_end = key in (wx.WXK_END, wx.WXK_NUMPAD_END)
+                if count > 0:
+                    caret0 = _lst_caret()
+                    caret0 = caret0 if caret0 >= 0 else 0
+                    lo, hi = (caret0, count - 1) if to_end else (0, caret0)
+                    newly = []
+                    for i in range(lo, hi + 1):
+                        if not _lst_is_selected(i):
+                            _lst_set_selected(i, True)
+                            newly.append(i)
+                    target = count - 1 if to_end else 0
+                    _lst_set_caret(target)
+                    for i in newly:
+                        _refresh_row(i)
+                    if newly:
+                        self.selection_sound.play()
+                        mw.output(i18n.t("selected"), interrupt=True)
+                return
+
+            if ctrl and shift and key == wx.WXK_SPACE:
+                # Select every contact, or clear the selection if everything
+                # is already selected.
                 all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
                 for i in range(count):
                     _lst_set_selected(i, not all_selected)
+                    _refresh_row(i)
+                if count:
+                    if not all_selected:
+                        self.selection_sound.play()
+                    mw.output(i18n.t("all_unselected" if all_selected else "all_selected"), interrupt=True)
                 return
 
-            if key == wx.WXK_SPACE:
+            if ctrl and not shift and key == wx.WXK_SPACE:
                 caret = _lst_caret()
                 if caret >= 0:
                     now_selected = not _lst_is_selected(caret)
                     _lst_set_selected(caret, now_selected)
+                    _refresh_row(caret)
                     if now_selected:
-                        # LB_SETSEL doesn't move the caret, so no fresh
-                        # "item name, selected" announcement gets triggered
-                        # the way arrowing onto an already-selected item
-                        # does — NVDA/JAWS stay silent on the state change
-                        # unless told explicitly. Deselecting doesn't need
-                        # this: NVDA/JAWS already announce "not selected" on
-                        # their own for that transition.
-                        wx.CallAfter(mw.output, i18n.t("selected"))
+                        self.selection_sound.play()
+                    mw.output(i18n.t("selected" if now_selected else "unselected"), interrupt=True)
                 return
 
-            event.Skip()  # Ctrl+Arrow, Shift+Arrow, everything else: native behavior
+            event.Skip()  # Ctrl+Arrow, everything else: native behavior
 
         lst.Bind(wx.EVT_KEY_DOWN, _on_list_key_down)
 
@@ -10910,30 +10946,120 @@ class ConversationsPanel(wx.Panel):
         self.selected_messages.clear()
         self._refresh_message_rows_by_ids(saved_ids)
 
+    def _group_admin_delete_override(self) -> bool:
+        """True when the user is an admin of the currently open group — same
+        check _on_menu_delete_message() does for a single message, pulled
+        out so the bulk delete dialog can compute it once instead of once
+        per selected message (it doesn't depend on which message: an admin
+        can revoke ANY message in their own group, not just their own)."""
+        if not self.conversation:
+            return False
+        conv_jid = self.conversation.get("remoteJid", "")
+        if not conv_jid.endswith("@g.us"):
+            return False
+        group_meta = self.conversation.get("groupMetadata", {})
+        participants = group_meta.get("participants") or self.conversation.get("participants") or []
+
+        def _phone_part(j: str) -> str:
+            return j.rsplit("@", 1)[0].split(":")[0] if isinstance(j, str) else ""
+
+        mw = self.main_window
+        my_phone = _phone_part(getattr(mw, "my_jid", ""))
+        my_lid   = _phone_part(getattr(mw, "my_lid", ""))
+        for p in participants:
+            if not isinstance(p, dict):
+                continue
+            p_id = p.get("id", "")
+            if isinstance(p_id, dict):
+                p_id = p_id.get("_serialized", "")
+            p_digits = _phone_part(p_id)
+            if not p_digits:
+                continue
+            is_me = (my_phone and mw._phone_digits_equivalent(p_digits, my_phone)) or (my_lid and p_digits == my_lid)
+            if is_me:
+                return bool(p.get("admin") or p.get("isAdmin"))
+        return False
+
     def _on_mass_delete_messages(self, event):
+        """Same delete-scope dialog _on_menu_delete_message() shows for a
+        single message — radio buttons for "delete for me"/"delete for
+        everyone" plus Apagar/Cancelar — applied to every selected message
+        instead of the old plain Yes/No "apagar N mensagens?" confirmation."""
         i18n = self.main_window.i18n
         if not self.selected_messages: return
-        count = len(self.selected_messages)
-        if wx.MessageBox(
-            i18n.t("delete_msg_confirm_bulk").format(count=count),
-            i18n.t("delete_messages_bulk_title"),
-            wx.YES_NO | wx.ICON_QUESTION, self,
-        ) != wx.YES:
-            return
-
-        import threading
 
         msgs_to_delete = []
         for msg_id in self.selected_messages:
             msg = next((m for m in self._sorted_messages if not self._is_separator(m) and m.get("key", {}).get("id") == msg_id), None)
             if msg: msgs_to_delete.append(msg)
+        if not msgs_to_delete:
+            self.selected_messages.clear()
+            return
+
+        admin_override = self._group_admin_delete_override()
+
+        def _can_delete_for_all(msg):
+            if self._is_system_event(msg):
+                return False
+            return admin_override or msg.get("key", {}).get("fromMe", False)
+
+        any_eligible = any(_can_delete_for_all(m) for m in msgs_to_delete)
+
+        dlg = wx.Dialog(
+            self,
+            title=i18n.t("delete_messages_bulk_title"),
+            style=wx.DEFAULT_DIALOG_STYLE,
+        )
+        panel = wx.Panel(dlg)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        rb_me = wx.RadioButton(panel, label=i18n.t("delete_for_me"), style=wx.RB_GROUP)
+        rb_me.SetValue(True)
+        sizer.Add(rb_me, 0, wx.ALL, 8)
+
+        rb_all = None
+        if any_eligible:
+            rb_all = wx.RadioButton(panel, label=i18n.t("delete_for_everyone"))
+            sizer.Add(rb_all, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        btn_sizer  = wx.StdDialogButtonSizer()
+        ok_btn     = wx.Button(panel, wx.ID_OK,     label=i18n.t("delete_messages_bulk_title"))
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, label=i18n.t("cancel"))
+        btn_sizer.AddButton(ok_btn)
+        btn_sizer.AddButton(cancel_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        panel.SetSizer(sizer)
+        dlg_sizer = wx.BoxSizer(wx.VERTICAL)
+        dlg_sizer.Add(panel, 1, wx.EXPAND)
+        dlg.SetSizer(dlg_sizer)
+        dlg.Fit()
+        dlg.CentreOnParent()
+
+        result       = dlg.ShowModal()
+        for_everyone = rb_all.GetValue() if rb_all else False
+        dlg.Destroy()
+
+        if result != wx.ID_OK:
+            return
 
         def _delete_bg():
             for msg in msgs_to_delete:
-                msg_key = msg.get("key", {})
+                msg_key = dict(msg.get("key", {}))
                 jid = msg_key.get("remoteJid", "") or (self.conversation.get("remoteJid", "") if self.conversation else "")
-                if jid:
-                    self.main_window.delete_message_for_me(jid, dict(msg_key))
+                if not jid:
+                    continue
+                # Per message, never once for the batch: a mixed selection
+                # (e.g. admin revoking a mix of their own and others'
+                # messages, or a non-admin selection that also picked up a
+                # system event) can have members that aren't actually
+                # eligible for a real revoke even when "for everyone" was
+                # chosen — those still get deleted, just locally-only.
+                if for_everyone and _can_delete_for_all(msg):
+                    self.main_window.delete_message_for_everyone(jid, msg_key)
+                else:
+                    self.main_window.delete_message_for_me(jid, msg_key)
 
         threading.Thread(target=_delete_bg, daemon=True).start()
 
