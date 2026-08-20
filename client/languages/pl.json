@@ -251,6 +251,7 @@
     "cancel_edit": "Anuluj edycję",
     "noise_reduction_label": "Włącz &redukcję szumów mikrofonu",
     "notifications_label": "Włącz &powiadomienia w tle o nowych wiadomościach",
+    "keep_muted_chats_silent_when_open_label": "Zachowaj wyciszenie rozmów nawet gdy są otwarte",
     "announce_sync_events_label": "Anonsuj synchronizację, pobieranie multimediów i automatyczny tryb &offline",
     "search_normalization_label": "&Normalizacja Unicode w wyszukiwaniu",
     "search_normalization_off": "Wyłączona (domyślnie): wyszukiwanie dopasowuje dokładnie to, co wpiszesz",

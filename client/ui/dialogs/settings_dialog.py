@@ -207,6 +207,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._notifications_check, 0, wx.ALL, 8)
 
+        self._keep_muted_silent_check = wx.CheckBox(
+            self._general_page, label=i18n.t("keep_muted_chats_silent_when_open_label")
+        )
+        gen_sizer.Add(self._keep_muted_silent_check, 0, wx.ALL, 8)
+
         self._announce_sync_check = wx.CheckBox(
             self._general_page, label=i18n.t("announce_sync_events_label")
         )
@@ -746,6 +751,11 @@ class SettingsDialog(wx.Dialog):
 
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
+
+        keep_muted_silent = self.main_window.settings.get("general", {}).get(
+            "keep_muted_chats_silent_when_open", True
+        )
+        self._keep_muted_silent_check.SetValue(keep_muted_silent)
 
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
         self._announce_sync_check.SetValue(announce_sync)
@@ -1631,6 +1641,9 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("general", {})["notifications_enabled"] = (
             self._notifications_check.GetValue()
         )
+        self.main_window.settings.setdefault("general", {})["keep_muted_chats_silent_when_open"] = (
+            self._keep_muted_silent_check.GetValue()
+        )
 
         # Sync/media/auto-offline announcements
         self.main_window.settings.setdefault("general", {})["announce_sync_events"] = (
@@ -1797,6 +1810,7 @@ class SettingsDialog(wx.Dialog):
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
+        self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._search_norm_radio.SetLabel(i18n.t("search_normalization_label"))
         for _i, _key in enumerate((

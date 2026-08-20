@@ -4369,7 +4369,19 @@ class MainWindow(wx.Frame):
             except (TypeError, ValueError):
                 pass
 
-        if self.is_chat_muted(remote_jid):
+        # A reply to one of my own messages or an explicit @-mention always
+        # breaks through a muted chat's suppression, everywhere (background
+        # toast or foreground sound/speech) — the user still needs to know
+        # about those regardless of the mute. Ignoring the mute entirely for
+        # everything else is either always-on ("keep_muted_chats_silent_
+        # when_open", default True — the original behavior) or only lifted
+        # while that exact chat is the one currently open and the window is
+        # focused (setting off) — see the two mute checks below.
+        muted = self.is_chat_muted(remote_jid)
+        priority = muted and self._is_reply_or_mention_of_me(msg, remote_jid)
+        if muted and not priority and self.settings.get("general", {}).get(
+            "keep_muted_chats_silent_when_open", True
+        ):
             return
         if self.is_chat_archived(remote_jid):
             return
@@ -4399,6 +4411,13 @@ class MainWindow(wx.Frame):
                 else ""
             )
             is_current_conv = (current_jid == remote_jid)
+
+            # Muted + not the open conversation: stay silent even with the
+            # window active (the "keep silent when open" setting only ever
+            # exempts the chat that is actually open right now) — unless
+            # it's a reply/mention, which always gets through.
+            if muted and not priority and not is_current_conv:
+                return
 
             if is_current_conv:
                 # Scenario 1: message in the ACTIVE conversation
@@ -4431,12 +4450,19 @@ class MainWindow(wx.Frame):
                     self.output(spoken)
             return  # never send system toast when window is active
 
-        # Window is not focused → send system toast notification. This is the
-        # ONLY thing general.notifications_enabled controls — it used to gate
-        # the whole function above this point too, silently killing the
-        # foreground sounds/announcements above (and, when a burst of
-        # messages included one in a muted/archived chat before this point,
-        # nothing else) whenever the user turned it off.
+        # Window is not focused: a muted chat is never "open" from here, so
+        # this is where "keep silent when open" (setting off) actually stops
+        # exempting it — the chat being open only ever matters while the
+        # window is active. A reply/mention still gets through, same as above.
+        if muted and not priority:
+            return
+
+        # Send system toast notification. general.notifications_enabled is
+        # the ONLY thing this controls — it used to gate the whole function
+        # above this point too, silently killing the foreground sounds/
+        # announcements above (and, when a burst of messages included one in
+        # a muted/archived chat before this point, nothing else) whenever the
+        # user turned it off.
         if not self.settings.get("general", {}).get("notifications_enabled", True):
             return
         title = format_notification_title(msg, self, self.i18n)
@@ -10802,6 +10828,60 @@ class MainWindow(wx.Frame):
         my_lid = getattr(self, "my_lid", "")
         if my_lid and _phone_part(compare) == _phone_part(my_lid):
             return True
+        return False
+
+    def _is_reply_or_mention_of_me(self, msg: dict, remote_jid: str) -> bool:
+        """True when *msg* @-mentions me or replies to one of my own
+        messages. Used by on_incoming_message() to let these through a
+        muted chat's notification suppression — a reply/mention is
+        something the user needs to know about regardless of the mute,
+        everywhere (background toast or foreground sound/speech).
+        """
+        msg_obj = msg.get("message") or {}
+        if not isinstance(msg_obj, dict):
+            msg_obj = {}
+
+        ctx_candidates = []
+        top_ctx = msg.get("contextInfo")
+        if isinstance(top_ctx, dict):
+            ctx_candidates.append(top_ctx)
+        for sub in msg_obj.values():
+            if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
+                ctx_candidates.append(sub["contextInfo"])
+
+        for ctx in ctx_candidates:
+            mentioned = ctx.get("mentionedJid") or []
+            if isinstance(mentioned, list) and any(
+                isinstance(j, str) and self._is_self_jid(j) for j in mentioned
+            ):
+                return True
+
+        for ctx in ctx_candidates:
+            if "quotedMessage" not in ctx and not ctx.get("stanzaId"):
+                continue
+            participant = ctx.get("participant", "")
+            if participant:
+                if self._is_self_jid(participant):
+                    return True
+                continue
+            # No participant on the quote (typical for 1:1 chats) — resolve
+            # via the quoted message's own fromMe flag, if it's still in our
+            # local history for this chat.
+            stanza_id = ctx.get("stanzaId", "")
+            if not stanza_id:
+                continue
+            chat = self.chats.get(remote_jid) or {}
+            container = chat.get("messages")
+            records = []
+            if isinstance(container, dict):
+                inner = container.get("messages")
+                if isinstance(inner, dict) and isinstance(inner.get("records"), list):
+                    records = inner["records"]
+            for m in records:
+                if isinstance(m, dict) and m.get("key", {}).get("id") == stanza_id:
+                    if m.get("key", {}).get("fromMe", False):
+                        return True
+                    break
         return False
 
     def _compute_chat_lists(self):
