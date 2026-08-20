@@ -4382,12 +4382,12 @@ class ConversationsPanel(wx.Panel):
             if all_ids and all(mid in self.selected_messages for mid in all_ids):
                 self.selected_messages.clear()
                 self._refresh_message_rows_by_ids(all_ids)
-                self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+                self.main_window.output(self.main_window.i18n.t("all_unselected"), interrupt=True)
             elif all_ids:
                 self.selected_messages.update(all_ids)
                 self._refresh_message_rows_by_ids(all_ids)
                 self.selection_sound.play()
-                self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                self.main_window.output(self.main_window.i18n.t("all_selected"), interrupt=True)
             return
 
         if ctrl and not shift and key == wx.WXK_SPACE:
@@ -4511,12 +4511,12 @@ class ConversationsPanel(wx.Panel):
             if all_jids and all(j in self.selected_chats for j in all_jids):
                 self.selected_chats.clear()
                 self.main_window.add_chats_to_ui()
-                self.main_window.output(self.main_window.i18n.t("unselected"), interrupt=True)
+                self.main_window.output(self.main_window.i18n.t("all_unselected"), interrupt=True)
             elif all_jids:
                 self.selected_chats.update(all_jids)
                 self.main_window.add_chats_to_ui()
                 self.selection_sound.play()
-                self.main_window.output(self.main_window.i18n.t("selected"), interrupt=True)
+                self.main_window.output(self.main_window.i18n.t("all_selected"), interrupt=True)
             return
 
         if ctrl and not shift and key == wx.WXK_SPACE:
@@ -10512,7 +10512,12 @@ class ConversationsPanel(wx.Panel):
     def _on_mass_clear_chats(self, event):
         i18n = self.main_window.i18n
         if not self.selected_chats: return
-        if wx.MessageBox(i18n.t("clear_confirm_msg"), i18n.t("clear_chat"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
+        count = len(self.selected_chats)
+        if wx.MessageBox(
+            i18n.t("clear_confirm_msg_bulk").format(count=count),
+            i18n.t("clear_chat_bulk_title"),
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
             return
         for jid in list(self.selected_chats):
             self.main_window.clear_chat(jid)
@@ -10523,7 +10528,12 @@ class ConversationsPanel(wx.Panel):
     def _on_mass_delete_chats(self, event):
         i18n = self.main_window.i18n
         if not self.selected_chats: return
-        if wx.MessageBox(i18n.t("delete_confirm_msg"), i18n.t("delete_chat"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
+        count = len(self.selected_chats)
+        if wx.MessageBox(
+            i18n.t("delete_confirm_msg_bulk").format(count=count),
+            i18n.t("delete_chat_bulk_title"),
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
             return
         for jid in list(self.selected_chats):
             self.main_window.delete_chat(jid)
@@ -10580,7 +10590,12 @@ class ConversationsPanel(wx.Panel):
     def _on_mass_delete_messages(self, event):
         i18n = self.main_window.i18n
         if not self.selected_messages: return
-        if wx.MessageBox(i18n.t("delete_msg_confirm"), i18n.t("delete_message"), wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
+        count = len(self.selected_messages)
+        if wx.MessageBox(
+            i18n.t("delete_msg_confirm_bulk").format(count=count),
+            i18n.t("delete_messages_bulk_title"),
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
             return
 
         import threading

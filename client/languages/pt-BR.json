@@ -181,10 +181,14 @@
     "unarchive_chat": "Desarquivar conversa",
     "delete_chat": "Apagar conversa",
     "delete_confirm_msg": "Tem certeza de que deseja apagar esta conversa? Esta ação não pode ser desfeita.",
+    "delete_chat_bulk_title": "Apagar conversas selecionadas",
+    "delete_confirm_msg_bulk": "Tem certeza de que deseja apagar as {count} conversas selecionadas? Esta ação não pode ser desfeita.",
     "delete_group_confirm_msg": "Tem certeza de que deseja apagar esta conversa de grupo do WinZapp? O grupo continuará no seu WhatsApp e você continuará como participante. Para sair do grupo, use a opção Sair do grupo.",
     "leave_group_confirm_msg": "Tem certeza de que deseja sair deste grupo? Você deixará de receber as mensagens dele e precisará ser adicionado novamente para voltar.",
     "clear_chat": "Limpar conversa",
     "clear_confirm_msg": "Tem certeza de que deseja limpar todas as mensagens locais desta conversa?",
+    "clear_chat_bulk_title": "Limpar conversas selecionadas",
+    "clear_confirm_msg_bulk": "Tem certeza de que deseja limpar todas as mensagens locais das {count} conversas selecionadas?",
     "message_send_unconfirmed": "Não foi possível confirmar o envio da mensagem. Ela não será reenviada para evitar cópias duplicadas e poderá ser entregue quando a conexão voltar.",
     "leave_group": "Sair do grupo",
     "pin_chat": "&Fixar conversa",
@@ -209,6 +213,7 @@
     "copy_message_text": "Copiar",
     "copy_file": "Copiar arquivo",
     "delete_message": "Apagar mensagem",
+    "delete_messages_bulk_title": "Apagar mensagens selecionadas",
     "forward_message": "Encaminhar",
     "forward_keep_caption": "Manter legenda da mídia",
     "star_message": "Favoritar",
@@ -847,5 +852,7 @@
     "success_clear": "Conversas limpas.",
     "success_delete": "Apagado com sucesso.",
     "success_archive": "Conversas arquivadas.",
-    "delete_msg_confirm": "Tem certeza de que deseja apagar as mensagens selecionadas?"
+    "delete_msg_confirm_bulk": "Tem certeza de que deseja apagar as {count} mensagens selecionadas?",
+    "all_selected": "Tudo selecionado",
+    "all_unselected": "Tudo desmarcado"
 }

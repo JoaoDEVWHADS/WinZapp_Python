@@ -26,8 +26,17 @@ from ui.conversations import ConversationsPanel
 
 
 class _FakeI18n:
+    # The bulk confirmation dialogs format {count} into the text — give those
+    # specific keys a real template so the tests can pin the substitution,
+    # not just that .format() didn't blow up on a plain key name.
+    _TEMPLATES = {
+        "clear_confirm_msg_bulk": "Clear {count} selected chats?",
+        "delete_confirm_msg_bulk": "Delete {count} selected chats?",
+        "delete_msg_confirm_bulk": "Delete {count} selected messages?",
+    }
+
     def t(self, key):
-        return key  # the announcement keys are asserted by name
+        return self._TEMPLATES.get(key, key)  # other keys asserted by name
 
 
 class _FakeSound:
@@ -305,12 +314,17 @@ class TestCtrlSpaceInTheConversationsList:
         assert panel.conversations_list._focused == 0
 
     def test_ctrl_shift_space_selects_everything_then_clears_on_repeat(self):
+        """Announces "all selected"/"all deselected" — distinct from the
+        single-row "selected"/"unselected" toggle — so the user can tell by
+        ear that the whole list changed state, not just the focused row."""
         chats = [_chat(f"{i}@s.whatsapp.net") for i in range(3)]
         panel = _Panel(chats=chats, focused=0)
         panel._on_conv_list_key_down(_ctrl_shift_space())
         assert panel.selected_chats == {"0@s.whatsapp.net", "1@s.whatsapp.net", "2@s.whatsapp.net"}
+        assert panel.main_window.announced == ["all_selected"]
         panel._on_conv_list_key_down(_ctrl_shift_space())
         assert panel.selected_chats == set()
+        assert panel.main_window.announced == ["all_selected", "all_unselected"]
 
 
 class TestCtrlSpaceInTheMessagesList:
@@ -382,17 +396,36 @@ class TestCtrlSpaceInTheMessagesList:
         assert panel.messages_list._focused == 0
 
     def test_ctrl_shift_space_selects_everything_then_clears_on_repeat(self):
+        """Same "all selected"/"all deselected" distinction as the
+        conversations list — see the equivalent chat-list test above."""
         panel = _Panel(messages=[_msg("m1"), _msg("m2")], focused=0)
         panel._on_messages_list_key_down(_ctrl_shift_space())
         assert panel.selected_messages == {"m1", "m2"}
+        assert panel.main_window.announced == ["all_selected"]
         panel._on_messages_list_key_down(_ctrl_shift_space())
         assert panel.selected_messages == set()
+        assert panel.main_window.announced == ["all_selected", "all_unselected"]
 
 
 @pytest.fixture
 def confirm_yes(monkeypatch):
     """Every destructive mass action asks first; answer yes."""
     monkeypatch.setattr(wx, "MessageBox", lambda *a, **k: wx.YES)
+
+
+@pytest.fixture
+def confirm_yes_capture(monkeypatch):
+    """Same as confirm_yes, but records the (message, title) shown — used to
+    pin that the bulk confirmations use the "N selected" wording/title, not
+    the single-item ones, and that the count is the real selection size."""
+    calls = []
+
+    def _fake_message_box(message, title, *a, **k):
+        calls.append((message, title))
+        return wx.YES
+
+    monkeypatch.setattr(wx, "MessageBox", _fake_message_box)
+    return calls
 
 
 @pytest.fixture
@@ -432,6 +465,18 @@ class TestMassChatActions:
         assert panel.main_window.cleared == []
         assert panel.selected_chats == {"a@s.whatsapp.net"}
 
+    def test_clearing_confirmation_names_the_selection_not_a_single_chat(self, confirm_yes_capture):
+        """The dialog must say "clear the N selected chats", not the generic
+        single-chat "clear this chat" wording — otherwise a user acting on a
+        multi-chat selection has no way to tell the shortcut is about to hit
+        everything selected rather than just the focused row."""
+        panel = _Panel()
+        panel.selected_chats = {"a@s.whatsapp.net", "b@s.whatsapp.net"}
+        panel._on_mass_clear_chats(None)
+        (message, title), = confirm_yes_capture
+        assert message == "Clear 2 selected chats?"
+        assert title == "clear_chat_bulk_title"
+
     def test_deleting_applies_to_every_selected_chat(self, confirm_yes):
         panel = _Panel()
         panel.selected_chats = {"a@s.whatsapp.net", "b@s.whatsapp.net"}
@@ -445,6 +490,14 @@ class TestMassChatActions:
         panel._on_mass_delete_chats(None)
         assert panel.main_window.deleted == []
         assert panel.selected_chats == {"a@s.whatsapp.net"}
+
+    def test_deleting_confirmation_names_the_selection_not_a_single_chat(self, confirm_yes_capture):
+        panel = _Panel()
+        panel.selected_chats = {"a@s.whatsapp.net", "b@s.whatsapp.net", "c@s.whatsapp.net"}
+        panel._on_mass_delete_chats(None)
+        (message, title), = confirm_yes_capture
+        assert message == "Delete 3 selected chats?"
+        assert title == "delete_chat_bulk_title"
 
     def test_archiving_does_not_ask_first(self, monkeypatch):
         """Archiving is reversible from the archived panel, unlike clear and
@@ -559,6 +612,14 @@ class TestMassMessageActions:
         assert panel.main_window.deleted_messages == []
         assert panel.removed_locally == []
         assert panel.selected_messages == {"m1"}
+
+    def test_deleting_confirmation_names_the_selection_not_a_single_message(self, confirm_yes_capture, run_threads_inline):
+        panel = _Panel(messages=[_msg("m1"), _msg("m2")])
+        panel.selected_messages = {"m1", "m2"}
+        panel._on_mass_delete_messages(None)
+        (message, title), = confirm_yes_capture
+        assert message == "Delete 2 selected messages?"
+        assert title == "delete_messages_bulk_title"
 
     @pytest.mark.parametrize("handler", [
         "_on_mass_forward_messages", "_on_mass_save_messages", "_on_mass_delete_messages",

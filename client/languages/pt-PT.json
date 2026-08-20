@@ -181,10 +181,14 @@
     "unarchive_chat": "Desarquivar conversa",
     "delete_chat": "Eliminar conversa",
     "delete_confirm_msg": "Tem a certeza de que pretende eliminar esta conversa? Esta ação não pode ser anulada.",
+    "delete_chat_bulk_title": "Eliminar conversas selecionadas",
+    "delete_confirm_msg_bulk": "Tem a certeza de que pretende eliminar as {count} conversas selecionadas? Esta ação não pode ser anulada.",
     "delete_group_confirm_msg": "Tem a certeza de que pretende eliminar esta conversa de grupo do WinZapp? O grupo permanecerá no seu WhatsApp e continuará a ser participante. Para sair do grupo, utilize a opção Sair do grupo.",
     "leave_group_confirm_msg": "Tem a certeza de que pretende sair deste grupo? Deixará de receber as mensagens do grupo e terá de ser adicionado novamente para regressar.",
     "clear_chat": "Limpar conversa",
     "clear_confirm_msg": "Tem a certeza de que pretende eliminar todas as mensagens locais desta conversa?",
+    "clear_chat_bulk_title": "Limpar conversas selecionadas",
+    "clear_confirm_msg_bulk": "Tem a certeza de que pretende eliminar todas as mensagens locais das {count} conversas selecionadas?",
     "message_send_unconfirmed": "Não foi possível confirmar o envio da mensagem. Não será reenviada para evitar cópias duplicadas e poderá ser entregue quando a ligação voltar.",
     "leave_group": "Sair do grupo",
     "pin_chat": "&Afixar conversa",
@@ -209,6 +213,7 @@
     "copy_message_text": "Copiar",
     "copy_file": "Copiar ficheiro",
     "delete_message": "Eliminar mensagem",
+    "delete_messages_bulk_title": "Eliminar mensagens selecionadas",
     "forward_message": "Reencaminhar",
     "forward_keep_caption": "Manter a legenda da média",
     "star_message": "Marcar com estrela",
@@ -847,5 +852,7 @@
     "success_clear": "Conversas limpas.",
     "success_delete": "Eliminado com sucesso.",
     "success_archive": "Conversas arquivadas.",
-    "delete_msg_confirm": "Tem a certeza de que pretende eliminar as mensagens selecionadas?"
+    "delete_msg_confirm_bulk": "Tem a certeza de que pretende eliminar as {count} mensagens selecionadas?",
+    "all_selected": "Tudo selecionado",
+    "all_unselected": "Tudo desmarcado"
 }
