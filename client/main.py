@@ -14580,8 +14580,20 @@ class MainWindow(wx.Frame):
             self.conversations_panel.refresh_message_status(msg_id, status)
 
 
-    def _resolve_jid_name(self, jid_norm: str) -> str:
-        """Return the best display name for a participant JID (contact lookup + fallback)."""
+    def _resolve_jid_name(self, jid_norm: str, chat_jid_norm: str = "") -> str:
+        """Return the best display name for a participant JID (contact lookup + fallback).
+
+        chat_jid_norm: the group this participant belongs to, when known —
+        lets the @lid fallback below check that group's own already-loaded
+        messages for a pushName, the same source _get_participant_name()
+        (ui/conversations.py, used once the message itself has arrived)
+        checks. Without it, a presence event for someone whose @lid isn't in
+        _lid_to_phone yet had nothing left to try and fell straight to the
+        generic placeholder — reported live as "participante sem nome está
+        digitando" for a group member whose name rendered correctly moments
+        later once their actual message came in and went through that
+        richer resolution path instead of this one.
+        """
         ppm = getattr(self, "_presence_pushname_map", {})
 
         # Build candidate list covering all three JID formats for the same person.
@@ -14628,10 +14640,46 @@ class MainWindow(wx.Frame):
             phone = getattr(self, "_lid_to_phone", {}).get(jid_norm, "")
             if phone:
                 return format_number(phone)
-            # No phone mapping yet for this @lid — `local` here is just the
-            # raw @lid digits, meaningless to a user ("Fulano está digitando"
-            # showing a bare numeric ID instead of a name/phone). A generic
-            # placeholder is far more useful than exposing that internal ID.
+            # No phone mapping cached yet — before giving up, check whatever
+            # this group's own messages already know about this @lid (an
+            # earlier message from the same person, still carrying its
+            # pushName) and, for the conversation currently open, the same
+            # participant cache _get_participant_name() consults.
+            if chat_jid_norm:
+                records = (
+                    self.chats.get(chat_jid_norm, {})
+                        .get("messages", {})
+                        .get("messages", {})
+                        .get("records", [])
+                )
+                for m in records:
+                    if not isinstance(m, dict):
+                        continue
+                    m_part = m.get("key", {}).get("participant") or m.get("participant")
+                    if m_part and self._normalize_jid(m_part) == jid_norm:
+                        push = (m.get("pushName") or "").strip()
+                        if push and not is_phone_like(push):
+                            return push
+            cp = getattr(self, "conversations_panel", None)
+            if cp is not None and cp.conversation is not None:
+                if self._normalize_jid(cp.conversation.get("remoteJid", "")) == chat_jid_norm:
+                    for pname, p_jid in getattr(cp, "_group_participants_cache", []):
+                        if p_jid == jid_norm and pname and not is_phone_like(pname):
+                            return pname
+            # Still nothing — kick a background resolution so a later
+            # presence event in the same typing burst (or the next time this
+            # group is opened) shows the real name instead of the
+            # placeholder forever. resolve_lid_jids_via_api dedupes
+            # concurrent/repeat requests for the same jid internally.
+            threading.Thread(
+                target=self.resolve_lid_jids_via_api,
+                args=([jid_norm],),
+                daemon=True,
+            ).start()
+            # `local` here is just the raw @lid digits, meaningless to a user
+            # ("Fulano está digitando" showing a bare numeric ID instead of a
+            # name/phone). A generic placeholder is far more useful than
+            # exposing that internal ID.
             return self.i18n.t("unnamed_participant")
         if jid_norm.endswith("@g.us"):
             # The presence event never identified an actual participant (its
@@ -14654,7 +14702,7 @@ class MainWindow(wx.Frame):
         else:
             return ""
         if is_group:
-            name = self._resolve_jid_name(participant_jid)
+            name = self._resolve_jid_name(participant_jid, chat_jid_norm)
             if name:
                 return self.i18n.t("group_presence_indicator").format(
                     name=name, action=action_label
@@ -14977,7 +15025,7 @@ class MainWindow(wx.Frame):
                              announce_enabled, active_match, window_active, chat_jid_norm, conv_jid)
                 if announce_enabled and active_match and window_active:
                     if not self.is_chat_muted(chat_jid_norm) and not self.is_chat_archived(chat_jid_norm):
-                        name = self._resolve_jid_name(canonical)
+                        name = self._resolve_jid_name(canonical, chat_jid_norm)
                         logging.info("[on_presence_update] resolved name=%s for canonical=%s", name, canonical)
                         if name:
                             try:

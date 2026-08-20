@@ -39,7 +39,7 @@ class _Stub:
     def output(self, text, interrupt=False):
         self.outputs.append(text)
 
-    def _resolve_jid_name(self, jid_norm):
+    def _resolve_jid_name(self, jid_norm, chat_jid_norm=""):
         return "Fulano"
 
 
