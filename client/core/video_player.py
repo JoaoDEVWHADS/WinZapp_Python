@@ -70,6 +70,39 @@ _JPEG_SOI = b"\xff\xd8"  # Start Of Image marker
 _JPEG_EOI = b"\xff\xd9"  # End Of Image marker
 
 
+def fit_frame_size(frame_w: int, frame_h: int, target_w: int, target_h: int):
+    """Size a decoded frame must be scaled to so it fits *entirely* inside
+    the wx.StaticBitmap it is drawn into, or ``None`` when it already fits
+    (or there is nothing sensible to fit it to).
+
+    wx.StaticBitmap does NOT scale what it is given: a bitmap larger than
+    the control is simply clipped to the control's rectangle, so only its
+    top-left corner is ever visible. Frames come out of ffmpeg at a fixed
+    _FRAME_WIDTH (480) with whatever height the source aspect ratio implies,
+    while both callers hand this module a much smaller control —
+    StatusPanel's is created at a fixed (320, 240), and ConversationsPanel's
+    is sized by its sizer from the last thumbnail it showed (capped at
+    200 px, or nothing at all when the video had no embedded thumbnail).
+    A 480x270 landscape frame therefore lost its right third and a 480x854
+    portrait one showed barely its top corner — reported live as "os videos
+    so abrem pela metade nos status e conversas".
+
+    Pure function (no wx calls) so the fitting arithmetic is unit-testable
+    without a display, same as extract_jpeg_frames() below.
+    """
+    if frame_w <= 0 or frame_h <= 0:
+        return None
+    # A control that was never laid out with a bitmap in it reports 0/1 —
+    # there is no box to fit into, so draw at natural size and let the
+    # caller's own layout give it room.
+    if target_w <= 1 or target_h <= 1:
+        return None
+    if frame_w <= target_w and frame_h <= target_h:
+        return None
+    ratio = min(target_w / frame_w, target_h / frame_h)
+    return max(1, int(frame_w * ratio)), max(1, int(frame_h * ratio))
+
+
 def extract_jpeg_frames(buf: bytes) -> tuple:
     """Pull every complete JPEG frame out of an accumulated MJPEG byte
     buffer (ffmpeg's `-f image2pipe -vcodec mjpeg` output is just JPEG
@@ -444,6 +477,14 @@ class VideoPlayer:
         try:
             img = wx.Image(io.BytesIO(frame_bytes), wx.BITMAP_TYPE_JPEG)
             if img.IsOk():
+                # Scale to fit the control instead of letting wx clip the
+                # frame to its top-left corner — see fit_frame_size().
+                target_w, target_h = self.bitmap_ctrl.GetSize()
+                fitted = fit_frame_size(
+                    img.GetWidth(), img.GetHeight(), target_w, target_h
+                )
+                if fitted is not None:
+                    img = img.Scale(fitted[0], fitted[1], wx.IMAGE_QUALITY_NORMAL)
                 self.bitmap_ctrl.SetBitmap(wx.Bitmap(img))
                 self.bitmap_ctrl.Refresh()
         except Exception:

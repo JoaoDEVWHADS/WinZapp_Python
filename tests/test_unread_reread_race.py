@@ -31,6 +31,10 @@ class _Stub:
     # Bridges the @lid / phone identities of the incoming event before the
     # handler looks the chat up — see tests/test_chats_update_lid_resolution.py.
     _resolve_chat_for_event = MainWindow._resolve_chat_for_event
+    # _locally_read_at is persisted to DB metadata now (it has to survive a
+    # restart — see tests/test_locally_read_at_persisted.py); the real method
+    # is a no-op without a `db` attribute, which this stub deliberately lacks.
+    _persist_locally_read_at = MainWindow._persist_locally_read_at
 
     def __init__(self, chat):
         self.chats = {"5511999999999@s.whatsapp.net": chat}

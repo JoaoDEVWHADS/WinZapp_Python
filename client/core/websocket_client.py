@@ -730,6 +730,18 @@ class WebSocketClient:
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
 
+            # See on_wpp_message_received()'s own breadcrumb for why this is
+            # unconditional — pins down exactly which branch below (history-
+            # sync echo, own-send echo, or a genuine live dispatch) a given
+            # message id took, instead of only knowing the event arrived.
+            key = msg.get("key", {})
+            logging.info(
+                "[WebSocketClient] on_messages_upsert: id=%s remoteJid=%s fromMe=%s "
+                "type=%s isMdHistoryMsg=%s",
+                key.get("id", ""), key.get("remoteJid", ""), key.get("fromMe"),
+                msg.get("messageType", ""), msg.get("isMdHistoryMsg"),
+            )
+
             # ── Skip history-sync echoes ───────────────────────────────────────
             # WPPConnect/Baileys fires messages.upsert for historical messages
             # (isMdHistoryMsg=True) during its initial sync phase. These are
@@ -1192,9 +1204,21 @@ class WebSocketClient:
     def _set_wpp_limits(self):
         """Push raised file-size limits into WhatsApp Web via the setLimit API.
 
-        WPPConnect documented maximums:
+        WPPConnect documented defaults:
           maxMediaSize — 70 MB  (images, videos, audio)
           maxFileSize  — 1 GB   (documents)
+
+        maxMediaSize now matches maxFileSize: the 70 MB ceiling only ever
+        existed because non-document sends had no way to move a large file
+        into Chromium without building one giant in-memory base64 string
+        and passing it as a single CDP argument. Now that sender.layer.js's
+        bounded/chunked transfer covers image/video/audio too (see
+        core/wppconnect_sender_layer_patch.py), there is no longer a reason
+        for WhatsApp Web's own client-side guard to reject a large media
+        send before WinZapp ever gets a chance to use that path — matches
+        the single client-side cap every attachment type now shares
+        (ui/conversations.py's _MAX_ATTACHMENT_BYTES; the separate, lower
+        _MAX_MEDIA_BYTES it replaced no longer exists).
         """
         mw = self.main_window
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/set-limit"
@@ -1203,7 +1227,7 @@ class WebSocketClient:
             "Content-Type": "application/json",
         }
         limits = [
-            ("maxMediaSize", 70 * 1024 * 1024),    # 70 MB
+            ("maxMediaSize", 1 * 1024 * 1024 * 1024),  # 1 GB
             ("maxFileSize",  1 * 1024 * 1024 * 1024),  # 1 GB
         ]
         for limit_type, value in limits:
@@ -1308,7 +1332,29 @@ class WebSocketClient:
 
     def on_wpp_message_received(self, data):
         try:
-            if not isinstance(data, dict) or not self._belongs_to_this_session(data):
+            # Unconditional breadcrumb, logged before any filtering below —
+            # reported live: a message shows up in the chat list (unread
+            # count bumped) with no toast/sound/local notification at all,
+            # only surfacing minutes later once a periodic get_remote_chats()
+            # poll catches the stale unread count. This method previously
+            # logged nothing on its normal path, so there was no way to tell
+            # "the received-message Socket.IO event never arrived at all"
+            # apart from "it arrived and was silently filtered somewhere in
+            # here" after the fact — both looked identical: nothing in
+            # log.log. This line alone answers that: its absence around the
+            # time a message went missing means the event never reached this
+            # handler in the first place (a WPPConnect/Baileys-side delivery
+            # gap, not a WinZapp bug in this file); its presence, combined
+            # with which of the checks below actually returns early, pins
+            # down exactly where the drop happened instead.
+            is_dict = isinstance(data, dict)
+            session_ok = is_dict and self._belongs_to_this_session(data)
+            has_response = is_dict and bool(data.get("response"))
+            logging.info(
+                "[WebSocketClient] received-message event: session_ok=%s has_response=%s",
+                session_ok, has_response,
+            )
+            if not session_ok:
                 return
             wpp_msg = data.get("response")
             if not wpp_msg:

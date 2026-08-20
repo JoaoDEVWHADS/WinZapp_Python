@@ -97,6 +97,17 @@ def normalize_line_separators(text) -> str:
     return text
 
 
+def append_selected_marker(text: str, word: str, position: str, is_selected: bool) -> str:
+    """Add the localized "selected" marker word to a list-row string when
+    *is_selected*, at the configured *position* ("start" or anything else,
+    treated as "end"). Used by both the messages list and the conversations
+    list so a screen-reader user with sound events disabled still gets a
+    persistent, textual cue for which rows are part of the bulk selection."""
+    if not is_selected:
+        return text
+    return f"{word} {text}" if position == "start" else f"{text} {word}"
+
+
 def get_downloads_folder() -> str:
     """Return the current user's Downloads folder.
 
