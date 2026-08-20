@@ -889,6 +889,17 @@ class MainWindow(wx.Frame):
         # expresses: _sync_completed goes back to False on an incomplete sync
         # and _initial_sync_running is cleared as soon as the thread exits.
         self._sync_ever_started = False
+        # High-water mark of what list-chats has answered with this session,
+        # across sync rounds. Session-scoped on purpose — see the evidence
+        # comment in _run_sync()'s retry loop: it is the one number that
+        # cannot be explained by WhatsApp Web's store still warming up, which
+        # is what lets a store that has gone missing be told apart from one
+        # that is merely cold. Never reset while the process lives; a chat
+        # count that was real once does not stop having been real.
+        self._chat_list_high_water = 0
+        # Consecutive sync rounds that found the store not answering, counted
+        # towards recreating the session. See _BROKEN_STORE_REPAIR_ROUNDS.
+        self._broken_store_rounds = 0
         self.contacts = {}
         # Presence cache: maps JID → {lastKnownPresence, lastSeen}. Must be
         # initialized here (not lazily in _build_lid_to_phone_cache, which only
@@ -8406,6 +8417,16 @@ class MainWindow(wx.Frame):
             # since none of those status calls are inside a try/finally and a
             # thread that dies mid-sync never reaches its own clear-status line.
             self._initial_sync_running = False
+            # Re-stamp on the way out, not only on the way in. The stamp made
+            # at the top of this method is what trigger_sync_if_needed()
+            # measures its cooldown from, so a round that takes longer than
+            # the cooldown has already exhausted it by the time it finishes —
+            # the backoff was structurally dead for exactly the large accounts
+            # it exists to protect. Measured on a 937-chat session: 17 seconds
+            # between the end of one full round and the start of the next,
+            # against a nominal 120 s. Keeping the entry stamp as well means a
+            # round that dies immediately still cannot spin.
+            self._last_sync_attempt_ts = time.time()
             wx.CallAfter(self._set_status, "")
 
     @staticmethod
@@ -8424,6 +8445,126 @@ class MainWindow(wx.Frame):
         if remaining >= confirm_attempts:
             return max_attempts
         return attempt + 1 + confirm_attempts
+
+    # ── WhatsApp Web's in-memory store going missing ────────────────────────
+    # list-chats is WPP.chat.list(), which is literally
+    # ChatStore.getModelsArray().slice() inside the page — so it answering
+    # with an empty list means the in-memory ChatStore is empty, not that the
+    # account is. Measured on a real 937-chat session: after the very first
+    # successful call (935 chats), *99 consecutive* list-chats attempts across
+    # four full sync rounds and 37 minutes answered HTTP 200 with `[]`, while
+    # get-messages on the same page kept returning up to 1000 messages per
+    # chat (3843 successful calls) — get-messages reads WhatsApp Web's
+    # IndexedDB via msgFindBefore(), never the in-memory stores. The page was
+    # healthy throughout: state MAIN (NORMAL), no navigation, no detached
+    # frame, no "WAPI is not defined". WPPConnect's own log named the same
+    # failure from the other side, verbatim: `TypeError: Cannot read
+    # properties of undefined (reading 'map')` out of getAllContacts, whose
+    # body is `WPP.whatsapp.ContactStore.map(...)` — that store was not empty
+    # but *undefined*.
+    #
+    # /history-sync-status reports storeCounts.chat from the IndexedDB side,
+    # and it said 937 on every single check in both captured sessions,
+    # including eight seconds before the app accepted 36 chats as a whole
+    # account. That number was already being fetched and logged and used for
+    # nothing; it is what tells "this account is empty" apart from "the store
+    # this call reads is broken", which no chat count on its own can do.
+    #
+    # A ratio rather than equality because list-chats legitimately answers
+    # with fewer chats than the store holds: the visibleChats filter drops
+    # activity-less one-to-one entries. Measured healthy ratios: 935/937 and
+    # 32/33. Half is far below anything a working page produces.
+    _STORE_PLAUSIBLE_RATIO = 0.5
+    # Consecutive implausible *and non-growing* answers before the store is
+    # declared broken. Both halves are load-bearing, and the growth half is
+    # the one that is easy to get wrong: evidence_count includes the local
+    # cache, so on a returning account every early answer of a genuinely cold
+    # store looks like a regression against it (931 cached vs. an answer of
+    # 0, then 100, then 400). Only a count that has stopped moving is
+    # evidence of anything. Three rather than two because a fresh pairing can
+    # legitimately sit at zero for a moment while the in-memory store hydrates
+    # behind the IndexedDB side that storeCounts reads.
+    _BROKEN_STORE_CONFIRM = 3
+    # Rounds that must detect a broken store before the session is recreated.
+    # One round backs off and re-checks; the second repairs. _restart_wpp_session()
+    # carries its own re-entrancy guard, its own 120 s cooldown and the
+    # _auto_restart_grace_active() window that keeps a restart from being
+    # mistaken for a phone-side unlink.
+    _BROKEN_STORE_REPAIR_ROUNDS = 2
+
+    @classmethod
+    def count_contradicts_page(cls, server_count: int,
+                               wa_web_count: "int | None") -> bool:
+        """True when list-chats answers with far fewer chats than WhatsApp Web
+        itself reports holding.
+
+        A ratio rather than equality because list-chats legitimately answers
+        with fewer chats than the store holds — the visibleChats filter drops
+        activity-less one-to-one entries. Measured healthy ratios on real
+        sessions: 935/937 and 32/33.
+
+        ``wa_web_count`` of None (no endpoint, no answer) or 0 (the page
+        agrees there is nothing) is never a contradiction: the first decides
+        nothing, and the second is the genuinely-empty account.
+        """
+        if wa_web_count is None or wa_web_count <= 0:
+            return False
+        return server_count < wa_web_count * cls._STORE_PLAUSIBLE_RATIO
+
+    @classmethod
+    def store_looks_broken(cls, server_count: int, wa_web_count: "int | None",
+                           evidence_count: int) -> bool:
+        """True when list-chats' answer contradicts the page's own store count.
+
+        ``evidence_count`` is the largest number of chats we have positive
+        evidence for — the biggest count this same round already saw, or the
+        size of the local cache. It is what keeps a store that is merely still
+        loading from being called broken: a loading store only ever grows, so
+        an answer below something we already had is a regression, and a
+        regression is not loading.
+
+        All three conditions have to hold, and each rules out a specific case
+        that must NOT be treated as broken:
+
+        * ``wa_web_count`` unknown (no endpoint, no answer) — decide nothing
+          and leave the existing heuristics in charge.
+        * The page itself reports no chats — then an empty list-chats agrees
+          with it. This is the genuinely-empty account, and also the account
+          whose conversations were all deleted from another device: the case
+          _settle_deadline_decision()'s docstring calls unresolvable is
+          resolved here, correctly, because both sources say zero.
+        * No evidence of content above the answer — a first pairing filling in
+          0 -> 4 -> 7 -> 11 never regresses, so it never lands here.
+        """
+        if evidence_count <= server_count:
+            return False
+        return cls.count_contradicts_page(server_count, wa_web_count)
+
+    def _wa_web_chat_count(self) -> "int | None":
+        """How many chats WhatsApp Web itself says it is holding, or None.
+
+        Reads storeCounts.chat from the same /history-sync-status payload
+        log_history_sync_status() already prints. Kept separate from
+        refresh_history_still_landing() because that one deliberately reads
+        only the two queue fields and discards the rest.
+
+        Short timeout on purpose: this is a corroborating probe inside the
+        retry loop, not the sync itself. The default 30 s would let a hung
+        endpoint add a minute and a half to a round that is already the slow
+        path, and an unanswered probe costs nothing — None simply leaves the
+        existing heuristics in charge.
+        """
+        status = self.fetch_history_sync_status(timeout=10)
+        if not isinstance(status, dict):
+            return None
+        counts = status.get("storeCounts")
+        if not isinstance(counts, dict):
+            return None
+        try:
+            count = int(counts.get("chat"))
+        except (TypeError, ValueError):
+            return None
+        return count if count >= 0 else None
 
     # Ceiling for the deadline extensions below. _CHAT_RETRIES (6) x
     # _CHAT_DELAY (5 s) gives the settle loop about 30 seconds, which is not
@@ -8591,6 +8732,20 @@ class MainWindow(wx.Frame):
         max_attempts = _CHAT_RETRIES
         saw_nonzero  = False
         attempt      = -1
+        # See store_looks_broken(): the largest chat count we have positive
+        # evidence for this round, and the largest count WhatsApp Web itself
+        # has claimed. Both only ever grow — a store that is loading does not
+        # shrink — so keeping the maximum rather than the latest reading is
+        # what makes a regression detectable at all.
+        wa_web_count    = None
+        broken_readings = 0
+        store_broken    = False
+        # The previous attempt's count, whatever it was — distinct from
+        # prev_server_count, which the settle rules only advance on the paths
+        # that reach the bottom of the loop. A count that is still growing is
+        # a store still loading, and must never be counted as broken however
+        # far below the page's own total it currently is.
+        last_count      = -1
         while True:
             attempt += 1
             if attempt >= max_attempts:
@@ -8599,7 +8754,18 @@ class MainWindow(wx.Frame):
                 logging.info("[start_sync] Aborting sync: offline mode activated mid-sync.")
                 self._sync_completed = False
                 return
-            result   = self.get_remote_chats(dict(self.chats), notify_errors=False)
+            # persist_full=False: the full clear-and-reimport writes every
+            # message of every chat, and running it once per attempt meant a
+            # 931-chat account rewrote its whole message store up to 30 times
+            # per round (measured at ~4 s a time, ~8 minutes of redundant
+            # writes across the captured session). Nothing needs it here —
+            # sync_chat_messages() persists each chat incrementally a few
+            # lines below, and the mute/pin/archive metadata this call learns
+            # is written by its own set_metadata_json() regardless of the
+            # flag. prune_stale keeps the one thing persist_full also gated,
+            # the phantom-chat sweep, which is a plain in-memory dict scan.
+            result   = self.get_remote_chats(dict(self.chats), persist_full=False,
+                                             prune_stale=True, notify_errors=False)
             if result is None:
                 if getattr(self, "_last_chat_fetch_disconnected", False):
                     # WhatsApp went down mid-sync: stop immediately, stay
@@ -8638,6 +8804,55 @@ class MainWindow(wx.Frame):
                 "[start_sync] list-chats attempt %d returned %d chats (previous: %d, local cache: %d)",
                 attempt + 1, server_count, prev_server_count, local_chat_count,
             )
+
+            # ── Is this answer even possible? ────────────────────────────
+            # Checked before any of the settle rules below, because every one
+            # of them takes the count at face value: a broken store answering
+            # 0 is read as "still arriving" and extended 30 times, and a
+            # broken store answering 36 against no local cache is *accepted*
+            # as the whole account. Both were captured live on the same
+            # 937-chat session. See store_looks_broken() for why the three
+            # conditions there are the ones that avoid false positives.
+            # Evidence is the high-water mark of what list-chats has itself
+            # answered *this session*, and deliberately NOT the local cache.
+            # The cache would make every early answer of a genuinely cold
+            # store look like a regression on a returning account (931 cached
+            # against 0, then 100, then 400) — the commonest startup shape
+            # there is, and one the code has a documented live capture of
+            # (attempts 1-5 -> 0, attempt 6 -> 498). A count this same session
+            # already produced cannot be explained by the store still warming
+            # up, which is what makes it evidence at all.
+            evidence_count = getattr(self, "_chat_list_high_water", 0)
+            if evidence_count > server_count:
+                # Re-read rather than caching one reading for the round: the
+                # count can still be filling in, and only a later, higher
+                # answer can turn a wrongly-innocent verdict into the right
+                # one. At most _BROKEN_STORE_CONFIRM + 1 calls per round,
+                # since a confirmed break exits the loop.
+                latest = self._wa_web_chat_count()
+                if latest is not None:
+                    wa_web_count = max(wa_web_count or 0, latest)
+            still_growing = server_count > last_count
+            last_count = server_count
+            if (not still_growing
+                    and self.store_looks_broken(server_count, wa_web_count, evidence_count)):
+                broken_readings += 1
+                logging.warning(
+                    "[start_sync] list-chats answered %d chat(s) while WhatsApp Web "
+                    "reports %s in its own store and we have evidence for %d "
+                    "(reading %d/%d) — the page's in-memory chat store looks broken, "
+                    "not cold.",
+                    server_count, wa_web_count, evidence_count,
+                    broken_readings, self._BROKEN_STORE_CONFIRM,
+                )
+                if broken_readings >= self._BROKEN_STORE_CONFIRM:
+                    store_broken = True
+                    break
+                time.sleep(_CHAT_DELAY)
+                continue
+            broken_readings = 0
+            self._chat_list_high_water = max(evidence_count, server_count)
+
             # First non-zero answer: make sure at least _CHAT_CONFIRM_ATTEMPTS
             # attempts remain so it can be confirmed by a second, equal one.
             # See _CHAT_CONFIRM_ATTEMPTS above for why the loop cannot be left
@@ -8682,6 +8897,32 @@ class MainWindow(wx.Frame):
                     time.sleep(_CHAT_DELAY)
                     continue
                 if decision == "accept":
+                    # Last check before a snapshot becomes "the whole account
+                    # for this session": does the page agree there is nothing
+                    # more? This is the failure that amputated a real account
+                    # — a first pairing with no cache to contradict it took
+                    # 36 chats as the complete list of 937 and never retried,
+                    # eight seconds before the same session logged
+                    # wa_web_chats=937. Only reachable once the full attempt
+                    # budget is spent (~2.5 minutes), so unlike the early
+                    # break above it cannot fire on a store that is merely
+                    # slow: one that has not filled in by now is not filling in.
+                    #
+                    # Deliberately count_contradicts_page() and not
+                    # store_looks_broken(): the regression evidence the latter
+                    # demands is what keeps the *early* break off a cold
+                    # store, and there is nothing left to be early about here.
+                    if wa_web_count is None:
+                        wa_web_count = self._wa_web_chat_count()
+                    if self.count_contradicts_page(server_count, wa_web_count):
+                        logging.error(
+                            "[start_sync] Refusing to accept %d chat(s) as the whole "
+                            "account: WhatsApp Web reports %s in its own store. Marking "
+                            "the store as not answering instead of syncing an amputated "
+                            "account.", server_count, wa_web_count,
+                        )
+                        store_broken = True
+                        break
                     logging.warning(
                         "[start_sync] Chat list never settled (last count: %d) but the extension "
                         "budget is spent — accepting this snapshot rather than declaring the sync "
@@ -8709,6 +8950,44 @@ class MainWindow(wx.Frame):
             logging.info("[start_sync] Aborting sync: WhatsApp is disconnected.")
             self._sync_completed = False
             return
+
+        if store_broken:
+            # Deliberately NOT settled and NOT accepted: this snapshot is
+            # known-wrong, so it must neither be announced as a finished sync
+            # nor be allowed to shrink the chat list. self.chats keeps
+            # whatever it already held — get_remote_chats() only merges, and
+            # its one pruning pass is keyed on JIDs present in the response,
+            # which is empty here.
+            self._broken_store_rounds = getattr(self, "_broken_store_rounds", 0) + 1
+            logging.error(
+                "[start_sync] WhatsApp Web's in-memory chat store is not answering "
+                "(round %d of %d before recreating the session). Messages are "
+                "unaffected — get-messages reads IndexedDB and keeps working — so "
+                "this sync continues with the chats already known locally.",
+                self._broken_store_rounds, self._BROKEN_STORE_REPAIR_ROUNDS,
+            )
+            if self._broken_store_rounds >= self._BROKEN_STORE_REPAIR_ROUNDS:
+                self._broken_store_rounds = 0
+                # Nothing short of rebuilding the page recovers a store in
+                # this state: it stayed broken for 37 minutes and four full
+                # sync rounds in the captured session, and no amount of
+                # re-asking changed it. Stop here rather than running the
+                # message and media phases into a session about to be torn
+                # down; the health checker starts a fresh sync once the new
+                # session is up.
+                logging.error(
+                    "[start_sync] Recreating the WPPConnect session to rebuild the "
+                    "store — this restores the existing WhatsApp session from its "
+                    "saved token, it does not ask for a new QR code."
+                )
+                self._sync_completed = False
+                self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
+                threading.Thread(target=self._restart_wpp_session, daemon=True).start()
+                return
+        else:
+            # A plausible answer clears the tally: only *consecutive* rounds
+            # count towards recreating the session.
+            self._broken_store_rounds = 0
         if not chat_list_ok:
             # Report once, after every attempt is exhausted, instead of one
             # modal dialog per attempt interrupting the screen reader.
@@ -9243,7 +9522,8 @@ class MainWindow(wx.Frame):
         parts = ser.split("_") if ser else []
         return parts[1] if len(parts) > 1 else ""
 
-    def get_remote_chats(self, chats, persist_full: bool = True, notify_errors: bool = True):
+    def get_remote_chats(self, chats, persist_full: bool = True, notify_errors: bool = True,
+                         prune_stale: "bool | None" = None):
         """Fetch/merge the remote chat list into `chats`.
 
         Returns the merged dict on success and **None** when every attempt
@@ -9264,7 +9544,17 @@ class MainWindow(wx.Frame):
         refresh, which otherwise re-clears and re-encrypts the *entire*
         chats+contacts DB every few minutes just to notice a pin/mute
         change on one chat).
+
+        `prune_stale` controls the retroactive phantom-chat sweep, which used
+        to ride along on `persist_full` for no reason other than both being
+        "right after a real sync" work. They have completely different costs —
+        the sweep is an in-memory dict scan, the save rewrites every message
+        in the database — so the initial sync's retry loop needs the first
+        without paying for the second. Defaults to `persist_full`, preserving
+        the previous behaviour for every caller that does not pass it.
         """
+        if prune_stale is None:
+            prune_stale = persist_full
         # Use the modern `list-chats` endpoint (WPP.chat.list) instead of the
         # deprecated `all-chats` (legacy WAPI.getAllChats). The legacy call omits
         # some chats — notably muted or pinned groups — so those never got
@@ -9790,9 +10080,9 @@ class MainWindow(wx.Frame):
                 # local cache before this filter existed: no local messages,
                 # no server-reported activity, and not deliberately pinned or
                 # muted by the user. Only worth the full-dict scan right after
-                # a real sync (persist_full=True) — the periodic background
+                # a real sync (prune_stale) — the periodic background
                 # refresh just wants pin/mute state, so skip it there.
-                if persist_full:
+                if prune_stale:
                     response_jids = {
                         self._normalize_jid(c.get("remoteJid", ""))
                         for c in response_data if isinstance(c, dict)
