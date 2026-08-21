@@ -15576,6 +15576,19 @@ class MainWindow(wx.Frame):
             return
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
+            # Logged like every other exit. This one used to be silent, and it
+            # is the one that makes a report impossible to diagnose: the event
+            # shows up in the socket log and then the trail simply stops, with
+            # no way to tell "the badge already agreed with the server" apart
+            # from "the handler never ran at all" (a stalled UI thread, a chat
+            # that failed to resolve). Seen live: a stretch of a session where
+            # every chats-update reached websocket_client's own log and then
+            # produced nothing at all here — this exit is the only one that
+            # could have swallowed them, but nothing written down proved it.
+            logging.info(
+                "[unread] %s: no change (already %s, previous=%s).",
+                normalized, unread_count, previous_unread,
+            )
             return  # no actual change — skip expensive rebuild + save
         # The server sometimes counts own (fromMe) messages — and system events
         # (group promotes, joins/leaves, revokes) — as unread. Correct for both
@@ -15590,6 +15603,11 @@ class MainWindow(wx.Frame):
                 unread_count = _discount_non_countable_unread(records, unread_count)
         old_count = int(chat.get("unreadCount") or 0)
         if old_count == unread_count:
+            logging.info(
+                "[unread] %s: no change after discounting non-countable "
+                "messages (already %s, previous=%s).",
+                normalized, unread_count, previous_unread,
+            )
             return
         # Never resurrect unread count for a conversation the user already read
         # locally (mark_conversation_as_read set it to 0). The server may still
@@ -15693,7 +15711,26 @@ class MainWindow(wx.Frame):
                 # chat.unread_count_changed does exactly that), and with
                 # local_new set the old elif could never be reached at all.
                 local_new = getattr(self, "_new_since_read", {}).get(normalized)
-                if unread_count == 0 and old_count > 0:
+                if unread_count == 0 and _remote_read:
+                    # A read confirmed on another device — the count really
+                    # fell from something (see _remote_read_confirmed) — covers
+                    # the WHOLE chat, including the messages that arrived after
+                    # our local read-ack. That is exactly what separates it
+                    # from the uninformative WA-JS load-time zero the branch
+                    # below defends against, and it has to be checked first or
+                    # the defense swallows the real read.
+                    #
+                    # Reported live: an audio arrived after the conversation
+                    # had been read locally, was then read on the phone, and
+                    # the badge stayed lit at "1 mensagem não lida" — WhatsApp
+                    # Web sent unreadCount=0/previousUnreadCount=1 and this
+                    # branch put the 1 straight back. The other two branches
+                    # (open conversation, and the `unread_count < old_count`
+                    # guard above) already consult _remote_read; this one was
+                    # simply missed, which is why the bug showed up in 1:1
+                    # chats while groups looked fixed.
+                    unread_count = 0
+                elif unread_count == 0 and old_count > 0:
                     unread_count = local_new or old_count
                 elif local_new:
                     unread_count = min(unread_count, local_new)

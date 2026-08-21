@@ -792,6 +792,16 @@ export default class CreateSessionUtil {
    * `WPP.on` lives on the page and is re-injected fresh on every WhatsApp
    * Web reload, same as the msgKey._serialized shim above — re-install on
    * 'load' too, or the first reload silently drops this listener.
+   *
+   * The install itself polls (same setInterval pattern as the
+   * MsgKey._serialized/status-sender shims above), instead of trusting the
+   * single attempt the first version of this patch made: wireListeners()
+   * runs before isConnected() is confirmed, so window.WPP routinely isn't
+   * injected yet at that point, and WhatsApp Web's SPA never fires a second
+   * 'load' once connected — so a failed first try used to mean the listener
+   * never existed for the rest of the session. Measured live: zero
+   * chats-update events for unreadCount over 24+ minutes of active message
+   * traffic with the single-attempt version.
    */
   async onUnreadCountChanged(client: WhatsAppServer, req: Request) {
     try {
@@ -813,70 +823,113 @@ export default class CreateSessionUtil {
     const installListener = () => {
       client.page
         .evaluate(() => {
-          const WPP = (window as any).WPP;
-          if (
-            !WPP ||
-            !WPP.on ||
-            (window as any).__winzappUnreadListenerInstalled
-          ) {
-            return;
-          }
-          (window as any).__winzappUnreadListenerInstalled = true;
-          WPP.on('chat.unread_count_changed', (evt: any) => {
+          // Everything in here is wrapped, and the "installed" flag is only
+          // set once WPP.on() has actually returned: `WPP.on` is foreign,
+          // minified code that can throw even once the `!WPP.on` guard has
+          // passed (wa-js present, emitter not bootstrapped). Marking the
+          // context as installed first would leave it permanently claiming a
+          // listener it never registered, and letting the throw escape is
+          // worse still — on the first attempt it rejects the whole evaluate
+          // so the retry below is never even scheduled, and from inside the
+          // retry it skips clearInterval(), leaving a timer firing every 500ms
+          // for the life of the page. Same shape as restoreStatusSender above,
+          // for the same reason.
+          const install = () => {
             try {
-            const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
-            if (!chatId) return;
-            // The count this chat held BEFORE the change, forwarded so the
-            // client can tell a real read apart from a meaningless zero.
-            // A chat merely being loaded into the Store reports unreadCount=0
-            // with nothing behind it, and is indistinguishable from "the user
-            // just read this chat on their phone" unless you know whether the
-            // count actually fell from something.
-            //
-            // Measured against a live session: the field really is a plain
-            // number, matching wa-js's own typing. Three consecutive messages
-            // in one group came through as unreadCount 1/2/3 with
-            // previousUnreadCount 0/1/2 — tracking exactly one step behind.
-            // The suspicion it might be Backbone's options object (wa-js
-            // emits it straight from the Store's `change:unreadCount`
-            // callback, whose third argument is options in every other
-            // handler of that shape) did not hold. The `.previous()` fallback
-            // stays anyway: it costs nothing, and it is what keeps this
-            // working if a future wa-js changes the payload — silently, since
-            // nothing else here would notice. Neither being a number sends
-            // null, and the client then keeps its own conservative count.
-            // Deriving `previous` must never be able to suppress the event
-            // itself: the unread count is the payload that matters and the
-            // previous value is an extra, so it is computed defensively and
-            // the emit happens regardless. Reading `.previous` off a Store
-            // model is a property access on foreign, minified code that can
-            // throw or be a getter with side effects, and a throw anywhere in
-            // this callback silently takes the whole listener down — the
-            // client then stops being told about unread counts at all, with
-            // nothing in any log to say so. Measured, not hypothetical: an
-            // earlier version of this block computed `previous` inline and
-            // the chats-update stream stopped dead.
-            let previous: any = null;
-            try {
-              const raw = evt?.previousUnreadCount;
-              if (typeof raw === 'number') {
-                previous = raw;
-              } else if (typeof evt?.chat?.previous === 'function') {
-                const p = evt.chat.previous('unreadCount');
-                previous = typeof p === 'number' ? p : null;
+            const WPP = (window as any).WPP;
+            if (!WPP || !WPP.on) return false;
+            if ((window as any).__winzappUnreadListenerInstalled) return true;
+            WPP.on('chat.unread_count_changed', (evt: any) => {
+              try {
+              const chatId = evt?.chat?.id?._serialized || evt?.chat?.id;
+              if (!chatId) return;
+              // The count this chat held BEFORE the change, forwarded so the
+              // client can tell a real read apart from a meaningless zero.
+              // A chat merely being loaded into the Store reports unreadCount=0
+              // with nothing behind it, and is indistinguishable from "the user
+              // just read this chat on their phone" unless you know whether the
+              // count actually fell from something.
+              //
+              // Measured against a live session: the field really is a plain
+              // number, matching wa-js's own typing. Three consecutive messages
+              // in one group came through as unreadCount 1/2/3 with
+              // previousUnreadCount 0/1/2 — tracking exactly one step behind.
+              // The suspicion it might be Backbone's options object (wa-js
+              // emits it straight from the Store's `change:unreadCount`
+              // callback, whose third argument is options in every other
+              // handler of that shape) did not hold. The `.previous()` fallback
+              // stays anyway: it costs nothing, and it is what keeps this
+              // working if a future wa-js changes the payload — silently, since
+              // nothing else here would notice. Neither being a number sends
+              // null, and the client then keeps its own conservative count.
+              // Deriving `previous` must never be able to suppress the event
+              // itself: the unread count is the payload that matters and the
+              // previous value is an extra, so it is computed defensively and
+              // the emit happens regardless. Reading `.previous` off a Store
+              // model is a property access on foreign, minified code that can
+              // throw or be a getter with side effects, and a throw anywhere in
+              // this callback silently takes the whole listener down — the
+              // client then stops being told about unread counts at all, with
+              // nothing in any log to say so. Measured, not hypothetical: an
+              // earlier version of this block computed `previous` inline and
+              // the chats-update stream stopped dead.
+              let previous: any = null;
+              try {
+                const raw = evt?.previousUnreadCount;
+                if (typeof raw === 'number') {
+                  previous = raw;
+                } else if (typeof evt?.chat?.previous === 'function') {
+                  const p = evt.chat.previous('unreadCount');
+                  previous = typeof p === 'number' ? p : null;
+                }
+              } catch (e) {
+                previous = null;
               }
+              (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount, previous);
+              } catch (e) {
+                // Anything unexpected in here costs at most this one event.
+                // Never the listener: WhatsApp Web's own objects are foreign
+                // and minified, and losing this stream means unread counts
+                // silently stop updating everywhere in the app.
+              }
+            });
+            (window as any).__winzappUnreadListenerInstalled = true;
+            return true;
             } catch (e) {
-              previous = null;
+              return false;
             }
-            (window as any).__winzappOnUnreadChanged(chatId, evt.unreadCount, previous);
-            } catch (e) {
-              // Anything unexpected in here costs at most this one event.
-              // Never the listener: WhatsApp Web's own objects are foreign
-              // and minified, and losing this stream means unread counts
-              // silently stop updating everywhere in the app.
+          };
+          if (install()) return 'installed';
+          // wa-js is injected asynchronously, so the first try above usually
+          // finds no window.WPP at all — poll instead of giving up, exactly
+          // like the MsgKey._serialized and status sender shims. See this
+          // method's own doc comment for why a single attempt was never
+          // enough here.
+          let tries = 0;
+          const timer = setInterval(() => {
+            if (install() || ++tries > 60) {
+              clearInterval(timer);
+              // The evaluate below can only ever log 'scheduled' — it returns
+              // long before this loop resolves — so without this line the log
+              // cannot tell "installed three seconds later" apart from "gave
+              // up after 30s and this session will never see an unread event",
+              // which is exactly the blind spot that let the single-attempt
+              // version go unnoticed for 24 minutes. The page console is
+              // already bridged into log.log for anything tagged
+              // '[browser-evaluate]' (see the page.on('console') handler where
+              // the client is created).
+              console.log(
+                (window as any).__winzappUnreadListenerInstalled
+                  ? `[browser-evaluate] onUnreadCountChanged listener: installed after ${tries} retries`
+                  : '[browser-evaluate] onUnreadCountChanged listener: GAVE UP after 60 retries — wa-js never appeared, unread counts will not update'
+              );
             }
-          });
+          }, 500);
+          return 'scheduled (wa-js not ready yet)';
         })
+        .then((result: string) =>
+          req.logger.info(`[${client.session}] onUnreadCountChanged listener: ${result}`)
+        )
         .catch((e: any) =>
           req.logger.warn(
             `[onUnreadCountChanged] install failed: ${e?.message || e}`
