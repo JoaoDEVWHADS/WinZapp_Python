@@ -9192,8 +9192,27 @@ class MainWindow(wx.Frame):
             if jid.endswith("@lid") and jid not in getattr(self, "_lid_to_phone", {})
         ]
         if unresolved_lids:
-            logging.info(f"[Sync] Resolving {len(unresolved_lids)} unresolved @lid chats via API...")
-            self.resolve_lid_jids_via_api(unresolved_lids)
+            # One chunk here, the rest to the backfill. This pass is serial by
+            # design — resolve_lid_jids_via_api() sleeps 0.5 s per JID so it
+            # cannot hammer the single Puppeteer page — and it sits between
+            # the message phase and the "conversations synchronized"
+            # announcement, so its cost is time the user waits with no idea
+            # anything is happening. Measured on a live sync: 728 unresolved
+            # LIDs, six and a half minutes, on a sync whose message phase took
+            # 58 seconds.
+            #
+            # Nothing is dropped. _backfill_names() already resolves exactly
+            # this list, in chunks of the same size, on its own thread, with
+            # an adaptive delay — the chunked-and-paced pass this used to
+            # duplicate serially. The backfill scheduler below is what
+            # guarantees it runs.
+            head = unresolved_lids[:self._BACKFILL_CHUNK]
+            logging.info(
+                "[Sync] Resolving %d of %d unresolved @lid chat(s) via API now; "
+                "the backfill takes the remaining %d in the background.",
+                len(head), len(unresolved_lids), len(unresolved_lids) - len(head),
+            )
+            self.resolve_lid_jids_via_api(head)
             self.chats = self.deduplicate_chats(self.chats)
 
         # Conversations are fully sorted as soon as messages are synced.
@@ -9286,10 +9305,19 @@ class MainWindow(wx.Frame):
         # on its way — and it is the loop that decides when to stop.
         pending = len(getattr(self, "_chats_awaiting_messages", set()))
         still_landing = self.refresh_history_still_landing(context="after initial sync")
-        if pending or still_landing:
+        # Unresolved names are a third reason to run, and until the inline
+        # pass above was capped there was never a case where they were the
+        # ONLY reason — it resolved every one of them before getting here, at
+        # the cost of blocking the sync for minutes. Now that it hands the
+        # remainder over, leaving this condition on messages alone would strand
+        # them: a chat list where every chat holds a full page but hundreds
+        # still show a raw @lid, with nothing left to fix it this session.
+        unnamed = len(self._pending_name_resolution())
+        if pending or still_landing or unnamed:
             logging.info(
                 "[backfill] Scheduling backfill: %d chat(s) short of a full page, "
-                "history still landing=%s.", pending, still_landing)
+                "%d still unnamed, history still landing=%s.",
+                pending, unnamed, still_landing)
             existing = getattr(self, "_backfill_thread", None)
             if existing is None or not existing.is_alive():
                 self._backfill_thread = threading.Thread(
@@ -11540,13 +11568,21 @@ class MainWindow(wx.Frame):
                                 else:
                                     name = self.i18n.t("unknown_contact")
             
-            # Detailed logging for name resolution debugging
+            # Name-resolution tracing. DEBUG, not INFO, and with lazy %-args
+            # rather than an f-string, because both halves of that mattered:
+            # this runs once per chat inside _compute_chat_lists(), which the
+            # chat list rebuilds on every mapping learned. Measured on a live
+            # 935-chat sync: 336,741 of the session's 348,332 log lines came
+            # from this one call — 97% of the log, 74 MB of the 77 MB, roughly
+            # 690 synchronous disk writes a second sustained for eight
+            # minutes. An f-string would still be built on every call even
+            # with the level raised, so the format arguments stay deferred.
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
-                logging.info(
-                    f"[Name Resolution] jid={jid} phone_jid={phone_jid} "
-                    f"resolved_name={resolved_name} "
-                    f"msg_name={msg_push} "
-                    f"chat_name={chat.get('name')} push_name={chat.get('pushName')} -> final_name='{name}'"
+                logging.debug(
+                    "[Name Resolution] jid=%s phone_jid=%s resolved_name=%s "
+                    "msg_name=%s chat_name=%s push_name=%s -> final_name=%r",
+                    jid, phone_jid, resolved_name, msg_push,
+                    chat.get("name"), chat.get("pushName"), name,
                 )
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
@@ -12118,6 +12154,9 @@ class MainWindow(wx.Frame):
             
             lids_to_resolve = set()
             phones_to_resolve = set()
+            # Mappings learned by this scan, so the single end-of-scan refresh
+            # below fires even when no contact record happened to change.
+            mapped = 0
             # Senders are collected separately and capped: a busy account can
             # hold thousands of distinct group participants, and every one of
             # them would otherwise become an API round-trip through the single
@@ -12144,12 +12183,17 @@ class MainWindow(wx.Frame):
                     alt = key.get("remoteJidAlt", "")
                     participant = key.get("participant", "")
 
+                    # defer_ui: this walks every message of every chat, so a
+                    # refresh per mapping is the same rebuild storm
+                    # resolve_lid_jids_via_api() had. One refresh at the end.
                     if alt and alt.endswith("@s.whatsapp.net"):
                         if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
-                            self.register_jid_mapping(remote, alt)
+                            self.register_jid_mapping(remote, alt, defer_ui=True)
+                            mapped += 1
                     elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
                         if self._lid_to_phone.get(alt) != remote:
-                            self.register_jid_mapping(alt, remote)
+                            self.register_jid_mapping(alt, remote, defer_ui=True)
+                            mapped += 1
 
                     # Sender of a group message. Only mentioned JIDs used to be
                     # collected here, so a participant whose @lid we cannot
@@ -12229,6 +12273,11 @@ class MainWindow(wx.Frame):
                      except Exception as e:
                          logging.error(f"[Mentions Scan] Error saving contacts incrementally: {e}")
                          self.save_data(self.chats, self.contacts)
+                if updated_contacts or mapped:
+                     # Was gated on updated_contacts alone, which is no longer
+                     # enough now that the per-mapping refreshes are deferred:
+                     # a scan that learned mappings but changed no contact
+                     # record would otherwise never refresh the list at all.
                      wx.CallAfter(self._schedule_set_chats)
                      wx.CallAfter(self._schedule_refresh_active_messages)
             
@@ -16362,8 +16411,19 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_resolve, daemon=True).start()
 
-    def register_jid_mapping(self, lid_jid, phone_jid, save=True):
-        """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it."""
+    def register_jid_mapping(self, lid_jid, phone_jid, save=True, defer_ui=False):
+        """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it.
+
+        `defer_ui` suppresses this call's own chat-list refresh, for callers
+        resolving a whole batch: they schedule one refresh when the batch
+        finishes instead of one per mapping. Measured on a live 935-chat
+        sync, resolve_lid_jids_via_api() learned 1245 mappings in eight
+        minutes and each one scheduled a rebuild — _schedule_set_chats()
+        debounces at 300 ms, so that still came to roughly 380 full
+        recomputations of a 935-chat list, each resolving every chat's name.
+        The live message path (on_new_message) deliberately does NOT pass
+        this: a single arriving message must still refresh the list at once.
+        """
         if not lid_jid or not phone_jid:
             return
         if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
@@ -16416,7 +16476,8 @@ class MainWindow(wx.Frame):
                     logging.warning("[LID Mapping] Failed to save mapping incrementally: %s", exc)
                     # Fallback to save_data if incremental save fails
                     self.save_data(self.chats, self.contacts)
-            wx.CallAfter(self._schedule_set_chats)
+            if not defer_ui:
+                wx.CallAfter(self._schedule_set_chats)
 
     def resolve_lid_jids_via_api(self, jids):
         """Resolve a list of @lid JIDs to phone JIDs using WPPConnect contact endpoint."""
@@ -16500,7 +16561,7 @@ class MainWindow(wx.Frame):
                         if pn_jid:
                             canonical_jid = self._normalize_jid(pn_jid)
                             if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
-                                self.register_jid_mapping(lid_jid, canonical_jid, save=False)
+                                self.register_jid_mapping(lid_jid, canonical_jid, save=False, defer_ui=True)
                                 try:
                                     self.db.set_lid_mapping(lid_jid, canonical_jid)
                                 except Exception as exc:
@@ -16566,7 +16627,7 @@ class MainWindow(wx.Frame):
                         if profile_pn_jid:
                             profile_canonical = self._normalize_jid(profile_pn_jid)
                             if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
-                                self.register_jid_mapping(lid_jid, profile_canonical, save=False)
+                                self.register_jid_mapping(lid_jid, profile_canonical, save=False, defer_ui=True)
                                 try:
                                     self.db.set_lid_mapping(lid_jid, profile_canonical)
                                 except Exception as exc:
