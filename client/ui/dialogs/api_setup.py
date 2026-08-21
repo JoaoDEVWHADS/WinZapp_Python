@@ -140,6 +140,9 @@ _CUSTOM_ROOT_FILES = [
 # never pins directly either, come along transitively at whichever paired
 # version @wppconnect-team/wppconnect itself resolves to.
 _PATCHED_DEPENDENCY_KEYS = [
+    "zod",  # runtime schema for the sync endpoints' response contracts
+            # (src/dto/sync.ts). Declared here because the controllers import
+            # it at runtime — it is not a build-only tool.
     "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary — WinZapp's own
                                   # Python side shells out to it directly to
                                   # encode voice messages to OGG/Opus.
@@ -187,9 +190,11 @@ _CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
     "src/middleware/instrumentation.ts",
     "src/types/express/index.d.ts",
     "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",

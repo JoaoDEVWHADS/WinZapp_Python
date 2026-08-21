@@ -16,6 +16,12 @@
 import { Chat } from '@wppconnect-team/wppconnect';
 import { Request, Response } from 'express';
 
+import {
+  observePayload,
+  SyncChatListSchema,
+  SyncContactListSchema,
+  SyncMessageListSchema,
+} from '../dto/sync';
 import { contactToArray, unlinkAsync } from '../util/functions';
 import { clientsArray } from '../util/sessionUtil';
 
@@ -442,7 +448,12 @@ export async function listChats(req: Request, res: Response) {
       return hasActivity || isKnownConversation;
     });
 
-    res.status(200).json(visibleChats);
+    res.status(200).json(
+      observePayload(SyncChatListSchema, visibleChats, {
+        logger: req.logger,
+        endpoint: 'list-chats',
+      })
+    );
   } catch (e) {
     req.logger.error(e);
     res
@@ -2074,7 +2085,13 @@ export async function getMessages(req: Request, res: Response) {
         { chatId: phone, targetCount }
       );
     }
-    res.status(200).json({ status: 'success', response: response });
+    res.status(200).json({
+      status: 'success',
+      response: observePayload(SyncMessageListSchema, response, {
+        logger: req.logger,
+        endpoint: 'get-messages',
+      }),
+    });
   } catch (e: any) {
     req.logger.error(
       `Error in getMessages: ${e?.message || e}\nStack: ${e?.stack || ''}`
@@ -3192,7 +3209,13 @@ export async function getAllContacts(req: Request, res: Response) {
       });
     }
 
-    res.status(200).json({ status: 'success', response: response });
+    res.status(200).json({
+      status: 'success',
+      response: observePayload(SyncContactListSchema, response, {
+        logger: req.logger,
+        endpoint: 'all-contacts',
+      }),
+    });
   } catch (error) {
     req.logger.error(error);
     res.status(500).json({

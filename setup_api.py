@@ -78,9 +78,11 @@ CUSTOM_SRC_FILES = [
     "src/util/functions.ts",
     "src/middleware/statusConnection.ts",
     "src/middleware/auth.ts",
+    "src/dto/sync.ts",
     "src/middleware/instrumentation.ts",
     "src/types/express/index.d.ts",
     "src/tests/middleware/instrumentation.test.ts",
+    "src/tests/dto/sync.test.ts",
     "src/controller/deviceController.ts",
     "src/controller/messageController.ts",
     "src/controller/sessionController.ts",
@@ -175,6 +177,9 @@ def _current_tag(cwd: str) -> str:
 # api_patches/ at some earlier point, undoing legitimate upstream bumps on
 # every future tag this script prepares.
 _PATCHED_DEPENDENCY_KEYS = [
+    "zod",  # runtime schema for the sync endpoints' response contracts
+            # (src/dto/sync.ts). Declared here because the controllers import
+            # it at runtime — it is not a build-only tool.
     "@ffmpeg-installer/ffmpeg",  # vendors a real ffmpeg binary via npm — WinZapp's
                                   # own Python side shells out to it directly
                                   # (main.py: _find_api_ffmpeg/_convert_wav_to_ogg)
