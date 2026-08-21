@@ -99,6 +99,11 @@ def call_later_now(monkeypatch):
         return _Immediate()
 
     monkeypatch.setattr("ui.conversations.wx.CallLater", _call_later)
+
+    def _call_after(fn, *a, **kw):
+        fn(*a, **kw)
+
+    monkeypatch.setattr("ui.conversations.wx.CallAfter", _call_after)
     # _start_audio() (inside the chain) builds a voice_messages/ path via
     # data_path(), which needs an active multi-account context this test
     # never sets up — irrelevant to what's under test here (focus movement).

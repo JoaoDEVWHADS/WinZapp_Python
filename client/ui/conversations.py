@@ -5847,7 +5847,17 @@ class ConversationsPanel(wx.Panel):
                     # finished row's "played" status without that refresh's
                     # own accessibility event competing with (and queuing
                     # ahead of) the announcement of the newly focused row.
-                    _flush_pending_played_refresh()
+                    # Still via wx.CallAfter, not a direct call: Focus()/
+                    # Select() above only *post* the focus-change
+                    # accessibility event, they don't wait for NVDA to have
+                    # actually processed it — calling the refresh in the very
+                    # same synchronous burst raced the two events in whatever
+                    # order NVDA's own internal queue happened to prefer,
+                    # confirmed live as "works for some audios, not others".
+                    # CallAfter defers to the next idle iteration of the
+                    # message loop, after the focus event has actually been
+                    # dispatched to the OS.
+                    wx.CallAfter(_flush_pending_played_refresh)
                     clean_msg_id = msg_id
                     if "_" in msg_id:
                         parts = msg_id.split("_")
