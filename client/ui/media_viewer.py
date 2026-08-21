@@ -432,7 +432,10 @@ class MediaViewerDialog(wx.Dialog):
     def _configure_status_actions(self, item: dict):
         status_context = bool(item.get("status_id") or item.get("status"))
         can_interact = status_context and not bool(item.get("from_me"))
-        self._status_actions.Show(can_interact and (self._on_like_cb or self._on_reply_cb))
+        self._status_actions.Show(
+            can_interact
+            and (self._on_like_cb is not None or self._on_reply_cb is not None)
+        )
         self._like_btn.Show(can_interact and self._on_like_cb is not None)
         self._reply_field.Show(can_interact and self._on_reply_cb is not None)
         self._reply_btn.Show(can_interact and self._on_reply_cb is not None)
