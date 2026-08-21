@@ -196,9 +196,19 @@ async function listChatsWithStoreRecovery(
         return { ...first, recovered: false };
       }
 
-      // Every concurrent list-chats request awaits the same recovery. Delete
-      // it once complete so a later, genuinely new store loss can be repaired.
-      if (!root.__winzappChatStoreRecoveryPromise) {
+      // Every concurrent list-chats request awaits the same recovery, and a
+      // later, genuinely new store loss can still be repaired once this one
+      // finishes. The in-flight promise alone is not enough to guarantee that:
+      // it is cleared the moment the recovery settles, which is BEFORE the
+      // requests waiting on it have re-read the store, so a request arriving
+      // in that window would start a second 900-chat scan over a store that
+      // was just rebuilt. The cooldown closes it — the single-flight promise
+      // covers requests that arrive during the scan, the timestamp covers the
+      // ones that arrive right after it.
+      const RECOVERY_COOLDOWN_MS = 30_000;
+      const recoveredAt = root.__winzappChatStoreRecoveredAt || 0;
+      const coolingDown = Date.now() - recoveredAt < RECOVERY_COOLDOWN_MS;
+      if (!root.__winzappChatStoreRecoveryPromise && !coolingDown) {
         root.__winzappChatStoreRecoveryPromise = (async () => {
           const ids = await new Promise<string[]>((resolve) => {
             let open: IDBOpenDBRequest;
@@ -280,11 +290,18 @@ async function listChatsWithStoreRecovery(
           }
           return { indexedDbChats: ids.length, rehydrated, failed };
         })().finally(() => {
+          root.__winzappChatStoreRecoveredAt = Date.now();
           delete root.__winzappChatStoreRecoveryPromise;
         });
       }
 
-      const recovery = await root.__winzappChatStoreRecoveryPromise;
+      // Read the property once: within the cooldown there is no promise to
+      // await, and the store is simply re-read — a scan that just finished is
+      // not worth repeating for every request in the retry loop behind it.
+      const pending = root.__winzappChatStoreRecoveryPromise;
+      const recovery = pending
+        ? await pending
+        : { skipped: 'recovery ran recently' };
       const second = await serialise();
       return {
         ...second,
