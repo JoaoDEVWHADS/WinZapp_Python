@@ -1461,20 +1461,37 @@ class WebSocketClient:
                 }
             }
         elif msg_type in ("audio", "ptt"):
+            media_data = wpp_msg.get("mediaData") if isinstance(wpp_msg.get("mediaData"), dict) else {}
             dur = wpp_msg.get("duration") or wpp_msg.get("seconds")
-            if not dur and isinstance(wpp_msg.get("mediaData"), dict):
-                dur = wpp_msg.get("mediaData", {}).get("duration")
+            if not dur:
+                dur = media_data.get("duration")
             try:
                 seconds_val = int(float(dur)) if dur else 0
             except Exception:
                 seconds_val = 0
-            message_content = {
-                "audioMessage": {
-                    "url": wpp_msg.get("clientUrl", ""),
-                    "seconds": seconds_val,
-                    "mediaKey": _safe_media_key(wpp_msg.get("mediaKey"))
-                }
+
+            # Keep the original audio metadata.  Save As resolves the filename
+            # extension from these values; dropping them here made every
+            # received non-PTT audio with no local filename fall through to
+            # the old hard-coded .mp3 fallback even when WPPConnect reported
+            # audio/ogg, audio/mp4 (M4A), audio/aac, audio/wav, etc.
+            audio_mimetype = wpp_msg.get("mimetype") or media_data.get("mimetype") or ""
+            audio_file_name = (
+                wpp_msg.get("filename") or wpp_msg.get("fileName") or wpp_msg.get("title")
+                or media_data.get("filename") or media_data.get("fileName") or media_data.get("title")
+                or ""
+            )
+            audio_message = {
+                "url": wpp_msg.get("clientUrl", ""),
+                "seconds": seconds_val,
+                "mediaKey": _safe_media_key(wpp_msg.get("mediaKey")),
             }
+            if audio_mimetype:
+                audio_message["mimetype"] = audio_mimetype
+            if audio_file_name:
+                audio_message["fileName"] = audio_file_name
+
+            message_content = {"audioMessage": audio_message}
             # Preserve the PTT/voice-note flag: WPPConnect reports voice notes
             # with type="ptt", but that raw type is later mapped to
             # "audioMessage" (see type_mapping below) and the flag would be

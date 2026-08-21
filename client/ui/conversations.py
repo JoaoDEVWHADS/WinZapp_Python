@@ -4429,8 +4429,26 @@ class ConversationsPanel(wx.Panel):
         is_ptt = bool(inner.get("ptt", False) or inner.get("isPtt", False) or media_data.get("ptt", False))
 
         mimetype = inner.get("mimetype") or msg.get("mimetype") or media_data.get("mimetype") or ""
-        clean_mime = mimetype.split(";")[0].strip() if mimetype else ""
-        guessed_ext = mimetypes.guess_extension(clean_mime) if clean_mime else ""
+        clean_mime = mimetype.split(";")[0].strip().lower() if mimetype else ""
+        # A few audio MIME aliases are either absent from Python's mimetypes
+        # table or map to a non-user-facing extension.  Resolve these before
+        # falling back to the platform table so Save As keeps the real format.
+        canonical_ext = {
+            "audio/m4a": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/mp4": ".m4a",
+            "audio/ogg": ".ogg",
+            "audio/x-ogg": ".ogg",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/aac": ".aac",
+            "audio/flac": ".flac",
+            "audio/x-flac": ".flac",
+            "audio/opus": ".opus",
+            "audio/webm": ".webm",
+            "audio/mpeg": ".mp3",
+        }.get(clean_mime, "")
+        guessed_ext = canonical_ext or (mimetypes.guess_extension(clean_mime) if clean_mime else "")
         if not guessed_ext and "/" in clean_mime:
             guessed_ext = f".{clean_mime.split('/')[-1]}"
 
@@ -4465,7 +4483,11 @@ class ConversationsPanel(wx.Panel):
             ext = guessed_ext or ".mp4"
             default_file = f"video_{time_str or msg_id}{ext}"
         elif msg_type == "audioMessage":
-            ext = guessed_ext or ".mp3"
+            # Do not invent .mp3.  Regular audio attachments keep their real
+            # extension via fileName/mimetype above.  If WPPConnect supplies
+            # neither, leave the extension empty instead of mislabelling the
+            # original bytes as MP3.
+            ext = guessed_ext or ""
             default_file = f"audio_{time_str or msg_id}{ext}"
         else:
             ext = guessed_ext or ".bin"
@@ -4513,7 +4535,15 @@ class ConversationsPanel(wx.Panel):
         if ext_clean:
             wildcard = f"{ext_clean.upper()} (*.{ext_clean})|*.{ext_clean}|{i18n.t('all_files') if hasattr(i18n, 't') else 'Todos os ficheiros'} (*.*)|*.*"
         elif msg_type == "audioMessage":
-            wildcard = "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus)|*.mp3;*.ogg;*.wav;*.m4a;*.flac;*.opus|*.*|*.*"
+            # Unknown audio extension: put *.* first so the native save dialog
+            # does not silently append the first audio pattern (typically
+            # .mp3) to a file whose actual format we could not identify.
+            all_files = i18n.t("all_files") if hasattr(i18n, "t") else "Todos os arquivos"
+            wildcard = (
+                f"{all_files} (*.*)|*.*|"
+                "Áudio (*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus)|"
+                "*.mp3;*.ogg;*.wav;*.m4a;*.aac;*.flac;*.opus"
+            )
         elif msg_type == "imageMessage":
             wildcard = "Imagens (*.jpg;*.png;*.webp;*.gif)|*.jpg;*.png;*.webp;*.gif|*.*|*.*"
         elif msg_type == "videoMessage":
