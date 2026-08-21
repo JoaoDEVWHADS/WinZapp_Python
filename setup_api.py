@@ -62,7 +62,14 @@ if _CLIENT_DIR not in sys.path:
 # insisting its installed version was still 2.10.0 on a build that had
 # genuinely cloned/built 2.10.1, because api_patches/package.json's own
 # "version" field had gone stale.
-CUSTOM_ROOT_FILES = ["start.js", "config.json"]
+CUSTOM_ROOT_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+]
 CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",

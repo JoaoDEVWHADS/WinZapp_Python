@@ -57,6 +57,10 @@ def _setup_api_module():
 MIRRORED_FILES = [
     "start.js",
     "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
     "decrypt.js",
     "src/config.ts",
     "src/index.ts",

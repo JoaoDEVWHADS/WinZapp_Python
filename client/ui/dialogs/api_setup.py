@@ -112,7 +112,14 @@ _PRESERVE = {"start.js", ".env", "config.json"}
 # version would silently keep its config.json forever — including any
 # createOptions a newer release changed. `.env` is deliberately absent: it is
 # the one root file that could be genuinely local, and nothing reads it anyway.
-_CUSTOM_ROOT_FILES = ["start.js", "config.json"]
+_CUSTOM_ROOT_FILES = [
+    "start.js",
+    "config.json",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierignore",
+    "jest.config.js",
+]
 
 # Only these keys are copied from api_patches/package.json onto whatever the
 # downloaded ZIP produced — same list, and same reasoning, as setup_api.py's
