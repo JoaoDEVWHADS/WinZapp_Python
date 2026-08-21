@@ -12712,8 +12712,9 @@ class MainWindow(wx.Frame):
     # would have abandoned the rest while they were still arriving.  So: retry
     # quickly while passes keep recovering chats, back off when one recovers
     # nothing, and stop at an overall budget so this can never poll forever.
-    _BACKFILL_FIRST_DELAY = 30     # seconds before the first pass, and after any
-                                   # pass that made progress
+    _BACKFILL_FIRST_DELAY = 30     # seconds before the first sweep, and after a
+                                   # complete sweep that made progress
+    _BACKFILL_CHUNK_DELAY = 5      # pause between chunks in the same full sweep
     _BACKFILL_MAX_DELAY   = 300    # ceiling once passes stop recovering anything
     _BACKFILL_BUDGET      = 45 * 60  # total wall-clock the backfill may run for
     # Renewal ceiling for a session whose history is still arriving — a fresh
@@ -12724,6 +12725,18 @@ class MainWindow(wx.Frame):
     # burst of automation traffic on top of the media phase.
     _BACKFILL_WORKERS     = 3
     _BACKFILL_CHUNK       = 60     # chats re-queried per pass
+
+    @classmethod
+    def _backfill_short_queue_delays(cls, retry_delay: int, sweep_finished: bool,
+                                     sweep_made_progress: bool) -> tuple[int, int]:
+        """Return (next sleep, retained retry backoff) for the short-chat queue."""
+        if not sweep_finished:
+            return cls._BACKFILL_CHUNK_DELAY, retry_delay
+        if sweep_made_progress:
+            retry_delay = cls._BACKFILL_FIRST_DELAY
+        else:
+            retry_delay = min(retry_delay * 2, cls._BACKFILL_MAX_DELAY)
+        return retry_delay, retry_delay
 
     @staticmethod
     def _server_claims_content(chat: dict) -> bool:
@@ -13064,8 +13077,10 @@ class MainWindow(wx.Frame):
         # that never settles still ends.
         hard_deadline = time.monotonic() + self._BACKFILL_LANDING_BUDGET
         delay = self._BACKFILL_FIRST_DELAY
+        retry_delay = self._BACKFILL_FIRST_DELAY
         attempt = 0
         attempted: set[str] = set()
+        sweep_made_progress = False
         try:
             while time.monotonic() < deadline:
                 # Sleep in slices so a shutdown or a newer sync is noticed
@@ -13082,13 +13097,20 @@ class MainWindow(wx.Frame):
                     # Not a wasted pass: nothing was attempted, so just wait
                     # again rather than spending part of the budget on it.
                     logging.info("[backfill] Offline — waiting before retrying.")
+                    delay = retry_delay
                     continue
 
                 attempt += 1
                 # Re-read the queue once per pass (not once per chat): it is
                 # what decides whether a chat that came back short is still owed
                 # history or has simply told us everything it has.
-                if self.refresh_history_still_landing(context=f"backfill pass {attempt}"):
+                # Query/unblock the history-sync machinery once per complete
+                # sweep, not once per chunk. Large queues now move through
+                # several chunks quickly and do not need to hammer this status
+                # endpoint between each one.
+                if (not attempted
+                        and self.refresh_history_still_landing(
+                            context=f"backfill pass {attempt}")):
                     # Two things can stall the queue, and both are silent: a
                     # chunk the processing loop will never accept parked at the
                     # head of it, and a loop that simply stopped scheduling
@@ -13103,6 +13125,15 @@ class MainWindow(wx.Frame):
                 # it as history lands, and the sync that added it may have
                 # finished while this pass was sleeping.
                 pending = self._backfill_pending_snapshot()
+                if pending is None:
+                    pending = sorted(getattr(self, "_chats_awaiting_messages", set()))
+                pending_set = set(pending)
+                attempted = {
+                    canonical for jid in attempted
+                    if (canonical := self._canonical_backfill_jid(jid)) in pending_set
+                }
+                continuing_short_sweep = bool(
+                    attempted and any(jid not in attempted for jid in pending))
                 names_pending = self._pending_name_resolution()
                 # Chats that already hold a full page but whose older history
                 # has never been walked. Without this the loop declared itself
@@ -13115,7 +13146,9 @@ class MainWindow(wx.Frame):
                         # — keep the loop alive to notice when it does.
                         logging.info("[backfill] Nothing pending yet, but history is still "
                                      "landing — staying on watch.")
-                        delay = self._BACKFILL_FIRST_DELAY
+                        attempted.clear()
+                        retry_delay = self._BACKFILL_FIRST_DELAY
+                        delay = retry_delay
                         continue
                     logging.info("[backfill] Nothing pending — every chat is walked back to "
                                  "its beginning (or all there is) and has a name.")
@@ -13124,19 +13157,22 @@ class MainWindow(wx.Frame):
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
                 # up, so anything it could not map then stayed a bare @lid or a
                 # raw phone number for the whole session.
-                named = self._backfill_names()
+                # Name and deep-history work run once per complete short-chat
+                # sweep. Repeating them between every fast queue chunk would
+                # merely move the old 30-second bottleneck to another endpoint.
+                named = 0 if continuing_short_sweep else self._backfill_names()
                 if named:
                     wx.CallAfter(self._schedule_set_chats)
 
                 # ── Deep history ─────────────────────────────────────────
-                # Runs every pass, before the short-page work's own early
-                # exit below, so a session whose chats all hold a full page
-                # still makes progress. Each visit pages a few chats a few
-                # windows further back; a chat that needs more comes back on
-                # the next pass, anchored on whatever is now oldest on disk,
-                # so the walk resumes rather than restarting.
+                # Runs once per complete short-chat sweep, before the
+                # short-page work's own early exit below, so a session whose
+                # chats all hold a full page still makes progress. Each visit
+                # pages a few chats further back; a chat that needs more comes
+                # back on the next sweep, anchored on what is now oldest on
+                # disk, so the walk resumes rather than restarting.
                 deep_stored = 0
-                if deep_pending:
+                if deep_pending and not continuing_short_sweep:
                     window = deep_pending[:self._DEEP_CHATS_PER_PASS]
                     logging.info(
                         "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
@@ -13165,8 +13201,12 @@ class MainWindow(wx.Frame):
                 if not pending:
                     # No chat is short of a page; names and/or deep history
                     # were this round's work.
-                    delay = (self._BACKFILL_FIRST_DELAY if (named or deep_stored)
-                             else min(delay * 2, self._BACKFILL_MAX_DELAY))
+                    attempted.clear()
+                    if named or deep_stored:
+                        retry_delay = self._BACKFILL_FIRST_DELAY
+                    else:
+                        retry_delay = min(retry_delay * 2, self._BACKFILL_MAX_DELAY)
+                    delay = retry_delay
                     continue
 
                 before = len(pending)
@@ -13180,6 +13220,7 @@ class MainWindow(wx.Frame):
                     attempted.clear()
                     untried = pending
                 window = untried[:self._BACKFILL_CHUNK]
+                finishes_sweep = len(untried) <= self._BACKFILL_CHUNK
                 attempted.update(window)
 
                 # Resolve through the @lid ↔ phone bridge: deduplicate_chats()
@@ -13202,8 +13243,6 @@ class MainWindow(wx.Frame):
                                  len(missing))
                     for j in missing:
                         self._remove_backfill_pending(j)
-                if not targets:
-                    continue
                 # Chunked and deliberately gentler than sync_remote_chats().
                 # An unchunked pass fired 463 get-messages calls in ~6 s through
                 # the one Puppeteer page — on top of the media downloads running
@@ -13211,21 +13250,23 @@ class MainWindow(wx.Frame):
                 # account WhatsApp is already watching.  Nothing here is urgent:
                 # this is history the user is not looking at yet, so it costs
                 # nothing to spread it out.
-                logging.info("[backfill] Pass %d: retrying %d of %d chat(s) short of a "
-                             "full page (%d msg).",
-                             attempt, len(targets), before, self.history_page_target())
+                if targets:
+                    logging.info("[backfill] Pass %d: retrying %d of %d chat(s) short of a "
+                                 "full page (%d msg).",
+                                 attempt, len(targets), before, self.history_page_target())
                 # Snapshot what each target holds so progress can be measured in
                 # messages, not just in chats that finished. A chat that went
                 # from 15 to 90 messages made real progress and must not read as
                 # a wasted pass — that is what backs the delay off.
                 counts_before = {j: self._local_record_count(j) for j in window}
-                with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
-                    futs = [pool.submit(self.sync_chat_messages, c) for c in targets]
-                    for fut in as_completed(futs):
-                        try:
-                            fut.result()
-                        except Exception as exc:
-                            logging.warning("[backfill] chat sync failed: %s", exc)
+                if targets:
+                    with ThreadPoolExecutor(max_workers=self._BACKFILL_WORKERS) as pool:
+                        futs = [pool.submit(self.sync_chat_messages, c) for c in targets]
+                        for fut in as_completed(futs):
+                            try:
+                                fut.result()
+                            except Exception as exc:
+                                logging.warning("[backfill] chat sync failed: %s", exc)
 
                 completed = self._completed_backfill_targets(window)
                 grew = sum(1 for j, was in counts_before.items()
@@ -13233,14 +13274,21 @@ class MainWindow(wx.Frame):
                 logging.info(
                     "[backfill] Pass %d: %d chat(s) gained messages, %d no longer pending "
                     "(of %d).", attempt, grew, completed, before)
-                if grew > 0 or completed > 0 or named > 0 or deep_stored > 0:
+                made_progress = (grew > 0 or completed > 0 or named > 0
+                                 or deep_stored > 0)
+                sweep_made_progress = sweep_made_progress or made_progress
+                if made_progress:
                     # Unread badges, the "is this chat worth showing" decision and
                     # the displayed name all depend on this, so rebuild the list.
                     self._schedule_save()
                     wx.CallAfter(self._schedule_set_chats)
-                    delay = self._BACKFILL_FIRST_DELAY
-                else:
-                    delay = min(delay * 2, self._BACKFILL_MAX_DELAY)
+                # An unfinished sweep continues promptly; the retained retry
+                # backoff changes only after every pending chat has had a turn.
+                delay, retry_delay = MainWindow._backfill_short_queue_delays(
+                    retry_delay, finishes_sweep, sweep_made_progress)
+                if finishes_sweep:
+                    attempted.clear()
+                    sweep_made_progress = False
             still = len(self._backfill_pending_snapshot())
             unnamed = len(self._pending_name_resolution())
             if still or unnamed:

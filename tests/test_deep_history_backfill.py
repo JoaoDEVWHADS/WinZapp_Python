@@ -309,7 +309,8 @@ def _loop(deep_pending, pending=(), names=()):
     stub._backfill_empty_chats = types.MethodType(
         MainWindow.__dict__["_backfill_empty_chats"], stub)
     for const in ("_BACKFILL_BUDGET", "_BACKFILL_LANDING_BUDGET",
-                  "_BACKFILL_FIRST_DELAY", "_BACKFILL_MAX_DELAY",
+                  "_BACKFILL_FIRST_DELAY", "_BACKFILL_CHUNK_DELAY",
+                  "_BACKFILL_MAX_DELAY",
                   "_BACKFILL_CHUNK", "_BACKFILL_WORKERS",
                   "_DEEP_CHATS_PER_PASS"):
         setattr(stub, const, getattr(MainWindow, const))

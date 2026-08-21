@@ -364,6 +364,7 @@ class TestBackfillPacing:
 
     def test_constants_are_sane(self):
         assert MainWindow._BACKFILL_FIRST_DELAY <= 60, "first retry must be soon"
+        assert 0 < MainWindow._BACKFILL_CHUNK_DELAY < MainWindow._BACKFILL_FIRST_DELAY
         assert MainWindow._BACKFILL_MAX_DELAY >= MainWindow._BACKFILL_FIRST_DELAY
         assert MainWindow._BACKFILL_BUDGET >= 15 * 60, "must outlast a slow warm-up"
         assert MainWindow._BACKFILL_BUDGET <= 2 * 60 * 60, "must not poll forever"
@@ -395,6 +396,34 @@ class TestBackfillPacing:
         history nobody is waiting on — it must not burst."""
         assert MainWindow._BACKFILL_CHUNK <= 100
         assert MainWindow._BACKFILL_WORKERS <= 6, "must not exceed the sync's own cap"
+
+    def test_large_first_sweep_does_not_pay_the_retry_delay_per_chunk(self):
+        pending = 896
+        chunks = -(-pending // MainWindow._BACKFILL_CHUNK)
+        old_wait = chunks * MainWindow._BACKFILL_FIRST_DELAY
+        new_wait = (MainWindow._BACKFILL_FIRST_DELAY
+                    + (chunks - 1) * MainWindow._BACKFILL_CHUNK_DELAY)
+
+        assert new_wait < old_wait / 2
+
+    def test_partial_sweep_keeps_backoff_and_uses_chunk_delay(self):
+        sleep, retry = MainWindow._backfill_short_queue_delays(
+            retry_delay=120, sweep_finished=False, sweep_made_progress=False)
+
+        assert sleep == MainWindow._BACKFILL_CHUNK_DELAY
+        assert retry == 120
+
+    def test_finished_sweep_applies_backoff_once(self):
+        sleep, retry = MainWindow._backfill_short_queue_delays(
+            retry_delay=120, sweep_finished=True, sweep_made_progress=False)
+
+        assert sleep == retry == 240
+
+    def test_finished_sweep_with_progress_resets_backoff(self):
+        sleep, retry = MainWindow._backfill_short_queue_delays(
+            retry_delay=240, sweep_finished=True, sweep_made_progress=True)
+
+        assert sleep == retry == MainWindow._BACKFILL_FIRST_DELAY
 
     def test_the_window_rotates_so_every_chat_gets_tried(self):
         """`pending` is sorted, so slicing from the front every pass would retry
