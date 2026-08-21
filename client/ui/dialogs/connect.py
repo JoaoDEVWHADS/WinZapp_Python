@@ -599,19 +599,30 @@ class Connect:
             api_key = self.main_window.wpp_api_key
 
             def _generate_hash(raw: str) -> str:
-                """Call generate-token and return 'raw:hash'. Raises on failure."""
+                """Call generate-token with retries and return 'raw:hash'. Raises on failure."""
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
-                res = requests.post(url, timeout=30)
-                if res.status_code in (200, 201):
-                    hash_token = res.json().get("token") or ""
-                    if hash_token:
-                        return f"{raw}:{hash_token}"
-                    raise RuntimeError(
-                        f"generate-token returned empty hash (HTTP {res.status_code})"
-                    )
-                raise RuntimeError(
-                    f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
-                )
+                last_exc = None
+                for attempt, timeout in enumerate((15, 25, 35), start=1):
+                    try:
+                        res = requests.post(url, timeout=timeout)
+                        if res.status_code in (200, 201):
+                            hash_token = res.json().get("token") or ""
+                            if hash_token:
+                                return f"{raw}:{hash_token}"
+                            raise RuntimeError(
+                                f"generate-token returned empty hash (HTTP {res.status_code})"
+                            )
+                        raise RuntimeError(
+                            f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
+                        )
+                    except Exception as exc:
+                        last_exc = exc
+                        logging.warning(
+                            "[generate_hash] Attempt %d/3 failed (%s). Retrying...",
+                            attempt, exc
+                        )
+                        time.sleep(1)
+                raise last_exc or RuntimeError("generate-token timed out on all attempts")
 
             if _instance_exists:
                 # Re-generate hash if the stored token has no colon (legacy or corrupt).
