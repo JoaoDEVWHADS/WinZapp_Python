@@ -601,7 +601,7 @@ class Connect:
             def _generate_hash(raw: str) -> str:
                 """Call generate-token and return 'raw:hash'. Raises on failure."""
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
-                res = requests.post(url, timeout=10)
+                res = requests.post(url, timeout=30)
                 if res.status_code in (200, 201):
                     hash_token = res.json().get("token") or ""
                     if hash_token:
