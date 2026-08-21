@@ -474,7 +474,7 @@ class Connect:
         self.phone_panel.SetSizer(phone_sizer)
 
         # Quit button
-        self.quit_btn = wx.Button(self.connection_dial, wx.ID_CANCEL, "&Sair")
+        self.quit_btn = wx.Button(self.connection_dial, wx.ID_CANCEL, self.i18n.t("menu_exit"))
         self.quit_btn.Bind(wx.EVT_BUTTON, self.on_quit_from_connect)
 
         # Bind close event
