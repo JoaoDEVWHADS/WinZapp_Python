@@ -9807,6 +9807,62 @@ class ConversationsPanel(wx.Panel):
             # suppressed in on_messages_upsert to avoid double-counting.
             wx.CallAfter(self._on_own_reaction_sent, jid, msg_key, emoji)
 
+    def apply_incoming_reaction(self, remote_jid: str, msg: dict):
+        """Apply a reactionMessage that just arrived over the WebSocket.
+
+        Persisting is unconditional; only the live redraw is conditional on
+        the reacted-to chat being the one currently open. main.py's
+        on_new_message() deliberately never appends a reactionMessage to a
+        chat's `records` itself, so this is the ONLY thing that files a live
+        reaction anywhere — and it used to run behind
+        on_incoming_message()'s "is this conversation open?" guard, which
+        meant a reaction to a chat the user was not looking at (the normal
+        case: the toast for it only ever fires while the window is in the
+        background) was applied nowhere at all. It showed up as a
+        notification and then simply did not exist: opening the conversation
+        afterwards rebuilds _reaction_map by scanning `records`, which never
+        received it.
+
+        _reaction_map, by contrast, only ever describes the conversation
+        currently rendered in messages_list — populate_messages() rebuilds it
+        from scratch per conversation — so it is only touched when this
+        reaction really belongs to that conversation.
+        """
+        reaction   = (msg.get("message") or {}).get("reactionMessage") or {}
+        emoji      = reaction.get("text", "")
+        orig_id    = (reaction.get("key") or {}).get("id", "")
+        sender_key = self._reactor_key_from_msg(msg)
+        if not orig_id or not sender_key:
+            return
+
+        if self._matches_open_conversation(remote_jid):
+            per_msg = self._reaction_map.setdefault(orig_id, {})
+            if emoji:
+                # A new/changed reaction from this sender replaces theirs —
+                # it never accumulates into a bogus higher count.
+                per_msg[sender_key] = emoji
+            else:
+                # Empty emoji = this sender removed their reaction.
+                per_msg.pop(sender_key, None)
+            # Re-render the original message in the list
+            for i, m in enumerate(self._sorted_messages):
+                if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
+                    self.messages_list.SetItemText(i, self._render_message_line(m))
+                    break
+
+        # Persist so populate_messages()/refresh_active_conversation_messages()
+        # (which rebuild _reaction_map purely from `records`) can recover this
+        # reaction whenever the message list is (re)built — see
+        # _persist_reaction_record()'s own docstring. Not _track_last_reaction()
+        # or _schedule_set_chats() here — main.py's on_new_message() already
+        # calls both for every reaction from someone else.
+        own_key = msg.get("key", {}) or {}
+        self._persist_reaction_record(
+            remote_jid, orig_id, reaction.get("key") or {}, sender_key,
+            bool(own_key.get("fromMe")), emoji,
+            participant=own_key.get("participant", ""),
+        )
+
     def _persist_reaction_record(self, jid: str, orig_id: str, msg_key: dict,
                                   sender_key: str, from_me: bool, emoji: str,
                                   participant: str = "") -> "dict | None":
@@ -9838,6 +9894,12 @@ class ConversationsPanel(wx.Panel):
         chat = self.main_window.get_chat(jid)
         if not chat or not orig_id:
             return None
+        # get_chat() already resolves the @lid/phone duality when looking the
+        # chat up, but the record itself still has to be filed under the
+        # chat's own canonical JID: a live reaction arrives under whichever
+        # form the event happened to use, and persisting it under the other
+        # one wrote it into a DB bucket the conversation never reads back.
+        jid = chat.get("remoteJid") or jid
         rxn_id = (
             f"_rxn_{orig_id}" if sender_key == self._SELF_REACTOR_KEY
             else f"_rxn_{orig_id}_{sender_key}"
@@ -10340,6 +10402,25 @@ class ConversationsPanel(wx.Panel):
 
     # ── Real-time incoming message ────────────────────────────────────────────
 
+    def _matches_open_conversation(self, remote_jid: str) -> bool:
+        """True when remote_jid addresses the conversation currently open.
+
+        Tolerates the @lid/phone duality in both directions: a live event may
+        arrive under either form regardless of which one the open conversation
+        was loaded under.
+        """
+        if self.conversation is None:
+            return False
+        conv_jid = self.conversation.get("remoteJid", "")
+        if conv_jid == remote_jid:
+            return True
+        mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
+        mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
+        return bool(
+            (mapped_lid and mapped_lid == remote_jid)
+            or (mapped_phone and mapped_phone == remote_jid)
+        )
+
     def on_incoming_message(self, remote_jid: str, msg: dict):
         """
         Called (on the main thread) when a new message arrives via WebSocket.
@@ -10347,18 +10428,18 @@ class ConversationsPanel(wx.Panel):
         message to the list; otherwise does nothing (the unread badge in the
         conversations list is updated separately via set_chats).
         """
+        # Reactions are handled BEFORE the "is this conversation open?" guard
+        # below — unlike a normal message, a reaction still has to be recorded
+        # for a chat the user is not currently looking at. See
+        # apply_incoming_reaction().
+        if msg.get("messageType") == "reactionMessage":
+            self.apply_incoming_reaction(remote_jid, msg)
+            return  # Don't add reaction as a separate row
+
         if self.conversation is None:
             return
-        
-        conv_jid = self.conversation.get("remoteJid", "")
-        jids_match = (conv_jid == remote_jid)
-        if not jids_match:
-            mapped_lid = getattr(self.main_window, "_phone_to_lid", {}).get(conv_jid, "")
-            mapped_phone = getattr(self.main_window, "_lid_to_phone", {}).get(conv_jid, "")
-            if (mapped_lid and mapped_lid == remote_jid) or (mapped_phone and mapped_phone == remote_jid):
-                jids_match = True
 
-        if not jids_match:
+        if not self._matches_open_conversation(remote_jid):
             return
 
         # Get the top visible item before inserting the message
@@ -10378,43 +10459,6 @@ class ConversationsPanel(wx.Panel):
                 m = self._sorted_messages[top_idx]
                 if not self._is_separator(m):
                     top_msg_id = m.get("key", {}).get("id", "")
-        # ── Reaction messages: update reaction_map and re-render original ────
-        if msg.get("messageType") == "reactionMessage":
-            reaction   = (msg.get("message") or {}).get("reactionMessage") or {}
-            emoji      = reaction.get("text", "")
-            orig_id    = (reaction.get("key") or {}).get("id", "")
-            sender_key = self._reactor_key_from_msg(msg)
-            if orig_id and sender_key:
-                per_msg = self._reaction_map.setdefault(orig_id, {})
-                if emoji:
-                    # A new/changed reaction from this sender replaces theirs —
-                    # it never accumulates into a bogus higher count.
-                    per_msg[sender_key] = emoji
-                else:
-                    # Empty emoji = this sender removed their reaction.
-                    per_msg.pop(sender_key, None)
-                # Re-render the original message in the list
-                for i, m in enumerate(self._sorted_messages):
-                    if not self._is_separator(m) and m.get("key", {}).get("id") == orig_id:
-                        self.messages_list.SetItemText(i, self._render_message_line(m))
-                        break
-                # Persist so populate_messages()/refresh_active_conversation_
-                # messages() (which rebuild _reaction_map purely from
-                # `records`) can recover this reaction after anything
-                # repopulates the message list — see
-                # _persist_reaction_record()'s own docstring for the bug
-                # this fixes (a reaction from someone else used to vanish
-                # the next time anything rebuilt the list, since it only
-                # ever touched the in-memory map). Not _track_last_reaction()
-                # or _schedule_set_chats() here — main.py's on_new_message()
-                # already calls both for every reaction from someone else.
-                own_key = msg.get("key", {}) or {}
-                self._persist_reaction_record(
-                    remote_jid, orig_id, reaction.get("key") or {}, sender_key,
-                    bool(own_key.get("fromMe")), emoji,
-                    participant=own_key.get("participant", ""),
-                )
-            return  # Don't add reaction as a separate row
         # Avoid duplicates
         msg_id = msg.get("key", {}).get("id", "")
         if msg_id:
