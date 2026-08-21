@@ -16,6 +16,7 @@ from core.video_player import VideoPlayer
 from core.audio_devices import (
     find_input_device_index, fallback_input_device_indices, RECORDING_SAMPLE_CONFIGS,
 )
+from ui.dialogs.emoji_picker import choose_and_insert_emoji
 
 try:
     import pyaudio
@@ -626,6 +627,12 @@ class StatusPanel(wx.Panel):
         )
         post_sizer.Add(self._post_text_field, 0, wx.EXPAND | wx.ALL, 5)
 
+        self._post_emoji_btn = wx.Button(
+            self._post_panel, label=i18n.t("emoji_button")
+        )
+        self._post_emoji_btn.Bind(wx.EVT_BUTTON, self._on_open_post_emoji_picker)
+        post_sizer.Add(self._post_emoji_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
         self._caption_label = wx.StaticText(self._post_panel, label=i18n.t("status_caption_hint"))
         post_sizer.Add(self._caption_label, 0, wx.LEFT, 5)
 
@@ -749,6 +756,7 @@ class StatusPanel(wx.Panel):
         self.ID_CTRL_SHIFT_P  = wx.NewIdRef()
         self.ID_CTRL_SHIFT_D  = wx.NewIdRef()
         self.ID_F5            = wx.NewIdRef()
+        self.ID_CTRL_PERIOD   = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                    wx.WXK_LEFT,   self.ID_CTRL_LEFT),
             (wx.ACCEL_CTRL,                    wx.WXK_RIGHT,  self.ID_CTRL_RIGHT),
@@ -758,6 +766,7 @@ class StatusPanel(wx.Panel):
             (wx.ACCEL_CTRL,                    ord("R"),      self.ID_CTRL_R),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("P"),      self.ID_CTRL_SHIFT_P),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT,   ord("D"),      self.ID_CTRL_SHIFT_D),
+            (wx.ACCEL_CTRL,                    ord("."),      self.ID_CTRL_PERIOD),
             # Same combo ConversationsPanel already uses for "save as"
             # (client/ui/conversations.py's ID_CTRL_SHIFT_S) — consistent
             # muscle memory across both places media can be saved from.
@@ -773,6 +782,7 @@ class StatusPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p_shortcut,id=self.ID_CTRL_SHIFT_P)
         self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d_shortcut,id=self.ID_CTRL_SHIFT_D)
         self.Bind(wx.EVT_MENU, self._on_refresh_status_btn,   id=self.ID_F5)
+        self.Bind(wx.EVT_MENU, self._on_open_post_emoji_picker, id=self.ID_CTRL_PERIOD)
 
     def _on_refresh_status_btn(self, event):
         """Manually reload statuses from WPPConnect API."""
@@ -1804,6 +1814,12 @@ class StatusPanel(wx.Panel):
         self.Layout()
         self._post_text_field.SetFocus()
 
+    def _on_open_post_emoji_picker(self, event):
+        """Open the shared picker while composing a text status."""
+        if not self._post_panel.IsShown() or not self._post_text_field.IsEnabled():
+            return
+        choose_and_insert_emoji(self, self._post_text_field, self.main_window.i18n)
+
     def _on_choose_media_status(self, event):
         i18n = self.main_window.i18n
         wildcard = (
@@ -2431,6 +2447,7 @@ class StatusPanel(wx.Panel):
                         i18n.t("status_unlike") if is_liked else i18n.t("status_like")
                     )
         self._post_send_btn.SetLabel(i18n.t("status_send"))
+        self._post_emoji_btn.SetLabel(i18n.t("emoji_button"))
         self._post_text_label.SetLabel(i18n.t("status_text_label"))
         self._media_send_btn.SetLabel(i18n.t("status_send"))
         self._media_add_more_btn.SetLabel(i18n.t("add_more_files"))

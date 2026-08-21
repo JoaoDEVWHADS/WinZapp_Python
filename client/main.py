@@ -3881,16 +3881,31 @@ class MainWindow(wx.Frame):
         self._active_incoming_calls[identity] = peer_jid
         self._arm_incoming_call_watchdog(identity)
 
-        caller_name = self._preview_sender_from_jid(peer_jid) if peer_jid else ""
-        if not caller_name:
-            caller_name = self.i18n.t("unknown_contact")
-        message = self.i18n.t("incoming_call_announcement").format(name=caller_name)
+        group_jid = self._normalize_jid(str(event.get("groupJid") or ""))
+        is_group = bool(event.get("isGroup")) or group_jid.endswith("@g.us")
+        if is_group:
+            chat = getattr(self, "chats", {}).get(group_jid, {}) if group_jid else {}
+            group_name = self._group_name_from_chat_dict(chat) if chat else ""
+            if not group_name and group_jid:
+                group_name = getattr(self, "_group_name_cache", {}).get(group_jid, "")
+            if not group_name:
+                group_name = self.i18n.t("unknown_group")
+            message = self.i18n.t("incoming_group_call_announcement").format(
+                name=group_name
+            )
+        else:
+            # Keep the proven one-to-one call path unchanged: peerJid is the
+            # caller and resolves through the existing contact-name machinery.
+            caller_name = self._preview_sender_from_jid(peer_jid) if peer_jid else ""
+            if not caller_name:
+                caller_name = self.i18n.t("unknown_contact")
+            message = self.i18n.t("incoming_call_announcement").format(name=caller_name)
         self.output(message, interrupt=True)
         if hasattr(self, "call_incoming_sound"):
             self.call_incoming_sound.play()
         logging.info(
             "[incoming_call] ringing id=%s peer=%s video=%s group=%s",
-            call_id, peer_jid, bool(event.get("isVideo")), bool(event.get("isGroup")),
+            call_id, peer_jid, bool(event.get("isVideo")), is_group,
         )
 
     @staticmethod
@@ -8630,6 +8645,38 @@ class MainWindow(wx.Frame):
     # mistaken for a phone-side unlink.
     _BROKEN_STORE_REPAIR_ROUNDS = 2
 
+    # A list-chats snapshot does not have to equal storeCounts.chat exactly:
+    # WA-JS deliberately hides a few activity-less one-to-one entries.  What
+    # matters here is that both views describe the same account.  Keep a small
+    # one-entry allowance for small accounts and a one-percent allowance for
+    # large ones, plus a 95% floor so a one-entry difference cannot mask half
+    # of a two-chat account; measured healthy snapshots were 680/682 and
+    # 935/937.
+    _STORE_SNAPSHOT_TOLERANCE_RATIO = 0.01
+    _STORE_SNAPSHOT_TOLERANCE_MIN = 1
+    _STORE_SNAPSHOT_MIN_RATIO = 0.95
+
+    @classmethod
+    def snapshot_matches_page_store(cls, snapshot_count: int,
+                                    wa_web_count: "int | None") -> bool:
+        """Whether a non-zero list-chats snapshot agrees with the page store.
+
+        This is intentionally much stricter than ``count_contradicts_page``.
+        The latter only proves that an answer is obviously broken; this helper
+        proves that a *previous, current-round* answer is credible enough to
+        keep when a later WA-JS call collapses to zero.  It never consults a
+        prior round's high-water mark, because a count without its matching
+        chat payload cannot safely complete the current sync.
+        """
+        if snapshot_count <= 0 or wa_web_count is None or wa_web_count <= 0:
+            return False
+        tolerance = max(
+            cls._STORE_SNAPSHOT_TOLERANCE_MIN,
+            int(wa_web_count * cls._STORE_SNAPSHOT_TOLERANCE_RATIO + 0.999999),
+        )
+        return (snapshot_count >= wa_web_count * cls._STORE_SNAPSHOT_MIN_RATIO
+                and abs(wa_web_count - snapshot_count) <= tolerance)
+
     @classmethod
     def count_contradicts_page(cls, server_count: int,
                                wa_web_count: "int | None") -> bool:
@@ -8878,6 +8925,12 @@ class MainWindow(wx.Frame):
         wa_web_count    = None
         broken_readings = 0
         store_broken    = False
+        # Best list-chats payload actually received in *this* round.  A later
+        # empty response must not erase it when the page's independent store
+        # count confirms that the earlier snapshot represented the account.
+        # self.chats already holds the merged payload; the count is the proof
+        # that lets us finish this round without starting the whole sync over.
+        best_server_count = 0
         # The previous attempt's count, whatever it was — distinct from
         # prev_server_count, which the settle rules only advance on the paths
         # that reach the bottom of the loop. A count that is still growing is
@@ -8938,6 +8991,7 @@ class MainWindow(wx.Frame):
             self.chats   = result
             chat_list_ok = True
             server_count = getattr(self, "_last_chat_fetch_count", 0)
+            best_server_count = max(best_server_count, server_count)
             logging.info(
                 "[start_sync] list-chats attempt %d returned %d chats (previous: %d, local cache: %d)",
                 attempt + 1, server_count, prev_server_count, local_chat_count,
@@ -8970,6 +9024,26 @@ class MainWindow(wx.Frame):
                 latest = self._wa_web_chat_count()
                 if latest is not None:
                     wa_web_count = max(wa_web_count or 0, latest)
+
+            # WA-JS can answer correctly once and then collapse to [] while
+            # IndexedDB and the rest of the page remain healthy.  The captured
+            # large-account failure was 680 -> 0 with storeCounts.chat=682.
+            # Keep that real, current-round snapshot instead of declaring the
+            # store broken, recreating the session and re-running message/media
+            # sync forever.  A partial 36/937 snapshot deliberately fails this
+            # strict check and remains incomplete.
+            if (server_count < best_server_count
+                    and self.snapshot_matches_page_store(
+                        best_server_count, wa_web_count)):
+                logging.warning(
+                    "[start_sync] list-chats regressed from a credible %d-chat "
+                    "snapshot to %d while WhatsApp Web reports %s. Keeping the "
+                    "earlier current-round snapshot and treating the chat list "
+                    "as settled; message history will continue per chat.",
+                    best_server_count, server_count, wa_web_count,
+                )
+                chat_list_settled = True
+                break
             still_growing = server_count > last_count
             last_count = server_count
             if (not still_growing
@@ -9360,6 +9434,17 @@ class MainWindow(wx.Frame):
         # applies the day/size caps from the same settings tab per message.
         if not self.settings.get("storage", {}).get("auto_download_media", True):
             logging.info("[start_sync] Phase 2 media auto-download skipped (disabled in settings).")
+        elif not getattr(self, "_sync_completed", False):
+            # An incomplete chat-list round will be retried by the health
+            # checker. Scanning every cached media record on each such round
+            # is pure duplicate work (8k+ candidates on the captured account)
+            # and makes the user hear/see a media phase that downloaded zero.
+            # Message history has its own durable per-chat backfill and does
+            # not depend on this media scan.
+            logging.info(
+                "[start_sync] Phase 2 media auto-download skipped — the chat-list "
+                "round is incomplete and will be retried."
+            )
         elif not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
             # Nothing can be downloaded while offline: every sync_if_media()
             # call returns at its first line. Running the phase anyway used to
@@ -16165,6 +16250,12 @@ class MainWindow(wx.Frame):
     # waiting and takes none; this has nobody waiting and is competing with
     # sends, media and live traffic for the page, so it yields.
     _DEEP_PAGE_DELAY = 1.0
+    # A non-advancing page is paused rather than retried on every backfill
+    # pass. It cannot be paused forever, though: on-demand history usually
+    # lands in WhatsApp Web's Store without a socket event that would write it
+    # into SQLite. Re-query after this cooldown so the newly arrived page can
+    # move the durable database anchor.
+    _DEEP_STALL_RETRY_SECONDS = 120
 
     def _oldest_stored_message(self, remote_jid: str) -> "dict | None":
         """The oldest message on disk for a chat — the anchor to page before.
@@ -16195,7 +16286,7 @@ class MainWindow(wx.Frame):
         return (int((msg or {}).get("messageTimestamp") or 0), str(key.get("id") or ""))
 
     def deep_backfill_chat(self, remote_jid: str) -> int:
-        """Page one chat backwards. Returns how many messages were stored.
+        """Page one chat backwards. Returns how many new messages were stored.
 
         Stops on the first page that comes back empty — fetch_older_messages()
         marks the chat exhausted there (or asks the phone for older history
@@ -16215,43 +16306,68 @@ class MainWindow(wx.Frame):
                 # Nothing stored at all: this is the ordinary backfill's job,
                 # not ours — it has no anchor to page before.
                 break
-            before = self._anchor_identity(anchor)
+            anchor_identity = self._anchor_identity(anchor)
+            stalled = getattr(self, "_deep_stalled_anchors", None)
+            if stalled is None:
+                stalled = self._deep_stalled_anchors = {}
+            stalled_entry = stalled.get(remote_jid)
+            stalled_identity = stalled_entry[0] if stalled_entry else None
+            retry_at = stalled_entry[1] if stalled_entry else 0.0
+            if (stalled_identity == anchor_identity
+                    and time.monotonic() < retry_at):
+                # We already asked the phone about this exact non-advancing
+                # anchor. Stay pending, but do not fetch the same page on every
+                # pass. The cooldown is finite because history landing in the
+                # browser Store does not itself move the SQLite anchor.
+                break
+            if stalled_identity == anchor_identity:
+                stalled.pop(remote_jid, None)
+            try:
+                count_before = self.db.get_message_count(remote_jid)
+            except Exception:
+                count_before = None
             page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
             if not page:
                 break
-            # Did the walk actually walk? A full page is not the same thing as
-            # progress, and the difference is not hypothetical: /get-messages
-            # resolves the anchor id inside the page, and when it cannot find
-            # it there, deviceController.ts deliberately re-anchors on
-            # `originalOldestId` — the oldest message the *page* happens to
-            # hold — instead of answering empty. Our anchor comes from SQLite,
-            # and the whole point of this walk is to accumulate history on disk
-            # that the page no longer keeps in memory, so the further a chat is
-            # walked the likelier that fallback becomes: it answers with the
-            # span between what we already stored and what the page holds,
-            # every row of which the messages table's primary key then drops.
-            # The anchor does not move, the next iteration re-reads it, and the
-            # same window comes back — five times a visit, every pass, for ever.
-            #
-            # Counting the returned page as `stored` made that worse than
-            # wasteful: _backfill_empty_chats() renews its whole budget on
-            # `deep_stored`, so re-reading what we already have kept the thread
-            # alive and the shared Puppeteer page busy for the full four-hour
-            # ceiling without a single new message being written.
-            # An unreadable anchor counts as "did not move": without a reading
-            # to compare, there is nothing to justify another four pages.
-            after = self._oldest_stored_message(remote_jid)
-            if after is None or self._anchor_identity(after) == before:
+            next_anchor = self._oldest_stored_message(remote_jid)
+            next_identity = self._anchor_identity(next_anchor)
+            try:
+                count_after = self.db.get_message_count(remote_jid)
+            except Exception:
+                count_after = None
+            added = (max(0, count_after - count_before)
+                     if count_before is not None and count_after is not None
+                     else 0)
+
+            # The API fallback can return the same 200-message page when its
+            # requested anchor is absent from the browser Store.  Counting
+            # len(page) called that progress, renewed the global deadline and
+            # created an endless history loop even though SQLite deduplicated
+            # every row. Progress exists only when the on-disk oldest anchor
+            # moved backwards *and* genuinely new IDs increased the row count.
+            if (next_anchor is None or next_identity == anchor_identity or added <= 0):
+                stalled[remote_jid] = (
+                    anchor_identity,
+                    time.monotonic() + self._DEEP_STALL_RETRY_SECONDS,
+                )
+                requested = False
+                older_requested = getattr(self, "_older_requested_chats", None)
+                if not isinstance(older_requested, dict):
+                    older_requested = self._older_requested_chats = {}
+                if remote_jid not in older_requested:
+                    older_requested[remote_jid] = time.time()
+                    self._persist_older_requested()
+                    requested = bool(self.request_older_messages(remote_jid))
                 logging.warning(
-                    "[deep-backfill] %s: a page of %d message(s) contained nothing "
-                    "older than the anchor we asked before — the anchor did not "
-                    "move, so this visit stops rather than re-reading the same "
-                    "window. (Check log.log for '[browser-evaluate] Anchor not "
-                    "found after walkback' — that is this, named from the page's "
-                    "side.)", remote_jid, len(page),
+                    "[deep-backfill] Page for %s did not advance the oldest "
+                    "database anchor (%s; %d new row(s)). Pausing this anchor "
+                    "instead of counting duplicates%s.",
+                    remote_jid, anchor_identity, added,
+                    " and requesting older history from the phone" if requested else "",
                 )
                 break
-            stored += len(page)
+            stalled.pop(remote_jid, None)
+            stored += added
             time.sleep(self._DEEP_PAGE_DELAY)
         return stored
 
@@ -16263,14 +16379,27 @@ class MainWindow(wx.Frame):
         """
         exhausted = getattr(self, "_exhausted_chats", set())
         target = self.history_page_target()
-        out = []
+        active = []
+        waiting = []
+        stalled = getattr(self, "_deep_stalled_anchors", {})
         for jid, chat in list(self.chats.items()):
             if jid in exhausted or jid in self._deleted_chats:
                 continue
             records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
             if len(records) >= target:
-                out.append(jid)
-        return out
+                stalled_entry = stalled.get(jid)
+                if stalled_entry is not None:
+                    stalled_at = stalled_entry[0]
+                    current = self._anchor_identity(
+                        self._oldest_stored_message(jid))
+                    if current == stalled_at:
+                        # Keep it pending so the watcher remains alive, but put
+                        # it behind chats that can still make immediate progress.
+                        waiting.append(jid)
+                        continue
+                    stalled.pop(jid, None)
+                active.append(jid)
+        return active + waiting
 
     # How long request_older_messages() gets to be answered before an empty
     # page is durable evidence that a chat really has no more history.

@@ -78,6 +78,7 @@ class _Stub:
         self.wa_web_probes = 0
         self.restarted = False
         self.message_sync_ran = 0
+        self.media_sync_ran = 0
         self.lid_batches = []
         self.backfill_started = False
 
@@ -129,6 +130,7 @@ class _Stub:
         return False
 
     def sync_media_for_all_chats(self):
+        self.media_sync_ran += 1
         return 0
 
     # ── everything else downstream: no-ops ───────────────────────────
@@ -142,7 +144,8 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
     stub = _Stub(counts, wa_web, local_chats, high_water)
     for name in ("_run_sync", "_should_abort_sync_for_offline",
                  "_announce_sync_events_enabled", "count_contradicts_page",
-                 "store_looks_broken", "_attempts_needed_to_confirm",
+                 "store_looks_broken", "snapshot_matches_page_store",
+                 "_attempts_needed_to_confirm",
                  "_settle_deadline_decision", "history_page_target"):
         raw = MainWindow.__dict__[name]
         if isinstance(raw, (staticmethod, classmethod)):
@@ -151,6 +154,9 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
             setattr(stub, name, types.MethodType(raw, stub))
     for const in ("_CHAT_ABSOLUTE_MAX_ATTEMPTS", "_CHAT_ATTEMPT_EXTENSION",
                   "_STORE_PLAUSIBLE_RATIO", "_BROKEN_STORE_CONFIRM",
+                  "_STORE_SNAPSHOT_TOLERANCE_RATIO",
+                  "_STORE_SNAPSHOT_TOLERANCE_MIN",
+                  "_STORE_SNAPSHOT_MIN_RATIO",
                   "_BROKEN_STORE_REPAIR_ROUNDS", "_DEEP_SYNC_TOP_N",
                   "_DEEP_SYNC_COUNT", "_BACKFILL_CHUNK"):
         setattr(stub, const, getattr(MainWindow, const))
@@ -168,6 +174,28 @@ def _fast(monkeypatch):
 
 
 class TestTheCapturedSessions:
+    def test_snapshot_tolerance_cannot_hide_half_of_a_small_account(self):
+        assert MainWindow.snapshot_matches_page_store(1, 2) is False
+        assert MainWindow.snapshot_matches_page_store(9, 10) is False
+        assert MainWindow.snapshot_matches_page_store(32, 33) is True
+
+    def test_a_credible_snapshot_survives_a_later_empty_answer(self):
+        """The 680 -> 0 / store=682 production capture must complete from
+        the real snapshot instead of recreating the session and rescanning
+        every message and media record."""
+        stub = _make([680, 0], wa_web=682, local_chats=681)
+        stub._run_sync()
+        assert stub._sync_completed is True
+        assert stub._broken_store_rounds == 0
+        assert stub.restarted is False
+        assert stub.message_sync_ran == 1
+
+    def test_a_small_snapshot_is_not_rescued_by_the_page_count(self):
+        stub = _make([36, 0, 0], wa_web=682, local_chats=0)
+        stub._run_sync()
+        assert stub._sync_completed is False
+        assert stub._broken_store_rounds == 1
+
     def test_the_resync_loop_stops_early_instead_of_extending_to_thirty(self):
         """Session one, round two: 931 cached, 935 seen in round one, the page
         still reporting 937, and list-chats answering 0 for ever. The old loop
@@ -179,6 +207,12 @@ class TestTheCapturedSessions:
         assert stub._sync_completed is False
         assert stub.settle_fetches <= MainWindow._BROKEN_STORE_CONFIRM + 1
         assert stub.full_saves_in_settle_loop == 0
+
+    def test_an_incomplete_round_does_not_rescan_media(self):
+        stub = _make([0] * 60, wa_web=937, local_chats=931, high_water=935)
+        stub.settings["storage"]["auto_download_media"] = True
+        stub._run_sync()
+        assert stub.media_sync_ran == 0
 
     def test_the_second_such_round_recreates_the_session(self):
         stub = _make([0] * 60, wa_web=937, local_chats=931, high_water=935)

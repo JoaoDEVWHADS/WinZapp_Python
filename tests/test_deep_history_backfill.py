@@ -39,6 +39,10 @@ class _DB:
         self.oldest = oldest_by_jid or {}
         self.batches = []
         self.metadata = {}
+        self.message_ids = {
+            jid: {msg.get("key", {}).get("id")} for jid, msg in self.oldest.items()
+            if msg
+        }
 
     def get_messages_asc(self, jid, limit=200, offset=0):
         got = self.oldest.get(jid)
@@ -46,6 +50,11 @@ class _DB:
 
     def insert_messages_batch(self, jid, msgs):
         self.batches.append((jid, len(msgs)))
+        ids = self.message_ids.setdefault(jid, set())
+        ids.update(m.get("key", {}).get("id") for m in msgs)
+
+    def get_message_count(self, jid):
+        return len(self.message_ids.get(jid, set()))
 
     def set_metadata_json(self, key, value):
         self.metadata[key] = value
@@ -64,10 +73,12 @@ class _Stub:
         self.offline_mode = False
         self.db = _DB({"chat@g.us": oldest} if oldest else {})
         self._exhausted_chats = set()
+        self._older_requested_chats = {}
         self._deleted_chats = set()
         self.chats = {}
         self.settings = {"user_interface": {"messages_page_size": 200}}
         self.calls = []
+        self.requested = []
 
     def fetch_older_messages(self, jid, anchor, store_only=False):
         self.calls.append({"jid": jid, "anchor": anchor, "store_only": store_only})
@@ -83,6 +94,14 @@ class _Stub:
             self._exhausted_chats.add(jid)
         return page
 
+    def request_older_messages(self, jid):
+        self.requested.append(jid)
+        return True
+
+    def _persist_older_requested(self):
+        self.db.metadata["older_history_requested"] = dict(
+            self._older_requested_chats)
+
 
 def _make(pages, oldest=None, advances=True):
     stub = _Stub(pages, oldest, advances)
@@ -95,7 +114,7 @@ def _make(pages, oldest=None, advances=True):
         else:
             setattr(stub, name, types.MethodType(raw, stub))
     for const in ("_DEEP_PAGES_PER_VISIT", "_DEEP_PAGE_DELAY",
-                  "_DEEP_CHATS_PER_PASS"):
+                  "_DEEP_CHATS_PER_PASS", "_DEEP_STALL_RETRY_SECONDS"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
@@ -118,7 +137,8 @@ class TestWalkingOneChatBack:
     def test_the_visit_budget_caps_one_chat(self):
         """One enormous conversation must not hold the queue while the rest
         of the account waits. It comes back next pass."""
-        stub = _make([[_msg(i)] for i in range(50)], oldest=_msg(99))
+        # Every response must genuinely move backwards from the prior anchor.
+        stub = _make([[_msg(i)] for i in range(98, 48, -1)], oldest=_msg(99))
         stub.deep_backfill_chat("chat@g.us")
         assert len(stub.calls) == MainWindow._DEEP_PAGES_PER_VISIT
         assert "chat@g.us" not in stub._exhausted_chats
@@ -161,6 +181,33 @@ class TestWalkingOneChatBack:
         stub.chats = {"chat@g.us": {"messages": {"messages": {"records": [_msg(9)]}}}}
         stub.deep_backfill_chat("chat@g.us")
         assert stub.calls[0]["anchor"] == _msg(5)
+
+    def test_a_repeated_page_is_not_counted_as_progress(self):
+        """When the API falls back to the page containing the requested
+        anchor, SQLite replaces the same ID and the walk must pause instead
+        of renewing its deadline forever."""
+        stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+        assert len(stub.calls) == 1
+        assert stub.requested == ["chat@g.us"]
+        stalled_identity, retry_at = stub._deep_stalled_anchors["chat@g.us"]
+        assert stalled_identity == (1_700_000_005, "m5")
+        assert retry_at > main.time.monotonic()
+
+        # A second visit at the same anchor performs no duplicate request.
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+        assert len(stub.calls) == 1
+
+        # Once the cooldown expires, query again: phone history reaches the
+        # browser Store without necessarily generating a SQLite write event,
+        # so a permanent pause would strand the conversation at this anchor.
+        stub._deep_stalled_anchors["chat@g.us"] = (stalled_identity, 0.0)
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+        assert len(stub.calls) == 2
+
+    def test_progress_counts_only_new_database_rows(self):
+        stub = _make([[_msg(3), _msg(4), _msg(4)], []], oldest=_msg(5))
+        assert stub.deep_backfill_chat("chat@g.us") == 2
 
 
 class TestChoosingWhichChatsNeedIt:
@@ -295,7 +342,7 @@ class _FetchStub:
         self._returned = returned
         self._wa_connected = True
         self._exhausted_chats = set()
-        self._older_requested_chats = set()
+        self._older_requested_chats = {}
         self.chats = {"chat@g.us": {"messages": {"messages": {"records": [_msg(9)]}}}}
         self.settings = {"user_interface": {"messages_page_size": 200}}
         self.wpp_server, self.wpp_port, self.token = "http://x", 1, "t"

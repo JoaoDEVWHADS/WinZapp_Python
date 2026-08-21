@@ -44,6 +44,7 @@ from ui.accessible import (
     AccessibleReadMoreButton,
     CompatListBoxMessagesCtrl,
 )
+from ui.dialogs.emoji_picker import choose_and_insert_emoji
 from core.utils import format_number, decrypt_bytes, is_phone_like, encrypt, effective_unread_count, first_unread_index, paginated_window, db_fetch_limit, looks_like_binary_blob, get_downloads_folder, normalize_for_search, normalize_line_separators, parse_bool_flag as _parse_bool_flag, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.video_player import VideoPlayer
@@ -628,6 +629,12 @@ class ConversationsPanel(wx.Panel):
         self.message_field.Bind(wx.EVT_TEXT_PASTE, self._on_text_field_paste)
         conv_sizer.Add(self.message_field, 0, wx.EXPAND | wx.ALL, 5)
 
+        self._emoji_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("emoji_button")
+        )
+        self._emoji_btn.Bind(wx.EVT_BUTTON, self._on_open_emoji_picker)
+        conv_sizer.Add(self._emoji_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
         self._cancel_edit_btn = wx.Button(
             self.conversation_panel, label=i18n.t("cancel_edit")
         )
@@ -853,6 +860,7 @@ class ConversationsPanel(wx.Panel):
         # ── Audio speed ──────────────────────────────────────────────────────
         self.ID_ALT_COMMA       = wx.NewIdRef()  # decrease audio speed    (Alt+,)
         self.ID_ALT_PERIOD      = wx.NewIdRef()  # increase audio speed    (Alt+.)
+        self.ID_CTRL_PERIOD     = wx.NewIdRef()  # insert emoji            (Ctrl+.)
 
         CS  = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
         AS  = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
@@ -927,6 +935,7 @@ class ConversationsPanel(wx.Panel):
             (CS,               ord("O"),           self.ID_CTRL_SHIFT_O),
             (wx.ACCEL_ALT,     ord(","),           self.ID_ALT_COMMA),
             (wx.ACCEL_ALT,     ord("."),           self.ID_ALT_PERIOD),
+            (wx.ACCEL_CTRL,    ord("."),           self.ID_CTRL_PERIOD),
         ] + [
             (wx.ACCEL_CTRL, ord(str(d)), self.ID_BOOKMARK[d]) for d in range(10)
         ] + [
@@ -980,6 +989,7 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_star,                 id=self.ID_CTRL_SHIFT_O)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_decrease,      id=self.ID_ALT_COMMA)
         self.Bind(wx.EVT_MENU, self._on_audio_speed_increase,      id=self.ID_ALT_PERIOD)
+        self.Bind(wx.EVT_MENU, self._on_open_emoji_picker,          id=self.ID_CTRL_PERIOD)
         for _d in range(10):
             self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_set_or_jump(d), id=self.ID_BOOKMARK[_d])
             self.Bind(wx.EVT_MENU, lambda e, d=_d: self._on_bookmark_remove(d),      id=self.ID_BOOKMARK_REMOVE[_d])
@@ -1348,6 +1358,18 @@ class ConversationsPanel(wx.Panel):
                     self.main_window.send_typing_status(jid, now_typing, is_group)
         self._on_text_changed_mention_check()
 
+    def _on_open_emoji_picker(self, event):
+        """Insert an emoji at the caret without leaving the message editor."""
+        if (
+            self.conversation is None
+            or not self.conversation_panel.IsShown()
+            or not self.message_field.IsShown()
+            or not self.message_field.IsEnabled()
+            or not self.message_field.IsEditable()
+        ):
+            return
+        choose_and_insert_emoji(self, self.message_field, self.main_window.i18n)
+
     def _on_conversation_char_hook(self, event):
         kc = event.GetKeyCode()
         # Intercept Esc and Enter when the mention suggestion list has focus so
@@ -1458,6 +1480,7 @@ class ConversationsPanel(wx.Panel):
             self.message_label.SetLabel(i18n.t("type_message"))
 
         self.send_message_btn.SetLabel(i18n.t("send_message"))
+        self._emoji_btn.SetLabel(i18n.t("emoji_button"))
         self._cancel_edit_btn.SetLabel(i18n.t("cancel_edit"))
         if hasattr(self, "_remove_quote_btn"):
             self._remove_quote_btn.SetLabel(i18n.t("remove_quote"))
@@ -2160,6 +2183,8 @@ class ConversationsPanel(wx.Panel):
             if _rec_jid and not _rec_jid.endswith("@newsletter"):
                 self.main_window.send_recording_status(_rec_jid, True, _rec_jid.endswith("@g.us"))
             self.message_field.Hide()
+            if hasattr(self, "_emoji_btn"):
+                self._emoji_btn.Hide()
             self.send_message_btn.Hide()
             self.record_voice_message_btn.Hide()
             self._add_attachment_btn.Hide()
@@ -2212,6 +2237,8 @@ class ConversationsPanel(wx.Panel):
         send button visibility (sent or discarded — both call this)."""
         self._voice_panel.Hide()
         self.message_field.Show()
+        if hasattr(self, "_emoji_btn"):
+            self._emoji_btn.Show()
         if self.message_field.GetValue().strip():
             self.send_message_btn.Show()
         else:
@@ -10053,6 +10080,8 @@ class ConversationsPanel(wx.Panel):
         self._rebuild_attachment_list()
         self.message_label.Hide()
         self.message_field.Hide()
+        if hasattr(self, "_emoji_btn"):
+            self._emoji_btn.Hide()
         self.send_message_btn.Hide()
         self.record_voice_message_btn.Hide()
         self._add_attachment_btn.Hide()
@@ -10125,6 +10154,8 @@ class ConversationsPanel(wx.Panel):
         if hasattr(self, "message_label"):
             self.message_label.Show()
             self.message_field.Show()
+            if hasattr(self, "_emoji_btn"):
+                self._emoji_btn.Show()
             if self.message_field.GetValue().strip():
                 self.send_message_btn.Show()
             else:
