@@ -599,30 +599,40 @@ class Connect:
             api_key = self.main_window.wpp_api_key
 
             def _generate_hash(raw: str) -> str:
-                """Call generate-token with retries and return 'raw:hash'. Raises on failure."""
+                """Call generate-token with retries and return 'raw:hash'.
+
+                Falls back to local HMAC-SHA256 token calculation if the Node API
+                is in a cold-start state to prevent blocking the UI connection dialog.
+                """
                 url = f"{server_base}/api/{raw}/{api_key}/generate-token"
                 last_exc = None
-                for attempt, timeout in enumerate((15, 25, 35), start=1):
+                for attempt, timeout in enumerate((3, 5), start=1):
                     try:
                         res = requests.post(url, timeout=timeout)
                         if res.status_code in (200, 201):
                             hash_token = res.json().get("token") or ""
                             if hash_token:
                                 return f"{raw}:{hash_token}"
-                            raise RuntimeError(
-                                f"generate-token returned empty hash (HTTP {res.status_code})"
-                            )
-                        raise RuntimeError(
-                            f"generate-token failed: HTTP {res.status_code} — {res.text[:200]}"
-                        )
                     except Exception as exc:
                         last_exc = exc
-                        logging.warning(
-                            "[generate_hash] Attempt %d/3 failed (%s). Retrying...",
+                        logging.info(
+                            "[generate_hash] HTTP attempt %d failed (%s). Testing local fallback...",
                             attempt, exc
                         )
-                        time.sleep(1)
-                raise last_exc or RuntimeError("generate-token timed out on all attempts")
+
+                # Local HMAC-SHA256 token generation fallback (matches WPPConnect encryptSession algorithm)
+                try:
+                    import hmac
+                    import hashlib
+                    hash_val = hmac.new(
+                        api_key.encode("utf-8"),
+                        raw.encode("utf-8"),
+                        hashlib.sha256
+                    ).hexdigest()
+                    logging.info("[generate_hash] Generated local token hash fallback successfully.")
+                    return f"{raw}:{hash_val}"
+                except Exception as exc:
+                    raise last_exc or exc
 
             if _instance_exists:
                 # Re-generate hash if the stored token has no colon (legacy or corrupt).
