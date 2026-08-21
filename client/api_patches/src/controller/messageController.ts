@@ -77,6 +77,12 @@ async function watchMediaUpload(req: Request, uploadId: string, contact: string)
           });
         }
       };
+      // WA-JS' own sendFileMessage() uses mediaStage as the upload
+      // lifecycle signal.  progressiveStage still exists on MediaDataModel and
+      // can carry a numeric fraction on some WhatsApp builds, so listen to both:
+      // mediaStage guarantees that report() is re-run as the upload advances,
+      // while progressiveStage preserves the real numeric value where available.
+      message.on('change:mediaData.mediaStage', report);
       message.on('change:mediaData.progressiveStage', report);
       report();
       (window as any).WPP.whatsapp.MsgStore.off('add', onMessage);
