@@ -10484,7 +10484,6 @@ class ConversationsPanel(wx.Panel):
         except (TypeError, ValueError):
             return None
         return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
->>>>>>> upstream/main
 
     def _jid_from_vcard(self, vcard: str) -> str | None:
         """Extract the WhatsApp JID from a vCard string."""
