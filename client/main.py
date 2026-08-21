@@ -7605,6 +7605,16 @@ class MainWindow(wx.Frame):
         # what WPPConnect's /blocklist endpoint returns (see get_block_list()).
         self._blocked_contacts = set(self.db.get_metadata_json("blocked_contacts", []))
 
+        # 6b. exhausted_chats — conversations WhatsApp Web has no older history
+        # for. It used to live only in memory (fetch_older_messages() even says
+        # "in-memory" in its own log line), which was fine while the only
+        # consumer was a user scrolling up in one conversation: worst case it
+        # asked once more per session. The deep backfill walks every chat back
+        # to its beginning, so an in-memory-only set would make every relaunch
+        # re-walk an account that is already complete — hundreds of pointless
+        # round-trips through the one Puppeteer page, for ever.
+        self._exhausted_chats = set(self.db.get_metadata_json("exhausted_chats", []))
+
         # 7. my_jid / my_lid — previously only ever set at runtime by an
         # online host-device/self-LID lookup (check_wa_connection_http(),
         # resolve_self_lid()), never persisted or restored. _is_self_jid()
@@ -9192,8 +9202,27 @@ class MainWindow(wx.Frame):
             if jid.endswith("@lid") and jid not in getattr(self, "_lid_to_phone", {})
         ]
         if unresolved_lids:
-            logging.info(f"[Sync] Resolving {len(unresolved_lids)} unresolved @lid chats via API...")
-            self.resolve_lid_jids_via_api(unresolved_lids)
+            # One chunk here, the rest to the backfill. This pass is serial by
+            # design — resolve_lid_jids_via_api() sleeps 0.5 s per JID so it
+            # cannot hammer the single Puppeteer page — and it sits between
+            # the message phase and the "conversations synchronized"
+            # announcement, so its cost is time the user waits with no idea
+            # anything is happening. Measured on a live sync: 728 unresolved
+            # LIDs, six and a half minutes, on a sync whose message phase took
+            # 58 seconds.
+            #
+            # Nothing is dropped. _backfill_names() already resolves exactly
+            # this list, in chunks of the same size, on its own thread, with
+            # an adaptive delay — the chunked-and-paced pass this used to
+            # duplicate serially. The backfill scheduler below is what
+            # guarantees it runs.
+            head = unresolved_lids[:self._BACKFILL_CHUNK]
+            logging.info(
+                "[Sync] Resolving %d of %d unresolved @lid chat(s) via API now; "
+                "the backfill takes the remaining %d in the background.",
+                len(head), len(unresolved_lids), len(unresolved_lids) - len(head),
+            )
+            self.resolve_lid_jids_via_api(head)
             self.chats = self.deduplicate_chats(self.chats)
 
         # Conversations are fully sorted as soon as messages are synced.
@@ -9286,10 +9315,19 @@ class MainWindow(wx.Frame):
         # on its way — and it is the loop that decides when to stop.
         pending = len(getattr(self, "_chats_awaiting_messages", set()))
         still_landing = self.refresh_history_still_landing(context="after initial sync")
-        if pending or still_landing:
+        # Unresolved names are a third reason to run, and until the inline
+        # pass above was capped there was never a case where they were the
+        # ONLY reason — it resolved every one of them before getting here, at
+        # the cost of blocking the sync for minutes. Now that it hands the
+        # remainder over, leaving this condition on messages alone would strand
+        # them: a chat list where every chat holds a full page but hundreds
+        # still show a raw @lid, with nothing left to fix it this session.
+        unnamed = len(self._pending_name_resolution())
+        if pending or still_landing or unnamed:
             logging.info(
                 "[backfill] Scheduling backfill: %d chat(s) short of a full page, "
-                "history still landing=%s.", pending, still_landing)
+                "%d still unnamed, history still landing=%s.",
+                pending, unnamed, still_landing)
             existing = getattr(self, "_backfill_thread", None)
             if existing is None or not existing.is_alive():
                 self._backfill_thread = threading.Thread(
@@ -11540,13 +11578,21 @@ class MainWindow(wx.Frame):
                                 else:
                                     name = self.i18n.t("unknown_contact")
             
-            # Detailed logging for name resolution debugging
+            # Name-resolution tracing. DEBUG, not INFO, and with lazy %-args
+            # rather than an f-string, because both halves of that mattered:
+            # this runs once per chat inside _compute_chat_lists(), which the
+            # chat list rebuilds on every mapping learned. Measured on a live
+            # 935-chat sync: 336,741 of the session's 348,332 log lines came
+            # from this one call — 97% of the log, 74 MB of the 77 MB, roughly
+            # 690 synchronous disk writes a second sustained for eight
+            # minutes. An f-string would still be built on every call even
+            # with the level raised, so the format arguments stay deferred.
             if jid.endswith("@lid") or name == self.i18n.t("unknown_contact"):
-                logging.info(
-                    f"[Name Resolution] jid={jid} phone_jid={phone_jid} "
-                    f"resolved_name={resolved_name} "
-                    f"msg_name={msg_push} "
-                    f"chat_name={chat.get('name')} push_name={chat.get('pushName')} -> final_name='{name}'"
+                logging.debug(
+                    "[Name Resolution] jid=%s phone_jid=%s resolved_name=%s "
+                    "msg_name=%s chat_name=%s push_name=%s -> final_name=%r",
+                    jid, phone_jid, resolved_name, msg_push,
+                    chat.get("name"), chat.get("pushName"), name,
                 )
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
@@ -12118,6 +12164,9 @@ class MainWindow(wx.Frame):
             
             lids_to_resolve = set()
             phones_to_resolve = set()
+            # Mappings learned by this scan, so the single end-of-scan refresh
+            # below fires even when no contact record happened to change.
+            mapped = 0
             # Senders are collected separately and capped: a busy account can
             # hold thousands of distinct group participants, and every one of
             # them would otherwise become an API round-trip through the single
@@ -12144,12 +12193,17 @@ class MainWindow(wx.Frame):
                     alt = key.get("remoteJidAlt", "")
                     participant = key.get("participant", "")
 
+                    # defer_ui: this walks every message of every chat, so a
+                    # refresh per mapping is the same rebuild storm
+                    # resolve_lid_jids_via_api() had. One refresh at the end.
                     if alt and alt.endswith("@s.whatsapp.net"):
                         if remote.endswith("@lid") and self._lid_to_phone.get(remote) != alt:
-                            self.register_jid_mapping(remote, alt)
+                            self.register_jid_mapping(remote, alt, defer_ui=True)
+                            mapped += 1
                     elif alt and alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
                         if self._lid_to_phone.get(alt) != remote:
-                            self.register_jid_mapping(alt, remote)
+                            self.register_jid_mapping(alt, remote, defer_ui=True)
+                            mapped += 1
 
                     # Sender of a group message. Only mentioned JIDs used to be
                     # collected here, so a participant whose @lid we cannot
@@ -12229,6 +12283,11 @@ class MainWindow(wx.Frame):
                      except Exception as e:
                          logging.error(f"[Mentions Scan] Error saving contacts incrementally: {e}")
                          self.save_data(self.chats, self.contacts)
+                if updated_contacts or mapped:
+                     # Was gated on updated_contacts alone, which is no longer
+                     # enough now that the per-mapping refreshes are deferred:
+                     # a scan that learned mappings but changed no contact
+                     # record would otherwise never refresh the list at all.
                      wx.CallAfter(self._schedule_set_chats)
                      wx.CallAfter(self._schedule_refresh_active_messages)
             
@@ -12823,7 +12882,12 @@ class MainWindow(wx.Frame):
                 # finished while this pass was sleeping.
                 pending = sorted(getattr(self, "_chats_awaiting_messages", set()))
                 names_pending = self._pending_name_resolution()
-                if not pending and not names_pending:
+                # Chats that already hold a full page but whose older history
+                # has never been walked. Without this the loop declared itself
+                # finished the moment every chat had 200 messages, which for a
+                # 20,000-message conversation is 1% of it.
+                deep_pending = self._chats_needing_deep_history()
+                if not pending and not names_pending and not deep_pending:
                     if getattr(self, "_history_still_landing", False):
                         # Nothing to re-query yet, but history is still arriving
                         # — keep the loop alive to notice when it does.
@@ -12831,8 +12895,8 @@ class MainWindow(wx.Frame):
                                      "landing — staying on watch.")
                         delay = self._BACKFILL_FIRST_DELAY
                         continue
-                    logging.info("[backfill] Nothing pending — every chat has a full page "
-                                 "of history (or all there is) and a name.")
+                    logging.info("[backfill] Nothing pending — every chat is walked back to "
+                                 "its beginning (or all there is) and has a name.")
                     return
                 # Names get the same second chance as messages. _run_sync()
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
@@ -12842,9 +12906,44 @@ class MainWindow(wx.Frame):
                 if named:
                     wx.CallAfter(self._schedule_set_chats)
 
+                # ── Deep history ─────────────────────────────────────────
+                # Runs every pass, before the short-page work's own early
+                # exit below, so a session whose chats all hold a full page
+                # still makes progress. Each visit pages a few chats a few
+                # windows further back; a chat that needs more comes back on
+                # the next pass, anchored on whatever is now oldest on disk,
+                # so the walk resumes rather than restarting.
+                deep_stored = 0
+                if deep_pending:
+                    window = deep_pending[:self._DEEP_CHATS_PER_PASS]
+                    logging.info(
+                        "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
+                        attempt, len(window), len(deep_pending))
+                    for jid in window:
+                        if getattr(self, "_sync_run_id", 0) != my_run:
+                            return
+                        try:
+                            deep_stored += self.deep_backfill_chat(jid)
+                        except Exception as exc:
+                            logging.warning("[deep-backfill] %s failed: %s", jid, exc)
+                    if deep_stored:
+                        logging.info(
+                            "[deep-backfill] Pass %d stored %d older message(s); "
+                            "%d chat(s) still to walk.",
+                            attempt, deep_stored, len(self._chats_needing_deep_history()))
+                        # Real progress renews the clock, capped by the same
+                        # ceiling everything else respects. Deliberately not an
+                        # unbounded loop: the walk is durable — exhausted_chats
+                        # is persisted and the anchor is read from the database
+                        # — so a budget that runs out costs a resume on the next
+                        # launch, not a restart from the newest page.
+                        deadline = min(hard_deadline,
+                                       max(deadline, time.monotonic() + self._BACKFILL_BUDGET))
+
                 if not pending:
-                    # Only names were outstanding this round.
-                    delay = (self._BACKFILL_FIRST_DELAY if named
+                    # No chat is short of a page; names and/or deep history
+                    # were this round's work.
+                    delay = (self._BACKFILL_FIRST_DELAY if (named or deep_stored)
                              else min(delay * 2, self._BACKFILL_MAX_DELAY))
                     continue
 
@@ -12913,7 +13012,7 @@ class MainWindow(wx.Frame):
                 logging.info(
                     "[backfill] Pass %d: %d chat(s) gained messages, %d no longer pending "
                     "(of %d).", attempt, grew, completed, before)
-                if grew > 0 or completed > 0 or named > 0:
+                if grew > 0 or completed > 0 or named > 0 or deep_stored > 0:
                     # Unread badges, the "is this chat worth showing" decision and
                     # the displayed name all depend on this, so rebuild the list.
                     self._schedule_save()
@@ -16010,8 +16109,111 @@ class MainWindow(wx.Frame):
                     return ""
         return ""
 
-    def fetch_older_messages(self, remote_jid, oldest_msg):
-        """Fetch older messages from server starting before the oldest_msg."""
+    # ── Deep history backfill ────────────────────────────────────────────────
+    # Pages a single chat backwards until WhatsApp Web has nothing older. The
+    # ordinary backfill stops the moment a chat holds one page
+    # (_note_backfill_state: `count >= history_page_target()` retires it), so
+    # a 20,000-message conversation kept exactly 200 and the rest only ever
+    # arrived if the user scrolled up to it by hand.
+    #
+    # Pages per chat per visit. Not unbounded: one enormous conversation must
+    # not hold the queue while 900 others wait, and every page is a request
+    # through the single Puppeteer page the whole app shares. A chat that
+    # needs more comes back on the next pass, from where it stopped — the
+    # anchor is whatever is oldest in the database, so progress is durable
+    # across passes and across restarts.
+    _DEEP_PAGES_PER_VISIT = 5
+    # Chats given a deep visit per backfill pass. Small on purpose: with
+    # _DEEP_PAGES_PER_VISIT pages each and a pause between pages, a pass is
+    # already tens of seconds of background traffic, and the ordinary
+    # short-page backfill shares the same pass and the same page.
+    _DEEP_CHATS_PER_PASS = 8
+    # Pause between pages of the same chat. The scroll-up path has a user
+    # waiting and takes none; this has nobody waiting and is competing with
+    # sends, media and live traffic for the page, so it yields.
+    _DEEP_PAGE_DELAY = 1.0
+
+    def _oldest_stored_message(self, remote_jid: str) -> "dict | None":
+        """The oldest message on disk for a chat — the anchor to page before.
+
+        Read from SQLite rather than from self.chats: the in-memory record
+        list is the newest page only, so anchoring on it would re-request the
+        same window on every visit and never advance.
+        """
+        try:
+            rows = self.db.get_messages_asc(remote_jid, limit=1, offset=0)
+        except Exception as exc:
+            logging.warning("[deep-backfill] Could not read oldest message for %s: %s",
+                            remote_jid, exc)
+            return None
+        return rows[0] if rows else None
+
+    def deep_backfill_chat(self, remote_jid: str) -> int:
+        """Page one chat backwards. Returns how many messages were stored.
+
+        Stops on the first page that comes back empty — fetch_older_messages()
+        marks the chat exhausted there (or asks the phone for older history
+        and leaves it re-queryable, in which case the next pass picks up the
+        reply). Also stops when the per-visit page budget runs out, and when
+        the connection drops.
+        """
+        stored = 0
+        for _ in range(self._DEEP_PAGES_PER_VISIT):
+            if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
+                break
+            if remote_jid in getattr(self, "_exhausted_chats", set()):
+                break
+            anchor = self._oldest_stored_message(remote_jid)
+            if not anchor:
+                # Nothing stored at all: this is the ordinary backfill's job,
+                # not ours — it has no anchor to page before.
+                break
+            page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
+            if not page:
+                break
+            stored += len(page)
+            time.sleep(self._DEEP_PAGE_DELAY)
+        return stored
+
+    def _chats_needing_deep_history(self) -> list:
+        """Chats holding a full page whose older history has not been walked.
+
+        The complement of the ordinary backfill's queue: that one handles
+        chats *short* of a page, this one handles the chats it retires.
+        """
+        exhausted = getattr(self, "_exhausted_chats", set())
+        target = self.history_page_target()
+        out = []
+        for jid, chat in list(self.chats.items()):
+            if jid in exhausted or jid in self._deleted_chats:
+                continue
+            records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
+            if len(records) >= target:
+                out.append(jid)
+        return out
+
+    def _persist_exhausted_chats(self):
+        """Write the exhausted-chat set to DB metadata. Best effort — losing it
+        only costs one wasted round-trip per chat on the next launch."""
+        try:
+            if getattr(self, "db", None) is not None:
+                self.db.set_metadata_json(
+                    "exhausted_chats", sorted(getattr(self, "_exhausted_chats", set())))
+        except Exception as exc:
+            logging.warning("[history] Could not persist exhausted_chats: %s", exc)
+
+    def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
+        """Fetch older messages from server starting before the oldest_msg.
+
+        `store_only` writes the page to SQLite without growing the chat's
+        in-memory record list. The scroll-up path needs that list to grow —
+        the open conversation renders from it — but the deep backfill walks
+        chats back to their very beginning, and appending there would hold
+        every message of every chat in RAM at once. A 935-chat account with
+        20k-message conversations is millions of dicts; nothing needs them
+        resident, and navigate_to_conversation() reloads the page it renders
+        from the database anyway (see conversations.py).
+        """
         remote_jid = self._normalize_jid(remote_jid)
 
         # Check if history is already marked as exhausted in-memory
@@ -16116,6 +16318,7 @@ class MainWindow(wx.Frame):
                         )
                     else:
                         self._exhausted_chats.add(remote_jid)
+                        self._persist_exhausted_chats()
                         logging.info(
                             "[fetch_older_messages] Marked history as exhausted "
                             "in-memory for %s (older-message request %s).",
@@ -16134,6 +16337,22 @@ class MainWindow(wx.Frame):
                             pass
                 
                 if fetched_messages:
+                    if store_only:
+                        # Straight to disk, nothing kept resident. Deliberately
+                        # not routed through the branch below even for the
+                        # dedup: that one dedups against the in-memory page,
+                        # which is the newest 200 and cannot overlap a window
+                        # anchored strictly before the oldest we hold. The
+                        # message table's own (message_id, remote_jid) primary
+                        # key is what makes a repeat harmless anyway.
+                        try:
+                            self.db.insert_messages_batch(remote_jid, fetched_messages)
+                        except Exception as e:
+                            logging.warning(
+                                "[fetch_older_messages] store-only save failed for %s: %s",
+                                remote_jid, e)
+                            return []
+                        return fetched_messages
                     # Update local database/memory
                     chat = self.chats.get(remote_jid, {})
                     if chat:
@@ -16399,8 +16618,19 @@ class MainWindow(wx.Frame):
 
         threading.Thread(target=_resolve, daemon=True).start()
 
-    def register_jid_mapping(self, lid_jid, phone_jid, save=True):
-        """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it."""
+    def register_jid_mapping(self, lid_jid, phone_jid, save=True, defer_ui=False):
+        """Register a bidirectional mapping between @lid and @s.whatsapp.net, and persist it.
+
+        `defer_ui` suppresses this call's own chat-list refresh, for callers
+        resolving a whole batch: they schedule one refresh when the batch
+        finishes instead of one per mapping. Measured on a live 935-chat
+        sync, resolve_lid_jids_via_api() learned 1245 mappings in eight
+        minutes and each one scheduled a rebuild — _schedule_set_chats()
+        debounces at 300 ms, so that still came to roughly 380 full
+        recomputations of a 935-chat list, each resolving every chat's name.
+        The live message path (on_new_message) deliberately does NOT pass
+        this: a single arriving message must still refresh the list at once.
+        """
         if not lid_jid or not phone_jid:
             return
         if not lid_jid.endswith("@lid") or not phone_jid.endswith("@s.whatsapp.net"):
@@ -16453,7 +16683,8 @@ class MainWindow(wx.Frame):
                     logging.warning("[LID Mapping] Failed to save mapping incrementally: %s", exc)
                     # Fallback to save_data if incremental save fails
                     self.save_data(self.chats, self.contacts)
-            wx.CallAfter(self._schedule_set_chats)
+            if not defer_ui:
+                wx.CallAfter(self._schedule_set_chats)
 
     def resolve_lid_jids_via_api(self, jids):
         """Resolve a list of @lid JIDs to phone JIDs using WPPConnect contact endpoint."""
@@ -16537,7 +16768,7 @@ class MainWindow(wx.Frame):
                         if pn_jid:
                             canonical_jid = self._normalize_jid(pn_jid)
                             if canonical_jid and canonical_jid.endswith("@s.whatsapp.net"):
-                                self.register_jid_mapping(lid_jid, canonical_jid, save=False)
+                                self.register_jid_mapping(lid_jid, canonical_jid, save=False, defer_ui=True)
                                 try:
                                     self.db.set_lid_mapping(lid_jid, canonical_jid)
                                 except Exception as exc:
@@ -16603,7 +16834,7 @@ class MainWindow(wx.Frame):
                         if profile_pn_jid:
                             profile_canonical = self._normalize_jid(profile_pn_jid)
                             if profile_canonical and profile_canonical.endswith("@s.whatsapp.net"):
-                                self.register_jid_mapping(lid_jid, profile_canonical, save=False)
+                                self.register_jid_mapping(lid_jid, profile_canonical, save=False, defer_ui=True)
                                 try:
                                     self.db.set_lid_mapping(lid_jid, profile_canonical)
                                 except Exception as exc:

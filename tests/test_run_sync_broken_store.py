@@ -67,6 +67,9 @@ class _Stub:
         self._chats_awaiting_messages = set()
         self._lid_to_phone = {}
         self._history_still_landing = False
+        self.unnamed = []
+        # __getattr__ would hand back a lambda, which has no is_alive().
+        self._backfill_thread = None
 
         # what the test inspects
         self.fetches = 0
@@ -75,6 +78,8 @@ class _Stub:
         self.wa_web_probes = 0
         self.restarted = False
         self.message_sync_ran = 0
+        self.lid_batches = []
+        self.backfill_started = False
 
     # ── the two calls the loop actually makes ────────────────────────
     def get_remote_chats(self, chats, persist_full=True, notify_errors=True,
@@ -103,6 +108,15 @@ class _Stub:
 
     def sync_remote_chats(self):
         self.message_sync_ran += 1
+
+    def _pending_name_resolution(self):
+        return list(self.unnamed)
+
+    def resolve_lid_jids_via_api(self, jids):
+        self.lid_batches.append(len(jids))
+
+    def _backfill_empty_chats(self):
+        self.backfill_started = True
 
     # ── collaborators whose return value the loop uses ───────────────
     def normalize_chats(self, chats):
@@ -138,7 +152,7 @@ def _make(counts, wa_web, local_chats=0, high_water=0):
     for const in ("_CHAT_ABSOLUTE_MAX_ATTEMPTS", "_CHAT_ATTEMPT_EXTENSION",
                   "_STORE_PLAUSIBLE_RATIO", "_BROKEN_STORE_CONFIRM",
                   "_BROKEN_STORE_REPAIR_ROUNDS", "_DEEP_SYNC_TOP_N",
-                  "_DEEP_SYNC_COUNT"):
+                  "_DEEP_SYNC_COUNT", "_BACKFILL_CHUNK"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
@@ -244,3 +258,58 @@ class TestTheProbeIsNotChatty:
         stub = _make([931, 931], wa_web=937, local_chats=931)
         stub._run_sync()
         assert stub.wa_web_probes == 0
+
+
+class TestTheSyncDoesNotBlockOnNameResolution:
+    """The inline @lid pass used to resolve every unresolved name before the
+    "conversations synchronized" announcement, serially, sleeping 0.5 s per
+    JID so as not to hammer the single Puppeteer page.
+
+    Measured on a live 935-chat sync: 728 unresolved LIDs, six and a half
+    minutes — on a sync whose message phase took 58 seconds. The user waits
+    that out with nothing announced. _backfill_names() already resolves the
+    same list in chunks of the same size, on its own thread, with an adaptive
+    delay, so the serial pass was duplicating paced work with unpaced work.
+    """
+
+    def _synced(self, unnamed):
+        stub = _make([931, 931], wa_web=937, local_chats=931)
+        stub.chats = {f"{i}@lid": {"remoteJid": f"{i}@lid"} for i in range(unnamed)}
+        stub.unnamed = [f"{i}@lid" for i in range(unnamed)]
+        stub._run_sync()
+        return stub
+
+    def test_only_one_chunk_is_resolved_inline(self):
+        stub = self._synced(728)
+        assert stub.lid_batches == [MainWindow._BACKFILL_CHUNK]
+
+    def test_a_small_account_is_still_fully_resolved_inline(self):
+        """Below one chunk there is nothing to defer, so behaviour is
+        unchanged for the accounts that were never slow."""
+        stub = self._synced(12)
+        assert stub.lid_batches == [12]
+
+    def test_the_remainder_is_handed_to_the_backfill(self):
+        """The half that makes capping safe. Without it the leftover names
+        would simply never resolve this session."""
+        stub = self._synced(728)
+        assert stub.backfill_started is True
+
+    def test_names_alone_are_enough_to_start_the_backfill(self):
+        """The scheduler used to look only at chats short of messages. That
+        was fine while the inline pass resolved every name before reaching
+        here; it is not fine now. A chat list where every chat holds a full
+        page but hundreds show a raw @lid must still get its backfill."""
+        stub = _make([931, 931], wa_web=937, local_chats=931)
+        stub._chats_awaiting_messages = set()      # nothing short of a page
+        stub.unnamed = [f"{i}@lid" for i in range(200)]
+        stub._run_sync()
+        assert stub.backfill_started is True
+
+    def test_nothing_pending_starts_nothing(self):
+        stub = _make([931, 931], wa_web=937, local_chats=931)
+        stub._chats_awaiting_messages = set()
+        stub.unnamed = []
+        stub._run_sync()
+        assert stub.backfill_started is False
+        assert stub.lid_batches == []
