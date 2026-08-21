@@ -8275,6 +8275,27 @@ class ConversationsPanel(wx.Panel):
                     mw.output(i18n.t("selected" if now_selected else "unselected"), interrupt=True)
                 return
 
+            # Letter/digit type-ahead: jump the caret to the next contact
+            # starting with that character, same as native wx.ListBox
+            # incremental search — but done here by hand, on the same
+            # caret-only path arrows use above, instead of letting the
+            # native handler run via event.Skip(). The native one moves
+            # focus AND collapses the selection to just that row (identical
+            # root cause to the arrow-key case above), which silently
+            # dropped whatever else had been Ctrl+Space-selected the moment
+            # the user typed a letter to jump to one more contact.
+            if not ctrl and 32 < key < 127:
+                char = chr(key).lower()
+                if char.isalnum() and count > 0:
+                    caret = _lst_caret()
+                    start = (caret + 1) if caret >= 0 else 0
+                    for offset in range(count):
+                        idx = (start + offset) % count
+                        if idx < len(_filtered_names) and _filtered_names[idx].lower().startswith(char):
+                            _lst_set_caret(idx)
+                            break
+                return  # suppressed regardless of a match — never fall through to native
+
             event.Skip()  # Ctrl+Arrow, everything else: native behavior
 
         lst.Bind(wx.EVT_KEY_DOWN, _on_list_key_down)
