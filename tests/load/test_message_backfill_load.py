@@ -31,7 +31,7 @@ class _LoadStub:
     _note_backfill_state = MainWindow._note_backfill_state
     _backfill_state_guard = MainWindow._backfill_state_guard
     _canonical_backfill_jid = MainWindow._canonical_backfill_jid
-    _backfill_pending_snapshot = MainWindow._backfill_pending_snapshot
+    _collapse_and_list_backfill_pending = MainWindow._collapse_and_list_backfill_pending
     _remove_backfill_pending = MainWindow._remove_backfill_pending
     _is_backfill_pending = MainWindow._is_backfill_pending
     _completed_backfill_targets = MainWindow._completed_backfill_targets
@@ -83,7 +83,7 @@ def test_backfill_queue_survives_large_concurrent_account():
     with ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(queue_both_forms, range(chat_count)))
 
-    queued = stub._backfill_pending_snapshot()
+    queued = stub._collapse_and_list_backfill_pending()
     assert len(queued) == chat_count
     assert all(jid.endswith("@s.whatsapp.net") for jid in queued)
     assert not any(jid.endswith("@lid") for jid in queued)
@@ -99,7 +99,7 @@ def test_backfill_queue_survives_large_concurrent_account():
     operations = chat_count * 3
 
     assert completed == chat_count
-    assert stub._backfill_pending_snapshot() == []
+    assert stub._collapse_and_list_backfill_pending() == []
     assert stub._partial_history_counts == {}
 
     print("\nBACKFILL_LOAD_RESULT=" + json.dumps({
@@ -120,7 +120,7 @@ class _SweepLoadStub:
     _backfill_empty_chats = MainWindow._backfill_empty_chats
     _backfill_state_guard = MainWindow._backfill_state_guard
     _canonical_backfill_jid = MainWindow._canonical_backfill_jid
-    _backfill_pending_snapshot = MainWindow._backfill_pending_snapshot
+    _collapse_and_list_backfill_pending = MainWindow._collapse_and_list_backfill_pending
     _remove_backfill_pending = MainWindow._remove_backfill_pending
     _is_backfill_pending = MainWindow._is_backfill_pending
     _completed_backfill_targets = MainWindow._completed_backfill_targets
@@ -214,7 +214,7 @@ def test_real_backfill_loop_covers_large_account_with_bounded_workers(monkeypatc
 
     assert len(stub.calls) == chat_count
     assert len(set(stub.calls)) == chat_count
-    assert stub._backfill_pending_snapshot() == []
+    assert stub._collapse_and_list_backfill_pending() == []
     assert 1 < stub.max_active_calls <= MainWindow._BACKFILL_WORKERS
     assert stub.refresh_calls <= 2
 

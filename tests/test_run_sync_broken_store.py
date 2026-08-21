@@ -17,6 +17,7 @@ so the method is bound to a plain object — the same pattern the other main.py
 tests use.
 """
 
+import threading
 import types
 
 import pytest
@@ -65,6 +66,11 @@ class _Stub:
         self._last_chat_fetch_disconnected = False
         self._last_chat_fetch_error = None
         self._chats_awaiting_messages = set()
+        # The backfill queue helpers below are bound for real, and they read
+        # both of these plus the lock. __getattr__ would hand back a lambda,
+        # which is neither a dict nor a context manager.
+        self._partial_history_counts = {}
+        self._backfill_state_lock = threading.RLock()
         self._lid_to_phone = {}
         self._history_still_landing = False
         self.unnamed = []
@@ -143,6 +149,12 @@ class _Stub:
 def _make(counts, wa_web, local_chats=0, high_water=0):
     stub = _Stub(counts, wa_web, local_chats, high_water)
     for name in ("_run_sync", "_should_abort_sync_for_offline",
+                 # Bound for real rather than left to __getattr__: _run_sync()
+                 # counts the backfill queue through them, and a lambda
+                 # returning None used to force a `is None` fallback into
+                 # main.py that existed for no other reason than this stub.
+                 "_collapse_and_list_backfill_pending", "_backfill_state_guard",
+                 "_canonical_backfill_jid",
                  "_announce_sync_events_enabled", "count_contradicts_page",
                  "store_looks_broken", "snapshot_matches_page_store",
                  "_attempts_needed_to_confirm",

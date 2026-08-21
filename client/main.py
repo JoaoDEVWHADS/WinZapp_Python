@@ -9425,12 +9425,7 @@ class MainWindow(wx.Frame):
         # following minutes, and nothing pushes it to WinZapp when it lands. So
         # the loop starts on either signal — chats to re-query, or history still
         # on its way — and it is the loop that decides when to stop.
-        pending_snapshot = self._backfill_pending_snapshot()
-        # A few embedders replace helpers with no-op callables while exercising
-        # _run_sync() in isolation. Keep scheduling compatible with those
-        # lightweight hosts; production always receives the stable snapshot.
-        pending = len(pending_snapshot if pending_snapshot is not None
-                      else getattr(self, "_chats_awaiting_messages", set()))
+        pending = len(self._collapse_and_list_backfill_pending())
         still_landing = self.refresh_history_still_landing(context="after initial sync")
         # Unresolved names are a third reason to run, and until the inline
         # pass above was capped there was never a case where they were the
@@ -12919,8 +12914,16 @@ class MainWindow(wx.Frame):
             return getattr(self, "_lid_to_phone", {}).get(jid, jid)
         return jid
 
-    def _backfill_pending_snapshot(self) -> list:
-        """Return a stable queue view while collapsing newly-known aliases."""
+    def _collapse_and_list_backfill_pending(self) -> list:
+        """Rewrite the queue under canonical JIDs and return it, sorted.
+
+        This MUTATES `_chats_awaiting_messages` and `_partial_history_counts`:
+        a chat queued under its @lid before the bridge was known collapses onto
+        the phone JID that names it now, so the same conversation stops
+        occupying two slots. It was called `_backfill_pending_snapshot()` — a
+        read-only name for a call that rewrites the queue from inside the
+        scheduling loop.
+        """
         with self._backfill_state_guard():
             pending = getattr(self, "_chats_awaiting_messages", None)
             if pending is None:
@@ -13124,9 +13127,7 @@ class MainWindow(wx.Frame):
                 # Read the pending set *after* the queue check: a chat can join
                 # it as history lands, and the sync that added it may have
                 # finished while this pass was sleeping.
-                pending = self._backfill_pending_snapshot()
-                if pending is None:
-                    pending = sorted(getattr(self, "_chats_awaiting_messages", set()))
+                pending = self._collapse_and_list_backfill_pending()
                 pending_set = set(pending)
                 attempted = {
                     canonical for jid in attempted
@@ -13289,7 +13290,7 @@ class MainWindow(wx.Frame):
                 if finishes_sweep:
                     attempted.clear()
                     sweep_made_progress = False
-            still = len(self._backfill_pending_snapshot())
+            still = len(self._collapse_and_list_backfill_pending())
             unnamed = len(self._pending_name_resolution())
             if still or unnamed:
                 logging.info(

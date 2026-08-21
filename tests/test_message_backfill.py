@@ -41,7 +41,7 @@ class _Stub:
     _note_backfill_state = MainWindow._note_backfill_state
     _backfill_state_guard = MainWindow._backfill_state_guard
     _canonical_backfill_jid = MainWindow._canonical_backfill_jid
-    _backfill_pending_snapshot = MainWindow._backfill_pending_snapshot
+    _collapse_and_list_backfill_pending = MainWindow._collapse_and_list_backfill_pending
     _remove_backfill_pending = MainWindow._remove_backfill_pending
     _is_backfill_pending = MainWindow._is_backfill_pending
     _completed_backfill_targets = MainWindow._completed_backfill_targets
@@ -286,7 +286,7 @@ class TestJidBridge:
         s._chats_awaiting_messages = {"111@lid", phone}
         s._partial_history_counts = {"111@lid": 15, phone: 90}
 
-        assert s._backfill_pending_snapshot() == [phone]
+        assert s._collapse_and_list_backfill_pending() == [phone]
         assert s._chats_awaiting_messages == {phone}
         assert s._partial_history_counts == {phone: 90}
 
@@ -306,7 +306,7 @@ class TestJidBridge:
             for future in futures:
                 future.result()
 
-        assert s._backfill_pending_snapshot() == [phone]
+        assert s._collapse_and_list_backfill_pending() == [phone]
 
     def test_completed_count_ignores_unrelated_concurrent_arrivals(self):
         s = self._stub()
