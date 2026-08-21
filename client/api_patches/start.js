@@ -546,6 +546,7 @@ const finalConfig = {
       ...(configDefault.createOptions?.puppeteerOptions || {}),
       ...(customConfig.createOptions?.puppeteerOptions || {}),
       protocolTimeout: 300000,
+      windowsHide: true,
       executablePath: chromeExecutable || undefined,
     },
     disableSpins: true,  // Disables command line spinners (saves CPU)
