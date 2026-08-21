@@ -182,6 +182,38 @@ def test_audio_save_as_preserves_original_filename_extension():
     assert _FilenameStub()._resolve_media_filename(msg) == "minha-musica.m4a"
 
 
+def test_audio_save_as_mimetype_overrides_wrong_filename_extension():
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {
+            "audioMessage": {
+                "mimetype": "audio/ogg; codecs=opus",
+                "fileName": "minha-musica.mp3",
+            }
+        },
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    assert _FilenameStub()._resolve_media_filename(msg) == "minha-musica.ogg"
+
+
+def test_ptt_uses_reported_mimetype_extension_when_available():
+    msg = {
+        "key": {"id": "ABC123", "fromMe": False},
+        "message": {
+            "audioMessage": {
+                "ptt": True,
+                "mimetype": "audio/webm",
+            }
+        },
+        "messageType": "audioMessage",
+        "messageTimestamp": 1700000000,
+    }
+
+    assert _FilenameStub()._resolve_media_filename(msg).endswith(".webm")
+
+
 def test_unknown_regular_audio_no_longer_forces_mp3():
     msg = {
         "key": {"id": "ABC123", "fromMe": False},

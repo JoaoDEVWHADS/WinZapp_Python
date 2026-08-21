@@ -4463,11 +4463,22 @@ class ConversationsPanel(wx.Panel):
         time_str = datetime.fromtimestamp(msg_ts).strftime("%Y%m%d_%H%M%S") if msg_ts > 0 else ""
 
         if msg_type == "audioMessage" and is_ptt:
-            # Recorded voice messages: default to .ogg
-            default_file = f"mensagem_de_voz_{time_str or msg_id}.ogg"
+            # WhatsApp voice notes are normally OGG/Opus, but use the MIME
+            # reported by WPPConnect when present instead of hard-coding an
+            # extension that may not match the original bytes.
+            ext = guessed_ext or ".ogg"
+            default_file = f"mensagem_de_voz_{time_str or msg_id}{ext}"
         elif file_name:
-            # Preserve original filename and extension
-            if "." in file_name and not file_name.endswith("."):
+            # WPPConnect's filenameFromMimeType() treats MIME as authoritative:
+            # if a supplied filename has a different extension, replace only
+            # the extension instead of mislabelling the original bytes.
+            current_root, current_ext = os.path.splitext(file_name)
+            if msg_type == "audioMessage" and guessed_ext:
+                if current_ext.lower() != guessed_ext.lower():
+                    default_file = f"{current_root or file_name}{guessed_ext}"
+                else:
+                    default_file = file_name
+            elif current_ext:
                 default_file = file_name
             elif guessed_ext:
                 default_file = f"{file_name}{guessed_ext}"
