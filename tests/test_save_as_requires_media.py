@@ -38,6 +38,7 @@ class _FakeMainWindow:
     def __init__(self):
         self.i18n = _FakeI18n()
         self.outputs = []
+        self.settings = {"user_interface": {}}
 
     def output(self, text, interrupt=False):
         self.outputs.append(text)
@@ -60,11 +61,13 @@ class _Stub:
 
     _is_separator = ConversationsPanel._is_separator
     _on_action_save_as = ConversationsPanel._on_action_save_as
+    _bulk_shortcuts_enabled = ConversationsPanel._bulk_shortcuts_enabled
 
     def __init__(self, sorted_messages, selected=0):
         self._sorted_messages = sorted_messages
         self.messages_list = _FakeMessagesList(selected)
         self.main_window = _FakeMainWindow()
+        self.selected_messages = set()
 
 
 def _msg(msg_type, text="oi"):

@@ -91,9 +91,10 @@ class _Stub:
 
 
 class _FakeKeyEvent:
-    def __init__(self, key_code, shift_down=True):
+    def __init__(self, key_code, shift_down=True, ctrl_down=False):
         self._key_code = key_code
         self._shift_down = shift_down
+        self._ctrl_down = ctrl_down
         self.skipped = False
 
     def GetKeyCode(self):
@@ -101,6 +102,9 @@ class _FakeKeyEvent:
 
     def ShiftDown(self):
         return self._shift_down
+
+    def ControlDown(self):
+        return self._ctrl_down
 
     def Skip(self):
         self.skipped = True

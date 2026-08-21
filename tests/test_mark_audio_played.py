@@ -35,10 +35,12 @@ class _Stub:
         self.wpp_port = 6300
         self.token = "session:key"
         self.status_update_calls = []
+        self.skip_panel_refresh_calls = []
         self.conversations_panel = type("P", (), {"conversation": None})()
 
-    def on_message_status_update(self, update):
+    def on_message_status_update(self, update, skip_panel_refresh=False):
         self.status_update_calls.append(update)
+        self.skip_panel_refresh_calls.append(skip_panel_refresh)
 
 
 def _received_audio_msg(msg_id="ABC123", remote_jid="5521999999999@s.whatsapp.net"):
@@ -102,6 +104,19 @@ class TestMarkAudioMessagePlayed:
 
         assert stub.status_update_calls[0]["key"]["remoteJid"] == "5521888888888@s.whatsapp.net"
         assert sent == ["5521888888888@s.whatsapp.net"]
+
+    def test_skip_panel_refresh_is_passed_through_to_the_status_update(self, monkeypatch):
+        """Set by the caller (ConversationsPanel.on_audio_timer()) whenever
+        this voice note is about to auto-chain into the next one — see
+        on_message_status_update()'s own docstring for why the row refresh
+        must not fire here in that case (the caller fires it itself once
+        it's safe to)."""
+        stub = _Stub()
+        monkeypatch.setattr(stub, "_send_mark_played_request", lambda *a, **k: None)
+
+        stub.mark_audio_message_played(_received_audio_msg(), skip_panel_refresh=True)
+
+        assert stub.skip_panel_refresh_calls == [True]
 
     def test_no_message_id_is_a_no_op(self, monkeypatch):
         stub = _Stub()

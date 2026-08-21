@@ -166,8 +166,10 @@ class MessageQueue:
                     retryable_failure = False
                     disconnected      = False
                     ambiguous         = False
+                    quote_lost        = False
                     if isinstance(real_id, dict):
                         if real_id.get("ok"):
+                            quote_lost = bool(real_id.get("quote_lost", False))
                             real_id = real_id.get("id") or True
                         else:
                             msg.last_error = real_id.get("error") or ""
@@ -226,6 +228,7 @@ class MessageQueue:
                             msg.audio_path,
                             real_id if isinstance(real_id, str) else None,
                             msg.jid,
+                            quote_lost,
                         )
                     else:
                         msg.fail_count += 1

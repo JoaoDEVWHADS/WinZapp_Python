@@ -29,7 +29,7 @@ import queue
 
 import pytest
 
-from core.video_player import extract_jpeg_frames, VideoPlayer
+from core.video_player import extract_jpeg_frames, fit_frame_size, VideoPlayer
 
 
 def _jpeg(payload: bytes) -> bytes:
@@ -141,13 +141,38 @@ class _FakeMainWindow:
 _created_players = []
 
 
-def _make_player(wx_app):
+def _make_player(wx_app, on_frame_size=None, box_size=None):
     import wx
     frame = wx.Frame(None)
     bitmap = wx.StaticBitmap(frame)
-    player = VideoPlayer(_FakeMainWindow(), bitmap)
+    if box_size is not None:
+        # SetSize (not SetMinSize) so GetSize() reports it back
+        # deterministically without needing a real sizer/Layout() pass.
+        bitmap.SetSize(box_size)
+    player = VideoPlayer(_FakeMainWindow(), bitmap, on_frame_size=on_frame_size)
     _created_players.append(player)
     return player
+
+
+def _real_jpeg_bytes_sized(wx_app, width: int, height: int) -> bytes:
+    """Same idea as _real_jpeg_bytes() above (a genuinely decodable JPEG,
+    needed because _on_timer() decodes for real via wx.Image), but at a
+    caller-chosen size instead of the fixed 2x2 — needed to exercise
+    fit_frame_size()'s actual scaling path instead of always hitting its
+    "already fits" no-op branch."""
+    import os
+    import tempfile
+    import wx
+    img = wx.Image(width, height)
+    img.SetRGB(0, 0, 255, 0, 0)
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    tmp.close()
+    try:
+        img.SaveFile(tmp.name, wx.BITMAP_TYPE_JPEG)
+        with open(tmp.name, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(tmp.name)
 
 
 @pytest.fixture(autouse=True)
@@ -354,3 +379,141 @@ class TestIsPlayingReflectsStopEvent:
         player.is_playing = True
         player.stop()
         assert player.is_playing is False
+
+
+class TestFitFrameSize:
+    """wx.StaticBitmap clips rather than scales, so a frame bigger than the
+    control it is drawn into shows only its top-left corner. ffmpeg emits
+    frames at a fixed 480 px width while both callers hand this module a
+    smaller control (StatusPanel: a fixed 320x240; ConversationsPanel: a
+    box sized from the last <=200 px thumbnail, or nothing at all), which is
+    what "os videos so abrem pela metade nos status e conversas" actually
+    was."""
+
+    def test_a_frame_wider_than_the_box_is_scaled_down_to_fit(self):
+        assert fit_frame_size(480, 270, 320, 240) == (320, 180)
+
+    def test_a_portrait_frame_is_limited_by_the_boxs_height(self):
+        # 480x854 into 320x240: height is the binding constraint (240/854),
+        # so the result must fit inside BOTH dimensions, not just the width —
+        # and must actually USE the height it has (int() truncation can cost
+        # a pixel, nothing more).
+        width, height = fit_frame_size(480, 854, 320, 240)
+        assert width <= 320 and height <= 240
+        assert height >= 239
+
+    def test_aspect_ratio_is_preserved(self):
+        width, height = fit_frame_size(1920, 1080, 320, 240)
+        assert abs((width / height) - (1920 / 1080)) < 0.02
+
+    def test_a_frame_that_already_fits_is_left_alone(self):
+        assert fit_frame_size(160, 90, 320, 240) is None
+
+    def test_a_frame_exactly_the_size_of_the_box_is_left_alone(self):
+        assert fit_frame_size(320, 240, 320, 240) is None
+
+    def test_a_control_with_no_size_of_its_own_leaves_the_frame_alone(self):
+        """A wx.StaticBitmap created with no explicit size and never laid
+        out with a bitmap in it reports 0 (or 1) — there is no box to fit
+        into, so the frame is drawn at its natural size and the caller's own
+        layout decides."""
+        assert fit_frame_size(480, 270, 0, 0) is None
+        assert fit_frame_size(480, 270, 1, 1) is None
+
+    def test_a_degenerate_frame_is_left_alone(self):
+        assert fit_frame_size(0, 0, 320, 240) is None
+        assert fit_frame_size(-1, 100, 320, 240) is None
+
+    def test_the_result_is_never_zero_sized(self):
+        width, height = fit_frame_size(4000, 4, 320, 240)
+        assert width >= 1 and height >= 1
+
+
+class TestOnFrameSizeCallback:
+    """Scaling a frame down to fit the box (TestFitFrameSize above) stops it
+    being CLIPPED, but the box itself stays at its generic placeholder size
+    for the whole video — a portrait clip inside the 4:3 default box then
+    renders small and left-aligned with a big blank gap filling the rest,
+    which still reads as "the video isn't fully shown" even though every
+    pixel is technically there (reported live, again, after the scale-to-fit
+    fix). on_frame_size(width, height) fires once, on the first frame, so
+    the caller can shrink its box to the frame's own actual size — the same
+    way a still photo is already sized to exactly its own content."""
+
+    def test_fires_once_with_the_scaled_size_when_the_frame_needs_shrinking(self, wx_app):
+        calls = []
+        player = _make_player(wx_app, on_frame_size=lambda w, h: calls.append((w, h)), box_size=(320, 240))
+        # 400x100 into 320x240: ratio = min(320/400, 240/100) = 0.8 -> (320, 80).
+        frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
+        player._frame_queue.put(frame)
+
+        player._on_timer(None)
+
+        assert calls == [(320, 80)]
+
+    def test_fires_once_with_the_natural_size_when_the_frame_already_fits(self, wx_app):
+        """fit_frame_size() returns None when nothing needs scaling — the
+        box must still shrink to the frame's own (smaller) natural size,
+        not stay at the oversized placeholder."""
+        calls = []
+        player = _make_player(wx_app, on_frame_size=lambda w, h: calls.append((w, h)), box_size=(320, 240))
+        frame = _real_jpeg_bytes_sized(wx_app, 40, 30)
+        player._frame_queue.put(frame)
+
+        player._on_timer(None)
+
+        assert calls == [(40, 30)]
+
+    def test_does_not_fire_again_on_the_second_frame_of_the_same_playback(self, wx_app):
+        """Only once per playback — resizing the box on every frame would
+        mean relaying out the panel at 12fps, worse for a screen-reader user
+        than the blank-gap bug this is fixing."""
+        calls = []
+        player = _make_player(wx_app, on_frame_size=lambda w, h: calls.append((w, h)), box_size=(320, 240))
+        frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
+        player._frame_queue.put(frame)
+        player._frame_queue.put(frame)
+
+        player._on_timer(None)
+        player._on_timer(None)
+
+        assert len(calls) == 1
+
+    def test_load_and_play_resets_the_once_only_flag(self, wx_app, monkeypatch):
+        """A new video (possibly a different aspect ratio) needs its own
+        one-time resize — load_and_play() must reset the "already sized"
+        flag so the next playback's first frame fires the callback again.
+
+        (Not asserted end-to-end via a second _on_timer() call: wx.StaticBitmap
+        auto-shrinks itself to whatever bitmap it's just been given — visible
+        in this very test's first frame already leaving the control at 320x80,
+        not the 320x240 it started at — so a bare second call here would
+        legitimately compute the *same* fitted size against that leftover
+        size and correctly skip re-firing. Production callers avoid that by
+        resetting the box back to the shared baseline via SetMinSize()+
+        Layout() before every load_and_play() — see
+        ConversationsPanel._start_video_playback() — which is a UI concern
+        this module has no part of.)"""
+        player = _make_player(wx_app, on_frame_size=lambda w, h: None, box_size=(320, 240))
+        frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
+        player._frame_queue.put(frame)
+        player._on_timer(None)
+        assert player._box_sized is True
+
+        # load_and_play() would normally spin up real ffmpeg/BASS — not
+        # wanted here, just the flag reset it does before that.
+        monkeypatch.setattr(player, "_start_audio", lambda *a, **k: None)
+        monkeypatch.setattr(player, "_start_video_pipe", lambda: None)
+        player.load_and_play("fake.mp4")
+
+        assert player._box_sized is False
+
+    def test_no_callback_registered_does_not_crash(self, wx_app):
+        """ConversationsPanel/StatusPanel always pass one, but the parameter
+        is optional — must degrade gracefully, not raise, if a future
+        caller doesn't."""
+        player = _make_player(wx_app, on_frame_size=None, box_size=(320, 240))
+        frame = _real_jpeg_bytes_sized(wx_app, 400, 100)
+        player._frame_queue.put(frame)
+
+        player._on_timer(None)  # must not raise

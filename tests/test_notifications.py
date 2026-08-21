@@ -192,6 +192,85 @@ class TestToastIdentity:
         assert NotificationManager.TOAST_GRP
 
 
+class TestSetupToasterAumid:
+    """_setup_toaster() builds the AUMID candidate list show_toast() calls
+    live under. Dev mode used to skip straight to sys.executable (the
+    venv's own python.exe — an AUMID shared by every unrelated script run
+    from that same venv, with no registered DisplayName/icon of its own)
+    instead of trying the registered "WinZapp" identity first like a frozen
+    build does. Windows can silently decline to show a banner for an AUMID
+    it has no real registered app identity for — reported live running
+    from source: the custom sound played, but the toast never appeared on
+    screen at all, with no exception anywhere to explain why."""
+
+    class _ToasterStub:
+        _setup_toaster  = NotificationManager._setup_toaster
+        _outer_exe_path = staticmethod(NotificationManager._outer_exe_path)
+        APP_ID          = NotificationManager.APP_ID
+
+        def __init__(self):
+            self._toaster      = None
+            self._interactable = False
+
+        def _register_aumid_registry(self):
+            pass  # touches the real Windows registry — irrelevant here
+
+    def test_dev_mode_tries_the_registered_app_id_first(self, monkeypatch):
+        monkeypatch.setattr("core.notification_manager._is_frozen", lambda: False)
+        attempts = []
+
+        class FakeInteractable:
+            def __init__(self, app_id, notifierAUMID=None):
+                attempts.append(app_id)
+
+        monkeypatch.setattr("windows_toasts.InteractableWindowsToaster", FakeInteractable)
+
+        stub = self._ToasterStub()
+        stub._setup_toaster()
+
+        assert attempts == ["WinZapp"]
+        assert isinstance(stub._toaster, FakeInteractable)
+        assert stub._interactable is True
+
+    def test_dev_mode_falls_back_to_the_interpreter_path_if_app_id_fails(self, monkeypatch):
+        monkeypatch.setattr("core.notification_manager._is_frozen", lambda: False)
+        monkeypatch.setattr("core.notification_manager.sys.executable", "C:\\venv\\Scripts\\python.exe")
+        attempts = []
+
+        class AlwaysFails:
+            def __init__(self, app_id, notifierAUMID=None):
+                attempts.append(app_id)
+                raise RuntimeError("simulated: no registered app identity for this AUMID")
+
+        monkeypatch.setattr("windows_toasts.InteractableWindowsToaster", AlwaysFails)
+        monkeypatch.setattr("windows_toasts.WindowsToaster", AlwaysFails)
+
+        stub = self._ToasterStub()
+        stub._setup_toaster()
+
+        assert attempts == [
+            "WinZapp", "WinZapp",
+            "C:\\venv\\Scripts\\python.exe", "C:\\venv\\Scripts\\python.exe",
+        ]
+        assert stub._toaster is None
+
+    def test_frozen_mode_also_tries_app_id_before_the_outer_exe(self, monkeypatch):
+        monkeypatch.setattr("core.notification_manager._is_frozen", lambda: True)
+        attempts = []
+
+        class FakeInteractable:
+            def __init__(self, app_id, notifierAUMID=None):
+                attempts.append(app_id)
+
+        monkeypatch.setattr("windows_toasts.InteractableWindowsToaster", FakeInteractable)
+
+        stub = self._ToasterStub()
+        stub._outer_exe_path = lambda: "C:\\Program Files\\WinZapp\\WinZapp.exe"
+        stub._setup_toaster()
+
+        assert attempts == ["WinZapp"]
+
+
 class TestDispatchLatency:
     """_dispatch() is called on the worker thread for every notification.
     These cover the two latency fixes: skipping the blocking clear when

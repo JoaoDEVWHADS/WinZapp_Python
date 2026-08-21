@@ -68,6 +68,81 @@ def normalize_for_search(text: str, mode="off") -> str:
     )
 
 
+_UNICODE_LINE_SEPARATORS = {
+    "\u2028",  # LINE SEPARATOR
+    "\u2029",  # PARAGRAPH SEPARATOR
+    "\u0085",  # NEXT LINE (NEL)
+    "\x0b",    # VERTICAL TAB
+    "\x0c",    # FORM FEED
+    "\r",      # lone CR (CRLF handled below, before this set applies)
+}
+
+
+def normalize_line_separators(text) -> str:
+    """Collapse every Unicode line/paragraph separator into plain ``\\n``.
+
+    Rich clipboard sources — Google Docs, Word, websites, Apple apps — copy
+    U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR (and the rarer NEL,
+    VT, FF) where a plain editor stores ``\\n``. A ``wx.TextCtrl`` keeps them
+    verbatim: the native control does not render them as breaks (a paste
+    looks like a single line, and NVDA reads it as one), yet WhatsApp
+    renders U+2029 as a paragraph break on the receiving side. The result is
+    the classic "it looks fine here but arrives full of weird breaks"
+    report. Normalizing to ``\\n`` makes the field, the screen reader and
+    the recipient all agree on the same line structure.
+    """
+    text = (text or "").replace("\r\n", "\n")
+    for sep in _UNICODE_LINE_SEPARATORS:
+        text = text.replace(sep, "\n")
+    return text
+
+
+_FORWARDABLE_SUB_KEYS = (
+    "extendedTextMessage", "audioMessage", "imageMessage",
+    "videoMessage", "documentMessage", "stickerMessage",
+    "locationMessage", "contactMessage", "buttonsMessage",
+    "listMessage",
+)
+
+
+def is_message_forwarded(msg) -> bool:
+    """True when contextInfo.isForwarded is set — a real WhatsApp protocol
+    field present on any forwarded message, from anyone, not only ones this
+    app itself forwarded (WebSocketClient._normalize_wpp_message threads it
+    through from WPPConnect's own Message.isForwarded).
+
+    Shared by ui/conversations.py (to skip offering forward-related actions
+    it doesn't apply to) and main.py's on_new_message() (to make sure a
+    forwarded copy's own contextInfo/key fields — which can carry residual
+    provenance about whoever originally sent the message being forwarded —
+    are never mistaken for identifying WHO SENT THIS COPY)."""
+    if not isinstance(msg, dict):
+        return False
+    top_ctx = msg.get("contextInfo")
+    if isinstance(top_ctx, dict) and top_ctx.get("isForwarded"):
+        return True
+    msg_obj = msg.get("message") or {}
+    if not isinstance(msg_obj, dict):
+        return False
+    for sub_key in _FORWARDABLE_SUB_KEYS:
+        sub = msg_obj.get(sub_key)
+        if isinstance(sub, dict) and isinstance(sub.get("contextInfo"), dict):
+            if sub["contextInfo"].get("isForwarded"):
+                return True
+    return False
+
+
+def append_selected_marker(text: str, word: str, position: str, is_selected: bool) -> str:
+    """Add the localized "selected" marker word to a list-row string when
+    *is_selected*, at the configured *position* ("start" or anything else,
+    treated as "end"). Used by both the messages list and the conversations
+    list so a screen-reader user with sound events disabled still gets a
+    persistent, textual cue for which rows are part of the bulk selection."""
+    if not is_selected:
+        return text
+    return f"{word} {text}" if position == "start" else f"{text} {word}"
+
+
 def get_downloads_folder() -> str:
     """Return the current user's Downloads folder.
 
@@ -517,19 +592,28 @@ def format_number(string_number):
 
     local = digits[len(cc):]
 
-    if cc == "55":
+    # A Brazilian mobile/landline number is always DDD(2) + 8 or 9 digits —
+    # 10 or 11 digits total after the country code. E.164 codes are
+    # prefix-free (no other country's code starts with "55"), so a genuine
+    # phone number matching "55" here really is Brazilian — but a
+    # non-standard-length id (e.g. a WhatsApp internal identifier that
+    # slipped past the @lid/length guard above, or a malformed contact
+    # entry) can still coincidentally start with "55" digits without being
+    # a real Brazilian number. Forcing the DDD/dash split on it produced a
+    # string that *looked* like a valid Brazilian number even though it
+    # wasn't one — reported live for shared contacts whose actual country
+    # was something else entirely (issue #35). Only apply the Brazil-
+    # specific shape when the length actually fits; anything else falls
+    # through to the plain "+55 <digits>" international format below,
+    # which at least never fabricates a fake area code/dash grouping.
+    if cc == "55" and len(local) in (10, 11):
         ddd = local[:2]
         rest = local[2:]
-        if not ddd:
-            return f"+{cc}"
-        if not rest:
-            return f"+{cc} {ddd}"
         if len(rest) == 9:
             return f"+{cc} {ddd} {rest[:5]}-{rest[5:]}"
-        split = max(len(rest) - 4, 1)
-        return f"+{cc} {ddd} {rest[:split]}-{rest[split:]}"
+        return f"+{cc} {ddd} {rest[:4]}-{rest[4:]}"
 
-    # Generic international
+    # Generic international (also covers "55" matches of the wrong length)
     return f"+{cc} {local}" if local else f"+{cc}"
 
 def parse_bool_flag(value):

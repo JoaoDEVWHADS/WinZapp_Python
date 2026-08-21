@@ -28,9 +28,14 @@ class _FakeMainWindow:
         self._failing_jids = set(failing_jids or ())
         self.calls = []
         self.resend_calls = []
+        self.source_msgs = []
 
-    def forward_message(self, source_jid, msg_key, target_jid):
+    def forward_message(self, source_jid, msg_key, target_jid, source_msg=None):
+        # source_msg carries the full source message so its media duration can
+        # be grafted onto the forwarded copy (issue #43) — mirrored here so the
+        # fake keeps matching the real signature.
         self.calls.append((source_jid, msg_key, target_jid))
+        self.source_msgs.append(source_msg)
         return target_jid not in self._failing_jids
 
     def resend_media_message_with_caption(self, msg, target_jid):
@@ -122,3 +127,24 @@ class TestForwardToMultipleTargets:
 
         assert failed == ["Bob"]
         assert stub.main_window.resend_calls[-1] == (MSG, "c@s.whatsapp.net")
+
+
+class TestSourceMessageReachesTheForwardCall:
+    """Issue #43: the forwarded copy comes back from the server with no
+    duration, so the source message has to travel with the call — it is the
+    only place the real length is known at that moment."""
+
+    def test_the_full_source_message_is_passed_along(self):
+        stub = _Stub()
+        msg = {
+            "key": {"id": "ABC", "remoteJid": "5511999999999@s.whatsapp.net"},
+            "messageType": "audioMessage",
+            "message": {"audioMessage": {"seconds": 67}},
+        }
+
+        stub._forward_message_to_targets(msg, [("5511888888888@s.whatsapp.net", "Fulano")])
+
+        assert stub.main_window.source_msgs == [msg], (
+            "forward_message was called without the source message, so the "
+            "forwarded copy has no duration to recover"
+        )

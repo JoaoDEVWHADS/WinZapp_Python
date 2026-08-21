@@ -207,6 +207,11 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._notifications_check, 0, wx.ALL, 8)
 
+        self._keep_muted_silent_check = wx.CheckBox(
+            self._general_page, label=i18n.t("keep_muted_chats_silent_when_open_label")
+        )
+        gen_sizer.Add(self._keep_muted_silent_check, 0, wx.ALL, 8)
+
         self._announce_sync_check = wx.CheckBox(
             self._general_page, label=i18n.t("announce_sync_events_label")
         )
@@ -399,6 +404,53 @@ class SettingsDialog(wx.Dialog):
             rb.Bind(wx.EVT_RADIOBUTTON, self._on_self_reference_toggle)
 
         ui_sizer.Add(self_ref_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._show_delivery_status_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_show_delivery_status_in_chat_list")
+        )
+        ui_sizer.Add(self._show_delivery_status_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT, 8)
+
+        self._preserve_typed_caption_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_preserve_typed_text_as_caption")
+        )
+        ui_sizer.Add(
+            self._preserve_typed_caption_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._bulk_action_shortcuts_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_bulk_action_shortcuts")
+        )
+        ui_sizer.Add(
+            self._bulk_action_shortcuts_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._auto_focus_next_audio_cb = wx.CheckBox(
+            self._ui_page, label=i18n.t("ui_auto_focus_next_audio")
+        )
+        ui_sizer.Add(
+            self._auto_focus_next_audio_cb, 0, wx.LEFT | wx.TOP | wx.RIGHT | wx.BOTTOM, 8
+        )
+
+        self._selected_announce_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_selected_announce_position_label")
+        )
+        selected_announce_sizer = wx.StaticBoxSizer(self._selected_announce_box, wx.VERTICAL)
+
+        self._selected_announce_start_rb = wx.RadioButton(
+            self._ui_page,
+            label=i18n.t("ui_selected_announce_position_start"),
+            style=wx.RB_GROUP,
+        )
+        selected_announce_sizer.Add(self._selected_announce_start_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._selected_announce_end_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_selected_announce_position_end")
+        )
+        selected_announce_sizer.Add(
+            self._selected_announce_end_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+        )
+
+        ui_sizer.Add(selected_announce_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
@@ -707,6 +759,11 @@ class SettingsDialog(wx.Dialog):
         notifs = self.main_window.settings.get("general", {}).get("notifications_enabled", True)
         self._notifications_check.SetValue(notifs)
 
+        keep_muted_silent = self.main_window.settings.get("general", {}).get(
+            "keep_muted_chats_silent_when_open", True
+        )
+        self._keep_muted_silent_check.SetValue(keep_muted_silent)
+
         announce_sync = self.main_window.settings.get("general", {}).get("announce_sync_events", True)
         self._announce_sync_check.SetValue(announce_sync)
 
@@ -784,6 +841,34 @@ class SettingsDialog(wx.Dialog):
             "show_listbox_item_count", False
         )
         self._show_listbox_count_cb.SetValue(bool(show_listbox_count))
+
+        show_delivery_status = self.main_window.settings.get("user_interface", {}).get(
+            "show_delivery_status_in_chat_list", True
+        )
+        self._show_delivery_status_cb.SetValue(bool(show_delivery_status))
+
+        preserve_typed_caption = self.main_window.settings.get("user_interface", {}).get(
+            "preserve_typed_text_as_attachment_caption", True
+        )
+        self._preserve_typed_caption_cb.SetValue(bool(preserve_typed_caption))
+
+        bulk_action_shortcuts = self.main_window.settings.get("user_interface", {}).get(
+            "bulk_action_shortcuts", True
+        )
+        self._bulk_action_shortcuts_cb.SetValue(bool(bulk_action_shortcuts))
+
+        auto_focus_next_audio = self.main_window.settings.get("user_interface", {}).get(
+            "auto_focus_next_audio", True
+        )
+        self._auto_focus_next_audio_cb.SetValue(bool(auto_focus_next_audio))
+
+        selected_announce_position = self.main_window.settings.get("user_interface", {}).get(
+            "selected_announcement_position", "end"
+        )
+        if selected_announce_position == "start":
+            self._selected_announce_start_rb.SetValue(True)
+        else:
+            self._selected_announce_end_rb.SetValue(True)
 
 
         self_reference_mode = self.main_window.settings.get("user_interface", {}).get(
@@ -1472,6 +1557,21 @@ class SettingsDialog(wx.Dialog):
         self.main_window.settings.setdefault("user_interface", {})[
             "show_listbox_item_count"
         ] = self._show_listbox_count_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "show_delivery_status_in_chat_list"
+        ] = self._show_delivery_status_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "preserve_typed_text_as_attachment_caption"
+        ] = self._preserve_typed_caption_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "bulk_action_shortcuts"
+        ] = self._bulk_action_shortcuts_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "auto_focus_next_audio"
+        ] = self._auto_focus_next_audio_cb.GetValue()
+        self.main_window.settings.setdefault("user_interface", {})[
+            "selected_announcement_position"
+        ] = "start" if self._selected_announce_start_rb.GetValue() else "end"
         if new_message_list_mode != old_message_list_mode:
             self._restart_required = True
 
@@ -1555,6 +1655,9 @@ class SettingsDialog(wx.Dialog):
         # Notifications
         self.main_window.settings.setdefault("general", {})["notifications_enabled"] = (
             self._notifications_check.GetValue()
+        )
+        self.main_window.settings.setdefault("general", {})["keep_muted_chats_silent_when_open"] = (
+            self._keep_muted_silent_check.GetValue()
         )
 
         # Sync/media/auto-offline announcements
@@ -1722,6 +1825,7 @@ class SettingsDialog(wx.Dialog):
         self._reload_audio_device_choices()
         self._noise_reduction_check.SetLabel(i18n.t("noise_reduction_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
+        self._keep_muted_silent_check.SetLabel(i18n.t("keep_muted_chats_silent_when_open_label"))
         self._announce_sync_check.SetLabel(i18n.t("announce_sync_events_label"))
         self._search_norm_radio.SetLabel(i18n.t("search_normalization_label"))
         for _i, _key in enumerate((
@@ -1748,6 +1852,13 @@ class SettingsDialog(wx.Dialog):
         self._self_ref_voce_rb.SetLabel(i18n.t("ui_self_reference_voce"))
         self._self_ref_other_rb.SetLabel(i18n.t("ui_self_reference_other"))
         self._self_ref_custom_label.SetLabel(i18n.t("ui_self_reference_custom_label"))
+        self._show_delivery_status_cb.SetLabel(i18n.t("ui_show_delivery_status_in_chat_list"))
+        self._preserve_typed_caption_cb.SetLabel(i18n.t("ui_preserve_typed_text_as_caption"))
+        self._bulk_action_shortcuts_cb.SetLabel(i18n.t("ui_bulk_action_shortcuts"))
+        self._auto_focus_next_audio_cb.SetLabel(i18n.t("ui_auto_focus_next_audio"))
+        self._selected_announce_box.SetLabel(i18n.t("ui_selected_announce_position_label"))
+        self._selected_announce_start_rb.SetLabel(i18n.t("ui_selected_announce_position_start"))
+        self._selected_announce_end_rb.SetLabel(i18n.t("ui_selected_announce_position_end"))
         self._announce_typing_check.SetLabel(i18n.t("speech_announce_typing_label"))
         self._announce_recording_check.SetLabel(i18n.t("speech_announce_recording_label"))
         self._speak_active_conv_check.SetLabel(i18n.t("speech_speak_active_conv_label"))

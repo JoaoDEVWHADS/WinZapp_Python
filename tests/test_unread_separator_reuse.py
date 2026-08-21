@@ -56,6 +56,7 @@ def _msg(mid, from_me=False):
 
 class _Stub:
     on_incoming_message = ConversationsPanel.on_incoming_message
+    _matches_open_conversation = ConversationsPanel._matches_open_conversation
     _is_separator = ConversationsPanel._is_separator
     # Bound from the real class rather than faked: on_incoming_message() calls
     # these, and a hand-written stand-in would be free to drift from what the
