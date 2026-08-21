@@ -151,6 +151,164 @@ export async function getAllChats(req: Request, res: Response) {
   }
 }
 
+/**
+ * Read the chat list without trusting WhatsApp Web's in-memory ChatStore to
+ * already be hydrated.
+ *
+ * A large linked account can have every chat safely persisted in the
+ * `model-storage` IndexedDB while `WPP.chat.list()` returns [] (or even throws
+ * while serialising an undefined collection).  Retrying the same call does not
+ * repair that split-brain state: the captured 937-chat session returned an
+ * empty list 99 times while get-messages continued to read IndexedDB normally.
+ *
+ * On that exact failure only, load the persisted chat ids and ask wa-js to
+ * `find()` them. find() is the supported API that creates/loads a ChatModel and
+ * registers it in ChatStore. Work is chunked, bounded, and single-flight inside
+ * the page so Python's retry loop cannot start several 900-chat recoveries at
+ * once. The healthy path still performs one ordinary WPP.chat.list() call.
+ */
+async function listChatsWithStoreRecovery(
+  req: Request,
+  options: Record<string, any>
+): Promise<any[]> {
+  const result: any = await req.client.page.evaluate(
+    async ({ listOptions }) => {
+      const root = globalThis as any;
+
+      const serialise = async () => {
+        try {
+          const models = await root.WPP?.chat?.list?.(listOptions);
+          if (!Array.isArray(models)) {
+            return { chats: [], error: 'WPP.chat.list returned a non-array value' };
+          }
+          const serializer = root.WAPI?._serializeChatObj;
+          if (typeof serializer !== 'function') {
+            return { chats: [], error: 'WAPI._serializeChatObj is unavailable' };
+          }
+          return { chats: models.map((chat: any) => serializer(chat)) };
+        } catch (error: any) {
+          return { chats: [], error: error?.message || String(error) };
+        }
+      };
+
+      const first = await serialise();
+      if (first.chats.length > 0) {
+        return { ...first, recovered: false };
+      }
+
+      // Every concurrent list-chats request awaits the same recovery. Delete
+      // it once complete so a later, genuinely new store loss can be repaired.
+      if (!root.__winzappChatStoreRecoveryPromise) {
+        root.__winzappChatStoreRecoveryPromise = (async () => {
+          const ids = await new Promise<string[]>((resolve) => {
+            let open: IDBOpenDBRequest;
+            try {
+              open = indexedDB.open('model-storage');
+            } catch (_error) {
+              resolve([]);
+              return;
+            }
+            open.onerror = () => resolve([]);
+            open.onsuccess = () => {
+              const db = open.result;
+              const found = new Set<string>();
+              const jidPattern = /(?:^|_)([^_\s]+@(c\.us|s\.whatsapp\.net|lid|g\.us|newsletter|broadcast))$/;
+
+              const add = (candidate: any) => {
+                if (candidate && typeof candidate === 'object') {
+                  candidate =
+                    candidate._serialized || candidate.id || candidate.jid ||
+                    candidate.remoteJid || candidate.chatId;
+                }
+                if (typeof candidate !== 'string') return;
+                const match = candidate.match(jidPattern);
+                if (match?.[1]) found.add(match[1]);
+              };
+
+              try {
+                const transaction = db.transaction('chat', 'readonly');
+                const store = transaction.objectStore('chat');
+                const cursor = store.openCursor();
+                cursor.onerror = () => {
+                  db.close();
+                  resolve(Array.from(found));
+                };
+                cursor.onsuccess = () => {
+                  const current = cursor.result;
+                  if (!current || found.size >= 5000) {
+                    db.close();
+                    resolve(Array.from(found));
+                    return;
+                  }
+                  const value: any = current.value;
+                  add(current.primaryKey);
+                  add(current.key);
+                  add(value);
+                  add(value?.id);
+                  add(value?.jid);
+                  add(value?.remoteJid);
+                  add(value?.chatId);
+                  add(value?.key);
+                  add(value?.value?.id);
+                  add(value?.data?.id);
+                  current.continue();
+                };
+              } catch (_error) {
+                db.close();
+                resolve([]);
+              }
+            };
+          });
+
+          const findChat = root.WPP?.chat?.find;
+          if (typeof findChat !== 'function' || ids.length === 0) {
+            return { indexedDbChats: ids.length, rehydrated: 0, failed: ids.length };
+          }
+
+          let rehydrated = 0;
+          let failed = 0;
+          const batchSize = 24;
+          for (let offset = 0; offset < ids.length; offset += batchSize) {
+            const batch = ids.slice(offset, offset + batchSize);
+            const settled = await Promise.allSettled(
+              batch.map((jid) => findChat(jid))
+            );
+            for (const item of settled) {
+              if (item.status === 'fulfilled' && item.value) rehydrated++;
+              else failed++;
+            }
+          }
+          return { indexedDbChats: ids.length, rehydrated, failed };
+        })().finally(() => {
+          delete root.__winzappChatStoreRecoveryPromise;
+        });
+      }
+
+      const recovery = await root.__winzappChatStoreRecoveryPromise;
+      const second = await serialise();
+      return {
+        ...second,
+        recovered: true,
+        firstError: first.error,
+        recovery,
+      };
+    },
+    { listOptions: options }
+  );
+
+  if (result?.recovered) {
+    req.logger.warn(
+      `[listChats] ChatStore was empty/invalid; IndexedDB recovery: ${JSON.stringify(
+        result.recovery || {}
+      )}; recovered list has ${result?.chats?.length || 0} chat(s)`
+    );
+  }
+  if (result?.error && !result?.chats?.length) {
+    req.logger.warn(`[listChats] ${result.error}`);
+  }
+  return Array.isArray(result?.chats) ? result.chats : [];
+}
+
 export async function listChats(req: Request, res: Response) {
   /**
    * #swagger.tags = ["Chat"]
@@ -249,8 +407,7 @@ export async function listChats(req: Request, res: Response) {
     if (ignoreGroupMetadata !== undefined)
       options.ignoreGroupMetadata = ignoreGroupMetadata;
 
-    const response = await req.client.listChats(options);
-    const chats = Array.isArray(response) ? response : [];
+    const chats = await listChatsWithStoreRecovery(req, options);
 
     // WhatsApp Web creates one-to-one ChatStore entries for group participants
     // when it receives only an encryption-key notification from them. These are
@@ -2969,7 +3126,22 @@ export async function getAllContacts(req: Request, res: Response) {
      }
    */
   try {
-    let response = await req.client.getAllContacts();
+    let response;
+    try {
+      response = await req.client.getAllContacts();
+    } catch (firstError: any) {
+      // ContactStore and ChatStore disappear together in the captured broken
+      // session. Rehydrating the persisted chats also restores their contact
+      // models; retry once instead of turning a transient store loss into a
+      // permanent 500 for the whole sync.
+      req.logger.warn(
+        `[getAllContacts] Initial read failed; attempting ChatStore recovery: ${
+          firstError?.message || firstError
+        }`
+      );
+      await listChatsWithStoreRecovery(req, { ignoreGroupMetadata: true });
+      response = await req.client.getAllContacts();
+    }
 
     if (Array.isArray(response)) {
       // Was req.client.getAllChats() — the deprecated, heavier WAPI call
@@ -2987,9 +3159,9 @@ export async function getAllContacts(req: Request, res: Response) {
       // to actually finish. listChats() wraps the same modern, non-
       // deprecated WPP.chat.list() the list-chats route already uses, with
       // the same ignoreGroupMetadata skip.
-      const chats = await req.client
-        .listChats({ ignoreGroupMetadata: true } as any)
-        .catch(() => []);
+      const chats = await listChatsWithStoreRecovery(req, {
+        ignoreGroupMetadata: true,
+      });
       const activeChatIds = new Set(
         chats.map((c: any) => c?.id?._serialized || c?.id).filter(Boolean)
       );
