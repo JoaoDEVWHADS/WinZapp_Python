@@ -478,18 +478,26 @@ function patchWppconnectVersionPinning() {
           // Consumed here — WPPConnect must not add its blanket interception.
           version = undefined;
         } catch (e) {
+          // Never hand the version back to WPPConnect here. Its fallback is
+          // blanket request interception, which stalls WAWebBackendWorker and
+          // leaves history chunks at notification_stored. If our narrow CDP
+          // interception cannot be installed, continue unpinned instead: a
+          // live WhatsApp Web build is safer than a session whose history can
+          // never sync.
           console.error(
             '[WinZapp] Failed to install the document-only interception ' +
-            `(${e && e.message}); falling back to WPPConnect's blanket one. ` +
-            'History sync will not work in this session.'
+            `(${e && e.message}); continuing without the version pin so ` +
+            'WPPConnect cannot enable blanket interception. History sync is preserved.'
           );
+          version = undefined;
         }
       } else {
         console.error(
-          `[WinZapp] wa-version cannot serve ${version} (${bodyError}); leaving the pin ` +
-          "to WPPConnect, which installs its blanket request interception. WhatsApp Web's " +
-          'backend worker will stall and chats will only ever show their newest messages.'
+          `[WinZapp] wa-version cannot serve ${version} (${bodyError}); continuing ` +
+          'without the version pin so WPPConnect cannot install blanket request ' +
+          'interception. History sync is preserved.'
         );
+        version = undefined;
       }
     }
     return original.call(this, page, token, clear, version, proxy, log);

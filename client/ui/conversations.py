@@ -1312,7 +1312,10 @@ class ConversationsPanel(wx.Panel):
         def _start_mark_as_read():
             threading.Thread(
                 target=self.main_window.mark_conversation_as_read,
-                args=(jid,),
+                # Opening the chat is authoritative user intent. A partial
+                # sync can leave local unreadCount at zero even though WhatsApp
+                # still has unread state, so force the real /send-seen call.
+                args=(jid, True),
                 daemon=True,
             ).start()
         wx.CallAfter(_start_mark_as_read)
@@ -7575,30 +7578,51 @@ class ConversationsPanel(wx.Panel):
         progress = self._media_upload_progress.get(local_id, 0.0)
         self._update_media_transfer_gauge(progress)
 
+    def _set_media_transfer_gauge_visible(self, visible: bool):
+        """Show/hide the gauge as both a window and a sizer item.
+
+        wx.Window.Show() alone is not reliable for a child that was hidden
+        before its containing sizer first laid out (the document gauge is born
+        hidden).  Explicitly toggling the sizer item and repainting the outer
+        panel makes the progress row exist immediately on Windows.
+        """
+        gauge = getattr(self, "_media_transfer_gauge", None)
+        if gauge is None:
+            return
+        gauge.Show(visible)
+        sizer = self.conversation_panel.GetSizer()
+        if sizer is not None:
+            try:
+                sizer.Show(gauge, visible, recursive=True)
+            except TypeError:
+                # wxPython builds differ on the recursive keyword for Show().
+                sizer.Show(gauge, visible)
+        self.conversation_panel.Layout()
+        self.Layout()
+        self.conversation_panel.Refresh()
+        self.conversation_panel.Update()
+
     def _show_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge is None:
             return
         gauge.SetValue(0)
-        gauge.Show()
-        self.conversation_panel.Layout()
-        gauge.Pulse()
+        self._set_media_transfer_gauge_visible(True)
 
     def _update_media_transfer_gauge(self, progress: float):
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge is None:
             return
-        gauge.SetValue(max(0, min(100, round(progress * 100))))
         if not gauge.IsShown():
-            gauge.Show()
-            self.conversation_panel.Layout()
+            self._set_media_transfer_gauge_visible(True)
+        gauge.SetValue(max(0, min(100, round(progress * 100))))
+        gauge.Refresh()
 
     def _hide_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
         if gauge is None:
             return
-        gauge.Hide()
-        self.conversation_panel.Layout()
+        self._set_media_transfer_gauge_visible(False)
 
     # ── Ctrl+Shift+D / Ctrl+Shift+P dispatch ────────────────────────────────
 
@@ -10686,6 +10710,13 @@ class ConversationsPanel(wx.Panel):
             self._register_virtual_msg(virtual_msg)
             self._media_upload_progress[local_id] = 0.0
 
+            # A document has no Open/Save As controls until SENT, so establish
+            # its progress UI synchronously before any cache/enqueue worker can
+            # race ahead. The gauge remains at 100% until the SENT ACK clears
+            # _awaiting_sent_ack.
+            if media_type == "document":
+                self._show_media_transfer_gauge()
+
             # Pre-cache the file under local_id BEFORE enqueueing the actual
             # send: _mark_message_sent() renames the cache entry from
             # local_id to the real WhatsApp id as soon as the send is
@@ -10698,7 +10729,8 @@ class ConversationsPanel(wx.Panel):
 
             threading.Thread(target=_cache_then_enqueue, daemon=True).start()
 
-            self._show_media_transfer_gauge()
+            if media_type != "document":
+                self._show_media_transfer_gauge()
 
         self._on_cancel_reply()  # clear quoted state after send
         self.main_window.mark_conversation_as_read(remote_jid)
