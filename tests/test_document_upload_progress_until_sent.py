@@ -101,3 +101,10 @@ def test_upload_progress_is_monotonic_across_python_and_wpp_events():
     progress = _method_source(CONV, "ConversationsPanel", "update_media_upload_progress")
     assert "previous = self._media_upload_progress.get(upload_id, 0.0)" in progress
     assert "progress = max(previous, progress)" in progress
+
+
+def test_send_file_uses_streaming_multipart_instead_of_requests_files_buffering():
+    send = _method_source(MAIN, "MainWindow", "send_media_attachment")
+    assert "StreamingMultipartBody(" in send
+    assert 'files={"file"' not in send
+    assert 'upload_headers["Content-Length"] = str(body.content_length)' in send

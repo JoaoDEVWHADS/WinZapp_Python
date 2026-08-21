@@ -2310,6 +2310,14 @@ export async function unblockHistorySync(req: Request, res: Response) {
       out.onDemandPending = rows.filter(
         (r: any) => r.syncType === ON_DEMAND
       ).length;
+      // A stable identity for the pending queue. The captured failure reported
+      // restarted=true for many minutes while the exact same RECENT rows stayed
+      // parked at notification_stored, so the count alone is not enough to tell
+      // a slow queue from a frozen one.
+      out.queueFingerprint = rows
+        .map((r: any) => `${r.syncType}:${r.chunkOrder}:${String(r.msgKey)}`)
+        .sort()
+        .join('|');
 
       if (out.recentCompleted === true) {
         out.skipped =
@@ -2348,6 +2356,74 @@ export async function unblockHistorySync(req: Request, res: Response) {
       }
       return out;
     });
+
+    // Some WhatsApp Web builds accept ManualRestart but do not actually move
+    // RECENT chunks. Detect an unchanged queue across health checks and reload
+    // the page to recreate WAWebBackendWorker + re-enter the normal progressive
+    // history bootstrap. This is intentionally based on *no movement*, not just
+    // on the queue being non-empty.
+    const clientAny: any = req.client as any;
+    const now = Date.now();
+    const blockedOnRecent =
+      !result?.error &&
+      result?.recentCompleted !== true &&
+      Number(result?.recentWaiting || 0) > 0 &&
+      Number(result?.onDemandPending || 0) === 0;
+
+    if (blockedOnRecent) {
+      const fingerprint = String(result?.queueFingerprint || '');
+      const previous = clientAny.__winzappHistoryRecovery || {};
+      if (fingerprint && previous.fingerprint === fingerprint) {
+        const staleForMs = Math.max(0, now - Number(previous.since || now));
+        const lastReload = Number(previous.lastReload || 0);
+        result.staleForMs = staleForMs;
+        if (staleForMs >= 45_000 && now - lastReload >= 120_000) {
+          try {
+            req.logger.warn(
+              `[unblockHistorySync] RECENT queue unchanged for ${staleForMs}ms; ` +
+              'reloading WhatsApp Web to recreate the history backend worker.'
+            );
+            await req.client.page.reload({
+              waitUntil: 'domcontentloaded',
+              timeout: 60_000,
+            });
+            result.pageReloaded = true;
+            result.restarted = true;
+            clientAny.__winzappHistoryRecovery = {
+              fingerprint: '',
+              since: Date.now(),
+              lastReload: Date.now(),
+            };
+          } catch (reloadError: any) {
+            result.reloadError = reloadError?.message || String(reloadError);
+            clientAny.__winzappHistoryRecovery = {
+              fingerprint,
+              since: Number(previous.since || now),
+              lastReload: now,
+            };
+          }
+        } else {
+          clientAny.__winzappHistoryRecovery = {
+            fingerprint,
+            since: Number(previous.since || now),
+            lastReload,
+          };
+        }
+      } else {
+        clientAny.__winzappHistoryRecovery = {
+          fingerprint,
+          since: now,
+          lastReload: Number(previous.lastReload || 0),
+        };
+      }
+    } else {
+      const previous = clientAny.__winzappHistoryRecovery || {};
+      clientAny.__winzappHistoryRecovery = {
+        fingerprint: '',
+        since: now,
+        lastReload: Number(previous.lastReload || 0),
+      };
+    }
 
     req.logger.info(`[unblockHistorySync] ${JSON.stringify(result)}`);
     res.status(result?.error ? 500 : 200).json({

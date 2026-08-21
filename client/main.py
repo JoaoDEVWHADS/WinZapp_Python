@@ -24,7 +24,6 @@ if sys.platform == 'win32':
 
 import shutil
 import socket as _socket
-import io
 
 import subprocess
 import threading
@@ -52,6 +51,7 @@ from core.database_bridge import DatabaseBridge
 from core import token_vault
 from app_paths import resource_path, data_path, accounts_root
 from core.message_queue import MessageQueue, PendingMessage
+from core.multipart_stream import StreamingMultipartBody
 import wx
 import wx.adv
 if sys.platform == "win32":
@@ -74,21 +74,6 @@ _orig_get = requests.get
 _orig_post = requests.post
 
 
-class _UploadProgressFile(io.BufferedReader):
-    """File wrapper that reports multipart upload progress as it is read."""
-
-    def __init__(self, raw, size: int, callback):
-        super().__init__(raw)
-        self._size = max(size, 1)
-        self._callback = callback
-        self._uploaded = 0
-
-    def read(self, size=-1):
-        chunk = super().read(size)
-        if chunk:
-            self._uploaded += len(chunk)
-            self._callback(min(self._uploaded / self._size, 1.0))
-        return chunk
 
 def _patched_get(*args, **kwargs):
     return _http_session.get(*args, **kwargs)
@@ -907,6 +892,12 @@ class MainWindow(wx.Frame):
         # expresses: _sync_completed goes back to False on an incomplete sync
         # and _initial_sync_running is cleared as soon as the thread exits.
         self._sync_ever_started = False
+        # WebSocket messages can arrive in the tiny window between the socket
+        # becoming live and the first sync thread actually starting.  They used
+        # to be dropped on the assumption that the initial history sync would
+        # re-deliver them.  That assumption is exactly what breaks when history
+        # sync is incomplete/stalled, so keep a small bounded replay buffer.
+        self._early_live_messages = []
         # High-water mark of what list-chats has answered with this session,
         # across sync rounds. Session-scoped on purpose — see the evidence
         # comment in _run_sync()'s retry loop: it is the one number that
@@ -4127,11 +4118,19 @@ class MainWindow(wx.Frame):
         notification if appropriate.
         """
         # See _live_events_ready() for why this must be checked before
-        # touching self.chats/self.db at all. Safe to drop unconditionally:
-        # the sync that is either about to start or already running fetches
-        # the complete current chat/message state regardless, so nothing
-        # arriving this early is ever actually lost.
+        # touching self.chats/self.db at all. Do NOT drop these events: when
+        # history sync is slow or incomplete, there may be no later REST page
+        # that re-delivers them. Buffer them until start_sync() latches the
+        # live path on; normal message-id dedup makes overlap with the sync
+        # harmless.
         if not self._live_events_ready():
+            pending = getattr(self, "_early_live_messages", None)
+            if pending is None:
+                pending = self._early_live_messages = []
+            pending.append(msg)
+            # Bound memory if a broken session never gets as far as start_sync.
+            if len(pending) > 500:
+                del pending[:-500]
             return
         key        = msg.get("key", {})
         from_me    = key.get("fromMe", False)
@@ -7666,24 +7665,35 @@ class MainWindow(wx.Frame):
         # to its beginning, so an in-memory-only set would make every relaunch
         # re-walk an account that is already complete — hundreds of pointless
         # round-trips through the one Puppeteer page, for ever.
-        self._exhausted_chats = set(self.db.get_metadata_json("exhausted_chats", []))
-        # …and the timestamps of the older-history requests that justify those
-        # entries. Persisted for the reason _OLDER_REQUEST_GRACE explains: a
-        # durable "this chat is finished" may only be written once the phone has
-        # had longer than its reply window to answer, and nothing in a single
-        # session can establish that. Tolerates the legacy list form (the set
-        # this used to be) by treating those entries as asked long ago, which is
-        # true — they were written by an earlier run.
-        _asked = self.db.get_metadata_json("older_history_requested", {})
-        if isinstance(_asked, dict):
-            self._older_requested_chats = {
-                jid: float(ts) for jid, ts in _asked.items()
-                if isinstance(ts, (int, float))
-            }
-        elif isinstance(_asked, list):
-            self._older_requested_chats = {jid: 0.0 for jid in _asked}
-        else:
+        # Semantics v2: an empty local page or a refused on-demand request is
+        # no longer allowed to poison the history cache. Older builds could
+        # persist exactly those false conclusions, so clear them once on upgrade
+        # instead of carrying a known-bad "exhausted" decision forever. The
+        # cost is one extra deep-history walk after upgrading; the benefit is
+        # recovering chats that otherwise can never scroll back again.
+        _history_exhaustion_v2 = self.db.get_metadata("history_exhaustion_semantics_v2")
+        if _history_exhaustion_v2 != "1":
+            self._exhausted_chats = set()
             self._older_requested_chats = {}
+            try:
+                self.db.set_metadata_json("exhausted_chats", [])
+                self.db.set_metadata_json("older_history_requested", {})
+                self.db.set_metadata("history_exhaustion_semantics_v2", "1")
+            except Exception as exc:
+                logging.warning("[history] Could not migrate exhaustion cache: %s", exc)
+        else:
+            self._exhausted_chats = set(
+                self.db.get_metadata_json("exhausted_chats", []))
+            # Timestamps are persisted only after /request-older-messages says
+            # the phone request actually went out.
+            _asked = self.db.get_metadata_json("older_history_requested", {})
+            if isinstance(_asked, dict):
+                self._older_requested_chats = {
+                    jid: float(ts) for jid, ts in _asked.items()
+                    if isinstance(ts, (int, float))
+                }
+            else:
+                self._older_requested_chats = {}
 
         # 7. my_jid / my_lid — previously only ever set at runtime by an
         # online host-device/self-LID lookup (check_wa_connection_http(),
@@ -8596,6 +8606,14 @@ class MainWindow(wx.Frame):
         # coming to re-fetch anything, so live events are the only source of
         # new data there is — dropping them would be strictly worse.
         self._sync_ever_started = True
+        # Replay anything the WebSocket delivered before this first sync began.
+        # Schedule it on the UI thread just like ordinary socket delivery.
+        # Clear first so a re-entrant/new event cannot be replayed twice.
+        early_live = list(getattr(self, "_early_live_messages", []))
+        if early_live:
+            self._early_live_messages.clear()
+            for early_msg in early_live:
+                wx.CallAfter(self.on_new_message, early_msg)
         self._last_sync_attempt_ts = time.time()
         try:
             self._run_sync()
@@ -13300,6 +13318,11 @@ class MainWindow(wx.Frame):
             payload = body.get("response") if isinstance(body, dict) else None
             if not isinstance(payload, dict):
                 return None
+            if payload.get("pageReloaded"):
+                logging.warning(
+                    "[history-sync] RECENT history queue stayed frozen; "
+                    "reloaded WhatsApp Web to recreate the backend worker."
+                )
             removed = payload.get("removed") or []
             if removed:
                 logging.warning(
@@ -13328,22 +13351,21 @@ class MainWindow(wx.Frame):
         minutes later, never in this response, so a True here means "the
         request went out", not "there are new messages now".
 
-        The 60 s timeout is not generosity — a timeout here returns False, and
-        the caller in fetch_older_messages() reads False as "the request never
-        went out" and drops the chat into _exhausted_chats, which stops it from
-        ever being re-queried. Timing out early therefore writes off exactly the
-        chats that still have history coming.
-
-        That used to be bounded by the session, because _exhausted_chats died
-        with the process. It no longer is: the set is persisted, so the write-off
-        outlives the run and takes the user's own scroll-up with it. What keeps
-        the two apart now is _OLDER_REQUEST_GRACE — the write-off is only made
-        durable once this request has had far longer than its reply window to be
-        answered. See that constant.
+        False only means the request did not go out. In particular, the server
+        intentionally refuses it while RECENT history is incomplete to avoid an
+        ON_DEMAND/RECENT queue deadlock. fetch_older_messages() keeps that case
+        re-queryable; only a confirmed request that later outlives
+        _OLDER_REQUEST_GRACE can support an exhaustion decision.
         """
         if not getattr(self, "_wa_connected", False):
             return False
         jid = self._normalize_jid(remote_jid)
+        # Per-chat because deep backfill can ask for several conversations at
+        # once. A refusal while RECENT history is still landing is temporary
+        # and must never become proof that this chat has no older history.
+        if not hasattr(self, "_older_request_temporarily_blocked"):
+            self._older_request_temporarily_blocked = set()
+        self._older_request_temporarily_blocked.discard(jid)
         # Same @lid-preferred addressing sync_chat_messages() uses, so a chat
         # the store only knows under its @lid still resolves.
         lid = getattr(self, "_phone_to_lid", {}).get(jid, "")
@@ -13376,10 +13398,18 @@ class MainWindow(wx.Frame):
                     "%s (primary_has_more=%s).", jid, payload.get("primaryHasMore"),
                 )
                 return True
+            error_text = ""
+            if isinstance(payload, dict):
+                error_text = str(payload.get("error") or "")
+                if payload.get("recentCompleted") is False:
+                    self._older_request_temporarily_blocked.add(jid)
+            if "recent history sync is not complete" in error_text.lower():
+                self._older_request_temporarily_blocked.add(jid)
             logging.info(
                 "[history-sync] Older-message request for %s did not go out "
-                "(status=%s, payload=%s).", jid, response.status_code,
+                "(status=%s, payload=%s, temporary=%s).", jid, response.status_code,
                 payload if payload else response.text[:200],
+                jid in self._older_request_temporarily_blocked,
             )
             return False
         except Exception as exc:
@@ -16381,6 +16411,15 @@ class MainWindow(wx.Frame):
                 count_before = None
             page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
             if not page:
+                # Waiting for the phone must not require _exhausted_chats just
+                # to drain the deep-backfill queue. Pause this anchor for two
+                # minutes instead; user scroll-up does not consult this cooldown
+                # and remains free to retry as soon as history lands.
+                if remote_jid not in getattr(self, "_exhausted_chats", set()):
+                    stalled[remote_jid] = (
+                        anchor_identity,
+                        time.monotonic() + self._DEEP_STALL_RETRY_SECONDS,
+                    )
                 break
             next_anchor = self._oldest_stored_message(remote_jid)
             next_identity = self._anchor_identity(next_anchor)
@@ -16408,9 +16447,10 @@ class MainWindow(wx.Frame):
                 if not isinstance(older_requested, dict):
                     older_requested = self._older_requested_chats = {}
                 if remote_jid not in older_requested:
-                    older_requested[remote_jid] = time.time()
-                    self._persist_older_requested()
                     requested = bool(self.request_older_messages(remote_jid))
+                    if requested:
+                        older_requested[remote_jid] = time.time()
+                        self._persist_older_requested()
                 logging.warning(
                     "[deep-backfill] Page for %s did not advance the oldest "
                     "database anchor (%s; %d new row(s)). Pausing this anchor "
@@ -16538,10 +16578,23 @@ class MainWindow(wx.Frame):
         """
         remote_jid = self._normalize_jid(remote_jid)
 
-        # Check if history is already marked as exhausted in-memory
+        # Deep backfill may trust a durable exhaustion result, but a user
+        # explicitly scrolling upward must always be able to challenge that
+        # cache. This also gives a late (> grace window) phone reply a recovery
+        # path instead of making the early return permanent.
         if remote_jid in getattr(self, "_exhausted_chats", set()):
-            logging.info(f"[fetch_older_messages] History already marked as exhausted in-memory for {remote_jid}, skipping API query.")
-            return []
+            if store_only:
+                logging.info(
+                    "[fetch_older_messages] History marked exhausted for %s; "
+                    "skipping background deep-backfill query.", remote_jid)
+                return []
+            logging.info(
+                "[fetch_older_messages] User requested older history for %s; "
+                "clearing cached exhaustion and retrying the API.", remote_jid)
+            self._exhausted_chats.discard(remote_jid)
+            self._older_requested_chats.pop(remote_jid, None)
+            self._persist_exhausted_chats()
+            self._persist_older_requested()
 
         # Resolved phone/@c.us form of the chat JID — used both as the URL
         # parameter (WPPConnect has a special evaluate-bypass in
@@ -16622,54 +16675,67 @@ class MainWindow(wx.Frame):
                 # it must not do is leave the chat in _exhausted_chats, or the
                 # early-return at the top of this method would refuse to look
                 # again even after the messages have landed.
+                confirmed_end_of_history = False
                 if not wpp_messages:
                     if not hasattr(self, "_exhausted_chats"):
                         self._exhausted_chats = set()
                     if not hasattr(self, "_older_requested_chats"):
                         self._older_requested_chats = {}
                     asked_at = self._older_requested_chats.get(remote_jid)
-                    asked_now = asked_at is None
                     requested = False
-                    if asked_now:
-                        asked_at = time.time()
-                        self._older_requested_chats[remote_jid] = asked_at
-                        self._persist_older_requested()
-                        requested = self.request_older_messages(remote_jid)
-                    waited = max(0.0, time.time() - asked_at)
+                    if asked_at is None:
+                        requested = bool(self.request_older_messages(remote_jid))
+                        if requested:
+                            # Evidence is recorded only after the endpoint says
+                            # the request actually went out. The old order wrote
+                            # this timestamp first, so a RECENT-sync refusal was
+                            # later mistaken for a successful request.
+                            asked_at = time.time()
+                            self._older_requested_chats[remote_jid] = asked_at
+                            self._persist_older_requested()
+
                     if requested:
                         logging.info(
                             "[fetch_older_messages] No local history left for %s — "
                             "asked the phone for older messages; leaving the chat "
                             "re-queryable so the reply can be picked up.", remote_jid,
                         )
-                    else:
-                        # In-memory always, so the chat leaves the deep-backfill
-                        # queue at the same rate it always did. Persisted only
-                        # once the phone has genuinely had its chance: the
-                        # request above is answered by a history-sync chunk
-                        # minutes later, and _exhausted_chats is now durable, so
-                        # a write-off made 30 seconds after the ask (the backfill
-                        # pass cadence) used to become permanent — the chat was
-                        # early-returned at the top of this method for ever,
-                        # which also silently killed the user scrolling up in it.
-                        # `waited` clears the bar on the next session rather than
-                        # inside this one, since _older_requested_chats is
-                        # persisted too: one extra walk of an already-complete
-                        # account, in exchange for never writing a chat off on
-                        # evidence younger than the reply it is waiting for.
-                        self._exhausted_chats.add(remote_jid)
-                        durable = waited >= self._OLDER_REQUEST_GRACE
-                        if durable:
-                            self._persist_exhausted_chats()
+                    elif asked_at is None:
+                        temporary = remote_jid in getattr(
+                            self, "_older_request_temporarily_blocked", set())
+                        # Failure/refusal is not end-of-history evidence. In the
+                        # captured bug recentCompleted=false landed here and the
+                        # JID was put in _exhausted_chats, so the early return at
+                        # the top killed the user's scroll-up for the whole
+                        # session. Keep it live and retry later instead.
                         logging.info(
-                            "[fetch_older_messages] Marked history as exhausted for %s "
-                            "(%s). The phone was asked %.0fs ago; older-message request "
-                            "%s.",
+                            "[fetch_older_messages] No local history for %s, but "
+                            "the phone request did not go out%s; keeping the chat "
+                            "re-queryable instead of marking it exhausted.",
                             remote_jid,
-                            "persisted" if durable else "this session only",
-                            waited,
-                            "just attempted and failed" if asked_now else "sent earlier",
+                            " because recent history is still syncing" if temporary else "",
                         )
+                    else:
+                        waited = max(0.0, time.time() - asked_at)
+                        if waited >= self._OLDER_REQUEST_GRACE:
+                            # Only a successfully-sent request that has had the
+                            # full reply window with no new page can become a
+                            # durable end-of-history conclusion.
+                            self._exhausted_chats.add(remote_jid)
+                            confirmed_end_of_history = True
+                            self._persist_exhausted_chats()
+                            logging.info(
+                                "[fetch_older_messages] Marked history as exhausted "
+                                "for %s after waiting %.0fs for a confirmed phone "
+                                "request.", remote_jid, waited,
+                            )
+                        else:
+                            logging.info(
+                                "[fetch_older_messages] Still waiting for older "
+                                "history for %s (%.0fs/%.0fs); keeping scroll-up "
+                                "re-queryable.", remote_jid, waited,
+                                self._OLDER_REQUEST_GRACE,
+                            )
 
                 fetched_messages = []
                 for wm in wpp_messages:
@@ -16682,6 +16748,15 @@ class MainWindow(wx.Frame):
                             pass
                 
                 if fetched_messages:
+                    # Any newly retrievable older page fulfils the previous
+                    # phone request. Forget its timestamp so, when this new
+                    # window is eventually exhausted too, another on-demand
+                    # request may be issued instead of treating the old request
+                    # as proof that the whole conversation ended.
+                    if remote_jid in getattr(self, "_older_requested_chats", {}):
+                        self._older_requested_chats.pop(remote_jid, None)
+                        self._persist_older_requested()
+                    getattr(self, "_older_request_temporarily_blocked", set()).discard(remote_jid)
                     if store_only:
                         # Straight to disk, nothing kept resident. Deliberately
                         # not routed through the branch below even for the
@@ -16716,7 +16791,13 @@ class MainWindow(wx.Frame):
                                 self.save_data(self.chats, self.contacts)
                     return fetched_messages
                 else:
-                    return []
+                    # `None` means "temporarily no page" to the UI.  Returning
+                    # [] here used to make _load_older_messages_from_server()
+                    # set _reached_server_start permanently even when the phone
+                    # request had merely been refused while RECENT history was
+                    # still syncing (the exact state captured in logs.zip).
+                    # [] is reserved for a confirmed end after the full grace.
+                    return [] if confirmed_end_of_history else None
             else:
                 err_msg = response.text[:300]
                 try:
@@ -16803,52 +16884,52 @@ class MainWindow(wx.Frame):
         if unread == 0 and not force:
             return
 
-        # Prefer @lid JID for WPPConnect if mapped
-        target_phone = remote_jid
-        if not target_phone.endswith("@lid"):
-            alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(remote_jid), "")
-            if alt_lid:
-                target_phone = alt_lid
+        # WPPConnect/WA Web can know the same 1:1 chat by LID and by phone JID.
+        # A /send-seen call may return HTTP 2xx while markIsRead is a no-op for
+        # the alias that is not currently backing the ChatModel.  Read receipts
+        # are idempotent, so send to every known identity rather than trying the
+        # alternate only after an HTTP error.
+        normalized_remote = self._normalize_jid(remote_jid)
+        candidates = []
 
-        if target_phone.endswith("@s.whatsapp.net"):
-            target_phone = target_phone.rsplit("@", 1)[0] + "@c.us"
-        
-        is_lid_target = target_phone.endswith("@lid")
+        def _add_seen_candidate(jid):
+            if not jid:
+                return
+            jid = self._normalize_jid(jid)
+            if jid.endswith("@s.whatsapp.net"):
+                jid = jid.rsplit("@", 1)[0] + "@c.us"
+            if jid not in candidates:
+                candidates.append(jid)
 
-        def _send_seen(phone: str, is_lid: bool) -> "requests.Response | None":
+        _add_seen_candidate(normalized_remote)
+        if normalized_remote.endswith("@lid"):
+            _add_seen_candidate(getattr(self, "_lid_to_phone", {}).get(normalized_remote, ""))
+        elif not normalized_remote.endswith("@g.us"):
+            # Mapping keys are normalized to @s.whatsapp.net.  If the caller
+            # happened to supply @c.us, normalize_jid above converts it first.
+            _add_seen_candidate(getattr(self, "_phone_to_lid", {}).get(normalized_remote, ""))
+
+        def _send_seen(phone: str) -> "requests.Response | None":
             url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/send-seen"
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             payload = {"phone": phone, "isGroup": phone.endswith("@g.us")}
-            if is_lid:
+            if phone.endswith("@lid"):
                 payload["isLid"] = True
             return requests.post(url, json=payload, headers=headers, timeout=10)
 
         def _do_api():
-            try:
-                resp = _send_seen(target_phone, is_lid_target)
-                if not resp.ok:
-                    logging.warning("[mark_as_read] API response %s for %s: %s",
-                                     resp.status_code, target_phone, resp.text[:200])
-                    # If it failed, try the alternate format (LID <-> phone) as fallback
-                    fallback_phone = remote_jid
-                    if fallback_phone.endswith("@lid"):
-                        phone_jid = getattr(self, "_lid_to_phone", {}).get(fallback_phone, "")
-                        if phone_jid: fallback_phone = phone_jid
-                    else:
-                        alt_lid = getattr(self, "_phone_to_lid", {}).get(self._normalize_jid(fallback_phone), "")
-                        if alt_lid: fallback_phone = alt_lid
+            for phone in candidates:
+                try:
+                    resp = _send_seen(phone)
+                    if not resp.ok:
+                        logging.warning(
+                            "[mark_as_read] API response %s for %s: %s",
+                            resp.status_code, phone, resp.text[:200],
+                        )
+                except Exception as exc:
+                    # Keep trying the other alias even if one identity errors.
+                    logging.warning("[mark_as_read] Request failed for %s: %s", phone, exc)
 
-                    if fallback_phone.endswith("@s.whatsapp.net"):
-                        fallback_phone = fallback_phone.rsplit("@", 1)[0] + "@c.us"
-
-                    if fallback_phone != target_phone:
-                        logging.info("[mark_as_read] Retrying /send-seen using fallback JID: %s", fallback_phone)
-                        resp2 = _send_seen(fallback_phone, fallback_phone.endswith("@lid"))
-                        if not resp2.ok:
-                            logging.warning("[mark_as_read] Fallback /send-seen also failed %s for %s: %s",
-                                             resp2.status_code, fallback_phone, resp2.text[:200])
-            except Exception as exc:
-                logging.warning("[mark_as_read] Request failed for %s: %s", target_phone, exc)
         threading.Thread(target=_do_api, daemon=True).start()
 
     def mark_conversation_as_unread(self, remote_jid: str):
@@ -18445,18 +18526,28 @@ class MainWindow(wx.Frame):
                 post_data["isGroup"] = "true"
             if dest.endswith("@lid"):
                 post_data["isLid"] = "true"
-            with open(upload_path, "rb") as raw_file:
-                fh = (
-                    _UploadProgressFile(raw_file, file_size, progress_callback)
-                    if progress_callback else raw_file
-                )
-                return requests.post(
-                    url,
-                    headers=headers,
-                    data=post_data,
-                    files={"file": (filename, fh, mime)},
-                    timeout=timeout,
-                )
+            # requests' built-in ``files=`` multipart encoder eagerly reads
+            # the complete file while preparing the request. That made the UI
+            # callback jump to 100% before the HTTP upload had even started, so
+            # the document progress bar was effectively never visible. Stream
+            # the multipart body itself so progress follows chunks consumed by
+            # urllib3 on the real request.
+            body = StreamingMultipartBody(
+                file_path=upload_path,
+                filename=filename,
+                mime_type=mime,
+                fields=post_data,
+                progress_callback=progress_callback,
+            )
+            upload_headers = dict(headers)
+            upload_headers["Content-Type"] = body.content_type
+            upload_headers["Content-Length"] = str(body.content_length)
+            return requests.post(
+                url,
+                headers=upload_headers,
+                data=body,
+                timeout=timeout,
+            )
 
         try:
             r = _post(phone_val)

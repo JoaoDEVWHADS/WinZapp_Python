@@ -390,14 +390,15 @@ class _FetchStub:
 
 
 def _run_empty_result_branch(stub, remote_jid):
-    """Mirror of the no-messages branch in fetch_older_messages()."""
+    """Mirror the immediate no-messages decision in fetch_older_messages()."""
     already_asked = remote_jid in stub._older_requested_chats
-    requested = False
     if not already_asked:
-        stub._older_requested_chats.add(remote_jid)
         requested = stub.request_older_messages(remote_jid)
-    if not requested:
-        stub._exhausted_chats.add(remote_jid)
+        # A timestamp/asked marker is evidence only after the request went out.
+        if requested:
+            stub._older_requested_chats.add(remote_jid)
+    # Neither a failed/refused request nor a second empty page inside the reply
+    # window is enough to mark the chat exhausted anymore.
 
 
 class TestExhaustionBookkeeping:
@@ -414,19 +415,20 @@ class TestExhaustionBookkeeping:
         assert stub.requested_for == ["120363000000000000@g.us"]
         assert "120363000000000000@g.us" not in stub._exhausted_chats
 
-    def test_failed_request_marks_exhausted(self):
+    def test_failed_request_keeps_the_chat_requeryable(self):
         stub = _FetchStub(request_succeeds=False)
-        _run_empty_result_branch(stub, "120363000000000000@g.us")
-        assert "120363000000000000@g.us" in stub._exhausted_chats
+        jid = "120363000000000000@g.us"
+        _run_empty_result_branch(stub, jid)
+        assert jid not in stub._exhausted_chats
+        assert jid not in stub._older_requested_chats
 
-    def test_the_phone_is_asked_only_once_per_chat(self):
-        """Second empty result gives up instead of re-asking the phone."""
+    def test_confirmed_request_is_not_repeated_inside_reply_window(self):
         stub = _FetchStub(request_succeeds=True)
         jid = "120363000000000000@g.us"
         _run_empty_result_branch(stub, jid)
         _run_empty_result_branch(stub, jid)
         assert stub.requested_for == [jid]
-        assert jid in stub._exhausted_chats
+        assert jid not in stub._exhausted_chats
 
 
 class TestBrowserFlagsStayRemoved:
@@ -504,6 +506,18 @@ class TestRoutesArePatched:
         assert guard_at < send_at, "the guard must run before the request goes out"
 
 
+    def test_stuck_recent_queue_has_a_real_recovery_path(self):
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        controller = (
+            root / "client" / "api_patches" / "src" / "controller" / "deviceController.ts"
+        ).read_text(encoding="utf-8")
+        assert "queueFingerprint" in controller
+        assert "staleForMs >= 45_000" in controller
+        assert "req.client.page.reload" in controller
+
+
 class TestDocumentOnlyInterception:
     """Puppeteer's blanket request interception must not come back.
 
@@ -540,6 +554,11 @@ class TestDocumentOnlyInterception:
         start = self._start_js()
         assert "version = undefined;" in start
         assert "browserController.initWhatsapp = async function" in start
+
+    def test_pin_failure_also_consumes_version_instead_of_using_blanket_fallback(self):
+        start = self._start_js()
+        assert "falling back to WPPConnect's blanket one" not in start
+        assert "History sync is preserved" in start
 
     def test_every_paused_request_is_answered(self):
         """A paused request nobody answers is the bug itself, not a fix for it."""
