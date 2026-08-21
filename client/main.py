@@ -18353,7 +18353,7 @@ class MainWindow(wx.Frame):
             if prepared is None:
                 return {
                     "ok": False,
-                    "error": "Não foi possível converter o áudio OGG para Opus.",
+                    "error": self.i18n.t("media_audio_convert_failed"),
                     "retry": False,
                 }
             upload_path, mime = prepared
@@ -18371,7 +18371,7 @@ class MainWindow(wx.Frame):
             if prepared is None:
                 return {
                     "ok": False,
-                    "error": "Não foi possível converter o vídeo para um formato aceito pelo WhatsApp.",
+                    "error": self.i18n.t("media_video_convert_failed"),
                     "retry": False,
                 }
             upload_path, mime = prepared
@@ -19950,6 +19950,30 @@ class MainWindow(wx.Frame):
             pass
 
 
+def _startup_t(key: str, **values) -> str:
+    """Translate fatal-startup UI before MainWindow/I18n necessarily exists."""
+    try:
+        import locale
+        from core.i18n import LANGUAGE_NAMES, _load_translations
+
+        current = (locale.getlocale()[0] or "").replace("_", "-")
+        supported = list(LANGUAGE_NAMES)
+        if current not in supported:
+            prefix = current.split("-", 1)[0].lower() if current else ""
+            current = next(
+                (code for code in supported if code.split("-", 1)[0].lower() == prefix),
+                "en-US",
+            )
+        translations = _load_translations(current)
+        text = translations.get(key)
+        if not text and current != "en-US":
+            text = _load_translations("en-US").get(key)
+        text = text or key
+        return text.format(**values) if values else text
+    except Exception:
+        return key
+
+
 def _write_crash_log(tb: str) -> str:
     """Write a traceback to crash.log next to the exe and return the path."""
     from app_paths import _outer_exe_dir
@@ -20095,14 +20119,14 @@ if __name__ == "__main__":
         _mode = _startup["mode"]
         if _mode == "error":
             ctypes.windll.user32.MessageBoxW(
-                0, f"WinZapp: {_startup.get('reason', 'nieprawidłowe konto')}",
+                0, _startup_t("startup_invalid_account"),
                 "WinZapp", 0x10)
             sys.exit(2)
         elif _mode == "manager":
             # Global manager mode: no account/data_path, no Node (plan sekcja F).
             # TODO(Zad 4.5/4.6): show the account manager. For now, inform+exit.
             ctypes.windll.user32.MessageBoxW(
-                0, "WinZapp: brak kont do uruchomienia (menedżer kont w budowie).",
+                0, _startup_t("startup_account_manager_unavailable"),
                 "WinZapp", 0x40)
             sys.exit(0)
         elif _mode == "first_run":
@@ -20188,9 +20212,12 @@ if __name__ == "__main__":
         try:
             ctypes.windll.user32.MessageBoxW(
                 0,
-                f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
-                f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
-                "WinZapp — Erro de inicialização",
+                _startup_t(
+                    "startup_critical_message",
+                    path=crash_path,
+                    details=tb[:800],
+                ),
+                _startup_t("startup_critical_title"),
                 0x10,  # MB_ICONERROR
             )
         except Exception:
