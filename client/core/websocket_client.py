@@ -975,7 +975,19 @@ class WebSocketClient:
             if not chat_jid:
                 return
 
-            is_group = bool(info.get("isGroup", False))
+            # WPPConnect's own `isGroup` flag has been observed false for a
+            # real group event (id ending @g.us) right after a fresh pairing
+            # — reported live as EVERY group's typing indicator showing
+            # "Participante sem nome" for everyone, even after re-pairing
+            # from scratch: with is_group wrongly False, this fell into the
+            # single-chat branch below and keyed presences by the group's
+            # own jid instead of by participant, which is exactly the shape
+            # _resolve_jid_name() (main.py) already has a guard for — that
+            # guard just means "no participant identified", not "not a
+            # group". The @g.us suffix is authoritative and doesn't depend
+            # on wa-js's own state being warmed up yet, so it's checked
+            # first regardless of what isGroup says.
+            is_group = chat_jid.endswith("@g.us") or bool(info.get("isGroup", False))
             
             # We want to format this into the presences dict that main.py expects:
             # presences: {participant_jid: {"lastKnownPresence": state, "lastSeen": timestamp}}
