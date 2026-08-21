@@ -5749,15 +5749,13 @@ class MainWindow(wx.Frame):
         return port
 
     def _is_wpp_running(self):
-        """Return True if the WPPConnect is already listening on the configured server/port."""
+        """Return True if WPPConnect is actively responding on the configured server/port."""
         import urllib.parse
         try:
-            parsed = urllib.parse.urlparse(self.wpp_server)
-            host = parsed.hostname or "127.0.0.1"
-            port = parsed.port or self.wpp_port
-            with _socket.create_connection((host, port), timeout=1):
-                return True
-        except OSError:
+            url = f"{self.wpp_server}:{self.wpp_port}/"
+            res = requests.get(url, timeout=1)
+            return res.status_code < 500
+        except Exception:
             return False
 
     def _start_wpp_background(self):
