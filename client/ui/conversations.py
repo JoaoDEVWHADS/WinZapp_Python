@@ -8093,7 +8093,6 @@ class ConversationsPanel(wx.Panel):
         if not msgs_to_forward:
             self._reject_system_event_action(msg)
             return
-        import ctypes
         mw   = self.main_window
         i18n = mw.i18n
         dlg_label = (
@@ -8124,7 +8123,7 @@ class ConversationsPanel(wx.Panel):
         search_field.SetHint(i18n.t("search_conversations"))
         vsz.Add(search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        lst = wx.ListBox(p, choices=all_names, style=wx.LB_EXTENDED)
+        lst = wx.ListBox(p, choices=all_names, style=wx.LB_SINGLE)
         vsz.Add(lst, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         vsz.Add(
@@ -8143,45 +8142,39 @@ class ConversationsPanel(wx.Panel):
             chk_keep_caption.SetValue(True)
             vsz.Add(chk_keep_caption, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        # ── Selection keyboard handling — same system as the messages and
-        # conversations lists (Ctrl+Space toggle, Ctrl+Shift+Space select/
-        # clear all, Shift+Down/Home/End range-select), including the sound
-        # event, the "selected"/"unselected"/"all_selected"/"all_unselected"
-        # announcements, and the append/prepend "selected" marker in the row
-        # text itself (selected_announcement_position setting) — see
-        # _select_message_at()/_on_messages_list_key_down() for the pattern
-        # this mirrors. A plain wx.ListBox has no separate "keyboard focus
-        # row" the way wx.ListCtrl does, so the caret (the row Up/Down would
-        # land the native selection on) is driven directly via the raw
-        # Win32 listbox messages instead — LB_SETCARETINDEX is the same
-        # message the control's own Ctrl+Arrow handling already uses
-        # internally, so it's known to notify screen readers correctly.
-        # Native wx.LB_EXTENDED Up/Down would otherwise both move focus AND
-        # collapse the selection to just the newly-focused row, which is
-        # why plain Up/Down is remapped to move the caret only.
-        _LB_SETSEL        = 0x0185
-        _LB_GETSEL        = 0x0187
-        _LB_SETCARETINDEX = 0x019E
-        _LB_GETCARETINDEX = 0x019F
+        # ── Selection state ──────────────────────────────────────────────────
+        # lst is a single-selection wx.ListBox: native selection is only ever
+        # "which row has keyboard focus", exactly like messages_list/
+        # conversations_list's GetFocusedItem() elsewhere in this file. The
+        # actual multi-select the mass forward acts on lives entirely in this
+        # plain set, keyed by jid — mirroring self.selected_messages/
+        # self.selected_chats, including the sound event, the "selected"/
+        # "unselected"/"all_selected"/"all_unselected" announcements, and the
+        # append/prepend "selected" text marker (selected_announcement_position
+        # setting) — see _select_message_at()/_on_messages_list_key_down() for
+        # the pattern this mirrors.
+        #
+        # An earlier version used wx.LB_EXTENDED instead, with its own native
+        # multi-selection driven by hand through raw Win32 messages (so plain
+        # Up/Down and letter type-ahead — which natively collapse an extended
+        # selection to whatever row they land on — could be remapped to leave
+        # it alone). That meant two independent copies of "what's selected"
+        # that could drift out of sync with each other, reported live as
+        # "comportamentos estranhos". LB_SINGLE removes the native multi-select
+        # entirely, so arrows and type-ahead are simply left at their default
+        # native behavior (event.Skip()) — there is nothing left for them to
+        # collide with, and nothing custom left to keep in sync.
+        selected_jids = set()
 
-        def _lst_send(msg, wparam=0, lparam=0):
-            return ctypes.windll.user32.SendMessageW(lst.GetHandle(), msg, wparam, lparam)
+        def _jid_at(idx):
+            if 0 <= idx < len(_filtered_chats):
+                return _filtered_chats[idx].get("remoteJid", "")
+            return ""
 
-        def _lst_caret():
-            idx = _lst_send(_LB_GETCARETINDEX)
-            return idx if idx >= 0 else -1
-
-        def _lst_set_caret(idx):
-            _lst_send(_LB_SETCARETINDEX, idx, 0)
-
-        def _lst_is_selected(idx):
-            return _lst_send(_LB_GETSEL, idx) > 0
-
-        def _lst_set_selected(idx, select):
-            _lst_send(_LB_SETSEL, 1 if select else 0, idx)
-
-        def _row_text(idx, is_selected):
+        def _row_text(idx):
             name = _filtered_names[idx] if idx < len(_filtered_names) else ""
+            jid = _jid_at(idx)
+            is_selected = bool(jid) and jid in selected_jids
             position = mw.settings.get("user_interface", {}).get(
                 "selected_announcement_position", "end"
             )
@@ -8189,43 +8182,37 @@ class ConversationsPanel(wx.Panel):
 
         def _refresh_row(idx):
             if 0 <= idx < lst.GetCount():
-                lst.SetString(idx, _row_text(idx, _lst_is_selected(idx)))
+                lst.SetString(idx, _row_text(idx))
+
+        def _on_listbox_select(event):
+            # Fires for any NATIVE focus change (arrow keys, letter
+            # type-ahead, mouse click) — never for the SetSelection() calls
+            # this dialog makes itself below, which is exactly the split
+            # that's wanted: landing on a row already in selected_jids gets
+            # the same audible cue selection_sound gives everywhere else,
+            # without this dialog having to reimplement arrow/type-ahead
+            # navigation by hand to get it.
+            jid = _jid_at(lst.GetSelection())
+            if jid and jid in selected_jids:
+                self.selection_sound.play()
+            event.Skip()
+
+        lst.Bind(wx.EVT_LISTBOX, _on_listbox_select)
 
         def _on_list_key_down(event):
             key   = event.GetKeyCode()
             ctrl  = event.ControlDown()
             shift = event.ShiftDown()
             count = lst.GetCount()
-
-            if (key in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_NUMPAD_UP, wx.WXK_NUMPAD_DOWN)
-                    and not ctrl and not shift):
-                if count == 0:
-                    return
-                caret = _lst_caret()
-                if caret < 0:
-                    caret = 0
-                delta = -1 if key in (wx.WXK_UP, wx.WXK_NUMPAD_UP) else 1
-                new_caret = max(0, min(count - 1, caret + delta))
-                _lst_set_caret(new_caret)
-                # LB_SETCARETINDEX moves the caret without touching native
-                # selection state at all (that's the whole point — see this
-                # block's own comment above), so it never fires the
-                # selection-changed accessibility event NVDA would otherwise
-                # announce "selected" from. Without this, arrowing past an
-                # already-selected contact gave no audible cue it was part
-                # of the selection at all — the same selection_sound the
-                # messages/conversations lists play is played here too.
-                if _lst_is_selected(new_caret):
-                    self.selection_sound.play()
-                return  # suppressed — no Skip(), so selection is left alone
+            focus = lst.GetSelection()
 
             if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
-                caret  = _lst_caret()
-                target = (caret + 1) if caret >= 0 else 0
+                target = (focus + 1) if focus >= 0 else 0
                 if target < count:
-                    _lst_set_caret(target)
-                    if not _lst_is_selected(target):
-                        _lst_set_selected(target, True)
+                    lst.SetSelection(target)
+                    jid = _jid_at(target)
+                    if jid and jid not in selected_jids:
+                        selected_jids.add(jid)
                         _refresh_row(target)
                         self.selection_sound.play()
                         mw.output(i18n.t("selected"), interrupt=True)
@@ -8234,16 +8221,16 @@ class ConversationsPanel(wx.Panel):
             if shift and key in (wx.WXK_HOME, wx.WXK_NUMPAD_HOME, wx.WXK_END, wx.WXK_NUMPAD_END):
                 to_end = key in (wx.WXK_END, wx.WXK_NUMPAD_END)
                 if count > 0:
-                    caret0 = _lst_caret()
-                    caret0 = caret0 if caret0 >= 0 else 0
-                    lo, hi = (caret0, count - 1) if to_end else (0, caret0)
+                    focus0 = focus if focus >= 0 else 0
+                    lo, hi = (focus0, count - 1) if to_end else (0, focus0)
                     newly = []
                     for i in range(lo, hi + 1):
-                        if not _lst_is_selected(i):
-                            _lst_set_selected(i, True)
+                        jid = _jid_at(i)
+                        if jid and jid not in selected_jids:
+                            selected_jids.add(jid)
                             newly.append(i)
                     target = count - 1 if to_end else 0
-                    _lst_set_caret(target)
+                    lst.SetSelection(target)
                     for i in newly:
                         _refresh_row(i)
                     if newly:
@@ -8254,49 +8241,38 @@ class ConversationsPanel(wx.Panel):
             if ctrl and shift and key == wx.WXK_SPACE:
                 # Select every contact, or clear the selection if everything
                 # is already selected.
-                all_selected = count > 0 and all(_lst_is_selected(i) for i in range(count))
-                for i in range(count):
-                    _lst_set_selected(i, not all_selected)
+                row_jids = [_jid_at(i) for i in range(count)]
+                real_jids = [j for j in row_jids if j]
+                all_selected = bool(real_jids) and all(j in selected_jids for j in real_jids)
+                for i, jid in enumerate(row_jids):
+                    if not jid:
+                        continue
+                    if all_selected:
+                        selected_jids.discard(jid)
+                    else:
+                        selected_jids.add(jid)
                     _refresh_row(i)
-                if count:
+                if real_jids:
                     if not all_selected:
                         self.selection_sound.play()
                     mw.output(i18n.t("all_unselected" if all_selected else "all_selected"), interrupt=True)
                 return
 
             if ctrl and not shift and key == wx.WXK_SPACE:
-                caret = _lst_caret()
-                if caret >= 0:
-                    now_selected = not _lst_is_selected(caret)
-                    _lst_set_selected(caret, now_selected)
-                    _refresh_row(caret)
+                jid = _jid_at(focus)
+                if jid:
+                    now_selected = jid not in selected_jids
+                    if now_selected:
+                        selected_jids.add(jid)
+                    else:
+                        selected_jids.discard(jid)
+                    _refresh_row(focus)
                     if now_selected:
                         self.selection_sound.play()
                     mw.output(i18n.t("selected" if now_selected else "unselected"), interrupt=True)
                 return
 
-            # Letter/digit type-ahead: jump the caret to the next contact
-            # starting with that character, same as native wx.ListBox
-            # incremental search — but done here by hand, on the same
-            # caret-only path arrows use above, instead of letting the
-            # native handler run via event.Skip(). The native one moves
-            # focus AND collapses the selection to just that row (identical
-            # root cause to the arrow-key case above), which silently
-            # dropped whatever else had been Ctrl+Space-selected the moment
-            # the user typed a letter to jump to one more contact.
-            if not ctrl and 32 < key < 127:
-                char = chr(key).lower()
-                if char.isalnum() and count > 0:
-                    caret = _lst_caret()
-                    start = (caret + 1) if caret >= 0 else 0
-                    for offset in range(count):
-                        idx = (start + offset) % count
-                        if idx < len(_filtered_names) and _filtered_names[idx].lower().startswith(char):
-                            _lst_set_caret(idx)
-                            break
-                return  # suppressed regardless of a match — never fall through to native
-
-            event.Skip()  # Ctrl+Arrow, everything else: native behavior
+            event.Skip()  # Arrows, letter type-ahead, everything else: native behavior
 
         lst.Bind(wx.EVT_KEY_DOWN, _on_list_key_down)
 
@@ -8328,32 +8304,36 @@ class ConversationsPanel(wx.Panel):
                 pairs = list(zip(all_chats, all_names))
             _filtered_chats = [c for c, _ in pairs]
             _filtered_names = [n for _, n in pairs]
-            lst.Set(_filtered_names)
+            # Re-rendered with the "selected" marker for whichever of these
+            # are still in selected_jids — that set is keyed by identity, so
+            # a search that narrows/widens the visible rows doesn't reset it
+            # the way it would if selection lived in the native widget.
+            lst.Set([_row_text(i) for i in range(len(_filtered_names))])
             if _filtered_names:
-                # Focus only — do not pre-select, so confirming right away
-                # without ever pressing Space falls through to the "nothing
-                # selected -> use the focused item" behavior below rather
-                # than silently forwarding to whatever the search happened
-                # to focus first.
-                _lst_set_caret(0)
+                # Focus only — does not itself add to selected_jids, so
+                # confirming right away without ever pressing Ctrl+Space
+                # falls through to the "nothing selected -> use the focused
+                # item" behavior below rather than silently forwarding to
+                # whatever the search happened to focus first.
+                lst.SetSelection(0)
 
         search_field.Bind(wx.EVT_TEXT, _on_search)
         if all_names:
-            _lst_set_caret(0)
+            lst.SetSelection(0)
         ok_btn.SetDefault()
 
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
 
-        sels = list(lst.GetSelections())
-        if not sels:
-            # No explicit multi-selection was made (Space never pressed) —
-            # forward to whichever contact is currently focused, same as
-            # this dialog's original single-target behavior.
-            caret = _lst_caret()
-            if caret >= 0:
-                sels = [caret]
+        if selected_jids:
+            sels = [i for i in range(len(_filtered_chats)) if _jid_at(i) in selected_jids]
+        else:
+            # No explicit multi-selection was made (Ctrl+Space never
+            # pressed) — forward to whichever contact is currently focused,
+            # same as this dialog's original single-target behavior.
+            focus = lst.GetSelection()
+            sels = [focus] if focus >= 0 else []
         dlg.Destroy()
         if not sels:
             return
