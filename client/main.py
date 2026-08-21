@@ -12890,6 +12890,28 @@ class MainWindow(wx.Frame):
                or getattr(self, "_phone_to_lid", {}).get(jid))
         return (jid, alt) if alt and alt != jid else (jid,)
 
+    def _chat_jids_equivalent(self, left: str, right: str) -> bool:
+        """Whether two JIDs identify the same canonical conversation.
+
+        A returning session stores one-to-one chats under their phone JID, but
+        sync_chat_messages() deliberately queries the matching @lid because
+        that is the address WhatsApp Web reliably indexes. The returned message
+        keeps that @lid in key.remoteJid. Comparing the two raw strings made the
+        phantom-chat defense discard every legitimate result before saving it,
+        leaving hundreds of chats in the backfill forever.
+
+        Groups do not have an alternate form, so a group message returned by a
+        participant lookup still fails this comparison and remains filtered.
+        """
+        left = self._normalize_jid(left or "")
+        right = self._normalize_jid(right or "")
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        return bool(set(self._jid_address_forms(left)) &
+                    set(self._jid_address_forms(right)))
+
     def _resolve_backfill_target(self, jid: str):
         """Live (key, chat) for a pending JID, or (None, None) if it is gone.
 
@@ -13737,10 +13759,18 @@ class MainWindow(wx.Frame):
         # lastReceivedKey filter — a phantom chat that somehow slipped in must
         # not be able to accumulate history.)
         if all_messages:
-            all_messages = [
-                m for m in all_messages
-                if self._normalize_jid((m.get("key") or {}).get("remoteJid", "")) == remote_jid
-            ]
+            matching_messages = []
+            for message in all_messages:
+                key = message.get("key") or {}
+                message_jid = self._normalize_jid(key.get("remoteJid", ""))
+                if not self._chat_jids_equivalent(message_jid, remote_jid):
+                    continue
+                # Keep the database canonical too. Downstream code expects a
+                # message stored under a phone chat to carry that same phone JID,
+                # not the @lid form that happened to answer the API request.
+                key["remoteJid"] = remote_jid
+                matching_messages.append(message)
+            all_messages = matching_messages
 
         # After fetching, update chat messages
         for msg in all_messages:

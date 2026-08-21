@@ -125,6 +125,12 @@ class _MessagesStub:
     def _learn_sender_names_bulk(self, messages):
         return False
 
+    def _jid_address_forms(self, jid):
+        return MainWindow._jid_address_forms(self, jid)
+
+    def _chat_jids_equivalent(self, left, right):
+        return MainWindow._chat_jids_equivalent(self, left, right)
+
 
 class TestSyncChatMessagesHonorsDeepLimit:
     def test_deep_tagged_chat_queries_the_deep_count(self, monkeypatch):
@@ -150,3 +156,47 @@ class TestSyncChatMessagesHonorsDeepLimit:
         MainWindow.sync_chat_messages(stub, chat)
         assert len(urls) == 1
         assert "count=200" in urls[0]
+
+
+class TestSyncChatMessagesLidIdentity:
+    def test_lid_response_is_kept_under_its_canonical_phone_chat(self, monkeypatch):
+        phone = "5511999999999@s.whatsapp.net"
+        lid = "123456789@lid"
+        message = {
+            "key": {"remoteJid": lid, "fromMe": False, "id": "MSG-1"},
+            "message": {"conversation": "hello"},
+            "messageTimestamp": 100,
+            "messageType": "conversation",
+        }
+        urls = []
+        monkeypatch.setattr(
+            main_module.requests,
+            "get",
+            lambda url, **kwargs: urls.append(url) or _Resp(
+                200, {"response": [message]}
+            ),
+        )
+        stub = _MessagesStub(urls)
+        stub._phone_to_lid = {phone: lid}
+        stub._lid_to_phone = {lid: phone}
+        stub._normalize_fetched_messages = lambda raw, _jid: list(raw)
+        stub._extract_lid_mapping = lambda _message: None
+        stub.chats = {phone: {"remoteJid": phone, "t": 100}}
+
+        MainWindow.sync_chat_messages(stub, stub.chats[phone].copy())
+
+        assert f"get-messages/{lid}?count=200" in urls[0]
+        records = stub.chats[phone]["messages"]["messages"]["records"]
+        assert [record["key"]["id"] for record in records] == ["MSG-1"]
+        assert records[0]["key"]["remoteJid"] == phone
+
+    def test_group_message_from_lid_lookup_is_still_rejected(self):
+        phone = "5511999999999@s.whatsapp.net"
+        lid = "123456789@lid"
+        group = "120363000000000000@g.us"
+        stub = _MessagesStub([])
+        stub._phone_to_lid = {phone: lid}
+        stub._lid_to_phone = {lid: phone}
+
+        assert stub._chat_jids_equivalent(lid, phone) is True
+        assert stub._chat_jids_equivalent(group, phone) is False
