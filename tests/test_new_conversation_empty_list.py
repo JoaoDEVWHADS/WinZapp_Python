@@ -22,12 +22,20 @@ from ui.dialogs.new_conversation import NewConversationDialog
 class _FakeResultsList:
     def __init__(self):
         self.items = []
+        self.focus_calls = []
+        self.select_calls = []
 
     def DeleteAllItems(self):
         self.items = []
 
     def Append(self, row):
         self.items.append(row[0])
+
+    def Focus(self, idx):
+        self.focus_calls.append(idx)
+
+    def Select(self, idx, on=True):
+        self.select_calls.append(idx)
 
 
 class _FakeI18n:
@@ -259,6 +267,49 @@ class TestEmptyQueryListsEverything:
 
         assert stub._results == []
         assert stub._results_list.items == ["Sem resultados"]
+
+
+class TestFirstRowIsFocusedAndSelectedByDefault:
+    """Reported live: the New Conversation dialog's results list opened with
+    nothing focused/selected, unlike every other list in the app
+    (conversations, messages), where the first row is always focused and
+    selected by default. This is NOT about moving keyboard focus to the
+    list — the search field keeps that, so typing isn't interrupted — only
+    about the list's own internal focused/selected row state, so Tab-ing or
+    arrowing into the list (or pressing Enter) immediately acts on row 0
+    instead of nothing being highlighted at all."""
+
+    def test_row_0_is_focused_and_selected_when_results_exist(self):
+        mw = _FakeMw(contacts={"1@s.whatsapp.net": _contact("1@s.whatsapp.net", "Ana")})
+        stub = _Stub(mw)
+
+        stub._do_search("")
+
+        assert stub._results_list.focus_calls == [0]
+        assert stub._results_list.select_calls == [0]
+
+    def test_nothing_is_focused_when_the_list_is_a_single_no_results_row(self):
+        stub = _Stub(_FakeMw())
+
+        stub._do_search("")
+
+        assert stub._results_list.focus_calls == []
+        assert stub._results_list.select_calls == []
+
+    def test_row_0_is_refocused_after_typing_narrows_the_results(self):
+        mw = _FakeMw(
+            contacts={
+                "1@s.whatsapp.net": _contact("1@s.whatsapp.net", "Ana"),
+                "2@s.whatsapp.net": _contact("2@s.whatsapp.net", "Bia"),
+            }
+        )
+        stub = _Stub(mw)
+
+        stub._do_search("")
+        stub._do_search("bia")
+
+        assert stub._results_list.focus_calls == [0, 0]
+        assert stub._results_list.select_calls == [0, 0]
 
 
 class TestTypedQueryStillFilters:

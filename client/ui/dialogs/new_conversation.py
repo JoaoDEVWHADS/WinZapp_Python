@@ -207,6 +207,14 @@ class NewConversationDialog(wx.Dialog):
 
         if not self._results:
             self._results_list.Append((self._mw.i18n.t("no_results"),))
+        else:
+            # First row focused+selected by default, same as every other
+            # list in the app (conversations, messages) — without moving
+            # keyboard focus there: the search field keeps it, so typing
+            # keeps filtering uninterrupted, but Enter/Tab immediately act
+            # on row 0 instead of requiring an explicit arrow-down first.
+            self._results_list.Focus(0)
+            self._results_list.Select(0)
 
     # ── Activation ────────────────────────────────────────────────────────────
 
