@@ -900,6 +900,12 @@ class MainWindow(wx.Frame):
         # Consecutive sync rounds that found the store not answering, counted
         # towards recreating the session. See _BROKEN_STORE_REPAIR_ROUNDS.
         self._broken_store_rounds = 0
+        # Message-sync workers discover incomplete chats concurrently. Keep the
+        # queue and its growth counters behind one lock so a LID and its phone
+        # JID cannot be inserted or retired in conflicting states.
+        self._backfill_state_lock = threading.RLock()
+        self._chats_awaiting_messages = set()
+        self._partial_history_counts = {}
         self.contacts = {}
         # Presence cache: maps JID → {lastKnownPresence, lastSeen}. Must be
         # initialized here (not lazily in _build_lid_to_phone_cache, which only
@@ -9419,7 +9425,12 @@ class MainWindow(wx.Frame):
         # following minutes, and nothing pushes it to WinZapp when it lands. So
         # the loop starts on either signal — chats to re-query, or history still
         # on its way — and it is the loop that decides when to stop.
-        pending = len(getattr(self, "_chats_awaiting_messages", set()))
+        pending_snapshot = self._backfill_pending_snapshot()
+        # A few embedders replace helpers with no-op callables while exercising
+        # _run_sync() in isolation. Keep scheduling compatible with those
+        # lightweight hosts; production always receives the stable snapshot.
+        pending = len(pending_snapshot if pending_snapshot is not None
+                      else getattr(self, "_chats_awaiting_messages", set()))
         still_landing = self.refresh_history_still_landing(context="after initial sync")
         # Unresolved names are a third reason to run, and until the inline
         # pass above was capped there was never a case where they were the
@@ -12821,61 +12832,124 @@ class MainWindow(wx.Frame):
         keeps its slot for one more pass, so the ramp finishes, and is dropped
         the first pass that adds nothing.
 
-        Called from sync_chat_messages() on its worker threads; set/dict item
-        assignment is atomic under the GIL, so no lock is needed.
+        Called from sync_chat_messages() on its worker threads. The whole
+        read/decide/write transition is protected because individual atomic
+        set operations do not make that compound transition atomic.
         """
-        pending = getattr(self, "_chats_awaiting_messages", None)
-        if pending is None:
-            pending = self._chats_awaiting_messages = set()
-        counts = getattr(self, "_partial_history_counts", None)
-        if counts is None:
-            counts = self._partial_history_counts = {}
+        with self._backfill_state_guard():
+            pending = getattr(self, "_chats_awaiting_messages", None)
+            if pending is None:
+                pending = self._chats_awaiting_messages = set()
+            counts = getattr(self, "_partial_history_counts", None)
+            if counts is None:
+                counts = self._partial_history_counts = {}
 
-        def _done():
-            # Discard every address form: the chat may have been marked under
-            # its @lid and re-synced under its phone JID (or the reverse), and
-            # leaving the other form behind would retry it forever.
-            for form in self._jid_address_forms(remote_jid):
+            canonical = self._canonical_backfill_jid(remote_jid)
+            forms = set(self._jid_address_forms(remote_jid))
+            forms.update(self._jid_address_forms(canonical))
+
+            def _done():
+                # Discard every address form: the chat may have been marked
+                # under its @lid and re-synced under its phone JID (or reverse).
+                for form in forms:
+                    pending.discard(form)
+                    counts.pop(form, None)
+
+            records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
+            if not api_ok:
+                # The API never really answered — a failed call is the retry
+                # loop's business, not the backfill's.
+                _done()
+                return
+            if not records:
+                if self._server_claims_content(chat):
+                    _done()
+                    pending.add(canonical)
+                else:
+                    _done()
+                return
+
+            count = len(records)
+            # A full page used to retire the chat unconditionally, and that is
+            # the one signal that most deserves a second look: the page is full
+            # because the window saturated, which is exactly when there can be
+            # more history behind it. Gap chats stay queued until growth stops.
+            gaps = getattr(self, "_history_gap_jids", ())
+            gap = any(form in gaps for form in forms)
+            if count >= self.history_page_target() and not gap:
+                _done()
+                return
+
+            previous_values = [counts[f] for f in forms if f in counts]
+            previous = max(previous_values) if previous_values else None
+            grew = previous is not None and count > previous
+            still_landing = getattr(self, "_history_still_landing", False)
+            _done()
+            # `gap and previous is None` queues a gap chat once; from the next
+            # pass it is kept only while growing, like any other short chat.
+            if still_landing or grew or (gap and previous is None):
+                counts[canonical] = count
+                pending.add(canonical)
+
+    def _backfill_state_guard(self):
+        """Return the queue lock, lazily for lightweight test/legacy objects."""
+        lock = getattr(self, "_backfill_state_lock", None)
+        if lock is None:
+            lock = self._backfill_state_lock = threading.RLock()
+        return lock
+
+    def _canonical_backfill_jid(self, jid: str) -> str:
+        """Prefer the stable phone JID once the LID bridge is known."""
+        if not jid:
+            return jid
+        if jid.endswith("@lid"):
+            return getattr(self, "_lid_to_phone", {}).get(jid, jid)
+        return jid
+
+    def _backfill_pending_snapshot(self) -> list:
+        """Return a stable queue view while collapsing newly-known aliases."""
+        with self._backfill_state_guard():
+            pending = getattr(self, "_chats_awaiting_messages", None)
+            if pending is None:
+                pending = self._chats_awaiting_messages = set()
+            counts = getattr(self, "_partial_history_counts", None)
+            if counts is None:
+                counts = self._partial_history_counts = {}
+
+            canonical_pending = {self._canonical_backfill_jid(jid) for jid in pending}
+            canonical_counts = {}
+            for jid, count in counts.items():
+                key = self._canonical_backfill_jid(jid)
+                if key in canonical_pending:
+                    canonical_counts[key] = max(count, canonical_counts.get(key, count))
+            pending.clear()
+            pending.update(canonical_pending)
+            counts.clear()
+            counts.update(canonical_counts)
+            return sorted(canonical_pending)
+
+    def _remove_backfill_pending(self, jid: str) -> None:
+        """Retire a pending conversation under every known address form."""
+        with self._backfill_state_guard():
+            pending = getattr(self, "_chats_awaiting_messages", set())
+            counts = getattr(self, "_partial_history_counts", {})
+            forms = set(self._jid_address_forms(jid))
+            forms.update(self._jid_address_forms(self._canonical_backfill_jid(jid)))
+            for form in forms:
                 pending.discard(form)
                 counts.pop(form, None)
 
-        records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
-        if not api_ok:
-            # The API never really answered — a failed call is the retry loop's
-            # business, not the backfill's.
-            _done()
-            return
-        if not records:
-            if self._server_claims_content(chat):
-                pending.add(remote_jid)
-            else:
-                _done()
-            return
+    def _is_backfill_pending(self, jid: str) -> bool:
+        """Whether a conversation is queued under either known address."""
+        with self._backfill_state_guard():
+            pending = getattr(self, "_chats_awaiting_messages", set())
+            forms = set(self._jid_address_forms(jid))
+            forms.update(self._jid_address_forms(self._canonical_backfill_jid(jid)))
+            return any(form in pending for form in forms)
 
-        count = len(records)
-        # A full page used to retire the chat unconditionally, and that is the
-        # one signal that most deserves a second look: the page is full
-        # *because* the window saturated, which is exactly when there can be
-        # more history behind it. sync_chat_messages() flags the chats where
-        # that turned out to be true and its widened re-query still could not
-        # reach stored history — those stay in the queue.
-        gap = remote_jid in getattr(self, "_history_gap_jids", ())
-        if count >= self.history_page_target() and not gap:
-            _done()
-            return
-
-        forms = self._jid_address_forms(remote_jid)
-        previous = next((counts[f] for f in forms if f in counts), None)
-        grew = previous is not None and count > previous
-        still_landing = getattr(self, "_history_still_landing", False)
-        _done()
-        # `gap and previous is None` queues a gap chat once; from the next pass
-        # on it is kept only while it keeps growing, exactly like a short chat.
-        # Without that the queue would never drain for a hole WhatsApp Web
-        # cannot fill.
-        if still_landing or grew or (gap and previous is None):
-            counts[remote_jid] = count
-            pending.add(remote_jid)
+    def _completed_backfill_targets(self, window) -> int:
+        """Count only this pass's targets, independent of concurrent arrivals."""
+        return sum(1 for jid in window if not self._is_backfill_pending(jid))
 
     def _jid_address_forms(self, jid: str) -> tuple:
         """The JID plus its counterpart across the @lid ↔ phone bridge.
@@ -13028,7 +13102,7 @@ class MainWindow(wx.Frame):
                 # Read the pending set *after* the queue check: a chat can join
                 # it as history lands, and the sync that added it may have
                 # finished while this pass was sleeping.
-                pending = sorted(getattr(self, "_chats_awaiting_messages", set()))
+                pending = self._backfill_pending_snapshot()
                 names_pending = self._pending_name_resolution()
                 # Chats that already hold a full page but whose older history
                 # has never been walked. Without this the loop declared itself
@@ -13127,8 +13201,7 @@ class MainWindow(wx.Frame):
                     logging.info("[backfill] Dropping %d pending JID(s) with no chat left.",
                                  len(missing))
                     for j in missing:
-                        pending_set = getattr(self, "_chats_awaiting_messages", set())
-                        pending_set.discard(j)
+                        self._remove_backfill_pending(j)
                 if not targets:
                     continue
                 # Chunked and deliberately gentler than sync_remote_chats().
@@ -13154,7 +13227,7 @@ class MainWindow(wx.Frame):
                         except Exception as exc:
                             logging.warning("[backfill] chat sync failed: %s", exc)
 
-                completed = before - len(getattr(self, "_chats_awaiting_messages", set()))
+                completed = self._completed_backfill_targets(window)
                 grew = sum(1 for j, was in counts_before.items()
                            if self._local_record_count(j) > was)
                 logging.info(
@@ -13168,7 +13241,7 @@ class MainWindow(wx.Frame):
                     delay = self._BACKFILL_FIRST_DELAY
                 else:
                     delay = min(delay * 2, self._BACKFILL_MAX_DELAY)
-            still = len(getattr(self, "_chats_awaiting_messages", set()))
+            still = len(self._backfill_pending_snapshot())
             unnamed = len(self._pending_name_resolution())
             if still or unnamed:
                 logging.info(

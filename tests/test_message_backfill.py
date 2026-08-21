@@ -16,6 +16,9 @@ after, so the store does fill in — it just needs to be asked again.
 _note_backfill_state() decides who gets asked; that decision is tested here.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pytest
 
 from main import MainWindow
@@ -27,6 +30,7 @@ claims = MainWindow._server_claims_content
 
 class _Stub:
     def __init__(self, page_size=1, chunks_pending=False):
+        self._backfill_state_lock = threading.RLock()
         self._chats_awaiting_messages = set()
         # Most cases here predate paging and care only about empty-vs-not, so
         # the default target of 1 keeps a single record meaning "done".
@@ -35,6 +39,12 @@ class _Stub:
 
     _server_claims_content = staticmethod(MainWindow._server_claims_content)
     _note_backfill_state = MainWindow._note_backfill_state
+    _backfill_state_guard = MainWindow._backfill_state_guard
+    _canonical_backfill_jid = MainWindow._canonical_backfill_jid
+    _backfill_pending_snapshot = MainWindow._backfill_pending_snapshot
+    _remove_backfill_pending = MainWindow._remove_backfill_pending
+    _is_backfill_pending = MainWindow._is_backfill_pending
+    _completed_backfill_targets = MainWindow._completed_backfill_targets
     _jid_address_forms = MainWindow._jid_address_forms
     _resolve_backfill_target = MainWindow._resolve_backfill_target
     history_page_target = MainWindow.history_page_target
@@ -111,6 +121,9 @@ class TestBackfillBookkeeping:
         class _Bare:
             _server_claims_content = staticmethod(MainWindow._server_claims_content)
             _note_backfill_state = MainWindow._note_backfill_state
+            _backfill_state_guard = MainWindow._backfill_state_guard
+            _canonical_backfill_jid = MainWindow._canonical_backfill_jid
+            _jid_address_forms = MainWindow._jid_address_forms
         b = _Bare()
         b._note_backfill_state("a@lid", _chat(unread=1), api_ok=True)
         assert b._chats_awaiting_messages == {"a@lid"}
@@ -266,6 +279,41 @@ class TestJidBridge:
             "5511999999999@s.whatsapp.net",
             _chat(records=[{"key": {"id": "X"}}], t=1), api_ok=True)
         assert s._chats_awaiting_messages == set()
+
+    def test_snapshot_collapses_lid_and_phone_into_one_queue_entry(self):
+        s = self._stub()
+        phone = "5511999999999@s.whatsapp.net"
+        s._chats_awaiting_messages = {"111@lid", phone}
+        s._partial_history_counts = {"111@lid": 15, phone: 90}
+
+        assert s._backfill_pending_snapshot() == [phone]
+        assert s._chats_awaiting_messages == {phone}
+        assert s._partial_history_counts == {phone: 90}
+
+    def test_parallel_workers_cannot_leave_both_address_forms_pending(self):
+        s = _Stub(page_size=200, chunks_pending=True)
+        s.chats = {}
+        s._lid_to_phone = {"111@lid": "5511999999999@s.whatsapp.net"}
+        s._phone_to_lid = {"5511999999999@s.whatsapp.net": "111@lid"}
+        phone = "5511999999999@s.whatsapp.net"
+        chat = _chat(records=_records(15), t=1)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(s._note_backfill_state,
+                                   "111@lid" if i % 2 == 0 else phone,
+                                   chat, True)
+                       for i in range(200)]
+            for future in futures:
+                future.result()
+
+        assert s._backfill_pending_snapshot() == [phone]
+
+    def test_completed_count_ignores_unrelated_concurrent_arrivals(self):
+        s = self._stub()
+        s._chats_awaiting_messages = {"done@lid", "still@lid", "new@lid"}
+        s._remove_backfill_pending("done@lid")
+
+        assert s._completed_backfill_targets(["done@lid", "still@lid"]) == 1
 
 
 class TestSweepCoverage:
