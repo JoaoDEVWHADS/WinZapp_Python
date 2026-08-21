@@ -8205,7 +8205,18 @@ class ConversationsPanel(wx.Panel):
                 if caret < 0:
                     caret = 0
                 delta = -1 if key in (wx.WXK_UP, wx.WXK_NUMPAD_UP) else 1
-                _lst_set_caret(max(0, min(count - 1, caret + delta)))
+                new_caret = max(0, min(count - 1, caret + delta))
+                _lst_set_caret(new_caret)
+                # LB_SETCARETINDEX moves the caret without touching native
+                # selection state at all (that's the whole point — see this
+                # block's own comment above), so it never fires the
+                # selection-changed accessibility event NVDA would otherwise
+                # announce "selected" from. Without this, arrowing past an
+                # already-selected contact gave no audible cue it was part
+                # of the selection at all — the same selection_sound the
+                # messages/conversations lists play is played here too.
+                if _lst_is_selected(new_caret):
+                    self.selection_sound.play()
                 return  # suppressed — no Skip(), so selection is left alone
 
             if shift and key in (wx.WXK_DOWN, wx.WXK_NUMPAD_DOWN):
