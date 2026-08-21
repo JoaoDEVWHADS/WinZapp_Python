@@ -6343,12 +6343,19 @@ class MainWindow(wx.Frame):
         dist_server = resource_path("api",  "dist", "server.js")
 
         # All three files are required to start the bundled API.
-        # If any is missing (setup incomplete or not yet run), skip silently —
-        # ensure_api_modules_installed() already handled the missing node.exe
-        # case; dist/server.js absence means setup was cancelled or not done yet.
-        if not (os.path.isfile(node_exe)
-                and os.path.isfile(start_js)
-                and os.path.isfile(dist_server)):
+        missing_files = []
+        if not os.path.isfile(node_exe):
+            missing_files.append(f"node_exe: {node_exe}")
+        if not os.path.isfile(start_js):
+            missing_files.append(f"start_js: {start_js}")
+        if not os.path.isfile(dist_server):
+            missing_files.append(f"dist_server: {dist_server}")
+
+        if missing_files:
+            logging.warning(
+                "[ensure_wpp_running] Skipping automatic API start — missing required files: %s",
+                ", ".join(missing_files)
+            )
             return
 
         self._wpp_log_path = None
