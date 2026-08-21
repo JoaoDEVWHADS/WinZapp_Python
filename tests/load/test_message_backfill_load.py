@@ -1,8 +1,7 @@
-"""Opt-in synthetic load test for message-backfill bookkeeping.
+"""Synthetic load tests for message-backfill bookkeeping.
 
 Run from the repository root::
 
-    $env:WINZAPP_RUN_LOAD_TESTS = "1"
     python -m pytest -s -q tests/load/test_message_backfill_load.py
 
 ``WINZAPP_LOAD_CHAT_COUNT`` and ``WINZAPP_LOAD_WORKERS`` can increase or
@@ -24,13 +23,7 @@ from main import MainWindow
 import main as main_module
 
 
-pytestmark = [
-    pytest.mark.load,
-    pytest.mark.skipif(
-        os.environ.get("WINZAPP_RUN_LOAD_TESTS") != "1",
-        reason="set WINZAPP_RUN_LOAD_TESTS=1 to run synthetic load tests",
-    ),
-]
+pytestmark = pytest.mark.load
 
 
 class _LoadStub:
