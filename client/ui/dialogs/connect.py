@@ -70,7 +70,7 @@ class Connect:
         headers = self._wpp_headers(use_global_key=True)
 
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            response = requests.post(url, json=payload, headers=headers, timeout=90)
             # 200, 201 are success. 400 might mean session already active which is fine.
             if response.status_code in (200, 201, 400):
                 return token
