@@ -52,9 +52,14 @@ class _DB:
 
 
 class _Stub:
-    def __init__(self, pages, oldest=None):
+    def __init__(self, pages, oldest=None, advances=True):
         # pages: list of responses fetch_older_messages() will return, in order
         self._pages = list(pages)
+        # advances=False models the page re-anchoring on its own oldest loaded
+        # message instead of on the id we asked for: a full page comes back,
+        # every row of it is already stored, and the anchor stays put. See
+        # deviceController.ts's `originalOldestId` fallback.
+        self._advances = advances
         self._wa_connected = True
         self.offline_mode = False
         self.db = _DB({"chat@g.us": oldest} if oldest else {})
@@ -71,20 +76,24 @@ class _Stub:
         page = self._pages.pop(0)
         if page:
             self.db.insert_messages_batch(jid, page)
-            # the real one advances the anchor as it stores
-            self.db.oldest[jid] = page[0]
+            if self._advances:
+                # the real one advances the anchor as it stores
+                self.db.oldest[jid] = page[0]
         else:
             self._exhausted_chats.add(jid)
         return page
 
 
-def _make(pages, oldest=None):
-    stub = _Stub(pages, oldest)
+def _make(pages, oldest=None, advances=True):
+    stub = _Stub(pages, oldest, advances)
     for name in ("deep_backfill_chat", "_oldest_stored_message",
                  "_chats_needing_deep_history", "history_page_target",
-                 "_persist_exhausted_chats"):
-        stub_attr = MainWindow.__dict__[name]
-        setattr(stub, name, types.MethodType(stub_attr, stub))
+                 "_persist_exhausted_chats", "_anchor_identity"):
+        raw = MainWindow.__dict__[name]
+        if isinstance(raw, (staticmethod, classmethod)):
+            setattr(stub, name, getattr(MainWindow, name))
+        else:
+            setattr(stub, name, types.MethodType(raw, stub))
     for const in ("_DEEP_PAGES_PER_VISIT", "_DEEP_PAGE_DELAY",
                   "_DEEP_CHATS_PER_PASS"):
         setattr(stub, const, getattr(MainWindow, const))
@@ -371,3 +380,66 @@ class TestStoreOnlyKeepsNothingResident:
         records = stub.chats["chat@g.us"]["messages"]["messages"]["records"]
         assert len(records) == 3
         assert stub.batched == [("chat@g.us", 2)]
+
+
+class TestAPageThatDoesNotAdvanceTheAnchor:
+    """A full page is not the same thing as progress.
+
+    /get-messages resolves the anchor id inside the page, and when it cannot
+    find it there, deviceController.ts re-anchors on `originalOldestId` — the
+    oldest message the *page* holds — rather than answering empty. Our anchor
+    is read from SQLite, and this walk exists precisely to accumulate history
+    on disk that the page no longer keeps in memory, so the further a chat is
+    walked the likelier that fallback gets. It answers with the span between
+    what we already stored and what the page holds; the messages table's
+    primary key drops every row of it; the anchor stays put.
+
+    Counting that as `stored` is what made it expensive rather than merely
+    useless: _backfill_empty_chats() renews its entire budget on `deep_stored`,
+    so re-reading stored history kept the thread alive and the shared Puppeteer
+    page busy for the whole four-hour ceiling, writing nothing.
+    """
+
+    def test_the_visit_stops_on_the_first_such_page(self):
+        stub = _make([[_msg(3), _msg(4)]] * 10, oldest=_msg(5), advances=False)
+        stub.deep_backfill_chat("chat@g.us")
+        assert len(stub.calls) == 1, (
+            "re-reading the same window four more times is the worst possible "
+            "use of a budget the walk is already short of")
+
+    def test_it_does_not_count_as_progress(self):
+        """The number the backfill loop renews its budget from."""
+        stub = _make([[_msg(3), _msg(4)]] * 10, oldest=_msg(5), advances=False)
+        assert stub.deep_backfill_chat("chat@g.us") == 0
+
+    def test_the_chat_is_not_written_off_either(self):
+        """Nothing was learned about whether history remains — only that this
+        answer was useless. Marking it exhausted would be durable and wrong."""
+        stub = _make([[_msg(3), _msg(4)]] * 10, oldest=_msg(5), advances=False)
+        stub.deep_backfill_chat("chat@g.us")
+        assert "chat@g.us" not in stub._exhausted_chats
+
+    def test_a_walk_that_does_advance_is_untouched(self):
+        """The guard must not fire on the normal path — same case as
+        test_it_pages_until_the_history_runs_out, asserted against the new
+        early exit."""
+        stub = _make([[_msg(3), _msg(4)], [_msg(1), _msg(2)], []], oldest=_msg(5))
+        assert stub.deep_backfill_chat("chat@g.us") == 4
+        assert len(stub.calls) == 3
+
+
+class TestAnchorIdentity:
+    def test_two_messages_in_the_same_second_are_told_apart(self):
+        """get_messages_asc() breaks a timestamp tie on message_id, so the
+        anchor can legitimately move between two messages sharing a second."""
+        a = {"key": {"id": "m1"}, "messageTimestamp": 1_700_000_000}
+        b = {"key": {"id": "m2"}, "messageTimestamp": 1_700_000_000}
+        assert MainWindow._anchor_identity(a) != MainWindow._anchor_identity(b)
+
+    def test_the_same_message_reads_the_same_twice(self):
+        a = {"key": {"id": "m1"}, "messageTimestamp": 1_700_000_000}
+        assert MainWindow._anchor_identity(a) == MainWindow._anchor_identity(dict(a))
+
+    def test_a_missing_reading_does_not_raise(self):
+        assert MainWindow._anchor_identity(None) == (0, "")
+        assert MainWindow._anchor_identity({}) == (0, "")

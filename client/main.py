@@ -3280,6 +3280,7 @@ class MainWindow(wx.Frame):
             # state the user set locally on top of them (see
             # clear_local_data()'s own docstring).
             self.clear_local_data(wipe_metadata=False)
+            self._forget_history_exhaustion()
             try:
                 media_failed_path = data_path("media_failed.json")
                 if os.path.isfile(media_failed_path):
@@ -7606,14 +7607,30 @@ class MainWindow(wx.Frame):
         self._blocked_contacts = set(self.db.get_metadata_json("blocked_contacts", []))
 
         # 6b. exhausted_chats — conversations WhatsApp Web has no older history
-        # for. It used to live only in memory (fetch_older_messages() even says
-        # "in-memory" in its own log line), which was fine while the only
+        # for. It used to live only in memory, which was fine while the only
         # consumer was a user scrolling up in one conversation: worst case it
         # asked once more per session. The deep backfill walks every chat back
         # to its beginning, so an in-memory-only set would make every relaunch
         # re-walk an account that is already complete — hundreds of pointless
         # round-trips through the one Puppeteer page, for ever.
         self._exhausted_chats = set(self.db.get_metadata_json("exhausted_chats", []))
+        # …and the timestamps of the older-history requests that justify those
+        # entries. Persisted for the reason _OLDER_REQUEST_GRACE explains: a
+        # durable "this chat is finished" may only be written once the phone has
+        # had longer than its reply window to answer, and nothing in a single
+        # session can establish that. Tolerates the legacy list form (the set
+        # this used to be) by treating those entries as asked long ago, which is
+        # true — they were written by an earlier run.
+        _asked = self.db.get_metadata_json("older_history_requested", {})
+        if isinstance(_asked, dict):
+            self._older_requested_chats = {
+                jid: float(ts) for jid, ts in _asked.items()
+                if isinstance(ts, (int, float))
+            }
+        elif isinstance(_asked, list):
+            self._older_requested_chats = {jid: 0.0 for jid in _asked}
+        else:
+            self._older_requested_chats = {}
 
         # 7. my_jid / my_lid — previously only ever set at runtime by an
         # online host-device/self-LID lookup (check_wa_connection_http(),
@@ -12254,9 +12271,12 @@ class MainWindow(wx.Frame):
                 logging.info(f"[Mentions Scan] Found {len(lids_to_resolve)} unresolved LIDs.")
                 self.resolve_lid_jids_via_api(list(lids_to_resolve))
                 
+            # Declared out here, not inside the `if` below: the end-of-scan
+            # refresh reads it, and that refresh has to run whether or not there
+            # were any mentioned phone JIDs to resolve.
+            updated_contacts = {}
             if phones_to_resolve:
                 logging.info(f"[Mentions Scan] Found {len(phones_to_resolve)} unresolved mentioned phone JIDs.")
-                updated_contacts = {}
                 for p_jid in list(phones_to_resolve):
                     try:
                          res = self.get_contact_profile(p_jid)
@@ -12283,13 +12303,19 @@ class MainWindow(wx.Frame):
                      except Exception as e:
                          logging.error(f"[Mentions Scan] Error saving contacts incrementally: {e}")
                          self.save_data(self.chats, self.contacts)
-                if updated_contacts or mapped:
-                     # Was gated on updated_contacts alone, which is no longer
-                     # enough now that the per-mapping refreshes are deferred:
-                     # a scan that learned mappings but changed no contact
-                     # record would otherwise never refresh the list at all.
-                     wx.CallAfter(self._schedule_set_chats)
-                     wx.CallAfter(self._schedule_refresh_active_messages)
+            # Outside `if phones_to_resolve:` — it was written inside it, which
+            # made it unreachable in precisely the case `mapped` exists for.
+            # The two are fed by unrelated passes: `mapped` counts @lid <-> phone
+            # pairs learned from remoteJidAlt while walking the messages, while
+            # phones_to_resolve holds *mentioned* phone JIDs that still need a
+            # name. A scan that learns mappings, needs no @lid lookup (so
+            # resolve_lid_jids_via_api()'s own unconditional refresh never fires)
+            # and finds no unnamed mention refreshed nothing at all — with the
+            # per-mapping refreshes deferred, the list kept showing raw @lid
+            # until something unrelated happened to rebuild it.
+            if updated_contacts or mapped:
+                wx.CallAfter(self._schedule_set_chats)
+                wx.CallAfter(self._schedule_refresh_active_messages)
             
             logging.info("[Mentions Scan] Scan and resolution of cached messages completed.")
 
@@ -13182,8 +13208,15 @@ class MainWindow(wx.Frame):
         The 60 s timeout is not generosity — a timeout here returns False, and
         the caller in fetch_older_messages() reads False as "the request never
         went out" and drops the chat into _exhausted_chats, which stops it from
-        ever being re-queried this session. Timing out early therefore
-        permanently writes off exactly the chats that still have history coming.
+        ever being re-queried. Timing out early therefore writes off exactly the
+        chats that still have history coming.
+
+        That used to be bounded by the session, because _exhausted_chats died
+        with the process. It no longer is: the set is persisted, so the write-off
+        outlives the run and takes the user's own scroll-up with it. What keeps
+        the two apart now is _OLDER_REQUEST_GRACE — the write-off is only made
+        durable once this request has had far longer than its reply window to be
+        answered. See that constant.
         """
         if not getattr(self, "_wa_connected", False):
             return False
@@ -16148,14 +16181,28 @@ class MainWindow(wx.Frame):
             return None
         return rows[0] if rows else None
 
+    @staticmethod
+    def _anchor_identity(msg: "dict | None") -> tuple:
+        """Which message an anchor read actually landed on.
+
+        Identity rather than timestamp order because two messages can share a
+        second, and get_messages_asc() breaks that tie on message_id. It only
+        ever has to answer "is this still the same message as before": the
+        oldest row can only stay put or move further back, since storing a
+        page adds rows and never removes any.
+        """
+        key = (msg or {}).get("key") or {}
+        return (int((msg or {}).get("messageTimestamp") or 0), str(key.get("id") or ""))
+
     def deep_backfill_chat(self, remote_jid: str) -> int:
         """Page one chat backwards. Returns how many messages were stored.
 
         Stops on the first page that comes back empty — fetch_older_messages()
         marks the chat exhausted there (or asks the phone for older history
         and leaves it re-queryable, in which case the next pass picks up the
-        reply). Also stops when the per-visit page budget runs out, and when
-        the connection drops.
+        reply). Also stops when the page brings back nothing older than we
+        already had, when the per-visit page budget runs out, and when the
+        connection drops.
         """
         stored = 0
         for _ in range(self._DEEP_PAGES_PER_VISIT):
@@ -16168,8 +16215,41 @@ class MainWindow(wx.Frame):
                 # Nothing stored at all: this is the ordinary backfill's job,
                 # not ours — it has no anchor to page before.
                 break
+            before = self._anchor_identity(anchor)
             page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
             if not page:
+                break
+            # Did the walk actually walk? A full page is not the same thing as
+            # progress, and the difference is not hypothetical: /get-messages
+            # resolves the anchor id inside the page, and when it cannot find
+            # it there, deviceController.ts deliberately re-anchors on
+            # `originalOldestId` — the oldest message the *page* happens to
+            # hold — instead of answering empty. Our anchor comes from SQLite,
+            # and the whole point of this walk is to accumulate history on disk
+            # that the page no longer keeps in memory, so the further a chat is
+            # walked the likelier that fallback becomes: it answers with the
+            # span between what we already stored and what the page holds,
+            # every row of which the messages table's primary key then drops.
+            # The anchor does not move, the next iteration re-reads it, and the
+            # same window comes back — five times a visit, every pass, for ever.
+            #
+            # Counting the returned page as `stored` made that worse than
+            # wasteful: _backfill_empty_chats() renews its whole budget on
+            # `deep_stored`, so re-reading what we already have kept the thread
+            # alive and the shared Puppeteer page busy for the full four-hour
+            # ceiling without a single new message being written.
+            # An unreadable anchor counts as "did not move": without a reading
+            # to compare, there is nothing to justify another four pages.
+            after = self._oldest_stored_message(remote_jid)
+            if after is None or self._anchor_identity(after) == before:
+                logging.warning(
+                    "[deep-backfill] %s: a page of %d message(s) contained nothing "
+                    "older than the anchor we asked before — the anchor did not "
+                    "move, so this visit stops rather than re-reading the same "
+                    "window. (Check log.log for '[browser-evaluate] Anchor not "
+                    "found after walkback' — that is this, named from the page's "
+                    "side.)", remote_jid, len(page),
+                )
                 break
             stored += len(page)
             time.sleep(self._DEEP_PAGE_DELAY)
@@ -16192,6 +16272,27 @@ class MainWindow(wx.Frame):
                 out.append(jid)
         return out
 
+    # How long request_older_messages() gets to be answered before an empty
+    # page is durable evidence that a chat really has no more history.
+    #
+    # The request is fire-and-forget: the phone replies with a history-sync
+    # chunk minutes later, never in the response (see that method's own
+    # docstring). The backfill revisits a chat about 30 seconds after the ask,
+    # so the second empty page — which is what writes the chat off — arrives an
+    # order of magnitude sooner than the answer it is judging. That was
+    # survivable while _exhausted_chats died with the process; now that it is
+    # persisted, a write-off made inside that window is permanent, and
+    # fetch_older_messages()' early return means the user scrolling up in that
+    # conversation gets nothing, in every future session.
+    #
+    # Set well past "minutes later" on purpose. Waiting costs a handful of
+    # empty round-trips per chat; being wrong costs the conversation's history
+    # for good. _older_requested_chats is persisted alongside the exhausted
+    # set, so in practice the bar is cleared on the next launch rather than
+    # inside one session: one extra walk of an already-complete account buys
+    # evidence that outlived the reply window.
+    _OLDER_REQUEST_GRACE = 15 * 60
+
     def _persist_exhausted_chats(self):
         """Write the exhausted-chat set to DB metadata. Best effort — losing it
         only costs one wasted round-trip per chat on the next launch."""
@@ -16201,6 +16302,45 @@ class MainWindow(wx.Frame):
                     "exhausted_chats", sorted(getattr(self, "_exhausted_chats", set())))
         except Exception as exc:
             logging.warning("[history] Could not persist exhausted_chats: %s", exc)
+
+    def _forget_history_exhaustion(self):
+        """Drop everything remembered about chats having no older history.
+
+        Called by the F5 resync. clear_local_data(wipe_metadata=False) keeps
+        system_metadata on purpose — that is where the user's own
+        cleared/deleted/archived/muted state lives — but these two entries are
+        not user state: they are a cached conclusion about what WhatsApp Web
+        was willing to hand over, and the messages they gate were just wiped
+        along with everything else. Keeping them would leave every walked-out
+        chat holding nothing but the page this resync re-fetches, with the deep
+        backfill skipping it and fetch_older_messages() early-returning on it.
+
+        It is also the only escape from a conclusion reached wrongly, and
+        "resync everything" is where a user would look for it. Pulled out of
+        _resync_all_worker() so it can be tested without a wx.App — that method
+        is otherwise all UI teardown.
+        """
+        self._exhausted_chats = set()
+        self._older_requested_chats = {}
+        self._persist_exhausted_chats()
+        self._persist_older_requested()
+
+    def _persist_older_requested(self):
+        """Write the "already asked the phone for older history" map to DB
+        metadata. Best effort, same as _persist_exhausted_chats().
+
+        Persisted for one reason only: it is what lets an empty page be told
+        apart from an empty page *that has already outlived the phone's reply
+        window*. Kept in memory alone — as it was — that distinction cannot
+        survive the session, and the exhausted set it gates is durable.
+        """
+        try:
+            if getattr(self, "db", None) is not None:
+                self.db.set_metadata_json(
+                    "older_history_requested",
+                    dict(getattr(self, "_older_requested_chats", {})))
+        except Exception as exc:
+            logging.warning("[history] Could not persist older_history_requested: %s", exc)
 
     def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
         """Fetch older messages from server starting before the oldest_msg.
@@ -16304,12 +16444,16 @@ class MainWindow(wx.Frame):
                     if not hasattr(self, "_exhausted_chats"):
                         self._exhausted_chats = set()
                     if not hasattr(self, "_older_requested_chats"):
-                        self._older_requested_chats = set()
-                    already_asked = remote_jid in self._older_requested_chats
+                        self._older_requested_chats = {}
+                    asked_at = self._older_requested_chats.get(remote_jid)
+                    asked_now = asked_at is None
                     requested = False
-                    if not already_asked:
-                        self._older_requested_chats.add(remote_jid)
+                    if asked_now:
+                        asked_at = time.time()
+                        self._older_requested_chats[remote_jid] = asked_at
+                        self._persist_older_requested()
                         requested = self.request_older_messages(remote_jid)
+                    waited = max(0.0, time.time() - asked_at)
                     if requested:
                         logging.info(
                             "[fetch_older_messages] No local history left for %s — "
@@ -16317,13 +16461,32 @@ class MainWindow(wx.Frame):
                             "re-queryable so the reply can be picked up.", remote_jid,
                         )
                     else:
+                        # In-memory always, so the chat leaves the deep-backfill
+                        # queue at the same rate it always did. Persisted only
+                        # once the phone has genuinely had its chance: the
+                        # request above is answered by a history-sync chunk
+                        # minutes later, and _exhausted_chats is now durable, so
+                        # a write-off made 30 seconds after the ask (the backfill
+                        # pass cadence) used to become permanent — the chat was
+                        # early-returned at the top of this method for ever,
+                        # which also silently killed the user scrolling up in it.
+                        # `waited` clears the bar on the next session rather than
+                        # inside this one, since _older_requested_chats is
+                        # persisted too: one extra walk of an already-complete
+                        # account, in exchange for never writing a chat off on
+                        # evidence younger than the reply it is waiting for.
                         self._exhausted_chats.add(remote_jid)
-                        self._persist_exhausted_chats()
+                        durable = waited >= self._OLDER_REQUEST_GRACE
+                        if durable:
+                            self._persist_exhausted_chats()
                         logging.info(
-                            "[fetch_older_messages] Marked history as exhausted "
-                            "in-memory for %s (older-message request %s).",
+                            "[fetch_older_messages] Marked history as exhausted for %s "
+                            "(%s). The phone was asked %.0fs ago; older-message request "
+                            "%s.",
                             remote_jid,
-                            "already sent earlier" if already_asked else "not sent",
+                            "persisted" if durable else "this session only",
+                            waited,
+                            "just attempted and failed" if asked_now else "sent earlier",
                         )
 
                 fetched_messages = []
