@@ -4674,29 +4674,44 @@ class MainWindow(wx.Frame):
             return
         title = format_notification_title(msg, self, self.i18n)
 
-        # Deliberately NOT also spoken via AO2 here: with the window
-        # backgrounded, the Windows toast notification is the announcement —
-        # NVDA/JAWS/Narrator read it themselves once it renders (toasts are
-        # exposed through UI Automation), so speaking the same "Nova
-        # mensagem de X: corpo" text here on top of it doubled every
-        # background message. AO2 is only used explicitly above, in the two
-        # window-active scenarios (current/other conversation), where there
-        # is no toast to be read instead.
-        if not self.settings.get("general", {}).get("show_tray_icon", True):
+        # The toast is the ONLY announcement a backgrounded message gets.
+        # Speaking it through AO2 here as well used to make every background
+        # message arrive twice: once as "Nova mensagem de X: ..." straight
+        # from accessible_output2, and again as the screen reader read the
+        # toast banner Windows had just put on screen. That AO2 call was
+        # added when the banner could silently never render at all (an
+        # unregistered AUMID in dev mode — see _setup_toaster()); now that
+        # the toast reliably shows in both source and frozen builds, the
+        # unconditional announcement is pure duplication.
+        #
+        # The safety net stays, just moved to where the outcome is actually
+        # known: NotificationManager._dispatch() speaks the message itself
+        # when — and only when — it produced no banner, and
+        # should_speak_background_message() covers the cases where no toast
+        # is even attempted — otherwise a user with toasts off would be left
+        # with nothing but the sound cue.
+        from core.notification_manager import (
+            announce_background_message, should_speak_background_message,
+        )
+
+        if should_speak_background_message(
+            self.settings, hasattr(self, "notification_manager")
+        ):
+            announce_background_message(self, self.i18n, title, body)
             return
-        if hasattr(self, "notification_manager"):
-            # The unread suffix is deliberately NOT baked in here — see
-            # NotificationManager._dispatch(), which appends it fresh right
-            # before the toast is actually shown. A burst of messages queues
-            # one notification per message, but _coalesce_pending() only
-            # ever displays the newest one; that toast's body (formatted
-            # here, at enqueue time) could still be showing the unreadCount
-            # from the FIRST message of the burst — e.g. "1" — while several
-            # more arrived (and incremented the real count) before the
-            # worker thread got around to actually dispatching it. Reported
-            # live as the toast's "✉️ N não lidas" line reading much lower
-            # than what Alt+3 announced moments later in the same chat.
-            self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
+
+        # The unread suffix is deliberately NOT baked in here — see
+        # NotificationManager._dispatch(), which appends it fresh right
+        # before the toast is actually shown. A burst of messages queues
+        # one notification per message, but _coalesce_pending() only
+        # ever displays the newest one; that toast's body (formatted
+        # here, at enqueue time) could still be showing the unreadCount
+        # from the FIRST message of the burst — e.g. "1" — while several
+        # more arrived (and incremented the real count) before the
+        # worker thread got around to actually dispatching it. Reported
+        # live as the toast's "✉️ N não lidas" line reading much lower
+        # than what Alt+3 announced moments later in the same chat.
+        self.notification_manager.send(title, body, remote_jid, msg_key=msg.get("key"))
 
     def _learn_sender_name(self, msg: dict) -> bool:
         """Remember the pushName a message carries for its sender JID.
