@@ -249,9 +249,12 @@ class ConversationsPanel(wx.Panel):
         # bookmark belongs to is always the open one, by construction.
         self._msg_temp_bookmarks: dict = {}
 
-        # ── Media download progress ─────────────────────────────────────────
-        # msg_id -> float 0.0-1.0  (absent = not tracked / already complete)
+        # ── Media transfer progress ─────────────────────────────────────────
+        # Downloads are keyed by real message id. Outgoing attachment uploads
+        # are keyed by their stable local id so their progress survives the
+        # local-id -> WhatsApp-id swap performed after send-file returns.
         self._download_progress: dict = {}
+        self._media_upload_progress: dict = {}
 
         # ── Unread separator ────────────────────────────────────────────────
         # Index in _sorted_messages of the unread-separator sentinel, or -1
@@ -1798,7 +1801,7 @@ class ConversationsPanel(wx.Panel):
         if msg_ts > current_t:
             chat["t"] = msg_ts
 
-    def _mark_message_sent(self, local_id: str, real_id: str = None, quote_lost: bool = False):
+    def _mark_message_sent(self, local_id: str, real_id: str = None, quote_lost: bool = False, send_status=None):
         """
         Called on the main thread when a queued message is successfully delivered.
         Clears the _local_pending flag, refreshes the list item, plays the
@@ -1811,23 +1814,64 @@ class ConversationsPanel(wx.Panel):
         message's reply contextInfo is dropped so the row stops reading as a
         reply — the quote never actually reached the recipient.
         """
-        self._hide_media_transfer_gauge()
+        # Do not hide the transfer gauge merely because send-file returned.
+        # For documents, 100% upload and HTTP success are not the same thing as
+        # WhatsApp's SENT acknowledgement. The ACK lifecycle below owns it.
         # Panel-level guard: survive _sorted_messages rebuilds that replace dict
         # objects, keeping the per-dict _ui_sent flag from being seen by both callers.
         _played = getattr(self, "_played_sent_local_ids", None)
         if _played is None:
             self._played_sent_local_ids: set = set()
             _played = self._played_sent_local_ids
-        if local_id in _played:
-            return
-        _played.add(local_id)
-        if len(_played) > 500:
-            _played.clear()
+        # This set is a *one-time side-effect* guard (most importantly the
+        # sent sound), not a reason to ignore later confirmation data.  The
+        # HTTP send completion and the own-message/WebSocket echo can arrive
+        # in either order; a later caller may be the first one carrying ACK
+        # SENT.  Always consume real_id/send_status below even when the visual
+        # sent work already ran once.
+        already_played = local_id in _played
+        if not already_played:
+            _played.add(local_id)
+            if len(_played) > 500:
+                _played.clear()
 
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
+                _status_int = None
+                if send_status is not None:
+                    try:
+                        _status_int = int(send_status)
+                    except (TypeError, ValueError):
+                        _status_int = None
+                    if _status_int is not None:
+                        msg["status"] = _status_int
+                        if (
+                            msg.get("messageType") == "documentMessage"
+                            and msg.get("_awaiting_sent_ack")
+                            and _status_int >= 2
+                        ):
+                            msg["_awaiting_sent_ack"] = False
+                            self._media_upload_progress.pop(local_id, None)
+                # Non-document attachments keep the existing lifecycle: their
+                # gauge ends with the send-file request, so no upload-progress
+                # bookkeeping is needed after this callback. Documents are the
+                # exception because their 100% value must survive until SENT.
+                if msg.get("messageType") != "documentMessage":
+                    self._media_upload_progress.pop(local_id, None)
                 if msg.get("_ui_sent"):
-                    return  # Already marked sent on the UI, ignore to prevent duplicate sound and actions
+                    # The own-message echo and the HTTP send completion can race.
+                    # Even when the visual "sent" work already ran, a later
+                    # caller may be the one carrying the real ACK; consume that
+                    # ACK before returning so a document cannot stay stuck at
+                    # 100% forever.
+                    self.messages_list.SetItemText(i, self._render_message_line(msg))
+                    try:
+                        self.messages_list.RefreshItem(i)
+                    except Exception:
+                        pass
+                    self._sync_pending_document_gauge()
+                    self._show_document_actions_if_ready(i, msg)
+                    return
                 msg["_ui_sent"] = True
                 msg["_local_pending"] = False
                 # The quoted send failed and the message went out as a plain
@@ -1884,27 +1928,34 @@ class ConversationsPanel(wx.Panel):
                 # "audioMessage" but never goes through that recording-specific
                 # path (it has no audio_path, only media_path) — excluding it
                 # here too meant it never got a sent sound from anywhere.
-                if hasattr(self.main_window, "message_sent_sound"):
+                if hasattr(self.main_window, "message_sent_sound") and not already_played:
                     if not msg.get("_is_voice_recording"):
                         self.main_window.message_sent_sound.play()
                 if self.conversation:
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
+                self._show_document_actions_if_ready(i, msg)
                 break
+        # A document may deliberately remain at 100% after send-file returns
+        # if that response did not yet carry SENT. Keep (or retire) the gauge
+        # according to the outstanding ACK latch, not according to HTTP return.
+        self._sync_pending_document_gauge()
         # Refresh conversation list so the preview reflects the sent message.
         self.main_window._schedule_set_chats()
 
 
     def _mark_message_failed(self, local_id: str):
         """Mark a virtual pending message as permanently failed (exhausted retries)."""
-        self._hide_media_transfer_gauge()
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
                 msg["_send_failed"]   = True
+                msg.pop("_awaiting_sent_ack", None)
+                self._media_upload_progress.pop(local_id, None)
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 if self.conversation:
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
+        self._sync_pending_document_gauge()
 
     def _mark_message_unconfirmed(self, local_id: str):
         """Mark a virtual message whose send timed out with an unknown outcome.
@@ -1915,11 +1966,12 @@ class ConversationsPanel(wx.Panel):
         as "sending" forever before, which reads as success once the spinner
         stops meaning anything.
         """
-        self._hide_media_transfer_gauge()
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"]     = False
                 msg["_send_unconfirmed"]  = True
+                if msg.get("messageType") != "documentMessage":
+                    self._media_upload_progress.pop(local_id, None)
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 try:
                     self.messages_list.RefreshItem(i)
@@ -1928,11 +1980,45 @@ class ConversationsPanel(wx.Panel):
                 if self.conversation:
                     self.main_window._schedule_save(dirty_jid=self.conversation.get("remoteJid"))
                 break
+        self._sync_pending_document_gauge()
+
+    def _show_document_actions_if_ready(self, index: int, msg: dict):
+        """Expose Open/Save As for the selected document only after SENT.
+
+        The sender-side cache exists before the upload begins, so cache
+        existence alone cannot be the readiness condition.  This helper is
+        deliberately gated by ``_awaiting_sent_ack`` and is called from both
+        the HTTP ACK path and the WebSocket status-update path.
+        """
+        if msg.get("messageType") != "documentMessage" or msg.get("_awaiting_sent_ack"):
+            return
+        try:
+            selected = self.messages_list.GetFirstSelected()
+        except Exception:
+            selected = -1
+        if selected != index:
+            return
+        msg_id = str((msg.get("key") or {}).get("id") or "")
+        clean_id = msg_id
+        if "_" in clean_id:
+            parts = clean_id.split("_")
+            clean_id = parts[2] if len(parts) > 2 else parts[-1]
+        if not clean_id or not os.path.isfile(data_path("media", f"{clean_id}.wzmedia")):
+            return
+        self._action_open_btn.SetLabel(self.main_window.i18n.t("open"))
+        self._action_open_btn.Show()
+        self._action_save_as_btn.Show()
+        self.conversation_panel.Layout()
 
     def refresh_message_status(self, msg_id: str, status: str):
         """Update the status icon for a single sent message without full redraw."""
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("key", {}).get("id") == msg_id:
+                _stage = self._classify_status_entry(status)
+                if msg.get("messageType") == "documentMessage" and msg.get("_awaiting_sent_ack"):
+                    if _stage in ("sent", "delivered", "read", "played", "failed"):
+                        msg["_awaiting_sent_ack"] = False
+                        self._media_upload_progress.pop(msg.get("_local_id", ""), None)
                 # NOTE: MessageUpdate was already appended by on_message_status_update
                 # in main.py before this method is called. Do NOT append again here
                 # or the status history grows with duplicates on every update.
@@ -1947,6 +2033,9 @@ class ConversationsPanel(wx.Panel):
                     self.messages_list.RefreshItem(i)
                 except Exception:
                     pass
+                self._sync_pending_document_gauge()
+                if _stage in ("sent", "delivered", "read", "played"):
+                    self._show_document_actions_if_ready(i, msg)
                 break
 
     # ── Voice recording ──────────────────────────────────────────────────────
@@ -2780,7 +2869,13 @@ class ConversationsPanel(wx.Panel):
         is_downloaded = os.path.isfile(media_path)
 
         if msg_type == "documentMessage":
-            if is_downloaded:
+            if msg.get("_awaiting_sent_ack"):
+                # The sender already has a local cached copy, but while the
+                # WhatsApp ACK is still pending the only relevant action is the
+                # transfer gauge. In particular, do not expose Open/Save As at
+                # 100% — it stays there until status becomes "sent".
+                self._sync_pending_document_gauge(preferred_local_id=msg.get("_local_id", ""))
+            elif is_downloaded:
                 self._action_open_btn.SetLabel(self.main_window.i18n.t("open"))
                 self._action_open_btn.Show()
                 self._action_save_as_btn.Show()
@@ -2913,7 +3008,13 @@ class ConversationsPanel(wx.Panel):
             self._open_conversation_media_viewer(index)
 
         elif msg_type in ("documentMessage", "locationMessage", "liveLocationMessage"):
-            # Documents and locations keep their existing system-open behaviour.
+            # A document being sent is deliberately not openable yet, even
+            # though its sender-side cache already exists. Keep the progress
+            # gauge visible until WhatsApp confirms SENT.
+            if msg_type == "documentMessage" and msg.get("_awaiting_sent_ack"):
+                self._sync_pending_document_gauge(preferred_local_id=msg.get("_local_id", ""))
+                return
+            # Sent documents and locations keep their existing system-open behaviour.
             self._on_action_open(None, index=index)
 
     def on_messages_context_menu(self, event):
@@ -3116,8 +3217,10 @@ class ConversationsPanel(wx.Panel):
         if "_" in msg_id:
             parts = msg_id.split("_")
             clean_msg_id = parts[2] if len(parts) > 2 else parts[-1]
-        if msg_type in _SAVEABLE and os.path.isfile(
-            data_path("media", f"{clean_msg_id}.wzmedia")
+        if (
+            msg_type in _SAVEABLE
+            and not (msg_type == "documentMessage" and msg.get("_awaiting_sent_ack"))
+            and os.path.isfile(data_path("media", f"{clean_msg_id}.wzmedia"))
         ):
             menu.AppendSeparator()
             save_item = menu.Append(
@@ -4937,6 +5040,10 @@ class ConversationsPanel(wx.Panel):
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
 
+        if msg_type == "documentMessage" and msg.get("_awaiting_sent_ack"):
+            self._sync_pending_document_gauge(preferred_local_id=msg.get("_local_id", ""))
+            return
+
         if msg_type in ("locationMessage", "liveLocationMessage"):
             # No download/cache involved — hand the coordinates straight to
             # the system's default map/browser handler.
@@ -5237,6 +5344,10 @@ class ConversationsPanel(wx.Panel):
         if self._is_separator(msg):
             return
         msg_type = msg.get("messageType", "")
+
+        if msg_type == "documentMessage" and msg.get("_awaiting_sent_ack"):
+            self._sync_pending_document_gauge(preferred_local_id=msg.get("_local_id", ""))
+            return
 
         # Nothing to save: say so instead of opening a file dialog over a
         # message that has no file. Silence would be worse than the bug it
@@ -7415,8 +7526,54 @@ class ConversationsPanel(wx.Panel):
                 break
 
     def update_media_upload_progress(self, upload_id: str, progress: float):
+        try:
+            progress = max(0.0, min(1.0, float(progress)))
+        except (TypeError, ValueError):
+            return
+        # Progress can arrive from both the Python multipart upload and the
+        # WPPConnect browser bridge. Those streams are not guaranteed to be
+        # ordered, so never let a late event move the visible gauge backwards.
+        previous = self._media_upload_progress.get(upload_id, 0.0)
+        progress = max(previous, progress)
+        self._media_upload_progress[upload_id] = progress
         if any(msg.get("_local_id") == upload_id for msg in self._sorted_messages):
             self._update_media_transfer_gauge(progress)
+
+    def _sync_pending_document_gauge(self, preferred_local_id: str = ""):
+        """Keep the transfer gauge tied to documents waiting for SENT ACK.
+
+        Reaching 100% is intentionally *not* a completion signal: it means the
+        bytes have reached the WPPConnect side. WhatsApp may still be uploading
+        / acknowledging the message, so the gauge remains at 100 until a SENT
+        (or later) status clears ``_awaiting_sent_ack``.
+        """
+        waiting = [
+            msg for msg in self._sorted_messages
+            if msg.get("messageType") == "documentMessage"
+            and msg.get("_awaiting_sent_ack")
+        ]
+        if not waiting:
+            self._hide_media_transfer_gauge()
+            return
+
+        target = None
+        if preferred_local_id:
+            target = next(
+                (msg for msg in waiting if msg.get("_local_id") == preferred_local_id),
+                None,
+            )
+        if target is None:
+            # Prefer an upload actually moving right now; otherwise keep the
+            # first waiting document visible (typically sitting at 100% while
+            # waiting for WhatsApp's SENT acknowledgement).
+            target = next(
+                (msg for msg in waiting
+                 if 0.0 < self._media_upload_progress.get(msg.get("_local_id", ""), 0.0) < 1.0),
+                waiting[0],
+            )
+        local_id = target.get("_local_id", "")
+        progress = self._media_upload_progress.get(local_id, 0.0)
+        self._update_media_transfer_gauge(progress)
 
     def _show_media_transfer_gauge(self):
         gauge = getattr(self, "_media_transfer_gauge", None)
@@ -10492,6 +10649,12 @@ class ConversationsPanel(wx.Panel):
             virtual_msg = {
                 "_local_pending": True,
                 "_local_id":      local_id,
+                # A locally attached document is pre-cached immediately so we
+                # already own its bytes, but that must NOT unlock Open/Save As
+                # while WhatsApp is still sending it. 100% only means the file
+                # upload finished; this latch is cleared only by a real SENT
+                # acknowledgement (or a later delivered/read acknowledgement).
+                "_awaiting_sent_ack": media_type == "document",
                 "key": {"id": local_id, "fromMe": True, "remoteJid": remote_jid},
                 "messageType": vtype,
                 "message": {vtype: _body},
@@ -10521,6 +10684,7 @@ class ConversationsPanel(wx.Panel):
                 quoted=quoted, progress_callback=_update_upload_progress,
             )
             self._register_virtual_msg(virtual_msg)
+            self._media_upload_progress[local_id] = 0.0
 
             # Pre-cache the file under local_id BEFORE enqueueing the actual
             # send: _mark_message_sent() renames the cache entry from

@@ -45,7 +45,7 @@ from core.sound_system import (
 )
 from core.audio_devices import find_input_device_index, test_input_device
 from core.i18n import I18n
-from core.websocket_client import WebSocketClient
+from core.websocket_client import WebSocketClient, ack_to_status
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, is_phone_like, looks_like_binary_blob, prune_message_record, prune_chats_messages, effective_unread_count, mute_response_accepted, normalize_for_search, search_normalization_mode, parse_bool_flag as _parse_bool_flag, DEFAULT_SETTINGS, append_selected_marker, is_message_forwarded
 from core.locale_format import get_date_format, get_time_format, get_datetime_format
 from core.database_bridge import DatabaseBridge
@@ -15099,8 +15099,23 @@ class MainWindow(wx.Frame):
         if audio_path and hasattr(self, "message_sent_sound"):
             self.message_sent_sound.play()
 
+        send_status = None
+        _ack_by_local_id = getattr(self, "_media_send_ack_by_local_id", None)
+        if isinstance(_ack_by_local_id, dict):
+            raw_ack = _ack_by_local_id.pop(local_id, None)
+            if raw_ack is not None:
+                send_status = ack_to_status(raw_ack)
+
         if hasattr(self, "conversations_panel"):
-            self.conversations_panel._mark_message_sent(local_id, real_id=real_id, quote_lost=quote_lost)
+            if send_status is None:
+                self.conversations_panel._mark_message_sent(
+                    local_id, real_id=real_id, quote_lost=quote_lost
+                )
+            else:
+                self.conversations_panel._mark_message_sent(
+                    local_id, real_id=real_id, quote_lost=quote_lost,
+                    send_status=send_status,
+                )
 
     def _on_message_unconfirmed(self, local_id: str):
         """Called when a send timed out and its outcome cannot be determined.
@@ -18462,13 +18477,24 @@ class MainWindow(wx.Frame):
                 if isinstance(resp, list) and resp:
                     resp = resp[0]
                 msg_id = ""
+                raw_ack = None
                 if isinstance(resp, dict):
+                    raw_ack = resp.get("ack")
                     msg_id = resp.get("id") or resp.get("key", {}).get("id") or ""
                     if isinstance(msg_id, dict):
                         msg_id = msg_id.get("_serialized", "")
                     if msg_id:
                         parts = msg_id.split("_")
                         msg_id = parts[2] if len(parts) > 2 else (parts[-1] if parts else msg_id)
+                if upload_id and isinstance(raw_ack, int) and not isinstance(raw_ack, bool):
+                    # sendFile() returns the real WhatsApp ACK. Keep it by the
+                    # stable local upload id so _on_message_sent can make the
+                    # row status and the document gauge transition atomically.
+                    # This also closes the race where socket onAck arrives just
+                    # before the local bubble has been renamed to the real id.
+                    if not hasattr(self, "_media_send_ack_by_local_id"):
+                        self._media_send_ack_by_local_id = {}
+                    self._media_send_ack_by_local_id[upload_id] = raw_ack
                 if msg_id:
                     return msg_id
                 return {"ok": True, "error": "ID not found in response"}
