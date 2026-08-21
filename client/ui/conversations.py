@@ -978,6 +978,7 @@ class ConversationsPanel(wx.Panel):
                 pass
         self._hide_audio_controls()
         self._hide_all_media_controls()
+        self._hide_media_transfer_gauge()
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._sep_from_open = False
@@ -2257,6 +2258,7 @@ class ConversationsPanel(wx.Panel):
         self._cancel_active_recording()
         self._hide_audio_controls()
         self._hide_all_media_controls()
+        self._hide_media_transfer_gauge()
         self._hide_attachment_panel()
         # Clear any active edit state
         if self._editing_message_id is not None:
@@ -2877,9 +2879,10 @@ class ConversationsPanel(wx.Panel):
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
         self._action_download_btn.Hide()
-        gauge = getattr(self, "_media_transfer_gauge", None)
-        if gauge:
-            gauge.Hide()
+        # The transfer gauge is not a selection-specific media control.  Hiding
+        # it here made an in-flight upload/download disappear whenever focus or
+        # message selection changed.  Transfer completion / conversation exit
+        # owns its lifetime instead.
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
         self._contact_msg_jid = None
@@ -9329,7 +9332,7 @@ class ConversationsPanel(wx.Panel):
             if last >= 0:
                 self.messages_list.EnsureVisible(last)
             def _update_upload_progress(progress, local_id=local_id):
-                wx.CallAfter(self._update_media_transfer_gauge, progress)
+                wx.CallAfter(self.update_media_upload_progress, local_id, progress)
 
             pm = PendingMessage(
                 local_id, remote_jid,
