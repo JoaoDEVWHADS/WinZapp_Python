@@ -979,7 +979,8 @@ export default class CreateSessionUtil {
           peerJid: string,
           callId: string,
           isVideo: boolean,
-          isGroup: boolean
+          isGroup: boolean,
+          groupJid: string
         ) => {
           req.io.emit('incomingcall', {
             session: client.session,
@@ -990,6 +991,7 @@ export default class CreateSessionUtil {
               id: callId,
               isVideo: isVideo,
               isGroup: isGroup,
+              groupJid: groupJid,
             },
           });
         }
@@ -1024,6 +1026,12 @@ export default class CreateSessionUtil {
           ].filter((store, index, all) => store && all.indexOf(store) === index);
           const callIdOf = (call: any) =>
             String(call?.id?._serialized || call?.id || '');
+          const groupJidOf = (call: any) =>
+            String(
+              call?.groupJid?._serialized ||
+              call?.groupJid?.toString?.() ||
+              ''
+            );
           const callStateOf = (call: any) => {
             const raw = String(
               call?.getState?.() || call?.state || call?.get?.('state') || ''
@@ -1066,7 +1074,8 @@ export default class CreateSessionUtil {
               peerJid,
               callIdOf(call),
               !!call?.isVideo || !!call?.isVideoCall,
-              !!call?.isGroup || !!call?.isGroupCall
+              !!call?.isGroup || !!call?.isGroupCall,
+              groupJidOf(call)
             );
           };
           const rememberCall = (call: any) => {
@@ -1095,6 +1104,20 @@ export default class CreateSessionUtil {
             }
             return null;
           };
+          const emitIncomingOffer = (call: any, attempt = 0) => {
+            const id = callIdOf(call);
+            const richCall = findCall(id) || call;
+            const isGroup = !!richCall?.isGroup || !!richCall?.isGroupCall;
+            if (isGroup && !groupJidOf(richCall) && attempt < 10) {
+              window.setTimeout(() => {
+                // A terminal Store event removes this id. Do not resurrect a
+                // call that ended while we were waiting for group metadata.
+                if (trackedCalls.has(id)) emitIncomingOffer(call, attempt + 1);
+              }, 100);
+              return;
+            }
+            emitCall('offer', richCall, 'INCOMING_RING');
+          };
 
           // ── Layer 1: WPP.on('call.incoming_call') ──────────────────
           // Uses wa-js's own event, which MAY work if the bug is only
@@ -1103,8 +1126,13 @@ export default class CreateSessionUtil {
           try {
             WPP.on('call.incoming_call', (call: any) => {
               try {
-                emitCall('offer', call, 'INCOMING_RING');
                 rememberCall(call);
+                // The public WA-JS event can be a reduced object: it says the
+                // call is a group call but omits groupJid. CallStore's model
+                // contains the group id, so briefly wait for it before
+                // announcing. The direct Store listener may win this race;
+                // Python deduplicates both events by call id.
+                emitIncomingOffer(call);
               } catch (e) {
                 // Never let one event kill the listener
               }

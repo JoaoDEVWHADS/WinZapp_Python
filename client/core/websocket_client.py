@@ -1440,6 +1440,7 @@ class WebSocketClient:
                 "peerJid": self._clean_jid(
                     payload.get("peerJid") or payload.get("sender") or payload.get("from")
                 ),
+                "groupJid": self._clean_jid(payload.get("groupJid")),
                 "isVideo": bool(payload.get("isVideo", False)),
                 "isGroup": bool(payload.get("isGroup", False)),
             }

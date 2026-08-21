@@ -24,13 +24,16 @@ class _I18n:
     def t(self, key):
         return {
             "incoming_call_announcement": "{name} está te ligando.",
+            "incoming_group_call_announcement": "Chamada em grupo recebida no grupo {name}.",
             "unknown_contact": "Contato desconhecido",
+            "unknown_group": "Grupo sem nome",
         }.get(key, key)
 
 
 class _MainStub:
     _CALL_RINGING_STATES = MainWindow._CALL_RINGING_STATES
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
+    _group_name_from_chat_dict = staticmethod(MainWindow._group_name_from_chat_dict)
     on_incoming_call_event = MainWindow.on_incoming_call_event
     _expire_incoming_call_alert = MainWindow._expire_incoming_call_alert
 
@@ -42,6 +45,8 @@ class _MainStub:
         self.announcements = []
         self.armed_watchdogs = []
         self.cancelled_watchdogs = []
+        self.chats = {}
+        self._group_name_cache = {}
 
     def _arm_incoming_call_watchdog(self, identity):
         self.armed_watchdogs.append(identity)
@@ -77,6 +82,23 @@ def test_offer_announces_and_starts_loop_only_once():
     assert stub._active_incoming_calls == {
         "call-1": "5511999999999@s.whatsapp.net"
     }
+
+
+def test_group_offer_announces_group_name_without_changing_personal_resolution():
+    stub = _MainStub()
+    group_jid = "120363427511142886@g.us"
+    stub.chats[group_jid] = {
+        "remoteJid": group_jid,
+        "groupMetadata": {"subject": "Família"},
+    }
+
+    event = _offer(peer="5511888888888@lid")
+    event.update({"isGroup": True, "groupJid": group_jid})
+    stub.on_incoming_call_event(event)
+
+    assert stub.announcements == [
+        ("Chamada em grupo recebida no grupo Família.", True)
+    ]
 
 
 def test_answered_or_ended_state_stops_the_tone():
@@ -152,6 +174,7 @@ def test_websocket_normalizes_nested_call_payload(monkeypatch):
             "state": "INCOMING_RING",
             "id": "abc",
             "peerJid": {"_serialized": "5511999999999@c.us"},
+            "groupJid": {"_serialized": "120363427511142886@g.us"},
             "isVideo": True,
         },
     })
@@ -161,6 +184,7 @@ def test_websocket_normalizes_nested_call_payload(monkeypatch):
         "state": "INCOMING_RING",
         "id": "abc",
         "peerJid": "5511999999999@s.whatsapp.net",
+        "groupJid": "120363427511142886@g.us",
         "isVideo": True,
         "isGroup": False,
     }]
