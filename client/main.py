@@ -7605,6 +7605,16 @@ class MainWindow(wx.Frame):
         # what WPPConnect's /blocklist endpoint returns (see get_block_list()).
         self._blocked_contacts = set(self.db.get_metadata_json("blocked_contacts", []))
 
+        # 6b. exhausted_chats — conversations WhatsApp Web has no older history
+        # for. It used to live only in memory (fetch_older_messages() even says
+        # "in-memory" in its own log line), which was fine while the only
+        # consumer was a user scrolling up in one conversation: worst case it
+        # asked once more per session. The deep backfill walks every chat back
+        # to its beginning, so an in-memory-only set would make every relaunch
+        # re-walk an account that is already complete — hundreds of pointless
+        # round-trips through the one Puppeteer page, for ever.
+        self._exhausted_chats = set(self.db.get_metadata_json("exhausted_chats", []))
+
         # 7. my_jid / my_lid — previously only ever set at runtime by an
         # online host-device/self-LID lookup (check_wa_connection_http(),
         # resolve_self_lid()), never persisted or restored. _is_self_jid()
@@ -12872,7 +12882,12 @@ class MainWindow(wx.Frame):
                 # finished while this pass was sleeping.
                 pending = sorted(getattr(self, "_chats_awaiting_messages", set()))
                 names_pending = self._pending_name_resolution()
-                if not pending and not names_pending:
+                # Chats that already hold a full page but whose older history
+                # has never been walked. Without this the loop declared itself
+                # finished the moment every chat had 200 messages, which for a
+                # 20,000-message conversation is 1% of it.
+                deep_pending = self._chats_needing_deep_history()
+                if not pending and not names_pending and not deep_pending:
                     if getattr(self, "_history_still_landing", False):
                         # Nothing to re-query yet, but history is still arriving
                         # — keep the loop alive to notice when it does.
@@ -12880,8 +12895,8 @@ class MainWindow(wx.Frame):
                                      "landing — staying on watch.")
                         delay = self._BACKFILL_FIRST_DELAY
                         continue
-                    logging.info("[backfill] Nothing pending — every chat has a full page "
-                                 "of history (or all there is) and a name.")
+                    logging.info("[backfill] Nothing pending — every chat is walked back to "
+                                 "its beginning (or all there is) and has a name.")
                     return
                 # Names get the same second chance as messages. _run_sync()
                 # resolves LIDs exactly once, while WhatsApp Web is still warming
@@ -12891,9 +12906,44 @@ class MainWindow(wx.Frame):
                 if named:
                     wx.CallAfter(self._schedule_set_chats)
 
+                # ── Deep history ─────────────────────────────────────────
+                # Runs every pass, before the short-page work's own early
+                # exit below, so a session whose chats all hold a full page
+                # still makes progress. Each visit pages a few chats a few
+                # windows further back; a chat that needs more comes back on
+                # the next pass, anchored on whatever is now oldest on disk,
+                # so the walk resumes rather than restarting.
+                deep_stored = 0
+                if deep_pending:
+                    window = deep_pending[:self._DEEP_CHATS_PER_PASS]
+                    logging.info(
+                        "[deep-backfill] Pass %d: walking %d of %d chat(s) further back.",
+                        attempt, len(window), len(deep_pending))
+                    for jid in window:
+                        if getattr(self, "_sync_run_id", 0) != my_run:
+                            return
+                        try:
+                            deep_stored += self.deep_backfill_chat(jid)
+                        except Exception as exc:
+                            logging.warning("[deep-backfill] %s failed: %s", jid, exc)
+                    if deep_stored:
+                        logging.info(
+                            "[deep-backfill] Pass %d stored %d older message(s); "
+                            "%d chat(s) still to walk.",
+                            attempt, deep_stored, len(self._chats_needing_deep_history()))
+                        # Real progress renews the clock, capped by the same
+                        # ceiling everything else respects. Deliberately not an
+                        # unbounded loop: the walk is durable — exhausted_chats
+                        # is persisted and the anchor is read from the database
+                        # — so a budget that runs out costs a resume on the next
+                        # launch, not a restart from the newest page.
+                        deadline = min(hard_deadline,
+                                       max(deadline, time.monotonic() + self._BACKFILL_BUDGET))
+
                 if not pending:
-                    # Only names were outstanding this round.
-                    delay = (self._BACKFILL_FIRST_DELAY if named
+                    # No chat is short of a page; names and/or deep history
+                    # were this round's work.
+                    delay = (self._BACKFILL_FIRST_DELAY if (named or deep_stored)
                              else min(delay * 2, self._BACKFILL_MAX_DELAY))
                     continue
 
@@ -12962,7 +13012,7 @@ class MainWindow(wx.Frame):
                 logging.info(
                     "[backfill] Pass %d: %d chat(s) gained messages, %d no longer pending "
                     "(of %d).", attempt, grew, completed, before)
-                if grew > 0 or completed > 0 or named > 0:
+                if grew > 0 or completed > 0 or named > 0 or deep_stored > 0:
                     # Unread badges, the "is this chat worth showing" decision and
                     # the displayed name all depend on this, so rebuild the list.
                     self._schedule_save()
@@ -16022,8 +16072,111 @@ class MainWindow(wx.Frame):
                     return ""
         return ""
 
-    def fetch_older_messages(self, remote_jid, oldest_msg):
-        """Fetch older messages from server starting before the oldest_msg."""
+    # ── Deep history backfill ────────────────────────────────────────────────
+    # Pages a single chat backwards until WhatsApp Web has nothing older. The
+    # ordinary backfill stops the moment a chat holds one page
+    # (_note_backfill_state: `count >= history_page_target()` retires it), so
+    # a 20,000-message conversation kept exactly 200 and the rest only ever
+    # arrived if the user scrolled up to it by hand.
+    #
+    # Pages per chat per visit. Not unbounded: one enormous conversation must
+    # not hold the queue while 900 others wait, and every page is a request
+    # through the single Puppeteer page the whole app shares. A chat that
+    # needs more comes back on the next pass, from where it stopped — the
+    # anchor is whatever is oldest in the database, so progress is durable
+    # across passes and across restarts.
+    _DEEP_PAGES_PER_VISIT = 5
+    # Chats given a deep visit per backfill pass. Small on purpose: with
+    # _DEEP_PAGES_PER_VISIT pages each and a pause between pages, a pass is
+    # already tens of seconds of background traffic, and the ordinary
+    # short-page backfill shares the same pass and the same page.
+    _DEEP_CHATS_PER_PASS = 8
+    # Pause between pages of the same chat. The scroll-up path has a user
+    # waiting and takes none; this has nobody waiting and is competing with
+    # sends, media and live traffic for the page, so it yields.
+    _DEEP_PAGE_DELAY = 1.0
+
+    def _oldest_stored_message(self, remote_jid: str) -> "dict | None":
+        """The oldest message on disk for a chat — the anchor to page before.
+
+        Read from SQLite rather than from self.chats: the in-memory record
+        list is the newest page only, so anchoring on it would re-request the
+        same window on every visit and never advance.
+        """
+        try:
+            rows = self.db.get_messages_asc(remote_jid, limit=1, offset=0)
+        except Exception as exc:
+            logging.warning("[deep-backfill] Could not read oldest message for %s: %s",
+                            remote_jid, exc)
+            return None
+        return rows[0] if rows else None
+
+    def deep_backfill_chat(self, remote_jid: str) -> int:
+        """Page one chat backwards. Returns how many messages were stored.
+
+        Stops on the first page that comes back empty — fetch_older_messages()
+        marks the chat exhausted there (or asks the phone for older history
+        and leaves it re-queryable, in which case the next pass picks up the
+        reply). Also stops when the per-visit page budget runs out, and when
+        the connection drops.
+        """
+        stored = 0
+        for _ in range(self._DEEP_PAGES_PER_VISIT):
+            if not getattr(self, "_wa_connected", False) or getattr(self, "offline_mode", False):
+                break
+            if remote_jid in getattr(self, "_exhausted_chats", set()):
+                break
+            anchor = self._oldest_stored_message(remote_jid)
+            if not anchor:
+                # Nothing stored at all: this is the ordinary backfill's job,
+                # not ours — it has no anchor to page before.
+                break
+            page = self.fetch_older_messages(remote_jid, anchor, store_only=True)
+            if not page:
+                break
+            stored += len(page)
+            time.sleep(self._DEEP_PAGE_DELAY)
+        return stored
+
+    def _chats_needing_deep_history(self) -> list:
+        """Chats holding a full page whose older history has not been walked.
+
+        The complement of the ordinary backfill's queue: that one handles
+        chats *short* of a page, this one handles the chats it retires.
+        """
+        exhausted = getattr(self, "_exhausted_chats", set())
+        target = self.history_page_target()
+        out = []
+        for jid, chat in list(self.chats.items()):
+            if jid in exhausted or jid in self._deleted_chats:
+                continue
+            records = (chat.get("messages", {}).get("messages", {}).get("records")) or []
+            if len(records) >= target:
+                out.append(jid)
+        return out
+
+    def _persist_exhausted_chats(self):
+        """Write the exhausted-chat set to DB metadata. Best effort — losing it
+        only costs one wasted round-trip per chat on the next launch."""
+        try:
+            if getattr(self, "db", None) is not None:
+                self.db.set_metadata_json(
+                    "exhausted_chats", sorted(getattr(self, "_exhausted_chats", set())))
+        except Exception as exc:
+            logging.warning("[history] Could not persist exhausted_chats: %s", exc)
+
+    def fetch_older_messages(self, remote_jid, oldest_msg, store_only: bool = False):
+        """Fetch older messages from server starting before the oldest_msg.
+
+        `store_only` writes the page to SQLite without growing the chat's
+        in-memory record list. The scroll-up path needs that list to grow —
+        the open conversation renders from it — but the deep backfill walks
+        chats back to their very beginning, and appending there would hold
+        every message of every chat in RAM at once. A 935-chat account with
+        20k-message conversations is millions of dicts; nothing needs them
+        resident, and navigate_to_conversation() reloads the page it renders
+        from the database anyway (see conversations.py).
+        """
         remote_jid = self._normalize_jid(remote_jid)
 
         # Check if history is already marked as exhausted in-memory
@@ -16128,6 +16281,7 @@ class MainWindow(wx.Frame):
                         )
                     else:
                         self._exhausted_chats.add(remote_jid)
+                        self._persist_exhausted_chats()
                         logging.info(
                             "[fetch_older_messages] Marked history as exhausted "
                             "in-memory for %s (older-message request %s).",
@@ -16146,6 +16300,22 @@ class MainWindow(wx.Frame):
                             pass
                 
                 if fetched_messages:
+                    if store_only:
+                        # Straight to disk, nothing kept resident. Deliberately
+                        # not routed through the branch below even for the
+                        # dedup: that one dedups against the in-memory page,
+                        # which is the newest 200 and cannot overlap a window
+                        # anchored strictly before the oldest we hold. The
+                        # message table's own (message_id, remote_jid) primary
+                        # key is what makes a repeat harmless anyway.
+                        try:
+                            self.db.insert_messages_batch(remote_jid, fetched_messages)
+                        except Exception as e:
+                            logging.warning(
+                                "[fetch_older_messages] store-only save failed for %s: %s",
+                                remote_jid, e)
+                            return []
+                        return fetched_messages
                     # Update local database/memory
                     chat = self.chats.get(remote_jid, {})
                     if chat:
