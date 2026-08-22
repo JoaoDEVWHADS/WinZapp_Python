@@ -127,6 +127,8 @@ _KEEP_RUNTIME = {"wppconnect_tokens", "userDataDir", "wppconnect.log"}
 # flow) stripped WinZapp's own controller/util/middleware fixes with no
 # restoration step. _run_setup() now stashes their content before the clean
 # step and restores it after extraction, mirroring setup_api.py's approach.
+_CUSTOM_ROOT_FILES = ["start.js", "package.json", "config.json"]
+
 _CUSTOM_SRC_FILES = [
     "src/config.ts",
     "src/index.ts",
@@ -784,12 +786,21 @@ class ApiSetupDialog(wx.Dialog):
         """
         import sys
         creation_flags = 0
-        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-            creation_flags = subprocess.CREATE_NO_WINDOW
+        startup_info = None
+        if sys.platform == "win32":
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            if hasattr(subprocess, "STARTUPINFO"):
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= getattr(
+                    subprocess, "STARTF_USESHOWWINDOW", 0
+                )
+                startup_info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
             self._proc = subprocess.Popen(
                 cmd, cwd=cwd, env=env,
                 creationflags=creation_flags,
+                startupinfo=startup_info,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
@@ -833,7 +844,7 @@ class ApiSetupDialog(wx.Dialog):
 
 
         api_dir  = resource_path("api")
-        puppeteer_cache = resource_path("api", ".cache", "puppeteer")
+        puppeteer_cache = resource_path("api", ".cache")
         npm_env  = {
             **os.environ,
             "PATH": path_env,
@@ -876,7 +887,7 @@ class ApiSetupDialog(wx.Dialog):
                     # for a newer WinZapp release's improved patches to ever
                     # reach an existing install.
                     custom_contents = {}
-                    for rel_path in _CUSTOM_SRC_FILES:
+                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
                         full_path = os.path.join(api_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(full_path):
                             try:
@@ -928,7 +939,7 @@ class ApiSetupDialog(wx.Dialog):
                     # api_dir (which may itself be an outdated/broken copy left
                     # by an older install) — see the comment above custom_contents.
                     patches_dir = resource_path("api_patches")
-                    for rel_path in _CUSTOM_SRC_FILES:
+                    for rel_path in _CUSTOM_SRC_FILES + _CUSTOM_ROOT_FILES:
                         pristine_path = os.path.join(patches_dir, rel_path.replace("/", os.sep))
                         if os.path.isfile(pristine_path):
                             try:

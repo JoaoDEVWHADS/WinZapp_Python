@@ -1,5 +1,36 @@
 const path = require('path');
 const fs = require('fs');
+const childProcess = require('child_process');
+
+// Puppeteer's browser launcher defaults to a detached Chrome process. On
+// Windows a detached GUI/console-capable child can briefly create its own
+// console even when node.exe itself was started with CREATE_NO_WINDOW. Patch
+// the shared child_process module before WPPConnect/Puppeteer is required so
+// every Chrome flavour inherits the hidden, non-detached launch policy.
+if (process.platform === 'win32' && !childProcess.__winzappChromeHidden) {
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = function winzappHiddenSpawn(command, args, options) {
+    const executable = path.basename(String(command || '')).toLowerCase();
+    const isChrome = [
+      'chrome-headless-shell.exe',
+      'chrome.exe',
+      'chromium.exe',
+      'msedge.exe'
+    ].includes(executable);
+    if (isChrome) {
+      options = {
+        ...(options || {}),
+        windowsHide: true,
+        detached: false
+      };
+    }
+    return originalSpawn.call(this, command, args, options);
+  };
+  Object.defineProperty(childProcess, '__winzappChromeHidden', {
+    value: true,
+    enumerable: false
+  });
+}
 
 // Garante que o Puppeteer saiba onde encontrar o cache do Chrome
 const puppeteerCacheDir = path.join(__dirname, '.cache');
@@ -98,7 +129,7 @@ function headlessShellDestForZip(zipPath) {
 // Extract a ZIP the way puppeteer's own bundled unzip failed to. PowerShell's
 // Expand-Archive ships with every supported Windows; unzip covers dev/Linux.
 function extractZip(zipPath, destDir) {
-  const { execSync } = require('child_process');
+  const { execSync } = childProcess;
   try {
     fs.mkdirSync(destDir, { recursive: true });
   } catch (e) {}
@@ -106,7 +137,7 @@ function extractZip(zipPath, destDir) {
     execSync(
       'powershell -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force"`,
-      { stdio: 'inherit' }
+      { stdio: 'inherit', windowsHide: true }
     );
   } else {
     execSync(`unzip -o "${zipPath}" -d "${destDir}"`, { stdio: 'inherit' });
@@ -116,7 +147,7 @@ function extractZip(zipPath, destDir) {
 if (!findHeadlessShell()) {
   console.log('[chrome-install] chrome-headless-shell não encontrado. Instalando automaticamente (isso pode levar alguns minutos)...');
   try {
-    const { execSync } = require('child_process');
+    const { execSync } = childProcess;
     const nodeDir = path.dirname(process.execPath);
     const env = {
       ...process.env,
@@ -139,7 +170,8 @@ if (!findHeadlessShell()) {
     execSync(npxCmd, {
       cwd: __dirname,
       stdio: 'inherit',
-      env: env
+      env: env,
+      windowsHide: true
     });
     console.log('[chrome-install] chrome-headless-shell instalado com sucesso!');
   } catch (err) {

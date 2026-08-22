@@ -4646,6 +4646,25 @@ class ConversationsPanel(wx.Panel):
                 logging.info(f"[_load_older_messages_from_server thread] Launching fetch_older_messages for {phone_jid_val}")
                 fetched = self.main_window.fetch_older_messages(phone_jid_val, oldest_msg)
                 logging.info(f"[_load_older_messages_from_server thread] fetch_older_messages returned {len(fetched) if fetched is not None else 'None'}")
+                if fetched is None:
+                    # An accepted phone-history request completes asynchronously.
+                    # Keep this one worker alive and poll the browser store instead
+                    # of clearing the loading flag and making the user press Home
+                    # repeatedly.  Background sync no longer sends competing phone
+                    # requests, so this is the only interactive request in flight.
+                    fetched = self.main_window.wait_for_older_messages(
+                        phone_jid_val,
+                        oldest_msg,
+                        should_continue=lambda: bool(
+                            self.conversation
+                            and self.conversation.get("remoteJid") == phone_jid_val
+                        ),
+                    )
+                    logging.info(
+                        "[_load_older_messages_from_server thread] wait_for_older_messages "
+                        "returned %s",
+                        len(fetched) if fetched is not None else "None",
+                    )
                 if fetched is not None:
                     if fetched:
                         wx.CallAfter(self._on_older_messages_loaded, fetched, phone_jid_val)
@@ -4708,11 +4727,17 @@ class ConversationsPanel(wx.Panel):
             logging.info(f"[_on_older_messages_loaded] n_new={n_new}, displayable_count={len(displayable)}, total={len(self._sorted_messages)}")
             
             if n_new == 0:
-                # All fetched messages are duplicates — we've reached the beginning
+                # A repeated/fallback page is not proof that the conversation
+                # ended. The get-messages bridge can re-anchor on a page it
+                # already holds when the requested anchor has not landed yet.
+                # Only fetch_older_messages() returning [] after WhatsApp's
+                # explicit endOfHistoryTransferType=1 may set reached_start.
                 phone_jid_val = self.conversation.get("remoteJid", "") if self.conversation else ""
-                logging.info(f"[_on_older_messages_loaded] No new messages after dedup — marking reached_server_start for {phone_jid_val}")
-                if phone_jid_val:
-                    self._reached_server_start[phone_jid_val] = True
+                logging.info(
+                    "[_on_older_messages_loaded] No new messages after dedup for %s; "
+                    "keeping older-history scroll re-queryable.",
+                    phone_jid_val,
+                )
                 return
             
             self._recompute_unread_sep_idx()
