@@ -1215,8 +1215,10 @@ class ConversationsPanel(wx.Panel):
                 configured_limit = int(self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200))
                 unread_count = int(conversation.get("unreadCount") or 0)
                 limit = db_fetch_limit(configured_limit, unread_count)
-                # Private chats also contain non-displayable protocol events;
-                # retain the raw-row margin from current main before filtering.
+                # Keep the configured limit as a visible-row limit. Private
+                # chats also store non-displayable WhatsApp events (ciphertext,
+                # reactions, pin updates), so read a raw margin and let
+                # populate_messages() filter first and paginate afterwards.
                 if not _conv_jid.endswith("@g.us"):
                     limit += 50
                 db_msgs = self.main_window.db.get_messages(_conv_jid, limit=limit)

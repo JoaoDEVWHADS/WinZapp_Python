@@ -14462,7 +14462,13 @@ class MainWindow(wx.Frame):
         limit = int(self.settings.get("user_interface", {}).get("messages_page_size", 200))
         if chat.get("_sync_limit"):
             limit = int(chat["_sync_limit"])
-        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={limit}"
+        # A private chat's raw WhatsApp window can contain ciphertext, pin and
+        # reaction events that intentionally do not become rows in the UI.  Ask
+        # for a small raw margin so those internal records do not consume the
+        # configured number of *visible* messages (e.g. 193/199 instead of 200).
+        # Groups already deliver a full visible page and keep their exact limit.
+        fetch_limit = limit if remote_jid.endswith("@g.us") else limit + 50
+        url = f"{self.wpp_server}:{self.wpp_port}/api/{self.token}/get-messages/{phone}?count={fetch_limit}"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
