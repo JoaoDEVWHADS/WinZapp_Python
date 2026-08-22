@@ -1446,12 +1446,42 @@ class WebSocketClient:
         except Exception:
             logging.exception("[WebSocketClient] on_wpp_reaction error")
 
+    @staticmethod
+    def _call_timestamp_seconds(value):
+        """Normalize WhatsApp call timestamps to epoch seconds.
+
+        The public IncomingCall contract uses seconds, but internal CallStore
+        models and custom bridges may expose milliseconds or microseconds.
+        Invalid/relative values intentionally become zero so they cannot be
+        mistaken for a trustworthy session-age signal.
+        """
+        if isinstance(value, bool):
+            return 0
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if numeric >= 1_000_000_000_000_000:
+            numeric /= 1_000_000
+        elif numeric >= 1_000_000_000_000:
+            numeric /= 1_000
+        if numeric < 1_000_000_000:
+            return 0
+        return int(numeric)
+
     def on_wpp_incoming_call(self, data):
         """Forward WPPConnect call lifecycle events to the wx main thread."""
         try:
             if not isinstance(data, dict) or not self._belongs_to_this_session(data):
                 return
             payload = data.get("data") if isinstance(data.get("data"), dict) else data
+            call_timestamp = self._call_timestamp_seconds(
+                payload.get("timestamp")
+                or payload.get("offerTime")
+                or payload.get("t")
+                or payload.get("startTime")
+            )
+            observed_at = self._call_timestamp_seconds(payload.get("observedAt"))
             normalized = {
                 "event": str(payload.get("event") or payload.get("status") or "offer"),
                 "state": str(payload.get("state") or ""),
@@ -1462,6 +1492,11 @@ class WebSocketClient:
                 "groupJid": self._clean_jid(payload.get("groupJid")),
                 "isVideo": bool(payload.get("isVideo", False)),
                 "isGroup": bool(payload.get("isGroup", False)),
+                "timestamp": call_timestamp,
+                "observedAt": observed_at,
+                "receivedWhileOffline": bool(
+                    payload.get("offerReceivedWhileOffline", False)
+                ),
             }
             if not normalized["id"] and not normalized["peerJid"]:
                 logging.warning("[WebSocketClient] incomingcall without id or peer: %r", data)

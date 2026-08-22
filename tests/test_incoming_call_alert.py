@@ -62,6 +62,7 @@ class _I18n:
 
 class _MainStub:
     _CALL_RINGING_STATES = MainWindow._CALL_RINGING_STATES
+    _CALL_EVENT_START_GRACE_SECONDS = MainWindow._CALL_EVENT_START_GRACE_SECONDS
     _normalize_jid = staticmethod(MainWindow._normalize_jid)
     _group_name_from_chat_dict = staticmethod(MainWindow._group_name_from_chat_dict)
     on_incoming_call_event = MainWindow.on_incoming_call_event
@@ -90,6 +91,7 @@ class _MainStub:
         self.wpp_server = "http://127.0.0.1"
         self.wpp_port = 6300
         self.token = "session-token"
+        self._wa_startup_time = 2_000_000_000
 
     def _arm_incoming_call_watchdog(self, identity):
         self.armed_watchdogs.append(identity)
@@ -141,6 +143,43 @@ def test_disabled_call_alerts_ignore_new_offer():
     stub.on_incoming_call_event(_offer())
 
     assert stub.announcements == []
+    assert stub.call_incoming_sound.play_calls == 0
+    assert stub._active_incoming_calls == {}
+
+
+def test_offer_from_before_current_session_is_ignored():
+    stub = _MainStub()
+    event = _offer()
+    event["timestamp"] = int(stub._wa_startup_time) - 60
+
+    stub.on_incoming_call_event(event)
+
+    assert stub.announcements == []
+    assert stub.call_incoming_sound.play_calls == 0
+    assert stub._active_incoming_calls == {}
+
+
+def test_offer_inside_startup_grace_is_still_live():
+    stub = _MainStub()
+    event = _offer()
+    event["timestamp"] = int(stub._wa_startup_time) - 3
+
+    stub.on_incoming_call_event(event)
+
+    assert stub.call_incoming_sound.play_calls == 1
+    assert set(stub._active_incoming_calls) == {"call-1"}
+
+
+def test_offer_received_while_offline_is_ignored_even_if_recent():
+    stub = _MainStub()
+    event = _offer()
+    event.update({
+        "timestamp": int(stub._wa_startup_time) + 1,
+        "receivedWhileOffline": True,
+    })
+
+    stub.on_incoming_call_event(event)
+
     assert stub.call_incoming_sound.play_calls == 0
     assert stub._active_incoming_calls == {}
 
@@ -267,6 +306,7 @@ def test_websocket_normalizes_nested_call_payload(monkeypatch):
     )
     stub._belongs_to_this_session = WebSocketClient._belongs_to_this_session.__get__(stub)
     stub._clean_jid = WebSocketClient._clean_jid.__get__(stub)
+    stub._call_timestamp_seconds = WebSocketClient._call_timestamp_seconds
 
     WebSocketClient.on_wpp_incoming_call(stub, {
         "session": "session-a",
@@ -277,6 +317,8 @@ def test_websocket_normalizes_nested_call_payload(monkeypatch):
             "peerJid": {"_serialized": "5511999999999@c.us"},
             "groupJid": {"_serialized": "120363427511142886@g.us"},
             "isVideo": True,
+            "offerTime": 2_000_000_001_000,
+            "observedAt": 2_000_000_002,
         },
     })
 
@@ -288,4 +330,17 @@ def test_websocket_normalizes_nested_call_payload(monkeypatch):
         "groupJid": "120363427511142886@g.us",
         "isVideo": True,
         "isGroup": False,
+        "timestamp": 2_000_000_001,
+        "observedAt": 2_000_000_002,
+        "receivedWhileOffline": False,
     }]
+
+
+def test_call_timestamp_normalizer_handles_seconds_millis_and_micros():
+    normalize = WebSocketClient._call_timestamp_seconds
+
+    assert normalize(2_000_000_001) == 2_000_000_001
+    assert normalize(2_000_000_001_000) == 2_000_000_001
+    assert normalize(2_000_000_001_000_000) == 2_000_000_001
+    assert normalize("invalid") == 0
+    assert normalize(True) == 0

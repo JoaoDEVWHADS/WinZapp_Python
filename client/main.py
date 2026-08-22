@@ -3972,6 +3972,10 @@ class MainWindow(wx.Frame):
         "", "3", "8", "OFFER", "INCOMING_RING", "RINGING",
     })
     _CALL_ALERT_MAX_SECONDS = 120
+    # A call may start a few seconds before the local socket/listener finishes
+    # connecting. Keep that startup race valid, but never alert for an offer
+    # whose WhatsApp timestamp clearly predates this WinZapp session.
+    _CALL_EVENT_START_GRACE_SECONDS = 5
 
     def _cancel_incoming_call_watchdog(self, identity: str):
         timer = self._incoming_call_watchdogs.pop(identity, None)
@@ -4091,6 +4095,33 @@ class MainWindow(wx.Frame):
         is_ringing = state in self._CALL_RINGING_STATES and (
             bool(state) or event_name in ("offer", "ringing", "incoming")
         )
+
+        if is_ringing:
+            try:
+                call_timestamp = int(event.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                call_timestamp = 0
+            try:
+                session_started_at = float(getattr(self, "_wa_startup_time", 0) or 0)
+            except (TypeError, ValueError):
+                session_started_at = 0
+            received_while_offline = bool(event.get("receivedWhileOffline", False))
+            predates_session = (
+                call_timestamp > 0
+                and session_started_at > 0
+                and call_timestamp
+                < session_started_at - self._CALL_EVENT_START_GRACE_SECONDS
+            )
+            if received_while_offline or predates_session:
+                logging.info(
+                    "[incoming_call] ignoring historical offer id=%s "
+                    "call_ts=%s session_started=%.0f offline=%s",
+                    call_id,
+                    call_timestamp,
+                    session_started_at,
+                    received_while_offline,
+                )
+                return
 
         # State changes away from INCOMING_RING mean the call was answered on
         # another device, rejected, missed, failed, or otherwise ended.
