@@ -70,6 +70,44 @@ _SAVEABLE_MESSAGE_TYPES = frozenset({
 })
 
 
+class _FocusedTransferGaugeAccessible(wx.Accessible):
+    """Expose value changes to screen readers only while the gauge has focus."""
+
+    def __init__(self, gauge):
+        super().__init__()
+        self._gauge = gauge
+
+    def GetState(self, childId):
+        state = wx.ACC_STATE_SYSTEM_FOCUSABLE
+        if self._gauge.HasFocus():
+            state |= wx.ACC_STATE_SYSTEM_FOCUSED
+        else:
+            # NVDA's native ProgressBar handler deliberately ignores value
+            # changes carrying INVISIBLE/OFFSCREEN. The gauge remains visible
+            # on screen; only unsolicited accessibility updates are suppressed.
+            state |= wx.ACC_STATE_SYSTEM_INVISIBLE
+        return (wx.ACC_OK, state)
+
+
+class _FocusedTransferGauge(wx.Gauge):
+    """Native gauge reachable by Tab, with focus-scoped NVDA progress output."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.SetAccessible(_FocusedTransferGaugeAccessible(self))
+        self.Bind(wx.EVT_LEFT_DOWN, self._focus_from_mouse)
+
+    def AcceptsFocus(self):
+        return True
+
+    def AcceptsFocusFromKeyboard(self):
+        return True
+
+    def _focus_from_mouse(self, event):
+        self.SetFocus()
+        event.Skip()
+
+
 def message_caption(msg) -> str:
     """The caption carried by an image/video/document message, '' otherwise.
 
@@ -553,7 +591,7 @@ class ConversationsPanel(wx.Panel):
             wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5,
         )
 
-        self._media_transfer_gauge = wx.Gauge(
+        self._media_transfer_gauge = _FocusedTransferGauge(
             self._media_action_slot,
             range=100,
             style=wx.GA_HORIZONTAL | wx.GA_SMOOTH,
@@ -587,6 +625,7 @@ class ConversationsPanel(wx.Panel):
         self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
         self._media_action_sizer.Add(self._action_download_btn, 0, wx.TOP, 2)
         self._action_download_btn.Hide()
+        self._media_action_slot.Hide()
 
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
@@ -2116,6 +2155,7 @@ class ConversationsPanel(wx.Panel):
         self._action_open_btn.SetLabel(self.main_window.i18n.t("open"))
         self._action_open_btn.Show()
         self._action_save_as_btn.Show()
+        self._sync_media_action_slot_visibility()
         self.conversation_panel.Layout()
 
     def refresh_message_status(self, msg_id: str, status: str):
@@ -3059,6 +3099,8 @@ class ConversationsPanel(wx.Panel):
         # ── Mention detection ─────────────────────────────────────────────
         self._update_mentions_panel(self._extract_mentions(msg))
 
+        self._sync_media_action_slot_visibility()
+
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
         idx = self.messages_list.GetFocusedItem()
@@ -3416,6 +3458,7 @@ class ConversationsPanel(wx.Panel):
         # it here made an in-flight upload/download disappear whenever focus or
         # message selection changed.  Transfer completion / conversation exit
         # owns its lifetime instead.
+        self._sync_media_action_slot_visibility()
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
         self._contact_msg_jid = None
@@ -5711,6 +5754,7 @@ class ConversationsPanel(wx.Panel):
                     self._action_save_as_btn.Show()
                 else:
                     self._action_download_btn.Show()
+                self._sync_media_action_slot_visibility()
                 self.conversation_panel.Layout()
 
             wx.CallAfter(_done)
@@ -7764,7 +7808,13 @@ class ConversationsPanel(wx.Panel):
         for index, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") != upload_id:
                 continue
-            self._update_media_transfer_gauge(progress)
+            if progress < 1.0:
+                self._update_media_transfer_gauge(progress)
+            else:
+                # Byte transfer is done. Waiting for WhatsApp's later SENT ACK
+                # still keeps document actions locked, but it must not leave a
+                # completed progress bar fixed on screen.
+                self._sync_pending_document_gauge()
             # Also repaint the message row with a textual percentage. Native
             # gauges are not consistently announced by Windows screen readers.
             self.messages_list.SetItemText(index, self._render_message_line(msg))
@@ -7772,21 +7822,16 @@ class ConversationsPanel(wx.Panel):
             break
 
     def _sync_pending_document_gauge(self, preferred_local_id: str = ""):
-        """Restore the gauge for any active upload and document SENT wait.
+        """Restore the gauge only while bytes are genuinely transferring.
 
-        Reaching 100% is intentionally *not* a completion signal: it means the
-        bytes have reached the WPPConnect side. WhatsApp may still be uploading
-        / acknowledging the message, so the gauge remains at 100 until a SENT
-        (or later) status clears ``_awaiting_sent_ack``.
+        WhatsApp's SENT acknowledgement independently controls when document
+        actions unlock; it never keeps a completed progress bar visible.
         """
         waiting = [
             msg for msg in self._sorted_messages
-            if msg.get("_local_id") and (
-                msg.get("_local_pending") or (
-                    msg.get("messageType") == "documentMessage"
-                    and msg.get("_awaiting_sent_ack")
-                )
-            )
+            if msg.get("_local_id")
+            and msg.get("_local_pending")
+            and self._media_upload_progress.get(msg.get("_local_id", ""), 0.0) < 1.0
         ]
         if not waiting:
             self._hide_media_transfer_gauge()
@@ -7799,9 +7844,7 @@ class ConversationsPanel(wx.Panel):
                 None,
             )
         if target is None:
-            # Prefer an upload actually moving right now; otherwise keep the
-            # first waiting document visible (typically sitting at 100% while
-            # waiting for WhatsApp's SENT acknowledgement).
+            # Prefer an upload already moving over one still at byte zero.
             target = next(
                 (msg for msg in waiting
                  if 0.0 < self._media_upload_progress.get(msg.get("_local_id", ""), 0.0) < 1.0),
@@ -7810,6 +7853,26 @@ class ConversationsPanel(wx.Panel):
         local_id = target.get("_local_id", "")
         progress = self._media_upload_progress.get(local_id, 0.0)
         self._update_media_transfer_gauge(progress)
+
+    def _sync_media_action_slot_visibility(self):
+        """Remove the complete action row whenever none of its children show."""
+        slot = getattr(self, "_media_action_slot", None)
+        if slot is None:
+            return
+        controls = (
+            getattr(self, "_media_transfer_gauge", None),
+            getattr(self, "_action_open_btn", None),
+            getattr(self, "_action_save_as_btn", None),
+            getattr(self, "_action_download_btn", None),
+        )
+        visible = any(control is not None and control.IsShown() for control in controls)
+        slot.Show(visible)
+        outer = self.conversation_panel.GetSizer()
+        if outer is not None:
+            try:
+                outer.Show(slot, visible, recursive=True)
+            except TypeError:
+                outer.Show(slot, visible)
 
     def _set_media_transfer_gauge_visible(self, visible: bool):
         """Show/hide the gauge as both a window and a sizer item.
@@ -7823,6 +7886,8 @@ class ConversationsPanel(wx.Panel):
         if gauge is None:
             return
         gauge.Show(visible)
+        if visible:
+            self._media_action_slot.Show()
         sizer = gauge.GetContainingSizer()
         if sizer is not None:
             try:
@@ -7831,6 +7896,8 @@ class ConversationsPanel(wx.Panel):
                 # wxPython builds differ on the recursive keyword for Show().
                 sizer.Show(gauge, visible)
         self._media_action_slot.Layout()
+        if not visible:
+            self._sync_media_action_slot_visibility()
         self.conversation_panel.Layout()
         self.Layout()
         self.conversation_panel.Refresh()
@@ -11034,6 +11101,13 @@ class ConversationsPanel(wx.Panel):
             )
             self._register_virtual_msg(virtual_msg)
             self._media_upload_progress[local_id] = 0.0
+
+            # A document has no Open/Save As controls until SENT, so establish
+            # its progress UI synchronously before any cache/enqueue worker can
+            # race ahead. The gauge disappears when byte transfer reaches 100%;
+            # the SENT ACK independently controls when actions unlock.
+            if media_type == "document":
+                self._show_media_transfer_gauge()
 
             # Pre-cache the file under local_id BEFORE enqueueing the actual
             # send: _mark_message_sent() renames the cache entry from
