@@ -189,7 +189,7 @@ class TestWalkingOneChatBack:
         stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
         assert stub.deep_backfill_chat("chat@g.us") == 0
         assert len(stub.calls) == 1
-        assert stub.requested == []
+        assert stub.requested == ["chat@g.us"]
         stalled_identity, retry_at = stub._deep_stalled_anchors["chat@g.us"]
         assert stalled_identity == (1_700_000_005, "m5")
         assert retry_at > main.time.monotonic()
