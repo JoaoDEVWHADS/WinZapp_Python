@@ -16911,7 +16911,23 @@ class MainWindow(wx.Frame):
                 older_requested = getattr(self, "_older_requested_chats", None)
                 if not isinstance(older_requested, dict):
                     older_requested = self._older_requested_chats = {}
-                if remote_jid not in older_requested:
+                # Repeatable, not once-per-install. This used to ask only if
+                # the chat had never been asked, and the map is persisted, so
+                # the first request was the only one it would ever get: any
+                # later end-of-IndexedDB sent nothing, and a conversation that
+                # needs several on-demand cycles stayed truncated for good.
+                #
+                # Gated by the same grace that governs writing a chat off, so
+                # asking again is never cheaper than waiting for the answer
+                # already outstanding. Resetting the clock also has a second,
+                # deliberate effect: fetch_older_messages() only PERSISTS
+                # exhaustion once a full grace has passed since the last ask,
+                # so a chat we are still actively asking about can no longer be
+                # written off permanently while a request is in flight.
+                asked_at = older_requested.get(remote_jid)
+                due = (asked_at is None
+                       or (time.time() - asked_at) >= self._OLDER_REQUEST_GRACE)
+                if due:
                     older_requested[remote_jid] = time.time()
                     self._persist_older_requested()
                     requested = bool(self.request_older_messages(remote_jid))
