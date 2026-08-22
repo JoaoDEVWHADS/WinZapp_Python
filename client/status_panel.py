@@ -2163,7 +2163,7 @@ class StatusPanel(wx.Panel):
             daemon=True,
         ).start()
 
-    def _send_status_voice_bg(self, path: str, is_temp_file: bool = False):
+    def _send_status_voice_bg(self, path: str, is_temp_file: bool = False, report_result: bool = True) -> bool:
         """Background: convert *path* to OGG/Opus (WhatsApp's own voice-
         message codec — main_window._convert_wav_to_ogg() despite the name
         just runs it through ffmpeg, which reads the real container/codec
@@ -2178,6 +2178,13 @@ class StatusPanel(wx.Panel):
         recorded WAV) — deleting *path* unconditionally used to also
         delete the user's own picked file (e.g. an .mp3 chosen from the
         media picker) right out from under them.
+
+        *report_result* controls whether a failure pops its own MessageBox
+        here. _send_all_media_statuses_bg() passes False and aggregates
+        instead — one popup per file used to stack into a flood of blocking
+        dialogs when several files in a batch failed at once (same failure
+        mode already fixed for save_data(), see main.py's
+        _SAVE_ERROR_DIALOG_COOLDOWN comment).
         """
         mw = self.main_window
         ogg_path = mw._convert_wav_to_ogg(path)
@@ -2187,13 +2194,15 @@ class StatusPanel(wx.Panel):
             except Exception:
                 pass
         if not ogg_path or not os.path.isfile(ogg_path):
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("audio_convert_failed"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
+            logging.error("[status audio] Failed to convert %s to OGG/Opus", path)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("audio_convert_failed"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
         try:
             with open(ogg_path, "rb") as fh:
                 audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
@@ -2218,12 +2227,14 @@ class StatusPanel(wx.Panel):
             wx.CallAfter(self._on_status_sent)
         else:
             logging.error("[status audio] send-status-voice-base64 failed: %s", err_msg)
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+        return ok
 
     # ── Send text status ─────────────────────────────────────────────────────
 
@@ -2360,6 +2371,16 @@ class StatusPanel(wx.Panel):
         ).start()
 
     def _send_all_media_statuses_bg(self, paths: list, caption: str):
+        """Send every file in *paths* sequentially, then report once.
+
+        Each per-file helper is called with report_result=False so a batch
+        where several files fail doesn't stack one blocking MessageBox per
+        failure — that used to flood the screen with "status_error" dialogs
+        one after another. Failures are still logged individually by the
+        helpers; only the popup is deferred to a single summary here.
+        """
+        mw = self.main_window
+        failures = 0
         for path in paths:
             ext = os.path.splitext(path)[1].lower()
             if ext in (".mp3", ".ogg", ".wav", ".m4a", ".aac"):
@@ -2369,11 +2390,20 @@ class StatusPanel(wx.Panel):
                 # video one below, which has no audio branch at all. Voice
                 # notes don't carry a caption in the official client either,
                 # so it's intentionally dropped here.
-                self._send_status_voice_bg(path)
+                ok = self._send_status_voice_bg(path, report_result=False)
             else:
-                self._send_media_status_bg(path, caption)
+                ok = self._send_media_status_bg(path, caption, report_result=False)
+            if not ok:
+                failures += 1
+        if failures:
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{mw.i18n.t('status_error')} ({failures}/{len(paths)})",
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
 
-    def _send_media_status_bg(self, path: str, caption: str):
+    def _send_media_status_bg(self, path: str, caption: str, report_result: bool = True) -> bool:
         mw = self.main_window
         ext      = os.path.splitext(path)[1].lower()
         mimetype = mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -2382,25 +2412,29 @@ class StatusPanel(wx.Panel):
         elif ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
             media_type = "image"
         else:
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
+            logging.error("[status media] Unsupported file extension for status: %s", path)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
 
         try:
             with open(path, "rb") as fh:
                 data_b64 = base64.b64encode(fh.read()).decode("utf-8")
-        except Exception:
-            wx.CallAfter(
-                wx.MessageBox,
-                mw.i18n.t("status_error"),
-                mw.app_name,
-                wx.OK | wx.ICON_ERROR,
-            )
-            return
+        except Exception as exc:
+            logging.error("[status media] Failed to read/encode %s: %s", path, exc)
+            if report_result:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    mw.i18n.t("status_error"),
+                    mw.app_name,
+                    wx.OK | wx.ICON_ERROR,
+                )
+            return False
 
         endpoint = "send-image-storie" if media_type == "image" else "send-video-storie"
         url = f"{mw.wpp_server}:{mw.wpp_port}/api/{mw.token}/{endpoint}"
@@ -2420,17 +2454,24 @@ class StatusPanel(wx.Panel):
         try:
             resp = api_post(url, json=payload, headers=headers, timeout=30)
             ok   = resp.status_code in (200, 201)
-        except Exception:
+            if not ok:
+                logging.warning(
+                    "[status media] %s failed: HTTP %s: %s",
+                    endpoint, resp.status_code, (resp.text or "")[:200],
+                )
+        except Exception as exc:
             ok = False
+            logging.warning("[status media] %s failed: %s", endpoint, exc)
         if ok:
             wx.CallAfter(self._on_status_sent)
-        else:
+        elif report_result:
             wx.CallAfter(
                 wx.MessageBox,
                 mw.i18n.t("status_error"),
                 mw.app_name,
                 wx.OK | wx.ICON_ERROR,
             )
+        return ok
 
     # ── Labels refresh ───────────────────────────────────────────────────────
 
