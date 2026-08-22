@@ -69,7 +69,7 @@ class TestFetchHistorySyncStatus:
         stub = _Stub()
         payload = {"backendWorkerBridgeReady": True, "storeCounts": {"message": 9000}}
         monkeypatch.setattr(
-            "main.requests.get",
+            "main.api_get",
             lambda *a, **k: _Response(200, {"status": "success", "response": payload}),
         )
         assert stub.fetch_history_sync_status() == payload
@@ -80,13 +80,13 @@ class TestFetchHistorySyncStatus:
         def _boom(*a, **k):
             raise AssertionError("must not hit the API while disconnected")
 
-        monkeypatch.setattr("main.requests.get", _boom)
+        monkeypatch.setattr("main.api_get", _boom)
         assert stub.fetch_history_sync_status() is None
 
     def test_missing_route_is_not_fatal(self, monkeypatch):
         """An older client/api/ build simply has no such endpoint."""
         stub = _Stub()
-        monkeypatch.setattr("main.requests.get", lambda *a, **k: _Response(404, text="nope"))
+        monkeypatch.setattr("main.api_get", lambda *a, **k: _Response(404, text="nope"))
         assert stub.fetch_history_sync_status() is None
 
     def test_transport_error_is_swallowed(self, monkeypatch):
@@ -95,7 +95,7 @@ class TestFetchHistorySyncStatus:
         def _raise(*a, **k):
             raise OSError("connection refused")
 
-        monkeypatch.setattr("main.requests.get", _raise)
+        monkeypatch.setattr("main.api_get", _raise)
         assert stub.fetch_history_sync_status() is None
 
 
@@ -171,7 +171,7 @@ class TestRequestOlderMessages:
             seen["url"] = url
             return _Response(200, {"status": "success", "response": {"requested": True}})
 
-        monkeypatch.setattr("main.requests.post", _post)
+        monkeypatch.setattr("main.api_post", _post)
         assert stub.request_older_messages("5535999999999@s.whatsapp.net") is True
         assert seen["url"].endswith("/request-older-messages/5535999999999@c.us")
 
@@ -181,7 +181,7 @@ class TestRequestOlderMessages:
         stub._phone_to_lid["5535999999999@s.whatsapp.net"] = "12345@lid"
         seen = {}
         monkeypatch.setattr(
-            "main.requests.post",
+            "main.api_post",
             lambda url, **k: (
                 seen.__setitem__("url", url),
                 _Response(200, {"status": "success", "response": {"requested": True}}),
@@ -194,7 +194,7 @@ class TestRequestOlderMessages:
         stub = _Stub()
         seen = {}
         monkeypatch.setattr(
-            "main.requests.post",
+            "main.api_post",
             lambda url, **k: (
                 seen.__setitem__("url", url),
                 _Response(200, {"status": "success", "response": {"requested": True}}),
@@ -207,7 +207,7 @@ class TestRequestOlderMessages:
         """WhatsApp Web disables on-demand sending after repeated failures."""
         stub = _Stub()
         monkeypatch.setattr(
-            "main.requests.post",
+            "main.api_post",
             lambda *a, **k: _Response(
                 500,
                 {"status": "error", "response": {"error": "on-demand requests disabled"}},
@@ -218,10 +218,48 @@ class TestRequestOlderMessages:
     def test_200_without_requested_flag_is_not_a_success(self, monkeypatch):
         stub = _Stub()
         monkeypatch.setattr(
-            "main.requests.post",
+            "main.api_post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {"requested": False}}),
         )
         assert stub.request_older_messages("120363000000000000@g.us") is False
+
+    def test_inflight_request_counts_as_active(self, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            "main.api_post",
+            lambda *a, **k: _Response(200, {"status": "success", "response": {
+                "requested": False, "inFlight": True,
+                "endOfHistoryTransferType": 2, "endOfHistory": False,
+            }}),
+        )
+        assert stub.request_older_messages("120363000000000000@g.us") is True
+
+    def test_explicit_end_type_one_is_recorded(self, monkeypatch):
+        stub = _Stub()
+        jid = "120363000000000000@g.us"
+        monkeypatch.setattr(
+            "main.api_post",
+            lambda *a, **k: _Response(200, {"status": "success", "response": {
+                "requested": False, "endOfHistoryTransferType": 1,
+                "endOfHistory": True,
+            }}),
+        )
+        assert stub.request_older_messages(jid) is False
+        assert jid in stub._older_request_confirmed_end
+
+    def test_type_two_is_not_mistaken_for_end_even_if_helper_says_false(self, monkeypatch):
+        stub = _Stub()
+        jid = "120363000000000000@g.us"
+        monkeypatch.setattr(
+            "main.api_post",
+            lambda *a, **k: _Response(200, {"status": "success", "response": {
+                "requested": True, "endOfHistoryTransferType": 2,
+                "endOfHistory": False, "primaryHasMore": False,
+                "moreOnPrimary": True,
+            }}),
+        )
+        assert stub.request_older_messages(jid) is True
+        assert jid not in getattr(stub, "_older_request_confirmed_end", set())
 
     def test_disconnected_session_never_calls_the_api(self, monkeypatch):
         stub = _Stub(connected=False)
@@ -229,7 +267,7 @@ class TestRequestOlderMessages:
         def _boom(*a, **k):
             raise AssertionError("must not hit the API while disconnected")
 
-        monkeypatch.setattr("main.requests.post", _boom)
+        monkeypatch.setattr("main.api_post", _boom)
         assert stub.request_older_messages("120363000000000000@g.us") is False
 
     def test_transport_error_is_swallowed(self, monkeypatch):
@@ -238,7 +276,7 @@ class TestRequestOlderMessages:
         def _raise(*a, **k):
             raise OSError("connection refused")
 
-        monkeypatch.setattr("main.requests.post", _raise)
+        monkeypatch.setattr("main.api_post", _raise)
         assert stub.request_older_messages("120363000000000000@g.us") is False
 
 
@@ -336,7 +374,7 @@ class TestUnblockHistorySync:
     def test_removed_chunks_are_reported_loudly(self, monkeypatch, caplog):
         stub = _Stub()
         monkeypatch.setattr(
-            "main.requests.post",
+            "main.api_post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {
                 "recentCompleted": False, "unprocessed": 26, "recentWaiting": 22,
                 "onDemandPending": 4, "removed": ["a", "b", "c", "d"],
@@ -353,7 +391,7 @@ class TestUnblockHistorySync:
     def test_healthy_queue_is_a_quiet_no_op(self, monkeypatch, caplog):
         stub = _Stub()
         monkeypatch.setattr(
-            "main.requests.post",
+            "main.api_post",
             lambda *a, **k: _Response(200, {"status": "success", "response": {
                 "recentCompleted": True, "unprocessed": 0, "recentWaiting": 0,
                 "onDemandPending": 0, "removed": [],
@@ -368,7 +406,7 @@ class TestUnblockHistorySync:
     def test_missing_route_is_not_fatal(self, monkeypatch):
         """An older client/api/ build simply has no such endpoint."""
         stub = _Stub()
-        monkeypatch.setattr("main.requests.post", lambda *a, **k: _Response(404, text="nope"))
+        monkeypatch.setattr("main.api_post", lambda *a, **k: _Response(404, text="nope"))
         assert stub.unblock_history_sync() is None
 
     def test_disconnected_session_never_calls_the_api(self, monkeypatch):
@@ -377,7 +415,7 @@ class TestUnblockHistorySync:
         def _boom(*a, **k):
             raise AssertionError("must not hit the API while disconnected")
 
-        monkeypatch.setattr("main.requests.post", _boom)
+        monkeypatch.setattr("main.api_post", _boom)
         assert stub.unblock_history_sync() is None
 
     def test_transport_error_is_swallowed(self, monkeypatch):
@@ -386,7 +424,7 @@ class TestUnblockHistorySync:
         def _raise(*a, **k):
             raise OSError("connection refused")
 
-        monkeypatch.setattr("main.requests.post", _raise)
+        monkeypatch.setattr("main.api_post", _raise)
         assert stub.unblock_history_sync() is None
 
 
@@ -561,7 +599,9 @@ class TestRoutesArePatched:
         assert "oldestMsgId: oldest?.id?.id" in controller
         assert "oldestMsgFromMe: oldest?.id?.fromMe" in controller
         assert "oldestMsgTimestampMs" in controller
-        assert "supportInlineResponse: true" in controller
+        assert "supportInlineResponse: false" in controller
+        assert "out.endOfHistory = endType === 1" in controller
+        assert "out.moreOnPrimary = endType === 0 || endType === 2" in controller
         assert "sendPeerDataOperationRequest(kind, request)" in controller
         assert "sendPeerDataOperationRequest(kind, { chatId: wid })" not in controller
 

@@ -117,7 +117,7 @@ def _make(pages, oldest=None, advances=True):
                   "_DEEP_CHATS_PER_PASS", "_DEEP_STALL_RETRY_SECONDS",
                   # Gates asking the phone again for a chat still stalled at
                   # the same anchor.
-                  "_OLDER_REQUEST_GRACE"):
+                  "_OLDER_REQUEST_RETRY", "_OLDER_REQUEST_GRACE"):
         setattr(stub, const, getattr(MainWindow, const))
     return stub
 
@@ -510,12 +510,12 @@ class TestAskingThePhoneAgain:
     ever asked?" — so the first request was the only one a conversation would
     ever get. Any later end-of-IndexedDB sent nothing, and a chat that needs
     several on-demand cycles (each chunk revealing one more end) stayed
-    truncated permanently. It is now gated by _OLDER_REQUEST_GRACE, the same
-    window that governs writing a chat off, so asking again is never cheaper
-    than waiting for the answer already outstanding.
+    truncated permanently. It is now gated by _OLDER_REQUEST_RETRY. The
+    timestamp is only a request throttle; it is never evidence that history
+    ended.
     """
 
-    def test_a_second_stall_within_the_grace_does_not_ask_again(self):
+    def test_a_second_stall_within_the_retry_window_does_not_ask_again(self):
         stub = _make([[_msg(5)], [_msg(5)]], oldest=_msg(5))
         stub.deep_backfill_chat("chat@g.us")
 
@@ -524,7 +524,7 @@ class TestAskingThePhoneAgain:
 
         assert stub.requested == ["chat@g.us"]
 
-    def test_once_the_grace_has_passed_the_phone_is_asked_again(self):
+    def test_once_the_retry_window_has_passed_the_phone_is_asked_again(self):
         """The case the old code could not reach at all: the previous chunk
         either arrived and was consumed — revealing a new end — or never came.
         Either way the conversation is owed another ask."""
@@ -532,7 +532,7 @@ class TestAskingThePhoneAgain:
         stub.deep_backfill_chat("chat@g.us")
 
         stub._older_requested_chats["chat@g.us"] = (
-            main.time.time() - MainWindow._OLDER_REQUEST_GRACE - 1)
+            main.time.time() - MainWindow._OLDER_REQUEST_RETRY - 1)
         stub._deep_stalled_anchors.clear()
         stub.deep_backfill_chat("chat@g.us")
 

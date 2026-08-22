@@ -1092,6 +1092,33 @@ class TestParseStatusesFiltersReactionsAndDetectsSelfParticipant:
         assert my_statuses == []
         assert contacts == []
 
+    def test_revoked_protocol_record_is_not_treated_as_my_status(self):
+        stub = _Stub()
+        revoked = {
+            "key": {"fromMe": True, "id": "dead1"},
+            "messageType": "protocolMessage",
+            "message": {"protocolMessage": {"type": 3}},
+            "messageTimestamp": 1700000000,
+        }
+        my_statuses, contacts = stub._parse_statuses([revoked], stub.main_window.i18n)
+        assert my_statuses == []
+        assert contacts == []
+
+    def test_deleted_flag_record_is_not_treated_as_my_status(self):
+        stub = _Stub()
+        deleted = _audio_status(from_me=True)
+        deleted["isDeleted"] = True
+        my_statuses, contacts = stub._parse_statuses([deleted], stub.main_window.i18n)
+        assert my_statuses == []
+        assert contacts == []
+
+    def test_literal_question_mark_text_status_is_still_valid(self):
+        stub = _Stub()
+        status = _text_status("?", from_me=True)
+        my_statuses, contacts = stub._parse_statuses([status], stub.main_window.i18n)
+        assert my_statuses == [status]
+        assert contacts == []
+
     def test_participant_resolving_to_self_counts_as_my_status(self):
         stub = _Stub()
         stub.main_window._is_self_jid = lambda jid: jid == "me@lid"

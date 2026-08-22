@@ -1054,15 +1054,29 @@ class StatusPanel(wx.Panel):
         # status@broadcast entries, which is how WhatsApp encodes them).
         grouped: dict = {}
         for item in items:
-            # A reaction to a status (fromMe or not) arrives through the
-            # exact same status@broadcast channel as a real status update
-            # (on_new_message() in main.py routes any @broadcast message to
-            # _store_status_update() before it ever checks messageType) —
-            # without this it showed up as a bogus extra "story" entry in
-            # this list. It's still available in raw _status_updates for
-            # StatusReactionsDialog to scan; only excluded from becoming a
-            # displayed story here.
-            if item.get("messageType") == "reactionMessage":
+            if not isinstance(item, dict):
+                continue
+
+            # Deleted/revoked status entries can survive in StatusV3 as
+            # protocol/tombstone records even after the official WhatsApp
+            # clients correctly show no active story. They are bookkeeping,
+            # not statuses. Filtering them here is a second line of defence in
+            # case a future WPPConnect/WA-JS version exposes one through the
+            # custom /statuses endpoint or the WebSocket cache. Do NOT filter
+            # by content (e.g. a literal "?" is a perfectly valid text
+            # status); only explicit administrative/deleted markers are
+            # rejected.
+            msg_type = str(item.get("messageType") or "")
+            raw_type = str(item.get("type") or "").lower()
+            if msg_type in ("protocolMessage", "reactionMessage") or raw_type in (
+                "revoked", "protocol", "protocolmessage",
+                "reaction", "reactionmessage",
+            ):
+                continue
+            if any(bool(item.get(flag)) for flag in (
+                "isRevoked", "revoked", "isDeleted", "deleted",
+                "isExpired", "expired", "isStatusExpired",
+            )):
                 continue
 
             key = item.get("key", {})

@@ -2308,13 +2308,31 @@ export async function requestOlderMessages(req: Request, res: Response) {
         }
         out.resolvedChatId = resolvedChatId;
         const chat = (window as any).WAPI?.getChat?.(resolvedChatId);
-        out.endOfHistoryTransferType = chat?.endOfHistoryTransferType ?? null;
+        const endType = chat?.endOfHistoryTransferType ?? null;
+        out.endOfHistoryTransferType = endType;
+        // Protocol enum (Conversation.EndOfHistoryTransferType):
+        //   0 = initial transfer complete, MORE messages remain on primary
+        //   1 = complete, NO more messages remain on primary
+        //   2 = on-demand transfer complete, MORE messages remain on primary
+        // Do not infer exhaustion from a timeout on the Python side when the
+        // phone has already given us this authoritative per-chat answer.
+        out.endOfHistory = endType === 1;
+        out.moreOnPrimary = endType === 0 || endType === 2;
         try {
+          // Keep the WA Web helper as diagnostics only. It reports whether a
+          // page is immediately ready to load and can be false for enum value
+          // 2 even though the protocol explicitly says more history remains
+          // on the primary phone.
           out.primaryHasMore = req_(
             'WAWebHistorySyncUtils'
-          ).primaryHasMoreMessagesReadyToLoad(chat?.endOfHistoryTransferType);
+          ).primaryHasMoreMessagesReadyToLoad(endType);
         } catch (e) {
           out.primaryHasMore = null;
+        }
+        if (out.endOfHistory) {
+          out.requested = false;
+          out.skipped = 'primary phone confirms end of history';
+          return out;
         }
 
         let wid;
@@ -2373,14 +2391,31 @@ export async function requestOlderMessages(req: Request, res: Response) {
             onDemandMsgCount,
             oldestMsgTimestampMs:
               oldest?.t != null ? oldest.t * 1000 : undefined,
-            supportInlineResponse: true,
+            // IMPORTANT: with this set to true the phone is allowed to return
+            // the requested history inline to sendPeerDataOperationRequest().
+            // WinZapp never decoded/persisted that private return payload, so
+            // the call logged `requested:true` while get-messages kept seeing
+            // the exact same oldest row forever. Ask for the ordinary history-
+            // sync notification instead: WhatsApp Web's own history pipeline
+            // decrypts it and inserts the messages into IndexedDB, which is
+            // exactly the store WAPI.getMessages() pages through.
+            supportInlineResponse: false,
           };
           out.historyChatJid = chatJid;
           out.oldestMsgId = request.oldestMsgId;
           out.oldestMsgFromMe = request.oldestMsgFromMe;
           out.onDemandMsgCount = request.onDemandMsgCount;
           out.oldestMsgTimestampMs = request.oldestMsgTimestampMs;
-          await sender.sendPeerDataOperationRequest(kind, request);
+          out.supportInlineResponse = request.supportInlineResponse;
+          if (!request.oldestMsgId) {
+            out.error = 'oldest message cursor unavailable for on-demand history request';
+            return out;
+          }
+          const sendResult = await sender.sendPeerDataOperationRequest(kind, request);
+          // Do not serialize the private response object itself (it can carry
+          // non-JSON values); just record whether this build returned one so
+          // future logs can tell which delivery mode it used.
+          out.senderReturnedValue = sendResult != null;
           out.requested = true;
         } catch (e: any) {
           out.error = `send failed: ${e?.message || e}`;

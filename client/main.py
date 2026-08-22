@@ -2576,6 +2576,61 @@ class MainWindow(wx.Frame):
         """
         return bool(self.settings.get("general", {}).get("announce_sync_events", True))
 
+    def _announce_sync_complete(self, run_id=None):
+        """Emit the sync-complete sound and TTS once for one successful run.
+
+        This is intentionally a UI-thread callback.  Sound and speech are
+        isolated from each other: a playback/device failure cannot suppress the
+        screen-reader announcement, and a TTS failure cannot prevent the sound.
+        ``run_id`` also rejects a stale callback if a newer sync has already
+        started before wx drains its queue.
+        """
+        if run_id is not None and run_id != getattr(self, "_sync_run_id", run_id):
+            logging.info(
+                "[sync-announce] Ignoring stale completion callback for run %s "
+                "(current=%s).", run_id, getattr(self, "_sync_run_id", None))
+            return
+        if run_id is not None and getattr(
+                self, "_sync_completion_announced_run_id", None) == run_id:
+            return
+
+        try:
+            self._set_status("")
+        except Exception:
+            # Status/tray failures must not swallow the audible completion
+            # notification — they are independent output channels.
+            logging.exception("[sync-announce] Failed to clear sync status text")
+        if not self._announce_sync_events_enabled():
+            logging.info("[sync-announce] Completion announcements disabled by settings.")
+            return
+
+        if run_id is not None:
+            self._sync_completion_announced_run_id = run_id
+
+        sound_ok = True
+        try:
+            self.sync_complete_sound.play()
+        except Exception:
+            sound_ok = False
+            logging.exception("[sync-announce] Sync-complete sound failed")
+
+        tts_ok = None
+        if not self.background_mode:
+            try:
+                # Completion is a state transition, not ordinary queued speech.
+                # Interrupting prevents a busy screen-reader queue from making
+                # the announcement appear to have been lost.
+                self.output(self.i18n.t("sync_complete"), interrupt=True)
+                tts_ok = True
+            except Exception:
+                tts_ok = False
+                logging.exception("[sync-announce] Sync-complete TTS failed")
+
+        logging.info(
+            "[sync-announce] Completion announced for run %s "
+            "(sound_ok=%s, tts=%s, background=%s).",
+            run_id, sound_ok, tts_ok, self.background_mode)
+
     def _search_normalization_mode(self) -> str:
         """Settings > Geral > "Normalização Unicode nas pesquisas": one of
         "off" (default), "nfd" or "nfkd" — see normalize_for_search().
@@ -8002,20 +8057,18 @@ class MainWindow(wx.Frame):
         # to its beginning, so an in-memory-only set would make every relaunch
         # re-walk an account that is already complete — hundreds of pointless
         # round-trips through the one Puppeteer page, for ever.
-        # Semantics v2: an empty local page or a refused on-demand request is
-        # no longer allowed to poison the history cache. Older builds could
-        # persist exactly those false conclusions, so clear them once on upgrade
-        # instead of carrying a known-bad "exhausted" decision forever. The
-        # cost is one extra deep-history walk after upgrading; the benefit is
-        # recovering chats that otherwise can never scroll back again.
-        _history_exhaustion_v2 = self.db.get_metadata("history_exhaustion_semantics_v2")
-        if _history_exhaustion_v2 != "1":
+        # Semantics v3: elapsed time is never end-of-history evidence.  Older
+        # builds persisted chats as exhausted after a 15-minute unanswered
+        # on-demand request even when WhatsApp's transfer type explicitly said
+        # more messages remained on the primary.  Clear those conclusions once.
+        _history_exhaustion_v3 = self.db.get_metadata("history_exhaustion_semantics_v3")
+        if _history_exhaustion_v3 != "1":
             self._exhausted_chats = set()
             self._older_requested_chats = {}
             try:
                 self.db.set_metadata_json("exhausted_chats", [])
                 self.db.set_metadata_json("older_history_requested", {})
-                self.db.set_metadata("history_exhaustion_semantics_v2", "1")
+                self.db.set_metadata("history_exhaustion_semantics_v3", "1")
             except Exception as exc:
                 logging.warning("[history] Could not migrate exhaustion cache: %s", exc)
         else:
@@ -8031,6 +8084,9 @@ class MainWindow(wx.Frame):
                 }
             else:
                 self._older_requested_chats = {}
+        # Explicit end signals are session-local; if a durable exhausted entry
+        # exists it already captures them.
+        self._older_request_confirmed_end = set()
 
         # 7. my_jid / my_lid — previously only ever set at runtime by an
         # online host-device/self-LID lookup (check_wa_connection_http(),
@@ -9731,29 +9787,6 @@ class MainWindow(wx.Frame):
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
 
-        # Same bundling as the "synchronizing" announcement above — status,
-        # sound and speech for this stage transition all happen in one
-        # wx.CallAfter so they land together instead of the sound/speech
-        # (previously fired directly on this background thread) visibly
-        # outrunning the queued status-text clear.
-        def _announce_messages_synced():
-            self._set_status("")
-            # Only announce completion when the chat list really came from the
-            # server — otherwise this is a partial sync that is about to be
-            # retried, and saying "conversations synchronized" over the few
-            # chats the socket delivered is exactly what makes the failure
-            # invisible to the user. …and only when that list had settled:
-            # announcing "conversations synchronized" over a chat list the
-            # server was still filling in is precisely what made the
-            # 3-or-4-conversations failure look like a success, right before
-            # the sync restarted itself.
-            if chat_list_ok and chat_list_settled:
-                if self._announce_sync_events_enabled():
-                    self.sync_complete_sound.play()
-                    if not self.background_mode:
-                        self.output(self.i18n.t("sync_complete"))
-        wx.CallAfter(_announce_messages_synced)
-
         # Mark sync as done for this session so late-arriving messages.set
         # events (WPPConnect sends them in batches) don't restart the full
         # sync process after it already completed successfully.
@@ -9772,6 +9805,15 @@ class MainWindow(wx.Frame):
                 and chat_list_ok and chat_list_settled):
             self._sync_completed = True
             self._sync_retry_count = 0
+            # Commit the successful state before announcing it.  The previous
+            # callback was queued earlier and could be hard to diagnose when a
+            # round later turned out incomplete.  One dedicated callback now
+            # owns status + sound + TTS, with per-run deduplication.
+            _completed_run_id = getattr(self, "_sync_run_id", None)
+            logging.info(
+                "[start_sync] Sync run %s completed; scheduling completion "
+                "sound/TTS.", _completed_run_id)
+            wx.CallAfter(self._announce_sync_complete, _completed_run_id)
         else:
             self._sync_completed = False
             self._sync_retry_count = getattr(self, "_sync_retry_count", 0) + 1
@@ -14049,17 +14091,13 @@ class MainWindow(wx.Frame):
             return None
 
     def request_older_messages(self, remote_jid: str, timeout: int = 60) -> bool:
-        """Ask the phone for history older than what this device holds.
+        """Ask the primary phone for the next on-demand history chunk.
 
-        Fire-and-forget by nature: the phone answers with a history-sync chunk
-        minutes later, never in this response, so a True here means "the
-        request went out", not "there are new messages now".
-
-        False only means the request did not go out. In particular, the server
-        intentionally refuses it while RECENT history is incomplete to avoid an
-        ON_DEMAND/RECENT queue deadlock. fetch_older_messages() keeps that case
-        re-queryable; only a confirmed request that later outlives
-        _OLDER_REQUEST_GRACE can support an exhaustion decision.
+        ``True`` means the request was accepted *or is already in flight*.  It
+        never means the history has arrived yet.  End-of-history is not inferred
+        from timeouts anymore: WhatsApp exposes ``endOfHistoryTransferType`` and
+        only value 1 is authoritative (0/2 explicitly mean more messages remain
+        on the primary device).
         """
         if not getattr(self, "_wa_connected", False):
             return False
@@ -14095,13 +14133,39 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
             payload = body.get("response") if isinstance(body, dict) else None
-            if response.status_code in (200, 201) and isinstance(payload, dict) \
-                    and payload.get("requested"):
-                logging.info(
-                    "[history-sync] Requested older messages from the phone for "
-                    "%s (primary_has_more=%s).", jid, payload.get("primaryHasMore"),
-                )
-                return True
+            if not hasattr(self, "_older_request_confirmed_end"):
+                self._older_request_confirmed_end = set()
+            if response.status_code in (200, 201) and isinstance(payload, dict):
+                # WhatsApp's enum is the only durable end-of-history signal:
+                #   0 = complete, but MORE remain on primary
+                #   1 = complete, NO MORE remain on primary
+                #   2 = on-demand complete, but MORE remain on primary
+                # primaryHasMore can be false for type 2 on current builds, so
+                # never use that helper as exhaustion evidence.
+                if payload.get("endOfHistory") is True \
+                        or payload.get("endOfHistoryTransferType") == 1:
+                    self._older_request_confirmed_end.add(jid)
+                    logging.info(
+                        "[history-sync] Primary phone confirmed end of history for "
+                        "%s (end_type=%s).", jid,
+                        payload.get("endOfHistoryTransferType"),
+                    )
+                    return False
+
+                if payload.get("requested") or payload.get("inFlight"):
+                    self._older_request_confirmed_end.discard(jid)
+                    logging.info(
+                        "[history-sync] Older-history request %s for %s "
+                        "(end_type=%s, more_on_primary=%s, primary_has_more=%s, "
+                        "inline=%s, sender_returned=%s).",
+                        "already in flight" if payload.get("inFlight") else "sent",
+                        jid, payload.get("endOfHistoryTransferType"),
+                        payload.get("moreOnPrimary"), payload.get("primaryHasMore"),
+                        payload.get("supportInlineResponse"),
+                        payload.get("senderReturnedValue"),
+                    )
+                    return True
+
             error_text = ""
             if isinstance(payload, dict):
                 error_text = str(payload.get("error") or "")
@@ -17256,19 +17320,14 @@ class MainWindow(wx.Frame):
                 # later end-of-IndexedDB sent nothing, and a conversation that
                 # needs several on-demand cycles stayed truncated for good.
                 #
-                # Gated by the same grace that governs writing a chat off, so
-                # asking again is never cheaper than waiting for the answer
-                # already outstanding. Resetting the clock also has a second,
-                # deliberate effect: fetch_older_messages() only PERSISTS
-                # exhaustion once a full grace has passed since the last ask,
-                # so a chat we are still actively asking about can no longer be
-                # written off permanently while a request is in flight.
+                # Retry periodically.  The timestamp is a throttle only: a
+                # silent/slow primary must never become durable evidence that
+                # the conversation ended.  Only endOfHistoryTransferType=1 can
+                # make fetch_older_messages() persist exhaustion.
                 asked_at = older_requested.get(remote_jid)
                 due = (asked_at is None
-                       or (time.time() - asked_at) >= self._OLDER_REQUEST_GRACE)
+                       or (time.time() - asked_at) >= self._OLDER_REQUEST_RETRY)
                 if due:
-                    older_requested[remote_jid] = time.time()
-                    self._persist_older_requested()
                     requested = bool(self.request_older_messages(remote_jid))
                     if requested:
                         older_requested[remote_jid] = time.time()
@@ -17316,26 +17375,14 @@ class MainWindow(wx.Frame):
                 active.append(jid)
         return active + waiting
 
-    # How long request_older_messages() gets to be answered before an empty
-    # page is durable evidence that a chat really has no more history.
-    #
-    # The request is fire-and-forget: the phone replies with a history-sync
-    # chunk minutes later, never in the response (see that method's own
-    # docstring). The backfill revisits a chat about 30 seconds after the ask,
-    # so the second empty page — which is what writes the chat off — arrives an
-    # order of magnitude sooner than the answer it is judging. That was
-    # survivable while _exhausted_chats died with the process; now that it is
-    # persisted, a write-off made inside that window is permanent, and
-    # fetch_older_messages()' early return means the user scrolling up in that
-    # conversation gets nothing, in every future session.
-    #
-    # Set well past "minutes later" on purpose. Waiting costs a handful of
-    # empty round-trips per chat; being wrong costs the conversation's history
-    # for good. _older_requested_chats is persisted alongside the exhausted
-    # set, so in practice the bar is cleared on the next launch rather than
-    # inside one session: one extra walk of an already-complete account buys
-    # evidence that outlived the reply window.
-    _OLDER_REQUEST_GRACE = 15 * 60
+    # On-demand history is asynchronous.  Retry an empty browser-store page
+    # periodically, but NEVER turn elapsed time into "end of conversation".
+    # Current WhatsApp builds expose an explicit endOfHistoryTransferType; only
+    # type 1 is authoritative.  Types 0 and 2 both mean the primary still has
+    # older messages.
+    _OLDER_REQUEST_RETRY = 30
+    # Compatibility alias for older tests/plugins that imported this name.
+    _OLDER_REQUEST_GRACE = _OLDER_REQUEST_RETRY
 
     def _persist_exhausted_chats(self):
         """Write the exhausted-chat set to DB metadata. Best effort — losing it
@@ -17366,6 +17413,7 @@ class MainWindow(wx.Frame):
         """
         self._exhausted_chats = set()
         self._older_requested_chats = {}
+        self._older_request_confirmed_end = set()
         self._persist_exhausted_chats()
         self._persist_older_requested()
 
@@ -17373,10 +17421,9 @@ class MainWindow(wx.Frame):
         """Write the "already asked the phone for older history" map to DB
         metadata. Best effort, same as _persist_exhausted_chats().
 
-        Persisted for one reason only: it is what lets an empty page be told
-        apart from an empty page *that has already outlived the phone's reply
-        window*. Kept in memory alone — as it was — that distinction cannot
-        survive the session, and the exhausted set it gates is durable.
+        Persisted so a restart does not hammer the primary phone immediately
+        after an on-demand request.  It is only a retry throttle; elapsed time
+        is never treated as proof that the conversation ended.
         """
         try:
             if getattr(self, "db", None) is not None:
@@ -17502,61 +17549,61 @@ class MainWindow(wx.Frame):
                         self._exhausted_chats = set()
                     if not hasattr(self, "_older_requested_chats"):
                         self._older_requested_chats = {}
-                    asked_at = self._older_requested_chats.get(remote_jid)
-                    requested = False
-                    if asked_at is None:
-                        requested = bool(self.request_older_messages(remote_jid))
-                        if requested:
-                            # Evidence is recorded only after the endpoint says
-                            # the request actually went out. The old order wrote
-                            # this timestamp first, so a RECENT-sync refusal was
-                            # later mistaken for a successful request.
-                            asked_at = time.time()
-                            self._older_requested_chats[remote_jid] = asked_at
-                            self._persist_older_requested()
+                    if not hasattr(self, "_older_request_confirmed_end"):
+                        self._older_request_confirmed_end = set()
 
-                    if requested:
-                        logging.info(
-                            "[fetch_older_messages] No local history left for %s — "
-                            "asked the phone for older messages; leaving the chat "
-                            "re-queryable so the reply can be picked up.", remote_jid,
-                        )
-                    elif asked_at is None:
-                        temporary = remote_jid in getattr(
-                            self, "_older_request_temporarily_blocked", set())
-                        # Failure/refusal is not end-of-history evidence. In the
-                        # captured bug recentCompleted=false landed here and the
-                        # JID was put in _exhausted_chats, so the early return at
-                        # the top killed the user's scroll-up for the whole
-                        # session. Keep it live and retry later instead.
-                        logging.info(
-                            "[fetch_older_messages] No local history for %s, but "
-                            "the phone request did not go out%s; keeping the chat "
-                            "re-queryable instead of marking it exhausted.",
-                            remote_jid,
-                            " because recent history is still syncing" if temporary else "",
-                        )
+                    # A previous endpoint response may already have carried the
+                    # authoritative type-1 end signal.  Only that signal may
+                    # make exhaustion durable.
+                    if remote_jid in self._older_request_confirmed_end:
+                        self._exhausted_chats.add(remote_jid)
+                        confirmed_end_of_history = True
+                        self._persist_exhausted_chats()
                     else:
-                        waited = max(0.0, time.time() - asked_at)
-                        if waited >= self._OLDER_REQUEST_GRACE:
-                            # Only a successfully-sent request that has had the
-                            # full reply window with no new page can become a
-                            # durable end-of-history conclusion.
-                            self._exhausted_chats.add(remote_jid)
-                            confirmed_end_of_history = True
-                            self._persist_exhausted_chats()
+                        asked_at = self._older_requested_chats.get(remote_jid)
+                        now = time.time()
+                        due = (asked_at is None or
+                               (now - asked_at) >= self._OLDER_REQUEST_RETRY)
+                        requested = False
+                        if due:
+                            requested = bool(self.request_older_messages(remote_jid))
+                            # request_older_messages() can learn the explicit end
+                            # signal even though its bool return is False.
+                            if remote_jid in self._older_request_confirmed_end:
+                                self._exhausted_chats.add(remote_jid)
+                                confirmed_end_of_history = True
+                                self._older_requested_chats.pop(remote_jid, None)
+                                self._persist_exhausted_chats()
+                                self._persist_older_requested()
+                            elif requested:
+                                self._older_requested_chats[remote_jid] = now
+                                self._persist_older_requested()
+
+                        if confirmed_end_of_history:
                             logging.info(
-                                "[fetch_older_messages] Marked history as exhausted "
-                                "for %s after waiting %.0fs for a confirmed phone "
-                                "request.", remote_jid, waited,
-                            )
+                                "[fetch_older_messages] Primary phone confirmed "
+                                "end of history for %s.", remote_jid)
+                        elif requested:
+                            logging.info(
+                                "[fetch_older_messages] No browser-store history "
+                                "left for %s — on-demand phone history requested; "
+                                "keeping scroll-up re-queryable.", remote_jid)
+                        elif not due:
+                            waited = max(0.0, now - float(asked_at or now))
+                            logging.info(
+                                "[fetch_older_messages] Waiting for on-demand "
+                                "history for %s (%.0fs since request); will retry "
+                                "without ever inferring end from timeout.",
+                                remote_jid, waited)
                         else:
+                            temporary = remote_jid in getattr(
+                                self, "_older_request_temporarily_blocked", set())
                             logging.info(
-                                "[fetch_older_messages] Still waiting for older "
-                                "history for %s (%.0fs/%.0fs); keeping scroll-up "
-                                "re-queryable.", remote_jid, waited,
-                                self._OLDER_REQUEST_GRACE,
-                            )
+                                "[fetch_older_messages] Phone history request for "
+                                "%s did not go out%s; keeping the chat re-queryable.",
+                                remote_jid,
+                                " because recent history is still syncing"
+                                if temporary else "")
 
                 fetched_messages = []
                 for wm in wpp_messages:
@@ -17578,6 +17625,7 @@ class MainWindow(wx.Frame):
                         self._older_requested_chats.pop(remote_jid, None)
                         self._persist_older_requested()
                     getattr(self, "_older_request_temporarily_blocked", set()).discard(remote_jid)
+                    getattr(self, "_older_request_confirmed_end", set()).discard(remote_jid)
                     if store_only:
                         # Straight to disk, nothing kept resident. Deliberately
                         # not routed through the branch below even for the
@@ -17617,7 +17665,9 @@ class MainWindow(wx.Frame):
                     # set _reached_server_start permanently even when the phone
                     # request had merely been refused while RECENT history was
                     # still syncing (the exact state captured in logs.zip).
-                    # [] is reserved for a confirmed end after the full grace.
+                    # [] is reserved for WhatsApp's explicit type-1 end signal.
+                    # None keeps the UI/background walker alive while the primary
+                    # still has older history or the request is pending.
                     return [] if confirmed_end_of_history else None
             else:
                 err_msg = response.text[:300]
